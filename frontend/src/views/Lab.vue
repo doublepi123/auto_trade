@@ -719,7 +719,10 @@
                   </el-table-column>
                   <el-table-column label="止损" min-width="80">
                     <template #default="{ row }">
-                      <template v-if="row.variant === 'OPENING_RANGE_STOP_CHALLENGER'">
+                      <template
+                        v-if="row.variant === 'OPENING_RANGE_STOP_CHALLENGER'
+                          || row.variant === 'FIVE_MINUTE_ORB_CHALLENGER'"
+                      >
                         区间低点 / 4%上限
                       </template>
                       <template v-else>
@@ -2638,6 +2641,7 @@ function openingMomentumVariantLabel(
   if (variant === 'ETF_REGIME_CRWD_CHALLENGER') return 'ETF 状态 + CRWD'
   if (variant === 'ETF_REGIME_TRV_CHALLENGER') return 'ETF 状态 + TRV'
   if (variant === 'OPENING_RANGE_STOP_CHALLENGER') return '开盘区间止损'
+  if (variant === 'FIVE_MINUTE_ORB_CHALLENGER') return '5 分钟 ORB 突破'
   const execution = /^EXECUTION_(.+)_CHALLENGER$/.exec(variant)
   if (execution) return `执行 + ${execution[1]}`
   const extension = /^EARLY_(.+)_CHALLENGER$/.exec(variant)
@@ -2661,6 +2665,7 @@ function openingMomentumVariantTagType(
     || variant === 'WEAK_BREADTH_WIDE_STOP_CHALLENGER'
     || variant.startsWith('ETF_REGIME_')
     || variant === 'OPENING_RANGE_STOP_CHALLENGER'
+    || variant === 'FIVE_MINUTE_ORB_CHALLENGER'
   ) return 'warning'
   if (variant.startsWith('EXECUTION_')) return 'success'
   if (variant.startsWith('EARLY_')) return 'warning'

@@ -7,6 +7,7 @@ from app.domain.opening_momentum import (
     OpeningMomentumObservation,
     evaluate_opening_momentum,
     evaluate_opening_momentum_path_eligible,
+    evaluate_opening_range_breakout,
     evaluate_opening_reversal,
     opening_path_efficiency,
     shadow_round_trip_return_bps,
@@ -104,6 +105,104 @@ def test_missing_next_bar_does_not_fall_through_to_second_rank() -> None:
     assert decision.action == "SKIP"
     assert decision.reason == "ENTRY_BAR_MISSING"
     assert decision.candidate_symbol == "S7.US"
+
+
+def test_opening_range_breakout_selects_strongest_confirmed_break() -> None:
+    observations = [
+        _observation(f"S{index}.US", value)
+        for index, value in enumerate(
+            (-10, 0, 5, 10, 15, 20, 80, 100),
+        )
+    ]
+    range_highs = {
+        item.symbol: (
+            100.5
+            if item.symbol == "S6.US"
+            else 100.9
+            if item.symbol == "S7.US"
+            else item.signal_close + 0.1
+        )
+        for item in observations
+    }
+
+    decision = evaluate_opening_range_breakout(
+        observations,
+        opening_range_high_by_symbol=range_highs,
+    )
+
+    assert decision.action == "ENTER_LONG"
+    assert decision.reason == "FIVE_MINUTE_OPENING_RANGE_BREAKOUT"
+    assert decision.candidate_symbol == "S6.US"
+    assert decision.candidate_return_bps == pytest.approx(80.0)
+    assert decision.market_return_bps == pytest.approx(12.5)
+    assert decision.excess_return_bps == pytest.approx(67.5)
+    assert decision.entry_price == 100.0
+    assert decision.ranking[0].symbol == "S7.US"
+
+
+def test_opening_range_breakout_requires_strict_close_confirmation() -> None:
+    observations = [
+        _observation(f"S{index}.US", 10 + index)
+        for index in range(8)
+    ]
+
+    decision = evaluate_opening_range_breakout(
+        observations,
+        opening_range_high_by_symbol={
+            item.symbol: item.signal_close for item in observations
+        },
+    )
+
+    assert decision.action == "SKIP"
+    assert decision.reason == "OPENING_RANGE_BREAKOUT_MISSING"
+    assert decision.candidate_symbol is None
+    assert decision.entry_price is None
+
+
+def test_opening_range_breakout_missing_entry_fails_closed() -> None:
+    observations = [
+        _observation(
+            f"S{index}.US",
+            100 if index == 7 else index,
+            entry_open=None if index == 7 else 100.0,
+        )
+        for index in range(8)
+    ]
+
+    decision = evaluate_opening_range_breakout(
+        observations,
+        opening_range_high_by_symbol={
+            item.symbol: (
+                item.signal_close - 0.1
+                if item.symbol == "S7.US"
+                else item.signal_close + 0.1
+            )
+            for item in observations
+        },
+    )
+
+    assert decision.action == "SKIP"
+    assert decision.reason == "ENTRY_BAR_MISSING"
+    assert decision.candidate_symbol == "S7.US"
+    assert decision.entry_price is None
+
+
+@pytest.mark.parametrize(
+    "range_highs",
+    [
+        {"S0.US": float("nan")},
+        {"S0.US": 0.0},
+        {"s0.us": 100.0, "S0.US": 101.0},
+    ],
+)
+def test_opening_range_breakout_rejects_invalid_highs(
+    range_highs: dict[str, float],
+) -> None:
+    with pytest.raises(ValueError):
+        evaluate_opening_range_breakout(
+            [_observation("S0.US", 10)],
+            opening_range_high_by_symbol=range_highs,
+        )
 
 
 def test_path_eligible_rerank_selects_strongest_eligible_candidate() -> None:
@@ -308,6 +407,11 @@ def test_duplicate_symbols_are_rejected() -> None:
             [item, item],
             path_efficiency_by_symbol={"AAPL.US": 1.0},
             minimum_path_efficiency=0.70,
+        )
+    with pytest.raises(ValueError, match="duplicate"):
+        evaluate_opening_range_breakout(
+            [item, item],
+            opening_range_high_by_symbol={"AAPL.US": 100.0},
         )
     with pytest.raises(ValueError, match="duplicate"):
         evaluate_opening_reversal([item, item])

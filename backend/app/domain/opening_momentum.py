@@ -253,6 +253,104 @@ def evaluate_opening_momentum(
     )
 
 
+def evaluate_opening_range_breakout(
+    observations: Sequence[OpeningMomentumObservation],
+    *,
+    opening_range_high_by_symbol: Mapping[str, float],
+    config: OpeningMomentumConfig | None = None,
+) -> OpeningMomentumDecision:
+    """Select the strongest close-confirmed opening-range breakout."""
+
+    normalized_highs: dict[str, float] = {}
+    for raw_symbol, raw_high in opening_range_high_by_symbol.items():
+        symbol = raw_symbol.strip().upper()
+        if not symbol:
+            raise ValueError("opening range symbol is required")
+        if symbol in normalized_highs:
+            raise ValueError(f"duplicate opening range high: {symbol}")
+        high = float(raw_high)
+        if not math.isfinite(high) or high <= 0:
+            raise ValueError(
+                "opening range highs must contain positive finite values"
+            )
+        normalized_highs[symbol] = high
+
+    params = config or OpeningMomentumConfig()
+    by_symbol, ranking = _rank_opening_observations(observations)
+    if len(ranking) < params.minimum_universe_size:
+        return OpeningMomentumDecision(
+            action="SKIP",
+            reason="INSUFFICIENT_UNIVERSE",
+            universe_size=len(ranking),
+            market_return_bps=None,
+            candidate_symbol=None,
+            candidate_return_bps=None,
+            excess_return_bps=None,
+            entry_price=None,
+            ranking=ranking,
+        )
+
+    market_return_bps = median(
+        item.opening_return_bps for item in ranking
+    )
+    eligible = [
+        item
+        for item in by_symbol.values()
+        if (
+            (opening_range_high := normalized_highs.get(item.symbol))
+            is not None
+            and item.signal_close > opening_range_high
+        )
+    ]
+    if not eligible:
+        return OpeningMomentumDecision(
+            action="SKIP",
+            reason="OPENING_RANGE_BREAKOUT_MISSING",
+            universe_size=len(ranking),
+            market_return_bps=market_return_bps,
+            candidate_symbol=None,
+            candidate_return_bps=None,
+            excess_return_bps=None,
+            entry_price=None,
+            ranking=ranking,
+        )
+
+    candidate_observation = min(
+        eligible,
+        key=lambda item: (
+            -(
+                item.signal_close
+                / normalized_highs[item.symbol]
+                - 1
+            ),
+            -item.opening_return_bps,
+            item.symbol,
+        ),
+    )
+    candidate_return_bps = candidate_observation.opening_return_bps
+    excess_return_bps = candidate_return_bps - market_return_bps
+    if candidate_observation.entry_open is None:
+        action: Literal["ENTER_LONG", "SKIP"] = "SKIP"
+        reason = "ENTRY_BAR_MISSING"
+        entry_price = None
+    else:
+        action = "ENTER_LONG"
+        reason = "FIVE_MINUTE_OPENING_RANGE_BREAKOUT"
+        entry_price = candidate_observation.entry_open
+
+    return OpeningMomentumDecision(
+        action=action,
+        reason=reason,
+        universe_size=len(ranking),
+        market_return_bps=market_return_bps,
+        candidate_symbol=candidate_observation.symbol,
+        candidate_return_bps=candidate_return_bps,
+        excess_return_bps=excess_return_bps,
+        entry_price=entry_price,
+        ranking=ranking,
+    )
+
+
 def evaluate_opening_momentum_path_eligible(
     observations: Sequence[OpeningMomentumObservation],
     *,

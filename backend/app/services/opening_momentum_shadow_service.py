@@ -20,6 +20,7 @@ from app.domain.opening_momentum import (
     OpeningMomentumObservation,
     evaluate_opening_momentum,
     evaluate_opening_momentum_path_eligible,
+    evaluate_opening_range_breakout,
     evaluate_opening_reversal,
     opening_path_efficiency,
     shadow_round_trip_return_bps,
@@ -269,6 +270,18 @@ _OPENING_RANGE_STOP_SOURCE = "OPENING_EXECUTION_RANGE_STOP"
 _OPENING_RANGE_STOP_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+{_OPENING_RANGE_STOP_VERSION}"
 )
+# This is an independent entry model, not another stop-loss sensitivity. The
+# first five completed bars freeze the range, the following bar must close
+# above it, and the next minute open is the causal shadow fill. Cost is raised
+# to 30 bps round trip so a noisy breakout cannot win on optimistic friction.
+_FIVE_MINUTE_ORB_VERSION = (
+    "forward-only-5m-close-over-range-high-next-minute-open-"
+    "range-low-stop-cap4-hold60-cost30-precommitted-20260728-v1"
+)
+_FIVE_MINUTE_ORB_SOURCE = "OPENING_FIVE_MINUTE_ORB"
+_FIVE_MINUTE_ORB_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+{_FIVE_MINUTE_ORB_VERSION}"
+)
 _EXECUTION_EXTENSION_COHORT_VERSION = (
     "individual-discovery-top6-positive-delta-min4-stop1-shortlist-v2-"
     "20260724"
@@ -406,6 +419,7 @@ _VariantName = Literal[
     "ETF_REGIME_CRWD_CHALLENGER",
     "ETF_REGIME_TRV_CHALLENGER",
     "OPENING_RANGE_STOP_CHALLENGER",
+    "FIVE_MINUTE_ORB_CHALLENGER",
     "EXECUTION_SNDK_CHALLENGER",
     "EXECUTION_INTC_CHALLENGER",
     "EXECUTION_QCOM_CHALLENGER",
@@ -413,7 +427,7 @@ _VariantName = Literal[
     "EXECUTION_PANW_CHALLENGER",
     "EXECUTION_CRWD_CHALLENGER",
 ]
-_SignalModel = Literal["MOMENTUM", "REVERSAL"]
+_SignalModel = Literal["MOMENTUM", "REVERSAL", "OPENING_RANGE_BREAKOUT"]
 _CandidateSelectionMode = Literal[
     "TOP_THEN_GATE",
     "PATH_ELIGIBLE_RERANK",
@@ -602,6 +616,13 @@ class _UniverseVariant:
         ):
             raise ValueError(
                 "opening-range stop requires a maximum stop-loss percent"
+            )
+        if self.signal_model == "OPENING_RANGE_BREAKOUT" and (
+            self.decision_config.signal_minutes != 5
+            or not self.opening_range_stop
+        ):
+            raise ValueError(
+                "opening-range breakout requires a five-minute range stop"
             )
 
     def effective_maximum_market_return_bps(
@@ -1083,7 +1104,20 @@ class OpeningMomentumShadowService:
         variant: _UniverseVariant,
         observations: list[OpeningMomentumObservation],
         path_efficiency_by_symbol: dict[str, float],
+        opening_range_high_by_symbol: dict[str, float] | None = None,
     ) -> OpeningMomentumDecision:
+        if variant.signal_model == "OPENING_RANGE_BREAKOUT":
+            if opening_range_high_by_symbol is None:
+                raise RuntimeError(
+                    "opening-range breakout is missing its frozen highs"
+                )
+            return evaluate_opening_range_breakout(
+                observations,
+                opening_range_high_by_symbol=(
+                    opening_range_high_by_symbol
+                ),
+                config=variant.decision_config,
+            )
         if variant.signal_model == "REVERSAL":
             return evaluate_opening_reversal(
                 observations,
@@ -1134,6 +1168,21 @@ class OpeningMomentumShadowService:
             if value is not None and value > 0:
                 result[(row.run_id, row.symbol)] = value
         return result
+
+    @staticmethod
+    def _variant_signal_at(
+        variant: _UniverseVariant,
+        *,
+        session_open: datetime,
+    ) -> datetime:
+        signal_offset = variant.decision_config.signal_minutes
+        if variant.signal_model == "OPENING_RANGE_BREAKOUT":
+            return session_open + timedelta(minutes=signal_offset)
+        return (
+            session_open
+            + timedelta(minutes=signal_offset)
+            - _BAR_DURATION
+        )
 
     @staticmethod
     def _variant_entry_at(
@@ -1233,10 +1282,9 @@ class OpeningMomentumShadowService:
 
         for variant in variants:
             config = variant.decision_config
-            signal_at = (
-                session_open
-                + timedelta(minutes=config.signal_minutes)
-                - _BAR_DURATION
+            signal_at = self._variant_signal_at(
+                variant,
+                session_open=session_open,
             )
             entry_at = self._variant_entry_at(
                 variant,
@@ -1246,12 +1294,16 @@ class OpeningMomentumShadowService:
                 session_open + timedelta(minutes=index)
                 for index in range(config.signal_minutes)
             }
+            benchmark_signal_bars = set(expected_signal_bars)
+            if variant.signal_model == "OPENING_RANGE_BREAKOUT":
+                benchmark_signal_bars.add(signal_at)
             observations: list[OpeningMomentumObservation] = []
             path_features_by_symbol: dict[
                 str, _OpeningPathFeatures
             ] = {}
             path_efficiency_by_symbol: dict[str, float] = {}
             opening_range_low_by_symbol: dict[str, float] = {}
+            opening_range_high_by_symbol: dict[str, float] = {}
             signal_turnover_by_symbol: dict[str, float] = {}
             excluded = {
                 symbol: fetch_errors[symbol]
@@ -1290,13 +1342,26 @@ class OpeningMomentumShadowService:
                     by_timestamp[timestamp]
                     for timestamp in sorted(expected_signal_bars)
                 ]
+                completed_signal_candles = signal_candles
+                if variant.signal_model == "OPENING_RANGE_BREAKOUT":
+                    completed_signal_candles = [
+                        *signal_candles,
+                        signal_bar,
+                    ]
                 path_efficiency_by_symbol[symbol] = (
-                    self._opening_path_efficiency(signal_candles)
+                    self._opening_path_efficiency(
+                        completed_signal_candles
+                    )
                 )
                 opening_range_low_by_symbol[symbol] = min(
                     candle.low for candle in signal_candles
                 )
-                signal_turnover = self._signal_turnover(signal_candles)
+                opening_range_high_by_symbol[symbol] = max(
+                    candle.high for candle in signal_candles
+                )
+                signal_turnover = self._signal_turnover(
+                    completed_signal_candles
+                )
                 if signal_turnover is not None:
                     signal_turnover_by_symbol[symbol] = signal_turnover
                 if len(signal_candles) >= 5:
@@ -1308,6 +1373,7 @@ class OpeningMomentumShadowService:
                 variant,
                 observations,
                 path_efficiency_by_symbol,
+                opening_range_high_by_symbol,
             )
             candidate_observation = next(
                 (
@@ -1376,7 +1442,7 @@ class OpeningMomentumShadowService:
             benchmark_returns = {
                 symbol: self._opening_return_bps(
                     benchmark_bars.get(symbol, {}),
-                    expected_signal_bars=expected_signal_bars,
+                    expected_signal_bars=benchmark_signal_bars,
                 )
                 for symbol in _OPENING_CONTEXT_BENCHMARKS
             }
@@ -2042,6 +2108,14 @@ class OpeningMomentumShadowService:
             symbols=active_broad_symbols,
             selection_run_id=run.id,
         ))
+        five_minute_orb_identity = identities_by_variant[
+            "FIVE_MINUTE_ORB_CHALLENGER"
+        ]
+        variants.append(replace(
+            five_minute_orb_identity,
+            symbols=active_broad_symbols,
+            selection_run_id=run.id,
+        ))
         for spec in _EXECUTION_EXTENSION_SPECS:
             identity = identities_by_variant[spec.variant]
             variants.append(_UniverseVariant(
@@ -2127,6 +2201,17 @@ class OpeningMomentumShadowService:
             )
             opening_range_stop_config = replace(
                 execution_config,
+                stop_loss_pct=_OPENING_RANGE_STOP_MAX_PCT,
+            )
+            five_minute_orb_config = replace(
+                execution_config,
+                signal_minutes=5,
+                holding_minutes=60,
+                minimum_market_return_bps=-10_000.0,
+                minimum_candidate_return_bps=0.0,
+                minimum_excess_return_bps=0.0,
+                one_side_fee_rate=0.0005,
+                one_side_slippage_bps=10.0,
                 stop_loss_pct=_OPENING_RANGE_STOP_MAX_PCT,
             )
             variants.append(_UniverseVariant(
@@ -2407,6 +2492,26 @@ class OpeningMomentumShadowService:
                     _EARLY_BROAD_MINIMUM_COVERAGE
                 ),
                 opening_range_stop=True,
+            ))
+            variants.append(_UniverseVariant(
+                variant="FIVE_MINUTE_ORB_CHALLENGER",
+                algorithm_version=(
+                    _FIVE_MINUTE_ORB_ALGORITHM_VERSION
+                ),
+                config_version=self._evidence_config_version(
+                    f"{five_minute_orb_config.version_hash()}:"
+                    f"{_FIVE_MINUTE_ORB_VERSION}"
+                ),
+                universe_source=_FIVE_MINUTE_ORB_SOURCE,
+                decision_config=five_minute_orb_config,
+                signal_model="OPENING_RANGE_BREAKOUT",
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+                opening_range_stop=True,
+                forward_evidence_start_date=(
+                    _POST_20260727_FORWARD_EVIDENCE_START_DATE
+                ),
             ))
             for spec in _EXECUTION_EXTENSION_SPECS:
                 variants.append(_UniverseVariant(
@@ -3119,6 +3224,7 @@ class OpeningMomentumShadowService:
                 "MODERATE_BREADTH_PATH_CHALLENGER",
                 "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
                 "QUALITY_FIRST_PATH_RERANK_CHALLENGER",
+                "FIVE_MINUTE_ORB_CHALLENGER",
             }
             requires_displacement_evidence = (
                 is_early_extension

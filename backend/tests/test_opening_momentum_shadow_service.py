@@ -86,6 +86,7 @@ _ALL_CHALLENGER_VARIANTS = (
     "WEAK_BREADTH_WIDE_STOP_CHALLENGER",
     *_ETF_REGIME_VARIANTS,
     "OPENING_RANGE_STOP_CHALLENGER",
+    "FIVE_MINUTE_ORB_CHALLENGER",
     *_EXECUTION_EXTENSION_VARIANTS,
 )
 
@@ -102,6 +103,7 @@ class _FakeCandles:
         ) = None,
         negative_last_five_for: str | None = None,
         low_efficiency_for: str | None = None,
+        orb_breakout_for: str | None = None,
         unavailable_symbols: set[str] | None = None,
         turnover_per_minute_by_symbol: dict[str, float] | None = None,
     ) -> None:
@@ -113,6 +115,7 @@ class _FakeCandles:
         self.early_path_returns_bps = early_path_returns_bps or {}
         self.negative_last_five_for = negative_last_five_for
         self.low_efficiency_for = low_efficiency_for
+        self.orb_breakout_for = orb_breakout_for
         self.unavailable_symbols = unavailable_symbols or set()
         self.turnover_per_minute_by_symbol = (
             turnover_per_minute_by_symbol or {}
@@ -171,6 +174,8 @@ class _FakeCandles:
                 close_price = 100.0 * (
                     1 + opening_return_bps / 10_000
                 )
+            if symbol == self.orb_breakout_for and index == 5:
+                close_price = 101.0
             if (
                 index == 25
                 and symbol == self.negative_last_five_for
@@ -180,6 +185,8 @@ class _FakeCandles:
                 open_price = 100.5 if symbol_index == 7 else 100.0
             if index == 4:
                 open_price = 100.5 if symbol_index == 7 else 100.0
+            if symbol == self.orb_breakout_for and index == 6:
+                open_price = 101.2
             if index == 61:
                 open_price = 101.5 if symbol_index == 7 else 100.0
             if index == 91:
@@ -1119,6 +1126,70 @@ def test_opening_range_stop_rejects_invalid_levels(
     ) is None
 
 
+def test_five_minute_orb_uses_confirmed_breakout_and_next_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        run = _seed_variant_universe(db)
+        _seed_active_broad_pool(db)
+        service = OpeningMomentumShadowService(
+            db,
+            _FakeCandles(orb_breakout_for="S7.US"),
+            config=OpeningMomentumConfig(
+                minimum_universe_size=2,
+                minimum_excess_return_bps=0,
+            ),
+        )
+
+        status = service.tick(
+            now=_SESSION_OPEN + timedelta(minutes=7, seconds=10),
+        )
+
+        orb = {
+            item.variant: item for item in status.variants
+        }["FIVE_MINUTE_ORB_CHALLENGER"]
+        assert orb.latest is not None
+        assert orb.latest.status == "OPEN"
+        assert orb.latest.reason == "FIVE_MINUTE_OPENING_RANGE_BREAKOUT"
+        assert orb.latest.selection_run_id == run.id
+        assert orb.latest.candidate_symbol == "S7.US"
+        assert orb.latest.signal_at == (
+            _SESSION_OPEN + timedelta(minutes=5)
+        )
+        assert orb.latest.entry_at == (
+            _SESSION_OPEN + timedelta(minutes=6)
+        )
+        assert orb.latest.entry_price == 101.2
+        assert orb.latest.exit_due_at == (
+            _SESSION_OPEN + timedelta(minutes=66)
+        )
+        assert orb.latest.stop_loss_pct == pytest.approx(
+            (1 - 99.9 / 101.2) * 100
+        )
+        assert orb.latest.estimated_cost_bps == 30.0
+        assert orb.latest.candidate_path_efficiency == pytest.approx(1.0)
+        assert orb.comparison_baseline == (
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        )
+        assert orb.comparison is not None
+        assert orb.comparison.resolved_sessions == 0
+        assert orb.comparison.minimum_policy_displacement_sessions == 3
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
 def test_challenger_variants_isolate_universe_and_entry_gates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1165,6 +1236,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "ETF_REGIME_CRWD_CHALLENGER",
             "ETF_REGIME_TRV_CHALLENGER",
             "OPENING_RANGE_STOP_CHALLENGER",
+            "FIVE_MINUTE_ORB_CHALLENGER",
             "EXECUTION_SNDK_CHALLENGER",
             "EXECUTION_INTC_CHALLENGER",
             "EXECUTION_QCOM_CHALLENGER",
@@ -1216,6 +1288,9 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         etf_regime = by_variant["ETF_REGIME_PATH_CHALLENGER"]
         opening_range_stop = by_variant[
             "OPENING_RANGE_STOP_CHALLENGER"
+        ]
+        five_minute_orb = by_variant[
+            "FIVE_MINUTE_ORB_CHALLENGER"
         ]
         reversal = by_variant["REVERSAL_CHALLENGER"]
         continuation = by_variant["CONTINUATION_CHALLENGER"]
@@ -1535,6 +1610,19 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         assert opening_range_stop.universe_source == (
             "OPENING_EXECUTION_RANGE_STOP"
         )
+        assert five_minute_orb.signal_model == "OPENING_RANGE_BREAKOUT"
+        assert five_minute_orb.decision_config.signal_minutes == 5
+        assert five_minute_orb.decision_config.holding_minutes == 60
+        assert five_minute_orb.decision_config.round_trip_cost_bps == 30.0
+        assert five_minute_orb.decision_config.stop_loss_pct == 4.0
+        assert five_minute_orb.minimum_data_coverage == 0.95
+        assert five_minute_orb.opening_range_stop is True
+        assert five_minute_orb.forward_evidence_start_date == date(
+            2026,
+            7,
+            28,
+        )
+        assert five_minute_orb.universe_source == "OPENING_FIVE_MINUTE_ORB"
         for variant, symbol in zip(
             _EXECUTION_EXTENSION_VARIANTS,
             _EXECUTION_EXTENSION_SYMBOLS,
@@ -1921,7 +2009,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 35
+        assert len(opened.variants) == 36
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -3245,7 +3333,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 35
+        assert len(status.variants) == 36
         by_variant = {
             item.variant: item for item in status.variants
         }

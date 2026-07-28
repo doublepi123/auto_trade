@@ -194,8 +194,9 @@ class TestOpeningMomentumShadowApi:
         opening_range_stop = variants[
             "OPENING_RANGE_STOP_CHALLENGER"
         ]
+        five_minute_orb = variants["FIVE_MINUTE_ORB_CHALLENGER"]
         execution_sndk = variants["EXECUTION_SNDK_CHALLENGER"]
-        assert len(variants) == 35
+        assert len(variants) == 36
         assert early["universe_source"] == "OPENING_EARLY_BROAD"
         assert early["signal_minutes"] == 3
         assert early["minimum_market_return_bps"] == -50.0
@@ -344,7 +345,7 @@ class TestOpeningMomentumShadowApi:
         assert moderate_comparison["evidence_gate_passed"] is False
         assert moderate_comparison[
             "multiple_testing_family_size"
-        ] == 3
+        ] == 4
         assert weak_breadth_exceptional_path["universe_source"] == (
             "OPENING_EXECUTION_WEAK_BREADTH_EXCEPTIONAL_PATH"
         )
@@ -428,7 +429,7 @@ class TestOpeningMomentumShadowApi:
         assert quality_first_path_rerank["comparison"] is not None
         assert quality_first_path_rerank["comparison"][
             "multiple_testing_family_size"
-        ] == 3
+        ] == 4
         assert exceptional_path_panw_cohort["universe_source"] == (
             "OPENING_EXECUTION_EXCEPTIONAL_PANW_COHORT"
         )
@@ -456,7 +457,7 @@ class TestOpeningMomentumShadowApi:
         assert exceptional_path_panw_cohort["comparison"] is not None
         assert exceptional_path_panw_cohort["comparison"][
             "multiple_testing_family_size"
-        ] == 3
+        ] == 4
         assert weak_breadth_index_cohort["universe_source"] == (
             "OPENING_EXECUTION_WEAK_BREADTH_INDEX_COHORT"
         )
@@ -615,6 +616,29 @@ class TestOpeningMomentumShadowApi:
             "EXECUTION_BROAD_CHALLENGER"
         )
         assert opening_range_stop["comparison"] is not None
+        assert five_minute_orb["universe_source"] == (
+            "OPENING_FIVE_MINUTE_ORB"
+        )
+        assert five_minute_orb["signal_minutes"] == 5
+        assert five_minute_orb["holding_minutes"] == 60
+        assert five_minute_orb["stop_loss_pct"] == 4.0
+        assert five_minute_orb["minimum_data_coverage"] == 0.95
+        assert five_minute_orb["minimum_market_return_bps"] == -10_000.0
+        assert five_minute_orb["minimum_candidate_return_bps"] == 0.0
+        assert five_minute_orb["minimum_excess_return_bps"] == 0.0
+        assert five_minute_orb["forward_evidence_start_date"] == (
+            "2026-07-28"
+        )
+        assert five_minute_orb["comparison_baseline"] == (
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        )
+        assert five_minute_orb["comparison"] is not None
+        assert five_minute_orb["comparison"][
+            "minimum_policy_displacement_sessions"
+        ] == 3
+        assert five_minute_orb["comparison"][
+            "multiple_testing_family_size"
+        ] == 4
         assert execution_sndk["required_symbols"] == ["SNDK.US"]
         assert (
             execution_sndk["comparison_baseline"]
