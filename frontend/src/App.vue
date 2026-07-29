@@ -20,6 +20,16 @@
           <router-link to="/notifications" class="app-menu-link" :class="{ active: route.path === '/notifications' }">通知中心</router-link>
         </el-badge>
         <router-link to="/lab" class="app-menu-link" :class="{ active: route.path === '/lab' }">优化工作台</router-link>
+        <router-link to="/signal-consensus" class="app-menu-link" :class="{ active: route.path === '/signal-consensus' }">信号共识</router-link>
+        <router-link to="/universe-explainer" class="app-menu-link" :class="{ active: route.path === '/universe-explainer' }">Universe解释</router-link>
+        <router-link to="/risk-timeline" class="app-menu-link" :class="{ active: route.path === '/risk-timeline' }">风控时间线</router-link>
+        <router-link to="/platform-catalog" class="app-menu-link" :class="{ active: route.path === '/platform-catalog' }">模块目录</router-link>
+        <router-link to="/attribution" class="app-menu-link" :class="{ active: route.path === '/attribution' }">绩效归因</router-link>
+        <router-link to="/regime" class="app-menu-link" :class="{ active: route.path === '/regime' }">市场状态</router-link>
+        <router-link to="/drawdown" class="app-menu-link" :class="{ active: route.path === '/drawdown' }">回撤分析</router-link>
+        <router-link to="/strategy-health" class="app-menu-link" :class="{ active: route.path === '/strategy-health' }">策略健康</router-link>
+        <router-link to="/execution-quality" class="app-menu-link" :class="{ active: route.path === '/execution-quality' }">执行质量</router-link>
+        <router-link to="/decision-replay" class="app-menu-link" :class="{ active: route.path === '/decision-replay' }">决策回放</router-link>
       </nav>
       <div class="header-actions">
         <el-button

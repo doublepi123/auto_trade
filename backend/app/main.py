@@ -55,6 +55,16 @@ from app.api.universe import router as universe_router
 from app.api.watchlist import router as watchlist_router
 from app.api.ws import router as ws_router
 from app.api.ws import manager as ws_manager
+from app.api.signal_consensus import router as signal_consensus_router
+from app.api.universe_explainer import router as universe_explainer_router
+from app.api.risk_timeline import router as risk_timeline_router
+from app.api.platform_catalog import router as platform_catalog_router
+from app.api.attribution import router as attribution_router
+from app.api.regime import router as regime_router
+from app.api.drawdown_analysis import router as drawdown_analysis_router
+from app.api.strategy_health import router as strategy_health_router
+from app.api.execution_quality import router as execution_quality_router
+from app.api.decision_replay import router as decision_replay_router
 from app.config import settings
 from app.database import init_db
 from app.runner import get_runner
@@ -1370,6 +1380,16 @@ app.include_router(review_router)
 app.include_router(calendar_router)
 app.include_router(metrics_router)
 app.include_router(ws_router)
+app.include_router(signal_consensus_router)
+app.include_router(universe_explainer_router)
+app.include_router(risk_timeline_router)
+app.include_router(platform_catalog_router)
+app.include_router(attribution_router)
+app.include_router(regime_router)
+app.include_router(drawdown_analysis_router)
+app.include_router(strategy_health_router)
+app.include_router(execution_quality_router)
+app.include_router(decision_replay_router)
 
 
 # Global exception handler: log unhandled exceptions and return a generic 500 JSON

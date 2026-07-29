@@ -14,6 +14,16 @@ const routes: RouteRecordRaw[] = [
   { path: '/alerts', component: () => import('../views/AlertRules.vue') },
   { path: '/notifications', component: () => import('../views/NotificationCenter.vue') },
   { path: '/lab', component: () => import('../views/Lab.vue') },
+  { path: '/signal-consensus', component: () => import('../views/SignalConsensus.vue') },
+  { path: '/universe-explainer', component: () => import('../views/UniverseExplainer.vue') },
+  { path: '/risk-timeline', component: () => import('../views/RiskTimeline.vue') },
+  { path: '/platform-catalog', component: () => import('../views/PlatformCatalog.vue') },
+  { path: '/attribution', component: () => import('../views/Attribution.vue') },
+  { path: '/regime', component: () => import('../views/RegimePanel.vue') },
+  { path: '/drawdown', component: () => import('../views/DrawdownAnalysis.vue') },
+  { path: '/strategy-health', component: () => import('../views/StrategyHealth.vue') },
+  { path: '/execution-quality', component: () => import('../views/ExecutionQuality.vue') },
+  { path: '/decision-replay', component: () => import('../views/DecisionReplay.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
