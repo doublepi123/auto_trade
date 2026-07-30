@@ -24,6 +24,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/strategy-health', component: () => import('../views/StrategyHealth.vue') },
   { path: '/execution-quality', component: () => import('../views/ExecutionQuality.vue') },
   { path: '/decision-replay', component: () => import('../views/DecisionReplay.vue') },
+  { path: '/lookahead-analysis', component: () => import('../views/LookaheadAnalysis.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

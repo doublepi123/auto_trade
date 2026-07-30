@@ -30,6 +30,7 @@
         <router-link to="/strategy-health" class="app-menu-link" :class="{ active: route.path === '/strategy-health' }">策略健康</router-link>
         <router-link to="/execution-quality" class="app-menu-link" :class="{ active: route.path === '/execution-quality' }">执行质量</router-link>
         <router-link to="/decision-replay" class="app-menu-link" :class="{ active: route.path === '/decision-replay' }">决策回放</router-link>
+        <router-link to="/lookahead-analysis" class="app-menu-link" :class="{ active: route.path === '/lookahead-analysis' }">前瞻偏差</router-link>
       </nav>
       <div class="header-actions">
         <el-button
