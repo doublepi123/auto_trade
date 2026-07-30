@@ -40,6 +40,7 @@
         <router-link to="/recovery" class="app-menu-link" :class="{ active: route.path === '/recovery' }">恢复时间线</router-link>
         <router-link to="/benchmark" class="app-menu-link" :class="{ active: route.path === '/benchmark' }">Alpha/Beta</router-link>
         <router-link to="/tag-analytics" class="app-menu-link" :class="{ active: route.path === '/tag-analytics' }">标签绩效</router-link>
+        <router-link to="/risk-score" class="app-menu-link" :class="{ active: route.path === '/risk-score' }">风险评分</router-link>
       </nav>
       <div class="header-actions">
         <el-button
