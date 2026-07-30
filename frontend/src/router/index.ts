@@ -28,6 +28,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/monte-carlo', component: () => import('../views/MonteCarlo.vue') },
   { path: '/correlation', component: () => import('../views/CorrelationMatrix.vue') },
   { path: '/kelly', component: () => import('../views/KellySizing.vue') },
+  { path: '/streaks', component: () => import('../views/StreakAnalysis.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
