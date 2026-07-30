@@ -66,6 +66,7 @@ from app.api.strategy_health import router as strategy_health_router
 from app.api.execution_quality import router as execution_quality_router
 from app.api.decision_replay import router as decision_replay_router
 from app.api.lookahead_analysis import router as lookahead_analysis_router
+from app.api.monte_carlo import router as monte_carlo_router
 from app.config import settings
 from app.database import init_db
 from app.runner import get_runner
@@ -1392,6 +1393,7 @@ app.include_router(strategy_health_router)
 app.include_router(execution_quality_router)
 app.include_router(decision_replay_router)
 app.include_router(lookahead_analysis_router)
+app.include_router(monte_carlo_router)
 
 
 # Global exception handler: log unhandled exceptions and return a generic 500 JSON
