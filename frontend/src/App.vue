@@ -33,6 +33,7 @@
         <router-link to="/lookahead-analysis" class="app-menu-link" :class="{ active: route.path === '/lookahead-analysis' }">前瞻偏差</router-link>
         <router-link to="/monte-carlo" class="app-menu-link" :class="{ active: route.path === '/monte-carlo' }">蒙特卡洛</router-link>
         <router-link to="/correlation" class="app-menu-link" :class="{ active: route.path === '/correlation' }">相关性</router-link>
+        <router-link to="/kelly" class="app-menu-link" :class="{ active: route.path === '/kelly' }">Kelly定尺</router-link>
       </nav>
       <div class="header-actions">
         <el-button

@@ -27,6 +27,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/lookahead-analysis', component: () => import('../views/LookaheadAnalysis.vue') },
   { path: '/monte-carlo', component: () => import('../views/MonteCarlo.vue') },
   { path: '/correlation', component: () => import('../views/CorrelationMatrix.vue') },
+  { path: '/kelly', component: () => import('../views/KellySizing.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
