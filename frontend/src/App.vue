@@ -32,6 +32,7 @@
         <router-link to="/decision-replay" class="app-menu-link" :class="{ active: route.path === '/decision-replay' }">决策回放</router-link>
         <router-link to="/lookahead-analysis" class="app-menu-link" :class="{ active: route.path === '/lookahead-analysis' }">前瞻偏差</router-link>
         <router-link to="/monte-carlo" class="app-menu-link" :class="{ active: route.path === '/monte-carlo' }">蒙特卡洛</router-link>
+        <router-link to="/correlation" class="app-menu-link" :class="{ active: route.path === '/correlation' }">相关性</router-link>
       </nav>
       <div class="header-actions">
         <el-button
