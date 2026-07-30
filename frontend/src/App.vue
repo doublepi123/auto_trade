@@ -35,6 +35,7 @@
         <router-link to="/correlation" class="app-menu-link" :class="{ active: route.path === '/correlation' }">相关性</router-link>
         <router-link to="/kelly" class="app-menu-link" :class="{ active: route.path === '/kelly' }">Kelly定尺</router-link>
         <router-link to="/streaks" class="app-menu-link" :class="{ active: route.path === '/streaks' }">连胜连败</router-link>
+        <router-link to="/time-performance" class="app-menu-link" :class="{ active: route.path === '/time-performance' }">时段绩效</router-link>
       </nav>
       <div class="header-actions">
         <el-button

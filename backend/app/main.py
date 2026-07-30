@@ -70,6 +70,7 @@ from app.api.monte_carlo import router as monte_carlo_router
 from app.api.correlation import router as correlation_router
 from app.api.kelly import router as kelly_router
 from app.api.streaks import router as streaks_router
+from app.api.time_performance import router as time_performance_router
 from app.config import settings
 from app.database import init_db
 from app.runner import get_runner
@@ -1400,6 +1401,7 @@ app.include_router(monte_carlo_router)
 app.include_router(correlation_router)
 app.include_router(kelly_router)
 app.include_router(streaks_router)
+app.include_router(time_performance_router)
 
 
 # Global exception handler: log unhandled exceptions and return a generic 500 JSON
