@@ -73,6 +73,7 @@ from app.api.streaks import router as streaks_router
 from app.api.time_performance import router as time_performance_router
 from app.api.rolling_metrics import router as rolling_metrics_router
 from app.api.recovery import router as recovery_router
+from app.api.benchmark import router as benchmark_router
 from app.config import settings
 from app.database import init_db
 from app.runner import get_runner
@@ -1406,6 +1407,7 @@ app.include_router(streaks_router)
 app.include_router(time_performance_router)
 app.include_router(rolling_metrics_router)
 app.include_router(recovery_router)
+app.include_router(benchmark_router)
 
 
 # Global exception handler: log unhandled exceptions and return a generic 500 JSON
