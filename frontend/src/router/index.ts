@@ -30,6 +30,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/kelly', component: () => import('../views/KellySizing.vue') },
   { path: '/streaks', component: () => import('../views/StreakAnalysis.vue') },
   { path: '/time-performance', component: () => import('../views/TimePerformance.vue') },
+  { path: '/rolling-metrics', component: () => import('../views/RollingMetrics.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
