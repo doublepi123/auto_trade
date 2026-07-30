@@ -1361,7 +1361,7 @@ def test_stocks_in_play_orb_uses_five_minute_activity_proxy(
             "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER"
         )
         assert catalog_top5.comparison is not None
-        assert catalog_top5.comparison.multiple_testing_family_size == 4
+        assert catalog_top5.comparison.multiple_testing_family_size == 3
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -1425,7 +1425,7 @@ def test_index_catalog_relative_volume_orb_uses_only_prior_sessions(
             "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER"
         )
         assert relative.comparison is not None
-        assert relative.comparison.multiple_testing_family_size == 4
+        assert relative.comparison.multiple_testing_family_size == 1
         current_rows = (
             db.query(OpeningActivityObservation)
             .filter(

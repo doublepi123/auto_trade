@@ -753,7 +753,7 @@ class TestOpeningMomentumShadowApi:
             assert sensitivity["comparison"] is not None
             assert sensitivity["comparison"][
                 "multiple_testing_family_size"
-            ] == 4
+            ] == 3
         assert index_catalog_relative_volume_top5["universe_source"] == (
             "OPENING_INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5"
         )
@@ -781,7 +781,7 @@ class TestOpeningMomentumShadowApi:
         assert index_catalog_relative_volume_top5["comparison"] is not None
         assert index_catalog_relative_volume_top5["comparison"][
             "multiple_testing_family_size"
-        ] == 4
+        ] == 1
         assert index_catalog_relative_volume_opening_return[
             "universe_source"
         ] == (

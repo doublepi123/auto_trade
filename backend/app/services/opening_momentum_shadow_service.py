@@ -4232,15 +4232,26 @@ class OpeningMomentumShadowService:
         *,
         paired_deltas_by_variant: dict[str, list[float]],
     ) -> list[OpeningMomentumShadowVariantResponse]:
-        family_indices: dict[str, list[int]] = {}
+        family_indices: dict[tuple[str, str], list[int]] = {}
         for index, response in enumerate(responses):
             if (
                 response.comparison is None
                 or response.comparison_baseline is None
             ):
                 continue
+            family_name = "baseline-comparison"
+            # These hypotheses were precommitted as separate experiments even
+            # though they share the raw index-catalog ORB baseline.
+            if response.variant in (
+                _INDEX_CATALOG_STOCKS_IN_PLAY_ORB_VARIANTS
+            ):
+                family_name = "index-catalog-activity-sensitivity"
+            elif response.variant == (
+                "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER"
+            ):
+                family_name = "index-catalog-relative-volume"
             family_indices.setdefault(
-                response.comparison_baseline,
+                (response.comparison_baseline, family_name),
                 [],
             ).append(index)
 
