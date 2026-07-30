@@ -37,6 +37,7 @@
         <router-link to="/streaks" class="app-menu-link" :class="{ active: route.path === '/streaks' }">连胜连败</router-link>
         <router-link to="/time-performance" class="app-menu-link" :class="{ active: route.path === '/time-performance' }">时段绩效</router-link>
         <router-link to="/rolling-metrics" class="app-menu-link" :class="{ active: route.path === '/rolling-metrics' }">滚动指标</router-link>
+        <router-link to="/recovery" class="app-menu-link" :class="{ active: route.path === '/recovery' }">恢复时间线</router-link>
       </nav>
       <div class="header-actions">
         <el-button
