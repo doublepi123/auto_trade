@@ -33,6 +33,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/rolling-metrics', component: () => import('../views/RollingMetrics.vue') },
   { path: '/recovery', component: () => import('../views/RecoveryTimeline.vue') },
   { path: '/benchmark', component: () => import('../views/BenchmarkAlphaBeta.vue') },
+  { path: '/tag-analytics', component: () => import('../views/TagAnalytics.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
