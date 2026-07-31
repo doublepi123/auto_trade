@@ -97,6 +97,7 @@ from app.api.robustness import router as robustness_router
 from app.api.milestones import router as milestones_router
 from app.api.momentum_ranking import router as momentum_ranking_router
 from app.api.fee_drag import router as fee_drag_router
+from app.api.exit_efficiency import router as exit_efficiency_router
 from app.config import settings
 from app.database import init_db
 from app.runner import get_runner
@@ -1454,6 +1455,7 @@ app.include_router(robustness_router)
 app.include_router(milestones_router)
 app.include_router(momentum_ranking_router)
 app.include_router(fee_drag_router)
+app.include_router(exit_efficiency_router)
 
 
 # Global exception handler: log unhandled exceptions and return a generic 500 JSON

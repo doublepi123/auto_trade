@@ -56,6 +56,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/milestones', component: () => import('../views/Milestones.vue') },
   { path: '/momentum-ranking', component: () => import('../views/MomentumRanking.vue') },
   { path: '/fee-drag', component: () => import('../views/FeeDrag.vue') },
+  { path: '/exit-efficiency', component: () => import('../views/ExitEfficiency.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
