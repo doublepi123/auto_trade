@@ -1794,6 +1794,33 @@ class TradeEventPageResponse(BaseModel):
     page_size: int
 
 
+class AuditLogOut(BaseModel):
+    """Safe projection of an ``audit_logs`` row for the browse API.
+
+    Mirrors the fields the existing ``/api/events`` audit export intentionally
+    exposes (``actor_hash``, ``source_ip``, ``severity``, ``result``). The
+    ``request_summary`` is a write-time-bounded, deliberately sanitized summary
+    dict (never a raw request body or secret); if it is not valid JSON it is
+    returned as ``{"raw": ...}``.
+    """
+
+    id: int
+    action: str
+    severity: str
+    result: str
+    actor_hash: str
+    source_ip: str
+    request_summary: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class AuditLogPage(BaseModel):
+    items: list[AuditLogOut]
+    total: int
+    limit: int
+    offset: int
+
+
 class ControlRequest(BaseModel):
     reason: str = Field(default="manual")
 
