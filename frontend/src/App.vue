@@ -47,6 +47,7 @@
         <router-link to="/profit-factor" class="app-menu-link" :class="{ active: route.path === '/profit-factor' }">盈亏因子</router-link>
         <router-link to="/concentration" class="app-menu-link" :class="{ active: route.path === '/concentration' }">集中度</router-link>
         <router-link to="/autocorrelation" class="app-menu-link" :class="{ active: route.path === '/autocorrelation' }">自相关</router-link>
+        <router-link to="/size-impact" class="app-menu-link" :class="{ active: route.path === '/size-impact' }">规模影响</router-link>
       </nav>
       <div class="header-actions">
         <el-button
