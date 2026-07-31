@@ -53,6 +53,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/prediction-score', component: () => import('../views/PredictionScore.vue') },
   { path: '/regime-sensitivity', component: () => import('../views/RegimeSensitivity.vue') },
   { path: '/robustness', component: () => import('../views/Robustness.vue') },
+  { path: '/milestones', component: () => import('../views/Milestones.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

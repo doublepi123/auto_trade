@@ -94,6 +94,7 @@ from app.api.drawdown_duration import router as drawdown_duration_router
 from app.api.prediction_score import router as prediction_score_router
 from app.api.regime_sensitivity import router as regime_sensitivity_router
 from app.api.robustness import router as robustness_router
+from app.api.milestones import router as milestones_router
 from app.config import settings
 from app.database import init_db
 from app.runner import get_runner
@@ -1448,6 +1449,7 @@ app.include_router(drawdown_duration_router)
 app.include_router(prediction_score_router)
 app.include_router(regime_sensitivity_router)
 app.include_router(robustness_router)
+app.include_router(milestones_router)
 
 
 # Global exception handler: log unhandled exceptions and return a generic 500 JSON
