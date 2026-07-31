@@ -59,6 +59,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/exit-efficiency', component: () => import('../views/ExitEfficiency.vue') },
   { path: '/skip-analytics', component: () => import('../views/SkipAnalytics.vue') },
   { path: '/r-multiples', component: () => import('../views/RMultiples.vue') },
+  { path: '/profit-concentration', component: () => import('../views/ProfitConcentration.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

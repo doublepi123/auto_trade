@@ -100,6 +100,7 @@ from app.api.fee_drag import router as fee_drag_router
 from app.api.exit_efficiency import router as exit_efficiency_router
 from app.api.skip_analytics import router as skip_analytics_router
 from app.api.r_multiples import router as r_multiples_router
+from app.api.profit_concentration import router as profit_concentration_router
 from app.config import settings
 from app.database import init_db
 from app.runner import get_runner
@@ -1460,6 +1461,7 @@ app.include_router(fee_drag_router)
 app.include_router(exit_efficiency_router)
 app.include_router(skip_analytics_router)
 app.include_router(r_multiples_router)
+app.include_router(profit_concentration_router)
 
 
 # Global exception handler: log unhandled exceptions and return a generic 500 JSON

@@ -65,6 +65,7 @@
         <router-link to="/exit-efficiency" class="app-menu-link" :class="{ active: route.path === '/exit-efficiency' }">离场效率</router-link>
         <router-link to="/skip-analytics" class="app-menu-link" :class="{ active: route.path === '/skip-analytics' }">跳过原因</router-link>
         <router-link to="/r-multiples" class="app-menu-link" :class="{ active: route.path === '/r-multiples' }">R倍数</router-link>
+        <router-link to="/profit-concentration" class="app-menu-link" :class="{ active: route.path === '/profit-concentration' }">盈利集中</router-link>
       </nav>
       <div class="header-actions">
         <el-button
