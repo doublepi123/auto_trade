@@ -47,6 +47,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/decay-detection', component: () => import('../views/DecayDetection.vue') },
   { path: '/rolling-var', component: () => import('../views/RollingVar.vue') },
   { path: '/asymmetry', component: () => import('../views/Asymmetry.vue') },
+  { path: '/capital-efficiency', component: () => import('../views/CapitalEfficiency.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

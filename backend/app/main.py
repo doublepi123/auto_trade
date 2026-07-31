@@ -88,6 +88,7 @@ from app.api.edge_quality import router as edge_quality_router
 from app.api.decay_detection import router as decay_detection_router
 from app.api.rolling_var import router as rolling_var_router
 from app.api.asymmetry import router as asymmetry_router
+from app.api.capital_efficiency import router as capital_efficiency_router
 from app.config import settings
 from app.database import init_db
 from app.runner import get_runner
@@ -1436,6 +1437,7 @@ app.include_router(edge_quality_router)
 app.include_router(decay_detection_router)
 app.include_router(rolling_var_router)
 app.include_router(asymmetry_router)
+app.include_router(capital_efficiency_router)
 
 
 # Global exception handler: log unhandled exceptions and return a generic 500 JSON
