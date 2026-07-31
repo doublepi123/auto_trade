@@ -60,6 +60,7 @@
         <router-link to="/regime-sensitivity" class="app-menu-link" :class="{ active: route.path === '/regime-sensitivity' }">体制敏感性</router-link>
         <router-link to="/robustness" class="app-menu-link" :class="{ active: route.path === '/robustness' }">稳健性</router-link>
         <router-link to="/milestones" class="app-menu-link" :class="{ active: route.path === '/milestones' }">里程碑</router-link>
+        <router-link to="/momentum-ranking" class="app-menu-link" :class="{ active: route.path === '/momentum-ranking' }">动量排名</router-link>
       </nav>
       <div class="header-actions">
         <el-button

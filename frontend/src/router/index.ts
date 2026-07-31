@@ -54,6 +54,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/regime-sensitivity', component: () => import('../views/RegimeSensitivity.vue') },
   { path: '/robustness', component: () => import('../views/Robustness.vue') },
   { path: '/milestones', component: () => import('../views/Milestones.vue') },
+  { path: '/momentum-ranking', component: () => import('../views/MomentumRanking.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
