@@ -42,6 +42,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/concentration', component: () => import('../views/Concentration.vue') },
   { path: '/autocorrelation', component: () => import('../views/Autocorrelation.vue') },
   { path: '/size-impact', component: () => import('../views/SizeImpact.vue') },
+  { path: '/return-calendar', component: () => import('../views/ReturnCalendar.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

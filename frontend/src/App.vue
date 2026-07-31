@@ -48,6 +48,7 @@
         <router-link to="/concentration" class="app-menu-link" :class="{ active: route.path === '/concentration' }">集中度</router-link>
         <router-link to="/autocorrelation" class="app-menu-link" :class="{ active: route.path === '/autocorrelation' }">自相关</router-link>
         <router-link to="/size-impact" class="app-menu-link" :class="{ active: route.path === '/size-impact' }">规模影响</router-link>
+        <router-link to="/return-calendar" class="app-menu-link" :class="{ active: route.path === '/return-calendar' }">收益日历</router-link>
       </nav>
       <div class="header-actions">
         <el-button
