@@ -192,7 +192,11 @@ describe('Dynamic universe observation pool', () => {
       cy.get('[data-testid="rotation-walk-forward"]').within(() => {
         cy.contains('评估完成').should('be.visible')
         cy.get('[data-testid="rotation-training-winner"]').should('contain', '集中 Top6')
+        cy.get('[data-testid="rotation-training-winner-gate"]')
+          .should('contain', '未通过双门槛')
         cy.get('[data-testid="rotation-validated-challenger"]').should('contain', '波动配权 Top8')
+        cy.get('[data-testid="rotation-validated-challenger-gate"]')
+          .should('contain', '通过双门槛')
         cy.get('[data-testid="rotation-validation-metrics"]')
           .should('contain', '+46.2%')
           .and('contain', '+37.1%')
@@ -314,7 +318,9 @@ describe('Dynamic universe observation pool', () => {
         universe_run_id: 7,
         as_of_date: '2026-07-23',
         generated_at: '2026-07-24T01:05:00Z',
-        priority_algorithm_version: 'selection-exploration-quant-fail-closed-v5',
+        priority_algorithm_version: 'selection-exploration-quant-core-satellite-observation-v7',
+        diversified_observation_limit: 8,
+        growth_satellite_limit: 4,
         items: {},
       },
     }).as('getUniversePromotionReadinessInvalid')

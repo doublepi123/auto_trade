@@ -102,6 +102,16 @@ class StrategyEngine:
 
         if self.state == EngineState.FLAT:
             if price <= self.params.buy_low:
+                entry_floor = self._long_entry_floor()
+                if entry_floor > 0 and price <= entry_floor:
+                    self._long_entry_rearm_required = True
+                    return TriggerResult(
+                        triggered=False,
+                        description=(
+                            f"Price {price} <= long entry floor {entry_floor}; "
+                            "configured range is invalidated"
+                        ),
+                    )
                 self.state = EngineState.LONG
                 self._long_entry_rearm_required = True
                 self._mark_trigger(price)
@@ -149,6 +159,19 @@ class StrategyEngine:
             # NOTE: SHORT 状态不追加做空 — 有意限制空头敞口,与 LONG 的 add-on 不对称
 
         return TriggerResult(triggered=False)
+
+    def _long_entry_floor(self) -> float:
+        """Reject a falling-through range instead of buying a stale threshold.
+
+        When a hard stop is configured, a quote already at or below the price
+        where an entry at ``buy_low`` would have stopped out is evidence that
+        the configured range has been invalidated.  The engine waits for a
+        reclaim/repricing rather than opening into the gap.  A zero stop keeps
+        the legacy unbounded ``price <= buy_low`` behavior.
+        """
+        if self.params.buy_low <= 0 or self.params.stop_loss_pct <= 0:
+            return 0.0
+        return self.params.buy_low * (1 - self.params.stop_loss_pct / 100)
 
     def _mark_trigger(self, price: float) -> None:
         self.last_trigger_price = price
@@ -275,6 +298,7 @@ class StrategyEngine:
                 "long_entry_rearm_required": self._long_entry_rearm_required,
                 "symbol": self.params.symbol,
                 "buy_low": self.params.buy_low,
+                "long_entry_floor": self._long_entry_floor(),
                 "sell_high": self.params.sell_high,
                 "short_selling": self.params.short_selling,
                 "min_profit_amount": self.params.min_profit_amount,

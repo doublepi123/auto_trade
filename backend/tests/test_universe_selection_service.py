@@ -35,8 +35,9 @@ from app.models import (
 from app.schemas import StrategyV2ShadowConfigUpdate
 from app.services.universe_selection_service import (
     _HISTORICAL_RESEARCH_BARS_CACHE,
-    _historical_membership_end,
-    _historical_research_candlesticks,
+    historical_membership_end,
+    historical_research_candlesticks,
+    research_candidate_uses_recent_candlesticks,
     UniverseSelectionService,
     minimum_peer_observation_dollar_volume,
     observation_pool_overrides,
@@ -107,12 +108,12 @@ def test_historical_research_bars_use_membership_end_and_cache() -> None:
     broker = _HistoricalBroker()
     _HISTORICAL_RESEARCH_BARS_CACHE.clear()
     try:
-        first = _historical_research_candlesticks(
+        first = historical_research_candlesticks(
             broker,
             candidate,
             count=1000,
         )
-        second = _historical_research_candlesticks(
+        second = historical_research_candlesticks(
             broker,
             candidate,
             count=1000,
@@ -120,7 +121,7 @@ def test_historical_research_bars_use_membership_end_and_cache() -> None:
     finally:
         _HISTORICAL_RESEARCH_BARS_CACHE.clear()
 
-    assert _historical_membership_end(candidate) == date(2022, 1, 24)
+    assert historical_membership_end(candidate) == date(2022, 1, 24)
     assert first == second
     assert len(broker.boundaries) == 1
     assert broker.boundaries[0] == datetime(
@@ -130,6 +131,98 @@ def test_historical_research_bars_use_membership_end_and_cache() -> None:
         12,
         tzinfo=timezone.utc,
     )
+
+
+def test_historical_research_empty_response_is_not_cached() -> None:
+    candidate = next(
+        row
+        for row in HISTORICAL_INDEX_CANDIDATE_CATALOG
+        if row.symbol == "PTON.US"
+    )
+
+    class _TransientEmptyBroker:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_candlesticks(
+            self,
+            symbol: str,
+            period: str,
+            count: int,
+        ) -> list[BrokerCandle]:
+            raise AssertionError("latest bars must not be used")
+
+        def get_forward_adjusted_history_candlesticks_before(
+            self,
+            symbol: str,
+            period: str,
+            count: int,
+            before: datetime,
+        ) -> list[BrokerCandle]:
+            self.calls += 1
+            if self.calls == 1:
+                return []
+            return [
+                BrokerCandle(
+                    timestamp=datetime(
+                        2022,
+                        1,
+                        21,
+                        tzinfo=timezone.utc,
+                    ),
+                    open=10,
+                    high=11,
+                    low=9,
+                    close=10.5,
+                    volume=1_000_000,
+                    turnover=10_000_000,
+                )
+            ]
+
+    broker = _TransientEmptyBroker()
+    _HISTORICAL_RESEARCH_BARS_CACHE.clear()
+    try:
+        first = historical_research_candlesticks(
+            broker,
+            candidate,
+            count=1000,
+        )
+        second = historical_research_candlesticks(
+            broker,
+            candidate,
+            count=1000,
+        )
+    finally:
+        _HISTORICAL_RESEARCH_BARS_CACHE.clear()
+
+    assert first == []
+    assert len(second or []) == 1
+    assert broker.calls == 2
+
+
+def test_recent_research_fallback_requires_active_snapshot_membership() -> None:
+    current_research_only = next(
+        row
+        for row in HISTORICAL_INDEX_CANDIDATE_CATALOG
+        if row.symbol == "GOOG.US"
+    )
+    former = next(
+        row
+        for row in HISTORICAL_INDEX_CANDIDATE_CATALOG
+        if row.symbol == "PTON.US"
+    )
+    missing = IndexCandidate(
+        "MISSING.US",
+        "Missing",
+        "Software",
+        ("NASDAQ_100",),
+    )
+
+    assert research_candidate_uses_recent_candlesticks(
+        current_research_only
+    ) is True
+    assert research_candidate_uses_recent_candlesticks(former) is False
+    assert research_candidate_uses_recent_candlesticks(missing) is False
 
 
 def _db() -> Session:

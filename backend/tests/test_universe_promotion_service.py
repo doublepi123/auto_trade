@@ -239,6 +239,9 @@ def test_promotion_blockers_fail_closed_until_all_evidence_gates_pass() -> None:
         quant=_quant_score(source="quant_error_v5"),
     ) == ["QUANT_SCORE_DATA_ERROR"]
     assert blockers(
+        quant=_quant_score(source="quant_warmup_v5"),
+    ) == ["QUANT_SCORE_WARMING_UP"]
+    assert blockers(
         quant=_quant_score(),
         quant_fresh=False,
     ) == ["QUANT_SCORE_STALE"]
@@ -291,6 +294,7 @@ def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
             selected=True,
             rank=1,
             score=91.25,
+            sector="Technology Hardware",
         )
         _candidate(
             db,
@@ -355,6 +359,7 @@ def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
                     confidence=0.92,
                     recommended_action="AVOID",
                     source="quant_v5",
+                    estimated_round_trip_cost_bps=18.5,
                     created_at=_NOW - timedelta(minutes=5),
                     expires_at=_NOW + timedelta(minutes=30),
                 ),
@@ -395,8 +400,10 @@ def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
         assert response.generated_at == _NOW
         assert (
             response.priority_algorithm_version
-            == "selection-exploration-quant-fail-closed-v5"
+            == "selection-exploration-quant-core-satellite-observation-v7"
         )
+        assert response.diversified_observation_limit == 8
+        assert response.growth_satellite_limit == 4
         assert [item.symbol for item in response.items] == [
             "AAPL.US",
             "MSFT.US",
@@ -407,6 +414,9 @@ def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
         aapl = by_symbol["AAPL.US"]
         msft = by_symbol["MSFT.US"]
         assert aapl.universe_role == "SELECTED"
+        assert aapl.memberships == ["NASDAQ_100"]
+        assert aapl.sector == "Technology Hardware"
+        assert aapl.risk_group == "Information Technology"
         assert msft.universe_role == "SELECTED"
         assert aapl.selection_score == 91.25
         assert aapl.priority_score == 72.05
@@ -422,6 +432,9 @@ def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
         assert aapl.quant_expires_at == (
             _NOW + timedelta(minutes=30)
         )
+        assert aapl.estimated_round_trip_cost_bps == 18.5
+        assert aapl.diversified_observation_selected is False
+        assert aapl.diversified_observation_rank is None
         assert msft.priority_score == 57.5
         assert msft.quant_weight == 0
         assert msft.quant_adjustment == -25.0
@@ -433,6 +446,9 @@ def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
         assert msft.quant_source == ""
         assert msft.quant_fresh is False
         assert msft.quant_expires_at is None
+        assert msft.estimated_round_trip_cost_bps is None
+        assert msft.diversified_observation_selected is False
+        assert msft.diversified_observation_rank is None
         assert aapl.blockers == ["QUANT_ACTION_NOT_CANDIDATE"]
         assert msft.blockers == [
             "SHADOW_DISABLED",
@@ -450,6 +466,136 @@ def test_readiness_uses_latest_terminal_and_gated_quant_priority() -> None:
             assert item.review_ready is False
             assert item.mature_evidence is False
             assert item.automatic_promotion_allowed is False
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_readiness_builds_fresh_quant_diversified_observation_shortlist() -> None:
+    engine, db = _db()
+    try:
+        run = _run(
+            db,
+            as_of_date=date(2026, 7, 23),
+            status="COMPLETE",
+            created_at=_NOW - timedelta(hours=2),
+        )
+        candidates = (
+            ("AAPL.US", 1, 95.0, "Technology Hardware", "AVOID"),
+            ("MSFT.US", 2, 90.0, "Software", "WATCH"),
+            ("JPM.US", 3, 80.0, "Financials", "WATCH"),
+            ("UNH.US", 4, 70.0, "Healthcare", "CANDIDATE"),
+        )
+        for symbol, rank, score, sector, action in candidates:
+            _candidate(
+                db,
+                run,
+                symbol=symbol,
+                selected=True,
+                rank=rank,
+                score=score,
+                sector=sector,
+            )
+            db.add(StrategyV2ShadowConfig(symbol=symbol, enabled=True))
+            db.add(WatchlistScore(
+                symbol=symbol,
+                market="US",
+                score=60.0,
+                confidence=0.8,
+                recommended_action=action,
+                source="quant_v5",
+                created_at=_NOW - timedelta(minutes=5),
+                expires_at=_NOW + timedelta(minutes=30),
+            ))
+        db.commit()
+
+        response = UniversePromotionService(db, now=_NOW).get_readiness()
+
+        assert response is not None
+        selected = [
+            (item.symbol, item.diversified_observation_rank)
+            for item in response.items
+            if item.diversified_observation_selected
+        ]
+        assert selected == [
+            ("MSFT.US", 1),
+            ("UNH.US", 2),
+            ("JPM.US", 3),
+        ]
+        aapl = next(item for item in response.items if item.symbol == "AAPL.US")
+        assert aapl.diversified_observation_selected is False
+        assert aapl.diversified_observation_rank is None
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_readiness_adds_low_cost_growth_satellites_without_core_overlap() -> None:
+    engine, db = _db()
+    try:
+        run = _run(
+            db,
+            as_of_date=date(2026, 7, 23),
+            status="COMPLETE",
+            created_at=_NOW - timedelta(hours=2),
+        )
+        candidates = (
+            ("MSFT.US", "Software"),
+            ("AAPL.US", "Technology Hardware"),
+            ("PLTR.US", "Software"),
+            ("NVDA.US", "Semiconductors"),
+            ("NFLX.US", "Communication Services"),
+            ("GOOGL.US", "Communication Services"),
+            ("V.US", "Financials"),
+            ("GS.US", "Financials"),
+        )
+        for rank, (symbol, sector) in enumerate(candidates, start=1):
+            _candidate(
+                db,
+                run,
+                symbol=symbol,
+                selected=True,
+                rank=rank,
+                score=100.0 - rank,
+                sector=sector,
+            )
+            db.add(StrategyV2ShadowConfig(symbol=symbol, enabled=True))
+            db.add(WatchlistScore(
+                symbol=symbol,
+                market="US",
+                score=60.0,
+                confidence=0.8,
+                recommended_action="WATCH",
+                source="quant_v5",
+                estimated_round_trip_cost_bps=15.0,
+                created_at=_NOW - timedelta(minutes=5),
+                expires_at=_NOW + timedelta(minutes=30),
+            ))
+        db.commit()
+
+        response = UniversePromotionService(db, now=_NOW).get_readiness()
+
+        assert response is not None
+        core = {
+            item.symbol
+            for item in response.items
+            if item.diversified_observation_selected
+        }
+        satellites = [
+            (item.symbol, item.growth_satellite_rank)
+            for item in response.items
+            if item.growth_satellite_selected
+        ]
+        assert satellites == [
+            ("AAPL.US", 1),
+            ("PLTR.US", 2),
+            ("GOOGL.US", 3),
+            ("GS.US", 4),
+        ]
+        assert core.isdisjoint(symbol for symbol, _rank in satellites)
+        assert next(
+            item for item in response.items if item.symbol == "NVDA.US"
+        ).growth_satellite_selected is False
     finally:
         db.close()
         engine.dispose()

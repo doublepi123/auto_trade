@@ -18,6 +18,7 @@ from app.models import (
 from app.runner import get_runner
 from app.schemas import (
     UniverseCatalogItem,
+    UniverseObservationHealthResponse,
     UniversePromotionReadinessResponse,
     UniverseRotationForwardScorecardResponse,
     UniverseSelectionCandidateResponse,
@@ -27,6 +28,9 @@ from app.schemas import (
 from app.services.universe_promotion_service import UniversePromotionService
 from app.services.rotation_forward_scorecard_service import (
     RotationForwardScorecardService,
+)
+from app.services.research_observation_health_service import (
+    ResearchObservationHealthService,
 )
 from app.services.universe_selection_service import (
     UniverseRefreshResult,
@@ -211,6 +215,16 @@ def get_rotation_forward_scorecard(
             detail="no universe selection run available",
         )
     return scorecard
+
+
+@router.get(
+    "/observation-health",
+    response_model=UniverseObservationHealthResponse,
+)
+def get_universe_observation_health(
+    db: Session = Depends(get_db),
+) -> UniverseObservationHealthResponse:
+    return ResearchObservationHealthService(db).get_health()
 
 
 @router.post("/refresh", response_model=UniverseSelectionRefreshResponse)

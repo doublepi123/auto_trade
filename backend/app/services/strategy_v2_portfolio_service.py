@@ -46,7 +46,9 @@ from app.schemas import (
     StrategyV2PortfolioRoutingReport,
     StrategyV2PortfolioRoutingVariant,
 )
-from app.services.watchlist_quant_service import CURRENT_QUANT_SOURCES
+from app.services.watchlist_quant_service import (
+    CURRENT_QUANT_SNAPSHOT_SOURCES,
+)
 
 
 @dataclass(frozen=True)
@@ -72,127 +74,127 @@ class _RoutingSpec:
 _ROUTING_SPECS = (
     _RoutingSpec(
         policy="FIXED_PRIMARY",
-        algorithm_version="strategy-v2-portfolio-fixed-primary-v2",
+        algorithm_version="strategy-v2-portfolio-fixed-primary-v3",
     ),
     # Chosen on data through 2026-07-24. Registration time makes all scored
     # observations forward-only rather than replaying the selection sample.
     _RoutingSpec(
         policy="FIXED_CANDIDATE",
-        algorithm_version="strategy-v2-portfolio-fixed-spcx-forward-v1",
+        algorithm_version="strategy-v2-portfolio-fixed-spcx-forward-v2",
         fixed_candidate_symbol="SPCX.US",
     ),
     _RoutingSpec(
         policy="SELECTED_UNIVERSE",
-        algorithm_version="strategy-v2-portfolio-selected-universe-v2",
+        algorithm_version="strategy-v2-portfolio-selected-universe-v3",
     ),
     _RoutingSpec(
         policy="QUANT_CANDIDATE",
-        algorithm_version="strategy-v2-portfolio-quant-candidate-v2",
+        algorithm_version="strategy-v2-portfolio-quant-candidate-v3",
     ),
     _RoutingSpec(
         policy="QUANT_WATCH_PLUS",
-        algorithm_version="strategy-v2-portfolio-quant-watch-plus-v2",
+        algorithm_version="strategy-v2-portfolio-quant-watch-plus-v3",
     ),
     _RoutingSpec(
         policy="SELECTED_VWAP_EDGE",
         algorithm_version=(
-            "strategy-v2-portfolio-selected-vwap-edge-v2"
+            "strategy-v2-portfolio-selected-vwap-edge-v3"
         ),
     ),
     _RoutingSpec(
         policy="VWAP_EDGE_POOL",
-        algorithm_version="strategy-v2-portfolio-vwap-edge-pool-v2",
+        algorithm_version="strategy-v2-portfolio-vwap-edge-pool-v3",
     ),
     _RoutingSpec(
         policy="VWAP_EDGE_75BPS_POOL",
         algorithm_version=(
-            "strategy-v2-portfolio-vwap-edge-75bps-pool-v2"
+            "strategy-v2-portfolio-vwap-edge-75bps-pool-v3"
         ),
     ),
     _RoutingSpec(
         policy="VWAP_EDGE_OBSERVED_COST_POOL",
         algorithm_version=(
-            "strategy-v2-portfolio-vwap-observed-cost-pool-v2"
+            "strategy-v2-portfolio-vwap-observed-cost-pool-v3"
         ),
     ),
     _RoutingSpec(
         policy="VWAP_EDGE_OBS_COST_75BPS_POOL",
         algorithm_version=(
-            "strategy-v2-portfolio-vwap-observed-cost-75bps-pool-v2"
+            "strategy-v2-portfolio-vwap-observed-cost-75bps-pool-v3"
         ),
     ),
     _RoutingSpec(
         policy="RISK_GROUP_REL_OBS_75BPS_POOL",
         algorithm_version=(
             "strategy-v2-portfolio-risk-group-relative-observed-"
-            "cost-75bps-v1"
+            "cost-75bps-v2"
         ),
     ),
     _RoutingSpec(
         policy="RISK_GROUP_LOO_OBS_75BPS_POOL",
         algorithm_version=(
             "strategy-v2-portfolio-risk-group-leave-one-out-"
-            "observed-cost-75bps-v1"
+            "observed-cost-75bps-v2"
         ),
     ),
     _RoutingSpec(
         policy="SECTOR_LOO_OBS_75BPS_POOL",
         algorithm_version=(
             "strategy-v2-portfolio-sector-leave-one-out-"
-            "observed-cost-75bps-v1"
+            "observed-cost-75bps-v2"
         ),
     ),
     _RoutingSpec(
         policy="SELECTED_SECTOR_LOO_OBS_75BPS_POOL",
         algorithm_version=(
             "strategy-v2-portfolio-selected-sector-leave-one-out-"
-            "observed-cost-75bps-v1"
+            "observed-cost-75bps-v2"
         ),
     ),
     _RoutingSpec(
         policy="SELECTED_ZSCORE_OBS_75BPS_POOL",
         algorithm_version=(
             "strategy-v2-portfolio-selected-zscore-observed-cost-"
-            "75bps-v1"
+            "75bps-v2"
         ),
     ),
     _RoutingSpec(
         policy="ROTATION_ZSCORE_OBS_75BPS_POOL",
         algorithm_version=(
             "strategy-v2-portfolio-rotation-zscore-observed-cost-"
-            "75bps-v1"
+            "75bps-v2"
         ),
     ),
     _RoutingSpec(
         policy="ROTATION_IV_WEIGHTED_ZSCORE_POOL",
         algorithm_version=(
             "strategy-v2-portfolio-rotation-inverse-vol-weighted-"
-            "zscore-observed-cost-75bps-v2"
+            "zscore-observed-cost-75bps-v3"
         ),
     ),
     _RoutingSpec(
         policy="ROTATION_IV_NET_EDGE_ZSCORE_POOL",
         algorithm_version=(
             "strategy-v2-portfolio-rotation-inverse-vol-target-net-"
-            "vwap-edge-zscore-observed-cost-75bps-v2"
+            "vwap-edge-zscore-observed-cost-75bps-v3"
         ),
     ),
     _RoutingSpec(
         policy="PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
         algorithm_version=(
             "strategy-v2-portfolio-rotation-pit-shrinkage-weighted-"
-            "zscore-observed-cost-75bps-v2"
+            "zscore-observed-cost-75bps-v3"
         ),
     ),
     _RoutingSpec(
         policy="PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
         algorithm_version=(
             "strategy-v2-portfolio-rotation-pit-shrinkage-target-net-"
-            "vwap-edge-zscore-observed-cost-75bps-v2"
+            "vwap-edge-zscore-observed-cost-75bps-v3"
         ),
     ),
 )
-_EVALUATOR_VERSION = "strategy-v2-single-capital-slot-forward-router-v2"
+_EVALUATOR_VERSION = "strategy-v2-single-capital-slot-forward-router-v3"
 _CURRENT_ROUTING_ALGORITHM_VERSIONS = tuple(
     spec.algorithm_version for spec in _ROUTING_SPECS
 )
@@ -1276,7 +1278,7 @@ class StrategyV2PortfolioService:
             return {}
         rows = self.db.query(WatchlistScore).filter(
             WatchlistScore.symbol.in_(symbols),
-            WatchlistScore.source.in_(CURRENT_QUANT_SOURCES),
+            WatchlistScore.source.in_(CURRENT_QUANT_SNAPSHOT_SOURCES),
             WatchlistScore.created_at <= observed_at,
         ).order_by(
             WatchlistScore.created_at.desc(),
@@ -1720,7 +1722,7 @@ class StrategyV2PortfolioService:
             ),
             "capital_slots": 1,
             "historical_backfill": False,
-            "quant_sources": list(CURRENT_QUANT_SOURCES),
+            "quant_sources": list(CURRENT_QUANT_SNAPSHOT_SOURCES),
             "context_cutoff": (
                 "LATEST_CAUSAL_SIGNAL_OBSERVATION_BEFORE_FILL_OPEN"
             ),

@@ -158,7 +158,7 @@ class TestStrategyV2ShadowApi:
         assert body["order_submission_allowed"] is False
         assert body["automatic_promotion_allowed"] is False
         assert body["historical_backfill_allowed"] is False
-        assert len(body["variants"]) == 7
+        assert len(body["variants"]) == 8
         assert {
             item["locked_profit_pct"]
             for item in body["variants"]
@@ -168,7 +168,7 @@ class TestStrategyV2ShadowApi:
             item["max_holding_minutes"]
             for item in body["variants"]
             if item["policy_type"] == "TIME_STOP"
-        } == {15, 30, 45}
+        } == {10, 15, 30, 45}
         assert all(item["status"] == "COLLECTING" for item in body["variants"])
 
     def test_bracket_challenger_report_is_forward_only_shadow_evidence(
@@ -240,10 +240,17 @@ class TestStrategyV2ShadowApi:
         assert body["automatic_promotion_allowed"] is False
         assert body["historical_backfill_allowed"] is False
         assert body["evaluation_scope"] == "FORWARD_LIVE_BASELINE"
-        assert len(body["variants"]) == 6
+        assert len(body["variants"]) == 11
         assert {
-            item["locked_profit_pct"] for item in body["variants"]
+            item["locked_profit_pct"]
+            for item in body["variants"]
+            if item["policy_type"] == "PROFIT_LOCK"
         } == {0.1, 0.2, 0.3, 0.4, 0.5, 0.6}
+        assert {
+            item["max_holding_minutes"]
+            for item in body["variants"]
+            if item["policy_type"] == "TIME_STOP"
+        } == {10, 15, 30, 45}
         assert all(item["status"] == "COLLECTING" for item in body["variants"])
 
     def test_portfolio_routing_report_is_forward_only_and_read_only(

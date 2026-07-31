@@ -121,6 +121,18 @@ function assertPromotionReadinessItem(value: unknown, index: number): void {
   const prefix = `items[${index}]`
   assertObject(value, `/api/universe/promotion-readiness.${prefix}`)
   assertString(value.symbol, `${prefix}.symbol`)
+  if (
+    !Array.isArray(value.memberships)
+    || value.memberships.some((membership) => (
+      membership !== 'NASDAQ_100' && membership !== 'DJIA'
+    ))
+  ) {
+    throw new Error(
+      `Unexpected /api/universe/promotion-readiness response: ${prefix}.memberships is invalid`,
+    )
+  }
+  assertString(value.sector, `${prefix}.sector`)
+  assertString(value.risk_group, `${prefix}.risk_group`)
   assertString(value.universe_role, `${prefix}.universe_role`)
   if (!PROMOTION_UNIVERSE_ROLES.has(value.universe_role)) {
     throw new Error(
@@ -131,6 +143,44 @@ function assertPromotionReadinessItem(value: unknown, index: number): void {
   assertFiniteNumber(value.selection_score, `${prefix}.selection_score`)
   assertPositiveInteger(value.priority_rank, `${prefix}.priority_rank`)
   assertFiniteNumber(value.priority_score, `${prefix}.priority_score`)
+  assertBoolean(
+    value.diversified_observation_selected,
+    `${prefix}.diversified_observation_selected`,
+  )
+  const diversifiedObservationRank = value.diversified_observation_rank
+  assertNullablePositiveInteger(
+    diversifiedObservationRank,
+    `${prefix}.diversified_observation_rank`,
+  )
+  if (
+    typeof diversifiedObservationRank === 'number'
+    && diversifiedObservationRank > 8
+  ) {
+    throw new Error(
+      `Unexpected /api/universe/promotion-readiness response: ${prefix}.diversified_observation_rank exceeds 8`,
+    )
+  }
+  if (
+    value.diversified_observation_selected
+    !== (typeof diversifiedObservationRank === 'number')
+  ) {
+    throw new Error(
+      `Unexpected /api/universe/promotion-readiness response: ${prefix}.diversified observation fields disagree`,
+    )
+  }
+  assertBoolean(value.growth_satellite_selected, `${prefix}.growth_satellite_selected`)
+  const growthSatelliteRank = value.growth_satellite_rank
+  assertNullablePositiveInteger(growthSatelliteRank, `${prefix}.growth_satellite_rank`)
+  if (typeof growthSatelliteRank === 'number' && growthSatelliteRank > 4) {
+    throw new Error(
+      `Unexpected /api/universe/promotion-readiness response: ${prefix}.growth_satellite_rank exceeds 4`,
+    )
+  }
+  if (value.growth_satellite_selected !== (typeof growthSatelliteRank === 'number')) {
+    throw new Error(
+      `Unexpected /api/universe/promotion-readiness response: ${prefix}.growth satellite fields disagree`,
+    )
+  }
   assertFiniteNumber(value.quant_weight, `${prefix}.quant_weight`)
   assertFiniteNumber(value.quant_adjustment, `${prefix}.quant_adjustment`)
   if (value.quant_weight < 0 || value.quant_weight > 0.35) {
@@ -149,6 +199,10 @@ function assertPromotionReadinessItem(value: unknown, index: number): void {
   assertString(value.quant_source, `${prefix}.quant_source`)
   assertBoolean(value.quant_fresh, `${prefix}.quant_fresh`)
   assertNullableString(value.quant_expires_at, `${prefix}.quant_expires_at`)
+  assertNullableFiniteNumber(
+    value.estimated_round_trip_cost_bps,
+    `${prefix}.estimated_round_trip_cost_bps`,
+  )
   assertBoolean(value.is_trading_target, `${prefix}.is_trading_target`)
   assertBoolean(value.shadow_enabled, `${prefix}.shadow_enabled`)
   assertString(value.forward_status, `${prefix}.forward_status`)
@@ -424,6 +478,21 @@ export async function getUniversePromotionReadiness(): Promise<UniversePromotion
   assertString(resp.data.as_of_date, 'as_of_date')
   assertString(resp.data.generated_at, 'generated_at')
   assertString(resp.data.priority_algorithm_version, 'priority_algorithm_version')
+  assertPositiveInteger(
+    resp.data.diversified_observation_limit,
+    'diversified_observation_limit',
+  )
+  if (resp.data.diversified_observation_limit !== 8) {
+    throw new Error(
+      'Unexpected /api/universe/promotion-readiness response: diversified_observation_limit must be 8',
+    )
+  }
+  assertPositiveInteger(resp.data.growth_satellite_limit, 'growth_satellite_limit')
+  if (resp.data.growth_satellite_limit !== 4) {
+    throw new Error(
+      'Unexpected /api/universe/promotion-readiness response: growth_satellite_limit must be 4',
+    )
+  }
   if (!Array.isArray(resp.data.items)) {
     throw new Error(
       'Unexpected /api/universe/promotion-readiness response: items is not an array',

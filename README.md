@@ -281,7 +281,10 @@ python3 scripts/evaluate_rotation_walk_forward.py --history-bars 1000
 python3 scripts/build_index_membership_snapshot.py
 ```
 
-轮动研究采用上月最后一个完整交易日信号、下月首个共同交易日开盘成交。`walk-forward-v4`
+上述研究脚本在 `backend/` 开发环境运行；精简的生产 backend 镜像只包含应用与迁移，
+不包含 `scripts/`。
+
+轮动研究采用上月最后一个完整交易日信号、下月首个共同交易日开盘成交。`walk-forward-v6`
 除最后 12 个月留出集外，还按时间顺序执行扩展训练窗口验证。等权 Top8 是当前冻结基线；
 既有参数集中的等权 Top6（每风险组最多 2 只）作为收益集中度挑战者，逆 20 日波动率、
 单票不超过 25% 的 Top8 作为纯风险配权挑战者，剩余权重保留现金；另有 75% 等权与
@@ -294,14 +297,16 @@ python3 scripts/build_index_membership_snapshot.py
 [Risk Parity Model](https://www.quantconnect.com/docs/v2/writing-algorithms/algorithm-framework/portfolio-construction/supported-models)；
 本项目实现的是更简单、可审计的逆波动率近似，不宣称复制论文组合。
 
-`walk-forward-v4` 另行输出只读的点时成分敏感性：每个信号日会排除当时尚未进入指数的
-当前目录股票。纳斯达克 100 历史来自固定提交的
+`walk-forward-v6` 同时输出当前成分目录敏感性对照与点时（PIT）主证据。PIT 会按每个
+信号日排除当时尚未进入指数的股票，并把研究目录扩展到快照中出现过的历史成分；单标的
+取数失败不会中断整次复算，但会结构化记录错误、列出缺失标的，并以
+`POINT_IN_TIME_MEMBER_DATA_PARTIAL` 失败关闭。纳斯达克 100 历史来自固定提交的
 [jmccarrell/n100tickers](https://github.com/jmccarrell/n100tickers/tree/9a23023b59707c5372ae1fff4ed983b3ad025c74)，
 道琼斯历史来自固定提交的
 [unliftedq/index-constitution](https://github.com/unliftedq/index-constitution/tree/650596e3c59a19d9c8767c8b504e3728da0fd07f)；
-构建脚本会校验每个源文件的 SHA-256，运行时只读取随代码发布的快照。该评估尚未纳入
-已经退市或已调出、且不在当前目录中的历史股票，因此只是部分消除幸存者偏差，不能作为
-自动晋级或下单依据。
+构建脚本会校验每个源文件的 SHA-256，运行时只读取随代码发布的快照。历史行情源仍可能
+无法返回已退市或已收购证券，因此 PIT 缺失阻断必须保留；当前成分结果和不完整 PIT 均不能
+作为自动晋级或下单依据。
 
 ---
 

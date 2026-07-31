@@ -1491,7 +1491,24 @@ def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
             "strategy_v2_bracket_challenger_registrations"
         )
     }
+    live_exit_registration_columns = {
+        column["name"]
+        for column in inspector.get_columns(
+            "live_exit_challenger_registrations"
+        )
+    }
     with db_engine.begin() as connection:
+        if "policy_type" not in live_exit_registration_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE live_exit_challenger_registrations "
+                "ADD COLUMN policy_type VARCHAR(24) NOT NULL "
+                "DEFAULT 'PROFIT_LOCK'"
+            )
+        if "max_holding_minutes" not in live_exit_registration_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE live_exit_challenger_registrations "
+                "ADD COLUMN max_holding_minutes INTEGER"
+            )
         if "estimated_fee_rate_us" not in config_columns:
             connection.exec_driver_sql(
                 "ALTER TABLE strategy_v2_shadow_config "

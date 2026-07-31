@@ -140,7 +140,7 @@ _MIN_CHALLENGER_COMPLETE_SESSIONS = 5
 _MAX_CHALLENGER_COMPLETE_SESSIONS = 20
 _MIN_WARMUP_CAUSAL_PAIRS = 5
 _FORWARD_CANDIDATE_VERSION = "strategy-v2-causal-trend-prewarm-v1"
-_FORWARD_EVALUATOR_VERSION = "strategy-v2-forward-evaluator-v3"
+FORWARD_EVALUATOR_VERSION = "strategy-v2-forward-evaluator-v4"
 _FORWARD_READY_PAIRS = 5
 _FORWARD_MATURE_PAIRS = 20
 _FORWARD_FINALIZE_START_MINUTES = 10
@@ -713,6 +713,10 @@ class StrategyV2ShadowService:
         """Fetch 1m candles, derive complete 5m bars, and advance shadow state."""
         current = _as_utc(now or datetime.now(timezone.utc))
         normalized = self._resolve_symbol(symbol)
+        live_exit_enabled_for_symbol = (
+            settings.live_exit_challenger_enabled
+            and self._is_primary_live_symbol(normalized)
+        )
         config = self._get_or_create_config(normalized)
         state = self._get_or_create_state(normalized)
         open_trade = self._open_trade(normalized)
@@ -754,7 +758,7 @@ class StrategyV2ShadowService:
                     ),
                     now=current,
                 )
-            if settings.live_exit_challenger_enabled:
+            if live_exit_enabled_for_symbol:
                 self.live_exit_challengers.ensure_registrations(
                     symbol=normalized,
                     market=market,
@@ -817,8 +821,11 @@ class StrategyV2ShadowService:
                     market=market,
                     one_minute=one_minute,
                     observed_at=current,
+                    advance_live_exit_challenger=(
+                        live_exit_enabled_for_symbol
+                    ),
                 )
-            if settings.live_exit_challenger_enabled:
+            if live_exit_enabled_for_symbol:
                 self.live_exit_challengers.sync_baseline_outcomes(
                     symbol=normalized,
                     paired_at=current,
@@ -1262,26 +1269,14 @@ class StrategyV2ShadowService:
             StrategyV2ShadowConfig.symbol == symbol,
         ).first()
         if config is None:
-            return rows[0]
+            return None
         current_version = self._config_version(config)
         evaluator_digest = self._forward_evaluator_digest()
-        exact = next(
-            (
-                row
-                for row in rows
-                if row.source_config_version == current_version
-                if row.candidate_algorithm_version
-                == _FORWARD_CANDIDATE_VERSION
-                and row.evaluator_digest == evaluator_digest
-            ),
-            None,
-        )
-        if exact is not None:
-            return exact
         return next(
             (
                 row
                 for row in rows
+                if row.source_config_version == current_version
                 if row.candidate_algorithm_version
                 == _FORWARD_CANDIDATE_VERSION
                 and row.evaluator_digest == evaluator_digest
@@ -1297,6 +1292,15 @@ class StrategyV2ShadowService:
         normalized = self._resolve_symbol(symbol)
         registration = self._forward_registration_for_symbol(normalized)
         if registration is None:
+            return StrategyV2ForwardValidationResponse(status="NOT_REGISTERED")
+        current_config = self.db.query(StrategyV2ShadowConfig).filter(
+            StrategyV2ShadowConfig.symbol == normalized,
+        ).first()
+        if (
+            current_config is None
+            or self._config_version(current_config)
+            != registration.source_config_version
+        ):
             return StrategyV2ForwardValidationResponse(status="NOT_REGISTERED")
 
         rows = self.db.query(StrategyV2ForwardEvidence).filter(
@@ -1947,8 +1951,8 @@ class StrategyV2ShadowService:
     @staticmethod
     def _forward_evaluator_spec() -> dict[str, Any]:
         return {
-            "schema_version": 3,
-            "evaluator_version": _FORWARD_EVALUATOR_VERSION,
+            "schema_version": 4,
+            "evaluator_version": FORWARD_EVALUATOR_VERSION,
             "candidate_algorithm_version": _FORWARD_CANDIDATE_VERSION,
             "source_algorithm_version": _ALGORITHM_VERSION,
             "evaluation_scope": "FORWARD_OUT_OF_SAMPLE",
@@ -1956,6 +1960,9 @@ class StrategyV2ShadowService:
             "seed_semantics": "IMMEDIATE_PRIOR_COMPLETE_SAME_VERSION_SESSION_KNOWN_AT_OPEN",
             "warmup_scope": "ADX_VOL_ONLY",
             "baseline_scope": "SESSION_LOCAL",
+            "source_feature_prewarm": (
+                "PERSISTED_IMMUTABLE_DECISION_BARS_WHEN_COMPLETE"
+            ),
             "minimum_ready_pairs": _FORWARD_READY_PAIRS,
             "minimum_mature_pairs": _FORWARD_MATURE_PAIRS,
             "finalize_start_minutes_after_close": _FORWARD_FINALIZE_START_MINUTES,
@@ -2487,6 +2494,67 @@ class StrategyV2ShadowService:
         self.db.add(state)
         self.db.commit()
 
+    def _feature_prewarm_bars(
+        self,
+        *,
+        symbol: str,
+        market: str,
+        config_version: str,
+        last_bar_at: datetime,
+        broker_bars: Sequence[StrategyBar],
+    ) -> list[StrategyBar]:
+        """Prefer immutable processed bars over broker-revised history."""
+        fallback = [
+            bar for bar in broker_bars if bar.timestamp <= last_bar_at
+        ]
+        session = get_session(market)
+        session_day = session.trade_day(last_bar_at)
+        rows = (
+            self.db.query(StrategyV2ShadowDecision)
+            .filter(
+                StrategyV2ShadowDecision.symbol == symbol,
+                StrategyV2ShadowDecision.config_version == config_version,
+                StrategyV2ShadowDecision.session_date == session_day,
+                StrategyV2ShadowDecision.bar_at <= last_bar_at,
+            )
+            .order_by(
+                StrategyV2ShadowDecision.bar_at.asc(),
+                StrategyV2ShadowDecision.id.asc(),
+            )
+            .all()
+        )
+        if not rows:
+            return fallback
+        try:
+            persisted = self._strategy_bars_from_replay(
+                self._bars_from_persisted_evidence(rows, symbol=symbol),
+                symbol=symbol,
+            )
+        except ValueError:
+            return fallback
+        expected_open = datetime.combine(
+            session_day,
+            session.rth_open,
+            tzinfo=session.timezone,
+        ).astimezone(timezone.utc)
+        if (
+            not persisted
+            or persisted[0].timestamp != expected_open
+            or persisted[-1].timestamp != last_bar_at
+            or any(not session.is_rth(bar.timestamp) for bar in persisted)
+            or any(
+                self._missing_rth_minute(
+                    market,
+                    previous=previous.timestamp,
+                    current=current.timestamp,
+                )
+                is not None
+                for previous, current in zip(persisted, persisted[1:])
+            )
+        ):
+            return fallback
+        return persisted
+
     def _evaluate_candles(
         self,
         *,
@@ -2495,6 +2563,7 @@ class StrategyV2ShadowService:
         market: str,
         one_minute: list[Any],
         observed_at: datetime,
+        advance_live_exit_challenger: bool = False,
     ) -> None:
         if not one_minute:
             raise ValueError("empty candle response")
@@ -2539,9 +2608,14 @@ class StrategyV2ShadowService:
             return
 
         if last_bar_at is not None:
-            for bar in bars:
-                if bar.timestamp <= last_bar_at:
-                    engine.features.on_bar(bar, observed_at=observed_at)
+            for bar in self._feature_prewarm_bars(
+                symbol=config.symbol,
+                market=market,
+                config_version=decision_version,
+                last_bar_at=last_bar_at,
+                broker_bars=bars,
+            ):
+                engine.features.on_bar(bar, observed_at=observed_at)
 
         if state.state_json and state.state_json != "{}" and (
             state.config_version == decision_version or open_trade is not None
@@ -2740,7 +2814,7 @@ class StrategyV2ShadowService:
                 bar=bar,
                 observed_at=observed_at,
             )
-            if settings.live_exit_challenger_enabled:
+            if advance_live_exit_challenger:
                 self.live_exit_challengers.advance_bar(
                     symbol=config.symbol,
                     bar=bar,
@@ -2827,6 +2901,17 @@ class StrategyV2ShadowService:
             state.last_poll_error = gap_error
             self.db.add(state)
             self.db.commit()
+
+    def _is_primary_live_symbol(self, symbol: str) -> bool:
+        live = (
+            self.db.query(StrategyConfig)
+            .order_by(StrategyConfig.id.desc())
+            .first()
+        )
+        return (
+            live is not None
+            and live.symbol.strip().upper() == symbol.strip().upper()
+        )
 
     @staticmethod
     def _in_post_close_collection_window(market: str, current: datetime) -> bool:
@@ -4397,8 +4482,19 @@ class StrategyV2ShadowService:
                 return {
                     "n_trades": len(trades),
                     "quality_data_complete": False,
-                }, ["QUALITY_DATA_INCOMPLETE"]
-            net_values.append(float(item.net_pnl))
+                    "cost_stressed_net_pnl": None,
+                }, ["QUALITY_DATA_INCOMPLETE", "COST_STRESS_UNAVAILABLE"]
+            try:
+                net_pnl = float(item.net_pnl)
+            except (TypeError, ValueError, OverflowError):
+                net_pnl = math.nan
+            if not math.isfinite(net_pnl):
+                return {
+                    "n_trades": len(trades),
+                    "quality_data_complete": False,
+                    "cost_stressed_net_pnl": None,
+                }, ["QUALITY_DATA_INCOMPLETE", "COST_STRESS_UNAVAILABLE"]
+            net_values.append(net_pnl)
         quality = strategy_quality_report(net_values).to_dict()
         cumulative = 0.0
         peak = 0.0
@@ -4409,29 +4505,89 @@ class StrategyV2ShadowService:
             max_drawdown = max(max_drawdown, peak - cumulative)
         total_net_pnl = sum(net_values)
 
-        cost_stressed_net_pnl: float | None = 0.0
+        slippage_bps: float | None = None
         try:
             slippage_bps = float(params["slippage_bps"])
         except (KeyError, TypeError, ValueError, OverflowError):
-            cost_stressed_net_pnl = None
-        if cost_stressed_net_pnl is not None:
+            pass
+        if (
+            slippage_bps is not None
+            and (not math.isfinite(slippage_bps) or slippage_bps < 0)
+        ):
+            slippage_bps = None
+        cost_stressed_net_pnl: float | None = (
+            0.0 if slippage_bps is not None else None
+        )
+        if slippage_bps is not None and cost_stressed_net_pnl is not None:
             for item, net_pnl in zip(trades, net_values):
                 exit_price = item.exit_price
                 if exit_price is None:
                     cost_stressed_net_pnl = None
                     break
-                quantity = float(item.quantity)
-                notional = (float(item.entry_price) + float(exit_price)) * quantity
+                try:
+                    entry_price = float(item.entry_price)
+                    parsed_exit_price = float(exit_price)
+                    quantity = float(item.quantity)
+                except (TypeError, ValueError, OverflowError):
+                    cost_stressed_net_pnl = None
+                    break
+                if (
+                    not math.isfinite(entry_price)
+                    or entry_price <= 0
+                    or not math.isfinite(parsed_exit_price)
+                    or parsed_exit_price <= 0
+                    or not math.isfinite(quantity)
+                    or quantity <= 0
+                ):
+                    cost_stressed_net_pnl = None
+                    break
+                notional = (entry_price + parsed_exit_price) * quantity
+                if not math.isfinite(notional) or notional <= 0:
+                    cost_stressed_net_pnl = None
+                    break
                 estimated_fees = item.estimated_fees
                 if estimated_fees is None:
                     if item.estimated_fee_rate is None:
                         cost_stressed_net_pnl = None
                         break
-                    estimated_fees = notional * float(item.estimated_fee_rate)
+                    try:
+                        estimated_fee_rate = float(item.estimated_fee_rate)
+                    except (TypeError, ValueError, OverflowError):
+                        cost_stressed_net_pnl = None
+                        break
+                    if (
+                        not math.isfinite(estimated_fee_rate)
+                        or estimated_fee_rate < 0
+                    ):
+                        cost_stressed_net_pnl = None
+                        break
+                    parsed_estimated_fees = notional * estimated_fee_rate
+                else:
+                    try:
+                        parsed_estimated_fees = float(estimated_fees)
+                    except (TypeError, ValueError, OverflowError):
+                        cost_stressed_net_pnl = None
+                        break
+                if (
+                    not math.isfinite(parsed_estimated_fees)
+                    or parsed_estimated_fees < 0
+                ):
+                    cost_stressed_net_pnl = None
+                    break
                 extra_slippage = notional * slippage_bps / 10_000
-                cost_stressed_net_pnl += (
-                    net_pnl - float(estimated_fees) - extra_slippage
+                stressed_trade_pnl = (
+                    net_pnl - parsed_estimated_fees - extra_slippage
                 )
+                if (
+                    not math.isfinite(extra_slippage)
+                    or not math.isfinite(stressed_trade_pnl)
+                ):
+                    cost_stressed_net_pnl = None
+                    break
+                cost_stressed_net_pnl += stressed_trade_pnl
+                if not math.isfinite(cost_stressed_net_pnl):
+                    cost_stressed_net_pnl = None
+                    break
 
         quality.update({
             "quality_data_complete": True,

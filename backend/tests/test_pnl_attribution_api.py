@@ -112,7 +112,7 @@ class TestPnlBySymbolAPI(_Base):
 
     def test_unresolved_exit_omits_symbol_day_from_attribution(self) -> None:
         db = self._db()
-        day = date(2026, 7, 1)
+        day = datetime.now(timezone.utc).date()
         db.add_all(
             self._roundtrip(
                 "quality-buy",

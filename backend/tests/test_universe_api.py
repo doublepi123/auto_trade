@@ -17,6 +17,7 @@ from app.database import get_db
 from app.domain.universe_selection.catalog import IndexCandidate
 from app.domain.universe_selection.selector import UniverseSelectionConfig
 from app.models import Base, StrategyConfig
+from app.schemas import UniverseObservationHealthResponse
 from app.services.universe_selection_service import UniverseSelectionService
 
 _NOW = datetime(2026, 7, 23, 19, tzinfo=timezone.utc)
@@ -153,6 +154,58 @@ def test_production_builder_uses_active_strategy_costs(
         assert service.config.round_trip_fee_bps == 24.0
         assert service.config.round_trip_slippage_bps == 7.5
         assert not db.dirty
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_observation_health_endpoint_preserves_research_safety_flags(
+    monkeypatch,
+) -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    class _ObservationHealthService:
+        def __init__(self, session: Session) -> None:
+            assert session is db
+
+        def get_health(self) -> dict[str, object]:
+            return {
+                "generated_at": _NOW,
+                "status": "WARNING",
+                "order_submission_allowed": False,
+                "automatic_promotion_allowed": False,
+                "components": [
+                    {
+                        "name": "UNIVERSE_SELECTION",
+                        "status": "WARNING",
+                        "blockers": ["LATEST_COMPLETED_SESSION_MISSING"],
+                    }
+                ],
+                "blockers": [
+                    "UNIVERSE_SELECTION:LATEST_COMPLETED_SESSION_MISSING"
+                ],
+            }
+
+    monkeypatch.setattr(
+        universe_api,
+        "ResearchObservationHealthService",
+        _ObservationHealthService,
+    )
+    try:
+        result = universe_api.get_universe_observation_health(db)
+        payload = UniverseObservationHealthResponse.model_validate(
+            result
+        ).model_dump(mode="json")
+
+        assert payload["status"] == "WARNING"
+        assert payload["order_submission_allowed"] is False
+        assert payload["automatic_promotion_allowed"] is False
+        assert payload["components"][0]["name"] == "UNIVERSE_SELECTION"
     finally:
         db.close()
         engine.dispose()

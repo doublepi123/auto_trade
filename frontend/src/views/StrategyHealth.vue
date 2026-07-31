@@ -24,6 +24,63 @@
       </div>
     </div>
 
+    <el-card v-loading="loading" class="section-card" data-testid="observation-health-card">
+      <template #header>
+        <div class="card-header">
+          <span>研究观察链路</span>
+          <el-tag
+            v-if="observationHealth"
+            :type="observationStatusTagType(observationHealth.status)"
+            effect="dark"
+            data-testid="observation-health-status"
+          >{{ observationStatusLabel(observationHealth.status) }}</el-tag>
+        </div>
+      </template>
+      <el-empty v-if="!observationHealth && !loading" description="暂无观察链路报告" />
+      <template v-else-if="observationHealth">
+        <el-table :data="observationHealth.components" data-testid="observation-health-table">
+          <el-table-column label="链路" min-width="180">
+            <template #default="{ row }">{{ observationComponentLabel(row.name) }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="100">
+            <template #default="{ row }">
+              <el-tag :type="observationStatusTagType(row.status)" size="small">
+                {{ observationStatusLabel(row.status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="最新会话" min-width="120">
+            <template #default="{ row }">{{ row.latest_session_date || '—' }}</template>
+          </el-table-column>
+          <el-table-column label="应到会话" min-width="120">
+            <template #default="{ row }">{{ row.expected_session_date || '—' }}</template>
+          </el-table-column>
+          <el-table-column label="覆盖率" width="110">
+            <template #default="{ row }">
+              {{ row.coverage_ratio === null ? '—' : `${(row.coverage_ratio * 100).toFixed(1)}%` }}
+            </template>
+          </el-table-column>
+          <el-table-column label="数据年龄" width="120">
+            <template #default="{ row }">{{ observationAge(row.age_seconds) }}</template>
+          </el-table-column>
+          <el-table-column label="阻塞原因" min-width="240">
+            <template #default="{ row }">
+              {{ row.blockers.map(observationBlockerLabel).join('、') || '—' }}
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-alert
+          v-for="blocker in observationHealth.blockers"
+          :key="blocker"
+          :title="observationBlockerLabel(blocker)"
+          type="warning"
+          :closable="false"
+          show-icon
+          class="observation-alert"
+        />
+      </template>
+    </el-card>
+
     <el-card v-loading="loading" class="section-card">
       <template #header><span>健康状态</span></template>
       <el-empty v-if="!report && !loading" description="暂无健康报告，请查询" />
@@ -133,14 +190,22 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { getHealthReport, getPerformanceTrend } from '../api/strategyHealth'
-import type { HealthReport, TrendRow, TradeSideMetrics } from '../api/strategyHealth'
+import { getHealthReport, getObservationHealth, getPerformanceTrend } from '../api/strategyHealth'
+import type {
+  HealthReport,
+  ObservationHealthComponent,
+  ObservationHealthReport,
+  ObservationHealthStatus,
+  TrendRow,
+  TradeSideMetrics,
+} from '../api/strategyHealth'
 
 const symbol = ref('')
 const weeks = ref(12)
 const loading = ref(false)
 const trendLoading = ref(false)
 const report = ref<HealthReport | null>(null)
+const observationHealth = ref<ObservationHealthReport | null>(null)
 const trend = ref<TrendRow[]>([])
 
 type HealthStatus = HealthReport['health_status']
@@ -162,6 +227,80 @@ function statusLabelCn(s: HealthStatus): string {
     case 'INSUFFICIENT_DATA': return '数据不足'
     default: return s
   }
+}
+
+function observationStatusTagType(s: ObservationHealthStatus): 'success' | 'warning' | 'danger' | 'info' {
+  switch (s) {
+    case 'HEALTHY': return 'success'
+    case 'WARNING': return 'warning'
+    case 'DEGRADED': return 'danger'
+    default: return 'info'
+  }
+}
+
+function observationStatusLabel(s: ObservationHealthStatus): string {
+  switch (s) {
+    case 'HEALTHY': return '健康'
+    case 'WARNING': return '警告'
+    case 'DEGRADED': return '退化'
+    case 'DISABLED': return '未启用'
+    default: return s
+  }
+}
+
+function observationComponentLabel(name: string): string {
+  switch (name) {
+    case 'UNIVERSE_SELECTION': return '指数股票池刷新'
+    case 'ROTATION_FORWARD_PRECOMMITMENT': return '月末轮动预承诺'
+    case 'WATCHLIST_QUANT': return '量化评分覆盖'
+    case 'DIVERSIFIED_PRIORITY_OBSERVATION': return '分散优先观察'
+    case 'GROWTH_SATELLITE_OBSERVATION': return '成长卫星观察'
+    case 'LIVE_INTERVAL_ALIGNMENT': return 'Live 区间对齐'
+    case 'LIVE_EXIT_CHALLENGER': return 'Live 退出挑战者'
+    case 'STRATEGY_V2_EXIT_CHALLENGER': return 'Strategy v2 退出挑战者'
+    case 'STRATEGY_V2_FORWARD': return 'Strategy v2 前瞻回放'
+    case 'PORTFOLIO_ROUTING': return '组合路由观察'
+    case 'OPENING_MOMENTUM_SHADOW': return '开盘策略影子'
+    case 'OPENING_MOMENTUM_EXECUTION': return '开盘模拟执行'
+    default: return name
+  }
+}
+
+function observationBlockerLabel(blocker: string): string {
+  const separator = blocker.indexOf(':')
+  if (separator >= 0) {
+    const component = blocker.slice(0, separator)
+    const reason = blocker.slice(separator + 1)
+    return `${observationComponentLabel(component)}：${observationBlockerLabel(reason)}`
+  }
+  const counted: Array<[RegExp, string]> = [
+    [/^DIVERSIFIED_ELIGIBILITY_INVALID_(\d+)$/, '分散名单中有 $1 只已不满足资格'],
+    [/^CURRENT_PROFIT_LOCK_REGISTRATION_MISSING_(\d+)$/, '当前利润锁注册缺失 $1 个方案'],
+    [/^CURRENT_EVALUATOR_REGISTRATION_MISSING_(\d+)$/, '当前 v4 注册缺失 $1 个标的'],
+    [/^BASELINE_REPLAY_MISMATCH_(\d+)$/, '基线回放不一致 $1 条'],
+    [/^STRUCTURAL_FAILURE_(\d+)$/, '前瞻证据结构失败 $1 条'],
+    [/^FORWARD_EVIDENCE_MISSING_AFTER_CLOSED_SESSION_(\d+)$/, '完整交易日后仍缺前瞻证据 $1 个标的'],
+  ]
+  for (const [pattern, label] of counted) {
+    if (pattern.test(blocker)) return blocker.replace(pattern, label)
+  }
+  const labels: Record<string, string> = {
+    DUPLICATE_RISK_GROUP: '分散名单出现重复风险组',
+    NON_CONTIGUOUS_DIVERSIFIED_RANKS: '分散名单排名不连续',
+    DIVERSIFIED_SHORTLIST_BELOW_4: '分散名单不足 4 只',
+    DIVERSIFIED_SHORTLIST_BELOW_8: '分散名单不足 8 只',
+    CURRENT_PRICE_UNAVAILABLE: '当前价格不可用',
+    CURRENT_PRICE_BELOW_LONG_ENTRY_FLOOR: '当前价格已跌穿多头有效入场下限',
+  }
+  if (labels[blocker]) return labels[blocker]
+  return blocker
+}
+
+function observationAge(seconds: number | null): string {
+  if (seconds === null) return '—'
+  if (seconds < 60) return `${Math.round(seconds)} 秒`
+  if (seconds < 3600) return `${Math.round(seconds / 60)} 分钟`
+  return `${(seconds / 3600).toFixed(1)} 小时`
 }
 
 function driftColor(d: number): string {
@@ -219,6 +358,16 @@ async function loadReport() {
   }
 }
 
+async function loadObservationHealth() {
+  try {
+    observationHealth.value = await getObservationHealth()
+  } catch (e) {
+    console.error('加载观察链路健康报告失败：', e)
+    ElMessage.error('加载观察链路健康报告失败')
+    observationHealth.value = null
+  }
+}
+
 async function loadTrend() {
   trendLoading.value = true
   try {
@@ -234,7 +383,7 @@ async function loadTrend() {
 }
 
 async function loadAll() {
-  await Promise.all([loadReport(), loadTrend()])
+  await Promise.all([loadReport(), loadObservationHealth(), loadTrend()])
 }
 
 onMounted(() => {
@@ -291,6 +440,17 @@ onMounted(() => {
   gap: 12px;
   flex-wrap: wrap;
   margin-bottom: 12px;
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.observation-alert {
+  margin-top: 8px;
 }
 
 .alerts-list {

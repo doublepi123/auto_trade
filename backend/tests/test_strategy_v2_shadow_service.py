@@ -16,6 +16,7 @@ from app.domain.strategy_v2 import (
     StrategyBar,
     StrategyV2Action,
     StrategyV2Decision,
+    StrategyV2Engine,
     StrategyV2EngineSnapshot,
     StrategyV2FeatureSnapshot,
     StrategyV2State,
@@ -50,6 +51,8 @@ from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 
 
 _SESSION_OPEN = datetime(2026, 7, 10, 13, 30, tzinfo=timezone.utc)
+_HK_SESSION_OPEN = datetime(2026, 7, 10, 1, 30, tzinfo=timezone.utc)
+_HK_AFTERNOON_OPEN = datetime(2026, 7, 10, 5, 0, tzinfo=timezone.utc)
 
 
 class _FakeCandles:
@@ -60,6 +63,54 @@ class _FakeCandles:
     def get_candlesticks(self, symbol: str, period: str, count: int) -> list[BrokerCandle]:
         self.calls.append((symbol, period, count))
         return list(self.candles)
+
+
+class _LiveExitSpy:
+    def __init__(self) -> None:
+        self.registrations: list[tuple[str, str]] = []
+        self.prepared: list[str] = []
+        self.bars: list[datetime] = []
+        self.synced: list[str] = []
+
+    def ensure_registrations(
+        self,
+        *,
+        symbol: str,
+        market: str,
+        now: datetime,
+    ) -> bool:
+        del now
+        self.registrations.append((symbol, market))
+        return True
+
+    def prepare_open_position(
+        self,
+        *,
+        symbol: str,
+        now: datetime,
+    ) -> bool:
+        del now
+        self.prepared.append(symbol)
+        return False
+
+    def advance_bar(
+        self,
+        *,
+        symbol: str,
+        bar: StrategyBar,
+        observed_at: datetime,
+    ) -> None:
+        del symbol, observed_at
+        self.bars.append(bar.timestamp)
+
+    def sync_baseline_outcomes(
+        self,
+        *,
+        symbol: str,
+        paired_at: datetime,
+    ) -> None:
+        del paired_at
+        self.synced.append(symbol)
 
 
 class _PagedFakeCandles(_FakeCandles):
@@ -186,6 +237,13 @@ def _candles(
             )
         )
     return result
+
+
+def _hk_candles(afternoon_count: int) -> list[BrokerCandle]:
+    return [
+        *_candles(150, start=_HK_SESSION_OPEN),
+        *_candles(afternoon_count, start=_HK_AFTERNOON_OPEN),
+    ]
 
 
 def _closed_trade_candles() -> list[BrokerCandle]:
@@ -815,6 +873,18 @@ class TestStrategyV2ShadowService:
             trades([0.9] * 50, estimated_fee=0.1, exit_price=101.0),
             {"slippage_bps": 2.0},
         )
+        missing_stress_quality, missing_stress_blockers = (
+            StrategyV2ShadowService._readiness_quality(
+                trades([0.9] * 50, estimated_fee=0.1, exit_price=101.0),
+                {},
+            )
+        )
+        invalid_stress_quality, invalid_stress_blockers = (
+            StrategyV2ShadowService._readiness_quality(
+                trades([0.9] * 50, estimated_fee=0.1, exit_price=101.0),
+                {"slippage_bps": "invalid"},
+            )
+        )
 
         assert "NET_PNL_NON_POSITIVE" in loss_blockers
         assert "MAX_DRAWDOWN_EXCEEDS_NET_PNL" in drawdown_blockers
@@ -826,6 +896,85 @@ class TestStrategyV2ShadowService:
         assert pass_blockers == []
         assert pass_quality is not None
         assert float(pass_quality["cost_stressed_net_pnl"]) > 0
+        assert missing_stress_quality is not None
+        assert missing_stress_quality["cost_stressed_net_pnl"] is None
+        assert missing_stress_blockers == ["COST_STRESS_UNAVAILABLE"]
+        assert invalid_stress_quality is not None
+        assert invalid_stress_quality["cost_stressed_net_pnl"] is None
+        assert invalid_stress_blockers == ["COST_STRESS_UNAVAILABLE"]
+
+    def test_readiness_quality_cost_stress_rejects_invalid_numbers(self) -> None:
+        def trade() -> StrategyV2ShadowTrade:
+            return StrategyV2ShadowTrade(
+                symbol="AAPL.US",
+                config_version="quality-version",
+                status="CLOSED",
+                entry_at=_SESSION_OPEN,
+                exit_at=_SESSION_OPEN + timedelta(minutes=1),
+                entry_price=100.0,
+                exit_price=101.0,
+                quantity=1.0,
+                gross_pnl=1.0,
+                estimated_fees=0.1,
+                net_pnl=0.9,
+                fee_source="ESTIMATED",
+                estimated_fee_rate=0.0005,
+            )
+
+        for invalid_slippage in (math.nan, math.inf, -1.0):
+            quality, blockers = StrategyV2ShadowService._readiness_quality(
+                [trade()],
+                {"slippage_bps": invalid_slippage},
+            )
+            assert quality is not None
+            assert quality["cost_stressed_net_pnl"] is None
+            assert blockers == ["COST_STRESS_UNAVAILABLE"]
+
+        for field, invalid_value in (
+            ("entry_price", math.nan),
+            ("entry_price", 0.0),
+            ("exit_price", math.inf),
+            ("exit_price", -1.0),
+            ("quantity", math.nan),
+            ("quantity", 0.0),
+            ("estimated_fees", math.inf),
+            ("estimated_fees", -0.1),
+        ):
+            invalid_trade = trade()
+            setattr(invalid_trade, field, invalid_value)
+            quality, blockers = StrategyV2ShadowService._readiness_quality(
+                [invalid_trade],
+                {"slippage_bps": 2.0},
+            )
+            assert quality is not None
+            assert quality["cost_stressed_net_pnl"] is None
+            assert blockers == ["COST_STRESS_UNAVAILABLE"]
+
+        for invalid_fee_rate in (math.nan, -0.1):
+            invalid_trade = trade()
+            invalid_trade.estimated_fees = None
+            invalid_trade.estimated_fee_rate = invalid_fee_rate
+            quality, blockers = StrategyV2ShadowService._readiness_quality(
+                [invalid_trade],
+                {"slippage_bps": 2.0},
+            )
+            assert quality is not None
+            assert quality["cost_stressed_net_pnl"] is None
+            assert blockers == ["COST_STRESS_UNAVAILABLE"]
+
+        invalid_net_trade = trade()
+        invalid_net_trade.net_pnl = math.nan
+        quality, blockers = StrategyV2ShadowService._readiness_quality(
+            [invalid_net_trade],
+            {"slippage_bps": 2.0},
+        )
+        assert quality is not None
+        assert quality["quality_data_complete"] is False
+        assert quality["cost_stressed_net_pnl"] is None
+        assert blockers == [
+            "QUALITY_DATA_INCOMPLETE",
+            "COST_STRESS_UNAVAILABLE",
+        ]
 
     def test_config_updates_and_listing_are_scoped_by_symbol(self) -> None:
         with self._db() as db:
@@ -1038,53 +1187,6 @@ class TestStrategyV2ShadowService:
         self,
         monkeypatch,
     ) -> None:
-        class _LiveExitSpy:
-            def __init__(self) -> None:
-                self.registrations: list[tuple[str, str]] = []
-                self.prepared: list[str] = []
-                self.bars: list[datetime] = []
-                self.synced: list[str] = []
-
-            def ensure_registrations(
-                self,
-                *,
-                symbol: str,
-                market: str,
-                now: datetime,
-            ) -> bool:
-                del now
-                self.registrations.append((symbol, market))
-                return True
-
-            def prepare_open_position(
-                self,
-                *,
-                symbol: str,
-                now: datetime,
-            ) -> bool:
-                del now
-                self.prepared.append(symbol)
-                return False
-
-            def advance_bar(
-                self,
-                *,
-                symbol: str,
-                bar: StrategyBar,
-                observed_at: datetime,
-            ) -> None:
-                del symbol, observed_at
-                self.bars.append(bar.timestamp)
-
-            def sync_baseline_outcomes(
-                self,
-                *,
-                symbol: str,
-                paired_at: datetime,
-            ) -> None:
-                del paired_at
-                self.synced.append(symbol)
-
         provider = _FakeCandles(_candles())
         with self._db() as db:
             self._enabled_config(db, activated_at=_SESSION_OPEN)
@@ -1108,6 +1210,48 @@ class TestStrategyV2ShadowService:
             assert spy.bars
             assert spy.bars == sorted(spy.bars)
             assert spy.synced == ["AAPL.US"]
+            assert service._is_primary_live_symbol("AAPL.US") is True
+            assert service._is_primary_live_symbol("MSFT.US") is False
+
+    def test_non_primary_tick_has_no_live_exit_challenger_side_effects(
+        self,
+        monkeypatch,
+    ) -> None:
+        provider = _FakeCandles(_candles())
+        with self._db() as db:
+            config = StrategyV2ShadowConfig(
+                symbol="MSFT.US",
+                enabled=True,
+                updated_at=_SESSION_OPEN,
+            )
+            db.add(config)
+            db.commit()
+            service = StrategyV2ShadowService(db, provider)
+            db.add(StrategyV2ShadowState(
+                symbol=config.symbol,
+                config_version=service._config_version(config),
+                state_json="{}",
+            ))
+            db.commit()
+            spy = _LiveExitSpy()
+            monkeypatch.setattr(
+                shadow_service_module.settings,
+                "live_exit_challenger_enabled",
+                True,
+            )
+            monkeypatch.setattr(service, "live_exit_challengers", spy)
+
+            service.tick(
+                "MSFT.US",
+                "US",
+                now=_SESSION_OPEN + timedelta(minutes=181, seconds=5),
+            )
+
+            assert provider.calls == [("MSFT.US", "MIN_1", 500)]
+            assert spy.registrations == []
+            assert spy.prepared == []
+            assert spy.bars == []
+            assert spy.synced == []
 
     def test_empty_legacy_version_first_tick_only_advances_watermark(self) -> None:
         provider = _FakeCandles(_candles(180))
@@ -1335,6 +1479,145 @@ class TestStrategyV2ShadowService:
             assert state.last_bar_at is not None
             assert state.last_bar_at.replace(tzinfo=timezone.utc) == _SESSION_OPEN + timedelta(minutes=124)
             assert state.last_poll_error == ""
+
+    def test_feature_prewarm_uses_persisted_bars_after_broker_revision(
+        self,
+    ) -> None:
+        original = _candles(122)
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN,
+            )
+            service = _ScheduledObservationShadowService(db)
+            state = db.query(StrategyV2ShadowState).filter_by(
+                symbol="AAPL.US"
+            ).one()
+            service._evaluate_candles(
+                config=config,
+                state=state,
+                market="US",
+                one_minute=original[:121],
+                observed_at=(
+                    _SESSION_OPEN + timedelta(minutes=121, seconds=10)
+                ),
+            )
+
+            revised = list(original)
+            source = revised[60]
+            revised[60] = BrokerCandle(
+                timestamp=source.timestamp,
+                open=source.open,
+                high=source.high,
+                low=source.low,
+                close=source.close,
+                volume=source.volume * 10,
+            )
+            service._evaluate_candles(
+                config=config,
+                state=state,
+                market="US",
+                one_minute=revised,
+                observed_at=(
+                    _SESSION_OPEN + timedelta(minutes=122, seconds=10)
+                ),
+            )
+
+            latest = db.query(StrategyV2ShadowDecision).filter_by(
+                symbol="AAPL.US",
+                bar_at=_SESSION_OPEN + timedelta(minutes=121),
+            ).one()
+            actual = json.loads(latest.features_json)
+            control = StrategyV2Engine(
+                service._domain_config(config, "US")
+            )
+            expected = None
+            for bar in service._coerce_strategy_bars(
+                original,
+                symbol="AAPL.US",
+            ):
+                expected = control.features.on_bar(
+                    bar,
+                    observed_at=bar.end_at + timedelta(seconds=5),
+                )
+
+            assert expected is not None
+            assert actual["session_vwap_1m"] == expected.session_vwap_1m
+            assert actual["realized_vol_1m"] == expected.realized_vol_1m
+
+    def test_feature_prewarm_uses_persisted_hk_bars_across_lunch(
+        self,
+    ) -> None:
+        original = _hk_candles(2)
+        with self._db() as db:
+            config = StrategyV2ShadowConfig(
+                symbol="0700.HK",
+                enabled=True,
+                updated_at=_HK_SESSION_OPEN,
+            )
+            db.add(config)
+            db.flush()
+            service = _ScheduledObservationShadowService(db)
+            state = StrategyV2ShadowState(
+                symbol=config.symbol,
+                config_version=service._config_version(config),
+                state_json="{}",
+            )
+            db.add(state)
+            db.commit()
+            service._evaluate_candles(
+                config=config,
+                state=state,
+                market="HK",
+                one_minute=original[:151],
+                observed_at=_HK_AFTERNOON_OPEN + timedelta(
+                    minutes=1,
+                    seconds=10,
+                ),
+            )
+
+            revised = list(original)
+            source = revised[60]
+            revised[60] = BrokerCandle(
+                timestamp=source.timestamp,
+                open=source.open,
+                high=source.high,
+                low=source.low,
+                close=source.close,
+                volume=source.volume * 10,
+            )
+            service._evaluate_candles(
+                config=config,
+                state=state,
+                market="HK",
+                one_minute=revised,
+                observed_at=_HK_AFTERNOON_OPEN + timedelta(
+                    minutes=2,
+                    seconds=10,
+                ),
+            )
+
+            latest = db.query(StrategyV2ShadowDecision).filter_by(
+                symbol="0700.HK",
+                bar_at=_HK_AFTERNOON_OPEN + timedelta(minutes=1),
+            ).one()
+            actual = json.loads(latest.features_json)
+            control = StrategyV2Engine(
+                service._domain_config(config, "HK")
+            )
+            expected = None
+            for bar in service._coerce_strategy_bars(
+                original,
+                symbol="0700.HK",
+            ):
+                expected = control.features.on_bar(
+                    bar,
+                    observed_at=bar.end_at + timedelta(seconds=5),
+                )
+
+            assert expected is not None
+            assert actual["session_vwap_1m"] == expected.session_vwap_1m
+            assert actual["realized_vol_1m"] == expected.realized_vol_1m
 
     def test_tick_pages_from_watermark_when_recent_window_moved_past_gap(
         self,
@@ -3256,26 +3539,37 @@ class TestStrategyV2ShadowService:
             assert response.daily[0].exclusion_reason == "COLLECTION_DISABLED"
             assert response.daily[0].structural_failure is False
 
-    def test_forward_source_version_drift_is_a_structural_block(self) -> None:
+    def test_forward_superseded_mature_registration_is_not_current(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(shadow_service_module, "_FORWARD_MATURE_PAIRS", 1)
         with self._db() as db:
             service, _version, target_open = self._collect_forward_pair(db)
+            mature = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            )
+            assert mature is not None
+            assert mature.status == "MATURE_EVIDENCE"
             service.update_config(
                 StrategyV2ShadowConfigUpdate(max_adx=18.0),
                 symbol="AAPL.US",
             )
 
+            stale_view = service.get_forward_validation("AAPL.US")
             response = service.collect_forward_validation(
                 "AAPL.US",
                 "US",
-                now=target_open + timedelta(minutes=400, seconds=30),
+                now=target_open + timedelta(days=2, minutes=400),
             )
 
-            assert response is not None
-            assert response.status == "BLOCKED"
-            assert response.daily[0].exclusion_reason == "SOURCE_VERSION_SUPERSEDED"
-            assert response.daily[0].structural_failure is True
+            assert stale_view.status == "NOT_REGISTERED"
+            assert response is None
+            assert db.query(StrategyV2ForwardEvidence).count() == 1
 
-    def test_forward_source_drift_wins_over_collection_disabled(self) -> None:
+    def test_forward_source_drift_never_falls_back_when_disabled(self) -> None:
         with self._db() as db:
             service, _version, target_open = self._collect_forward_pair(db)
             config = db.query(StrategyV2ShadowConfig).filter_by(
@@ -3291,12 +3585,13 @@ class TestStrategyV2ShadowService:
                 now=target_open + timedelta(minutes=400, seconds=30),
             )
 
-            assert response is not None
-            assert response.status == "BLOCKED"
-            assert response.daily[0].exclusion_reason == "SOURCE_VERSION_SUPERSEDED"
-            assert response.daily[0].structural_failure is True
+            assert service.get_forward_validation(
+                "AAPL.US"
+            ).status == "NOT_REGISTERED"
+            assert response is None
+            assert db.query(StrategyV2ForwardEvidence).count() == 0
 
-    def test_forward_source_drift_wins_over_a_missed_window(self) -> None:
+    def test_forward_source_drift_never_falls_back_after_missed_window(self) -> None:
         with self._db() as db:
             service, _version, target_open = self._collect_forward_pair(db)
             service.update_config(
@@ -3310,11 +3605,11 @@ class TestStrategyV2ShadowService:
                 now=target_open + timedelta(minutes=405),
             )
 
-            assert response is not None
-            assert response.status == "BLOCKED"
-            assert response.excluded_targets == 1
-            assert response.daily[0].exclusion_reason == "SOURCE_VERSION_SUPERSEDED"
-            assert db.query(StrategyV2ForwardEvidence).count() == 1
+            assert service.get_forward_validation(
+                "AAPL.US"
+            ).status == "NOT_REGISTERED"
+            assert response is None
+            assert db.query(StrategyV2ForwardEvidence).count() == 0
 
     def test_forward_mature_registration_stops_appending_targets(
         self,

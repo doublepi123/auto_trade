@@ -611,8 +611,17 @@ class LiveExitChallengerRegistration(Base):
     symbol: Mapped[str] = mapped_column(String(50), nullable=False)
     market: Mapped[str] = mapped_column(String(10), nullable=False)
     algorithm_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    policy_type: Mapped[str] = mapped_column(
+        String(24),
+        default="PROFIT_LOCK",
+        nullable=False,
+    )
     activation_pct: Mapped[float] = mapped_column(Float, nullable=False)
     locked_profit_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    max_holding_minutes: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
     slippage_bps: Mapped[float] = mapped_column(Float, nullable=False)
     evaluator_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     registered_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)

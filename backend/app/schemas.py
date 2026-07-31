@@ -1118,6 +1118,9 @@ class StrategyV2ExitChallengerVariant(BaseModel):
     challenger_net_pnl: float = 0.0
     net_pnl_delta: float = 0.0
     mean_net_pnl_delta: float = 0.0
+    baseline_mean_holding_minutes: float = 0.0
+    challenger_mean_holding_minutes: float = 0.0
+    mean_holding_minutes_saved: float = 0.0
     baseline_max_drawdown: float = 0.0
     challenger_max_drawdown: float = 0.0
     minimum_ready_pairs: Literal[20] = 20
@@ -1197,8 +1200,10 @@ class LiveExitChallengerVariant(BaseModel):
     registration_id: int
     algorithm_version: str
     evaluator_digest: str
+    policy_type: Literal["PROFIT_LOCK", "TIME_STOP"] = "PROFIT_LOCK"
     activation_pct: float
     locked_profit_pct: float
+    max_holding_minutes: Optional[int] = None
     slippage_bps: float
     registered_at: datetime
     eligible_after: datetime
@@ -1208,6 +1213,7 @@ class LiveExitChallengerVariant(BaseModel):
     open_trades: int = 0
     awaiting_baseline_trades: int = 0
     profit_lock_exits: int = 0
+    time_stop_exits: int = 0
     improved_trades: int = 0
     worsened_trades: int = 0
     unchanged_trades: int = 0
@@ -1217,11 +1223,15 @@ class LiveExitChallengerVariant(BaseModel):
     challenger_net_pnl: float = 0.0
     net_pnl_delta: float = 0.0
     mean_net_pnl_delta: float = 0.0
+    baseline_mean_holding_minutes: float = 0.0
+    challenger_mean_holding_minutes: float = 0.0
+    mean_holding_minutes_saved: float = 0.0
     baseline_max_drawdown: float = 0.0
     challenger_max_drawdown: float = 0.0
     minimum_ready_pairs: Literal[20] = 20
     minimum_mature_pairs: Literal[50] = 50
     minimum_profit_lock_exits: Literal[5] = 5
+    minimum_time_stop_exits: Literal[5] = 5
     promotion_ready: bool = False
     blockers: list[str] = Field(default_factory=list)
 
@@ -2769,6 +2779,45 @@ class UniverseRotationMetrics(BaseModel):
     exclusion_reasons: list[str] = Field(default_factory=list, max_length=50)
 
 
+class UniverseObservationHealthComponent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: Literal[
+        "UNIVERSE_SELECTION",
+        "ROTATION_FORWARD_PRECOMMITMENT",
+        "WATCHLIST_QUANT",
+        "DIVERSIFIED_PRIORITY_OBSERVATION",
+        "GROWTH_SATELLITE_OBSERVATION",
+        "LIVE_INTERVAL_ALIGNMENT",
+        "LIVE_EXIT_CHALLENGER",
+        "STRATEGY_V2_EXIT_CHALLENGER",
+        "STRATEGY_V2_FORWARD",
+        "PORTFOLIO_ROUTING",
+        "OPENING_MOMENTUM_SHADOW",
+        "OPENING_MOMENTUM_EXECUTION",
+    ]
+    status: Literal["HEALTHY", "WARNING", "DEGRADED", "DISABLED"]
+    latest_at: Optional[datetime] = None
+    age_seconds: Optional[float] = Field(default=None, ge=0)
+    latest_session_date: Optional[date] = None
+    expected_session_date: Optional[date] = None
+    observed_count: int = Field(default=0, ge=0)
+    expected_count: int = Field(default=0, ge=0)
+    coverage_ratio: Optional[float] = Field(default=None, ge=0, le=1)
+    blockers: list[str] = Field(default_factory=list)
+
+
+class UniverseObservationHealthResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    generated_at: datetime
+    status: Literal["HEALTHY", "WARNING", "DEGRADED"]
+    order_submission_allowed: Literal[False] = False
+    automatic_promotion_allowed: Literal[False] = False
+    components: list[UniverseObservationHealthComponent]
+    blockers: list[str] = Field(default_factory=list)
+
+
 class UniverseSelectionMetrics(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2905,6 +2954,12 @@ class UniverseSelectionRunResponse(BaseModel):
 
 class UniversePromotionReadinessItem(BaseModel):
     symbol: str = Field(min_length=1, max_length=50)
+    memberships: list[Literal["NASDAQ_100", "DJIA"]] = Field(
+        default_factory=list,
+        max_length=2,
+    )
+    sector: str = Field(default="", max_length=100)
+    risk_group: str = Field(default="", max_length=100)
     universe_role: Literal[
         "SELECTED",
         "EXPLORATION",
@@ -2921,6 +2976,18 @@ class UniversePromotionReadinessItem(BaseModel):
         ge=0,
         le=100,
         allow_inf_nan=False,
+    )
+    diversified_observation_selected: bool = False
+    diversified_observation_rank: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=8,
+    )
+    growth_satellite_selected: bool = False
+    growth_satellite_rank: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=4,
     )
     quant_weight: float = Field(
         ge=0,
@@ -2950,6 +3017,11 @@ class UniversePromotionReadinessItem(BaseModel):
     quant_source: str = ""
     quant_fresh: bool = False
     quant_expires_at: Optional[datetime] = None
+    estimated_round_trip_cost_bps: Optional[float] = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
     forward_status: Literal[
         "NOT_REGISTERED",
         "FROZEN",
@@ -2982,6 +3054,8 @@ class UniversePromotionReadinessResponse(BaseModel):
     as_of_date: date
     generated_at: datetime
     priority_algorithm_version: str = Field(min_length=1, max_length=100)
+    diversified_observation_limit: Literal[8] = 8
+    growth_satellite_limit: Literal[4] = 4
     items: list[UniversePromotionReadinessItem] = Field(
         default_factory=list,
     )

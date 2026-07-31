@@ -28,6 +28,7 @@ from app.models import (
 from app.services.strategy_v2_portfolio_service import (
     StrategyV2PortfolioService,
 )
+from app.services.watchlist_quant_service import QUANT_WARMUP_SOURCE
 
 
 _REGISTERED_AT = datetime(
@@ -512,8 +513,8 @@ class TestStrategyV2PortfolioService:
                 == "PIT_SHRINK_NET_EDGE_ZSCORE_POOL"
             )
             assert risk_group_v1.evaluator_digest == (
-                "9fa13dbedfbeb508e4b3ecca23d1a63c7"
-                "fe6c559dc71356922dda4c11528806e"
+                "dcfe8996b30a12b11953452316b2ef52"
+                "00e8bd190475fcbaa2f529f56fe9ea41"
             )
             assert (
                 risk_group_loo.evaluator_digest
@@ -528,8 +529,8 @@ class TestStrategyV2PortfolioService:
                 != sector_loo.evaluator_digest
             )
             assert selected_zscore.evaluator_digest == (
-                "4935c83dc7d73e9a1335fd9f8b6205c3"
-                "565790ba517d1fd0db53c4a8fbe32157"
+                "a6898ac070e3dfb15b5ada60dcef536b"
+                "87783d96bf245f9ae50e49155a2e3079"
             )
             assert len(rotation_zscore.evaluator_digest) == 64
             assert (
@@ -594,18 +595,25 @@ class TestStrategyV2PortfolioService:
             report = service.get_report("NVDA.US")
 
             assert len(report.variants) == 20
+            assert len({
+                row.algorithm_version for row in report.variants
+            }) == 20
+            assert sum(
+                row.algorithm_version.endswith("-v3")
+                for row in report.variants
+            ) == 13
             assert sum(
                 row.algorithm_version.endswith("-v2")
                 for row in report.variants
-            ) == 13
+            ) == 7
             assert any(
-                row.algorithm_version.endswith("-v1")
+                row.algorithm_version.endswith("-v2")
                 and row.policy
                 == "RISK_GROUP_REL_OBS_75BPS_POOL"
                 for row in report.variants
             )
             assert any(
-                row.algorithm_version.endswith("-v2")
+                row.algorithm_version.endswith("-v3")
                 and row.policy == "PIT_SHRINK_WEIGHTED_ZSCORE_POOL"
                 for row in report.variants
             )
@@ -2389,6 +2397,73 @@ class TestStrategyV2PortfolioService:
                 == registration.id
             ).one()
             assert observation.status == "NO_ELIGIBLE"
+
+    def test_newer_quant_warmup_blocks_fallback_to_older_candidate(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service = StrategyV2PortfolioService(db)
+            self._register(service)
+            self._signal(db, "MSFT.US", _FIRST_SIGNAL)
+            self._quant(
+                db,
+                "MSFT.US",
+                "CANDIDATE",
+                60,
+                expires_at=_FIRST_SIGNAL + timedelta(hours=4),
+            )
+            warmup = WatchlistScore(
+                symbol="MSFT.US",
+                score=0,
+                confidence=0,
+                recommended_action="CANDIDATE",
+                source=QUANT_WARMUP_SOURCE,
+                created_at=_FIRST_SIGNAL + timedelta(seconds=30),
+                expires_at=_FIRST_SIGNAL + timedelta(minutes=2),
+            )
+            db.add(warmup)
+            db.commit()
+
+            current = service._quant_context(
+                ("MSFT.US",),
+                observed_at=_FIRST_SIGNAL + timedelta(minutes=1),
+            )
+            assert current["MSFT.US"].id == warmup.id
+            assert current["MSFT.US"].source == QUANT_WARMUP_SOURCE
+
+            service.advance(
+                now=_FIRST_SIGNAL + timedelta(minutes=3)
+            )
+
+            registration = db.query(
+                StrategyV2PortfolioRegistration
+            ).filter(
+                StrategyV2PortfolioRegistration.policy
+                == "QUANT_CANDIDATE"
+            ).one()
+            observation = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registration.id
+            ).one()
+            assert observation.status == "NO_ELIGIBLE"
+            diagnostic_candidates = json.loads(
+                observation.candidates_json
+            )
+            assert len(diagnostic_candidates) == 1
+            assert diagnostic_candidates[0]["quant_source"] == (
+                QUANT_WARMUP_SOURCE
+            )
+            assert diagnostic_candidates[0]["rejection_reasons"] == [
+                "QUANT_SOURCE_NOT_CURRENT"
+            ]
+
+            expired = service._quant_context(
+                ("MSFT.US",),
+                observed_at=_FIRST_SIGNAL + timedelta(minutes=3),
+            )
+            assert "MSFT.US" not in expired
 
     def test_future_universe_run_is_not_visible_at_signal_time(
         self,

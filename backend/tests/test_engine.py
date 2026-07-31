@@ -114,6 +114,67 @@ class TestStrategyEngine:
         assert result.action == "BUY"
         assert engine.state == EngineState.LONG
 
+    def test_price_below_stop_derived_entry_floor_does_not_buy(self) -> None:
+        params = make_params(100, 200)
+        params.stop_loss_pct = 1.0
+        engine = StrategyEngine(params)
+
+        result = engine.update_price(98.99)
+
+        assert result.triggered is False
+        assert result.action == ""
+        assert result.description == (
+            "Price 98.99 <= long entry floor 99.0; "
+            "configured range is invalidated"
+        )
+        assert engine.state == EngineState.FLAT
+
+    def test_price_at_stop_derived_entry_floor_does_not_buy(self) -> None:
+        params = make_params(100, 200)
+        params.stop_loss_pct = 1.0
+        engine = StrategyEngine(params)
+
+        result = engine.update_price(99.0)
+
+        assert result.triggered is False
+        assert engine.state == EngineState.FLAT
+
+    def test_entry_floor_invalidation_latches_rearm_until_new_crossing(
+        self,
+    ) -> None:
+        params = make_params(100, 200)
+        params.stop_loss_pct = 1.0
+        engine = StrategyEngine(params)
+        engine._cooldown_seconds = 0
+
+        assert engine.update_price(101.0).triggered is False
+        invalidated = engine.update_price(98.99)
+        inside_band = engine.update_price(99.5)
+
+        assert invalidated.triggered is False
+        assert engine.long_entry_rearm_required is True
+        assert inside_band.triggered is False
+        assert engine.long_entry_rearm_required is True
+        assert engine.state == EngineState.FLAT
+
+        reclaimed = engine.update_price(101.0)
+        fresh_breach = engine.update_price(100.0)
+
+        assert reclaimed.triggered is False
+        assert fresh_breach.action == "BUY"
+        assert engine.state == EngineState.LONG
+
+    def test_price_inside_stop_derived_entry_band_buys(self) -> None:
+        params = make_params(100, 200)
+        params.stop_loss_pct = 1.0
+        engine = StrategyEngine(params)
+
+        result = engine.update_price(99.01)
+
+        assert result.triggered is True
+        assert result.action == "BUY"
+        assert engine.state == EngineState.LONG
+
     def test_price_above_sell_high_from_long_triggers_sell(self) -> None:
         engine = StrategyEngine(make_params(100, 200))
         engine.state = EngineState.LONG
