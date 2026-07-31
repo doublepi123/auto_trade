@@ -1,6 +1,7 @@
-"""R-multiple distribution API (GET /api/r-multiples/*).
+"""Realized-loss proxy distribution API (GET /api/r-multiples/*).
 
-Read-only risk-normalized outcome analytics.  Never writes.
+Read-only post-hoc outcome analytics. This is not true initial-risk R and
+never writes.
 """
 from __future__ import annotations
 
@@ -25,5 +26,5 @@ def r_multiples_distribution(
     days: int = Query(default=90, ge=7, le=3650),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Distribution of trade outcomes in R multiples."""
+    """Distribute outcomes in units of the sample's mean realized loss."""
     return RMultiplesService(db).distribution(days=days)

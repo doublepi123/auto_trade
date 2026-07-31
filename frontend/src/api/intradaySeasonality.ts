@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface IntradayBucket {
   bucket: string
@@ -16,6 +17,7 @@ export interface IntradaySeasonalityResult {
   unmatched_count: number
   best_bucket: IntradayBucket | null
   worst_bucket: IntradayBucket | null
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

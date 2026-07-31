@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface HoldingBucket {
   bucket: string
@@ -16,6 +17,7 @@ export interface HoldingTimeResult {
   median_holding_seconds: number
   buckets: HoldingBucket[]
   best_bucket: HoldingBucket | null
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

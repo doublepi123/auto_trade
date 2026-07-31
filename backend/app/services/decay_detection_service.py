@@ -10,13 +10,15 @@ degradation detection.
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import OrderRecord
+from app.services.analytics_trade_sample_service import (
+    analytics_response,
+    load_analytics_trade_sample,
+    mixed_currency_error,
+)
 
 __all__ = ["DecayDetectionService"]
 
@@ -33,14 +35,27 @@ class DecayDetectionService:
         lookback_days: int = 365,
         n_windows: int = 4,
     ) -> dict[str, Any]:
-        pnls = self._fetch_pnls(symbol, lookback_days)
+        sample = load_analytics_trade_sample(
+            self._db,
+            symbol=symbol,
+            lookback_days=lookback_days,
+            include_excursions=False,
+        )
+        mixed_error = mixed_currency_error(
+            sample,
+            symbol=symbol,
+            lookback_days=lookback_days,
+        )
+        if mixed_error is not None:
+            return mixed_error
+        pnls = [trade.net_pnl for trade in sample.trades]
         if len(pnls) < n_windows * 5:
-            return {
+            return analytics_response(sample, {
                 "symbol": symbol or "ALL",
                 "lookback_days": lookback_days,
                 "sample_size": len(pnls),
                 "error": f"Need at least {n_windows * 5} trades for {n_windows} windows.",
-            }
+            })
 
         chunk = len(pnls) // n_windows
         windows: list[dict[str, Any]] = []
@@ -86,7 +101,7 @@ class DecayDetectionService:
         else:
             verdict = "stable"
 
-        return {
+        return analytics_response(sample, {
             "symbol": symbol or "ALL",
             "lookback_days": lookback_days,
             "sample_size": len(pnls),
@@ -100,19 +115,7 @@ class DecayDetectionService:
             "decay_signals": decay_signals,
             "verdict": verdict,
             "assessment": _assess(verdict, wr_slope, sharpe_slope),
-        }
-
-    def _fetch_pnls(self, symbol: str | None, days: int) -> list[float]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        stmt = select(OrderRecord.net_pnl).where(
-            OrderRecord.net_pnl.is_not(None),
-            OrderRecord.filled_at >= cutoff,
-        )
-        if symbol:
-            stmt = stmt.where(OrderRecord.symbol == symbol)
-        stmt = stmt.order_by(OrderRecord.filled_at.asc())
-        rows = self._db.scalars(stmt).all()
-        return [float(r) for r in rows if r is not None]
+        })
 
 
 def _slope(values: list[float]) -> float:

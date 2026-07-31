@@ -1,6 +1,7 @@
-"""Prediction score API (GET /api/prediction-score/*).
+"""Retrospective conditional-frequency API (GET /api/prediction-score/*).
 
-Read-only conditional win-rate scoring.  Never writes.
+Read-only historical conditional win rates. Not a live decision signal and
+never writes.
 """
 from __future__ import annotations
 
@@ -26,5 +27,5 @@ def analyze_prediction(
     lookback_days: int = Query(default=180, ge=7, le=3650),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Compute conditional win-rate scores by observable features."""
+    """Summarize historical win rates by entry-observable features."""
     return PredictionScoreService(db).analyze(symbol=symbol, lookback_days=lookback_days)

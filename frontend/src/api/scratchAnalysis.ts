@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface ScratchSymbolRow {
   symbol: string
@@ -24,6 +25,10 @@ export interface ScratchAnalysisResult {
   median_scratch_hold_min: number | null
   by_symbol: ScratchSymbolRow[]
   weekly: ScratchWeekRow[]
+  currency: string | null
+  currencies: string[]
+  totals_comparable: boolean
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

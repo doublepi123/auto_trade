@@ -1,7 +1,9 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface VarPoint {
   index: number
+  at: string
   var: number
   cvar: number
 }
@@ -12,6 +14,7 @@ export interface RollingVarResult {
   window: number
   confidence: number
   sample_size: number
+  tail_count: number
   points: VarPoint[]
   summary: {
     latest_var: number
@@ -21,6 +24,10 @@ export interface RollingVarResult {
     cvar_mean: number
     cvar_max: number
   }
+  currency: string | null
+  currencies: string[]
+  totals_comparable: boolean
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { ref } from 'vue'
-import { getProfitFactor, type ProfitFactorResult } from '../api/profitFactor'
+import {
+  getProfitFactor,
+  type ProfitFactorResult,
+  type ProfitFactorState,
+} from '../api/profitFactor'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 
 const loading = ref(false)
 const result = ref<ProfitFactorResult | null>(null)
@@ -22,12 +27,18 @@ async function run() {
 function pnlColor(v: number): string {
   return v > 0 ? '#67c23a' : v < 0 ? '#f56c6c' : '#909399'
 }
+
+function formatProfitFactor(value: number | null, state: ProfitFactorState): string {
+  if (state === 'INFINITE') return '∞（无亏损）'
+  if (state === 'UNDEFINED') return '—（无盈亏）'
+  return value?.toFixed(2) ?? '—'
+}
 </script>
 
 <template>
   <div class="page-container">
     <h2>盈亏因子分解</h2>
-    <p class="page-desc">按标的、交易规模拆解 Profit Factor，识别优势来源与集中度风险（灵感来自 QuantStats / Edgewonk）</p>
+    <p class="page-desc">按标的、交易规模拆解 Profit Factor；明确区分有限值、无亏损的无限值与无盈亏的未定义值</p>
 
     <el-card class="control-card">
       <el-form inline>
@@ -44,13 +55,17 @@ function pnlColor(v: number): string {
     </el-card>
 
     <template v-if="result">
+      <StatisticsQualityAlert :quality="result.statistics_quality" />
       <el-alert v-if="result.error" :title="result.error" type="warning" :closable="false" style="margin-top: 16px" />
 
       <template v-else>
         <el-row :gutter="16" style="margin-top: 16px">
           <el-col :span="6">
             <el-card shadow="hover">
-              <el-statistic title="Profit Factor" :value="result.overall.profit_factor ?? 0" :precision="2" />
+              <div class="stat-custom">
+                <span class="stat-label">Profit Factor</span>
+                <span class="stat-value">{{ formatProfitFactor(result.overall.profit_factor, result.overall.profit_factor_state) }}</span>
+              </div>
             </el-card>
           </el-col>
           <el-col :span="6">
@@ -86,7 +101,7 @@ function pnlColor(v: number): string {
                 <el-table-column prop="segment" label="标的" width="120" />
                 <el-table-column prop="trade_count" label="交易数" width="80" />
                 <el-table-column prop="profit_factor" label="PF" width="80">
-                  <template #default="{ row }">{{ row.profit_factor ?? '∞' }}</template>
+                  <template #default="{ row }">{{ formatProfitFactor(row.profit_factor, row.profit_factor_state) }}</template>
                 </el-table-column>
                 <el-table-column prop="net_pnl" label="净 PnL" width="100">
                   <template #default="{ row }">
@@ -106,7 +121,7 @@ function pnlColor(v: number): string {
                 <el-table-column prop="segment" label="规模" width="130" />
                 <el-table-column prop="trade_count" label="交易数" width="80" />
                 <el-table-column prop="profit_factor" label="PF" width="80">
-                  <template #default="{ row }">{{ row.profit_factor ?? '∞' }}</template>
+                  <template #default="{ row }">{{ formatProfitFactor(row.profit_factor, row.profit_factor_state) }}</template>
                 </el-table-column>
                 <el-table-column prop="net_pnl" label="净 PnL" width="100">
                   <template #default="{ row }">
@@ -126,4 +141,7 @@ function pnlColor(v: number): string {
 .page-container { padding: 20px; }
 .page-desc { color: #909399; margin-bottom: 16px; }
 .control-card { margin-bottom: 8px; }
+.stat-custom { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.stat-label { font-size: 12px; color: #909399; }
+.stat-value { font-size: 20px; font-weight: 600; }
 </style>

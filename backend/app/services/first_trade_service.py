@@ -2,7 +2,7 @@
 
 Splits each trading day's closed trades into the first closing trade and
 all subsequent ones, comparing win rate and PnL, and measures how often
-the first trade's outcome matches the day's overall sign (tone setting).
+the first close's outcome matches the subsequent closes' combined sign.
 Read-only.
 
 Inspired by QuantConnect/Lean's session-open research notebooks.
@@ -10,15 +10,20 @@ Inspired by QuantConnect/Lean's session-open research notebooks.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import OrderRecord
+from app.services.analytics_trade_sample_service import (
+    analytics_response,
+    load_analytics_trade_sample,
+    mixed_currency_error,
+    trade_local_day,
+)
 
 __all__ = ["FirstTradeService"]
+
+_MIN_TONE_SAMPLE_DAYS = 5
 
 
 class _Bucket:
@@ -51,13 +56,33 @@ class FirstTradeService:
         self._db = db
 
     def summary(self, days: int = 90) -> dict[str, Any]:
-        rows = self._fetch(days)
+        sample = load_analytics_trade_sample(
+            self._db,
+            lookback_days=days,
+            include_excursions=False,
+        )
+        mixed_error = mixed_currency_error(
+            sample,
+            payload={"days": days, "sample_size": len(sample.trades)},
+        )
+        if mixed_error is not None:
+            return mixed_error
+        rows = [
+            (
+                trade_local_day(trade.symbol, trade.exit_at).isoformat(),
+                trade.net_pnl,
+            )
+            for trade in sample.trades
+        ]
         if len(rows) < 5:
-            return {
-                "days": days,
-                "sample_size": len(rows),
-                "error": "Need at least 5 closed trades.",
-            }
+            return analytics_response(
+                sample,
+                {
+                    "days": days,
+                    "sample_size": len(rows),
+                    "error": "Need at least 5 closed trades.",
+                },
+            )
 
         by_day: dict[str, list[float]] = defaultdict(list)
         for day, pnl in rows:
@@ -66,7 +91,7 @@ class FirstTradeService:
         first = _Bucket()
         rest = _Bucket()
         tone_match = 0
-        tone_days = 0
+        tone_sample_days = 0
         green_days = 0
 
         for pnls in by_day.values():
@@ -75,37 +100,37 @@ class FirstTradeService:
                 green_days += 1
             first_pnl = pnls[0]
             first.add(first_pnl)
-            for p in pnls[1:]:
+            rest_pnls = pnls[1:]
+            for p in rest_pnls:
                 rest.add(p)
-            if first_pnl != 0 and day_total != 0:
-                tone_days += 1
-                if (first_pnl > 0) == (day_total > 0):
+            rest_total = sum(rest_pnls)
+            if rest_pnls and first_pnl != 0 and rest_total != 0:
+                tone_sample_days += 1
+                if (first_pnl > 0) == (rest_total > 0):
                     tone_match += 1
 
         n_days = len(by_day)
         multi_trade_days = sum(1 for pnls in by_day.values() if len(pnls) > 1)
+        tone_sample_sufficient = tone_sample_days >= _MIN_TONE_SAMPLE_DAYS
 
-        return {
-            "days": days,
-            "sample_size": len(rows),
-            "trading_days": n_days,
-            "green_day_pct": round(green_days / n_days, 4) if n_days else None,
-            "multi_trade_days": multi_trade_days,
-            "first_trade": first.as_dict(),
-            "rest_of_day": rest.as_dict(),
-            "tone_match_pct": round(tone_match / tone_days, 4) if tone_days else None,
-            "tone_days": tone_days,
-        }
-
-    def _fetch(self, days: int) -> list[tuple[str, float]]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        stmt = (
-            select(OrderRecord.filled_at, OrderRecord.net_pnl)
-            .where(OrderRecord.net_pnl.is_not(None), OrderRecord.filled_at >= cutoff)
-            .order_by(OrderRecord.filled_at.asc())
+        return analytics_response(
+            sample,
+            {
+                "days": days,
+                "sample_size": len(rows),
+                "trading_days": n_days,
+                "green_day_pct": round(green_days / n_days, 4) if n_days else None,
+                "multi_trade_days": multi_trade_days,
+                "first_trade": first.as_dict(),
+                "rest_of_day": rest.as_dict(),
+                "tone_match_pct": (
+                    round(tone_match / tone_sample_days, 4)
+                    if tone_sample_sufficient
+                    else None
+                ),
+                "tone_match_count": tone_match,
+                "tone_sample_days": tone_sample_days,
+                "tone_min_sample_days": _MIN_TONE_SAMPLE_DAYS,
+                "tone_sample_sufficient": tone_sample_sufficient,
+            },
         )
-        return [
-            (r[0].date().isoformat(), float(r[1]))
-            for r in self._db.execute(stmt).all()
-            if r[0] is not None and r[1] is not None
-        ]

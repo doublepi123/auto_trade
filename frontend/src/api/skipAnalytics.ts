@@ -17,6 +17,19 @@ export interface SkipReasonGroup {
   reasons: { message: string; count: number }[]
 }
 
+export interface EventQualityIssue {
+  code: string
+  count: number
+}
+
+export interface EventQuality {
+  status: 'COMPLETE' | 'DEGRADED'
+  total_event_count: number
+  valid_event_count: number
+  invalid_event_count: number
+  issues: EventQualityIssue[]
+}
+
 export interface SkipAnalyticsResult {
   days: number
   sample_size: number
@@ -25,6 +38,7 @@ export interface SkipAnalyticsResult {
   by_side: Record<string, number>
   top_reasons: SkipReasonGroup[]
   daily: { date: string; count: number }[]
+  event_quality: EventQuality
   error?: string
 }
 

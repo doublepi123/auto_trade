@@ -25,5 +25,5 @@ def first_trade_summary(
     days: int = Query(default=90, ge=7, le=3650),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Compare the first closed trade of each day against the rest."""
+    """Compare each day's first close with its subsequent closes."""
     return FirstTradeService(db).summary(days=days)

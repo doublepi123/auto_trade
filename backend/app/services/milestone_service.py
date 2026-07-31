@@ -8,13 +8,15 @@ return analytics.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import OrderRecord
+from app.services.analytics_trade_sample_service import (
+    analytics_response,
+    load_analytics_trade_sample,
+    mixed_currency_error,
+)
 
 __all__ = ["MilestoneService"]
 
@@ -31,14 +33,30 @@ class MilestoneService:
         lookback_days: int = 365,
         step: float = 100.0,
     ) -> dict[str, Any]:
-        pnls = self._fetch_pnls(symbol, lookback_days)
+        sample = load_analytics_trade_sample(
+            self._db,
+            symbol=symbol,
+            lookback_days=lookback_days,
+            include_excursions=False,
+        )
+        mixed_error = mixed_currency_error(
+            sample,
+            symbol=symbol,
+            lookback_days=lookback_days,
+        )
+        if mixed_error is not None:
+            return mixed_error
+        pnls = [trade.net_pnl for trade in sample.trades]
         if len(pnls) < 5:
-            return {
-                "symbol": symbol or "ALL",
-                "lookback_days": lookback_days,
-                "sample_size": len(pnls),
-                "error": "Need at least 5 closed trades.",
-            }
+            return analytics_response(
+                sample,
+                {
+                    "symbol": symbol or "ALL",
+                    "lookback_days": lookback_days,
+                    "sample_size": len(pnls),
+                    "error": "Need at least 5 closed trades.",
+                },
+            )
 
         # compute cumulative PnL and find milestone crossings
         cum = 0.0
@@ -84,32 +102,23 @@ class MilestoneService:
                 return "decelerating"
             return "stable"
 
-        return {
-            "symbol": symbol or "ALL",
-            "lookback_days": lookback_days,
-            "sample_size": len(pnls),
-            "step": step,
-            "final_cumulative_pnl": round(cum, 2),
-            "total_milestones": len(milestones),
-            "up_milestones": len(up_milestones),
-            "down_milestones": len(down_milestones),
-            "milestones": milestones[-20:],
-            "pace": {
-                "avg_up_pace": round(sum(up_paces) / len(up_paces), 1) if up_paces else None,
-                "avg_down_pace": round(sum(down_paces) / len(down_paces), 1) if down_paces else None,
-                "up_acceleration": _accel(up_paces),
-                "down_acceleration": _accel(down_paces),
+        return analytics_response(
+            sample,
+            {
+                "symbol": symbol or "ALL",
+                "lookback_days": lookback_days,
+                "sample_size": len(pnls),
+                "step": step,
+                "final_cumulative_pnl": round(cum, 2),
+                "total_milestones": len(milestones),
+                "up_milestones": len(up_milestones),
+                "down_milestones": len(down_milestones),
+                "milestones": milestones[-20:],
+                "pace": {
+                    "avg_up_pace": round(sum(up_paces) / len(up_paces), 1) if up_paces else None,
+                    "avg_down_pace": round(sum(down_paces) / len(down_paces), 1) if down_paces else None,
+                    "up_acceleration": _accel(up_paces),
+                    "down_acceleration": _accel(down_paces),
+                },
             },
-        }
-
-    def _fetch_pnls(self, symbol: str | None, days: int) -> list[float]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        stmt = select(OrderRecord.net_pnl).where(
-            OrderRecord.net_pnl.is_not(None),
-            OrderRecord.filled_at >= cutoff,
         )
-        if symbol:
-            stmt = stmt.where(OrderRecord.symbol == symbol)
-        stmt = stmt.order_by(OrderRecord.filled_at.asc())
-        rows = self._db.scalars(stmt).all()
-        return [float(r) for r in rows if r is not None]

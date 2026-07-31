@@ -8,14 +8,17 @@ metrics.
 """
 from __future__ import annotations
 
-from collections import Counter
-from datetime import datetime, timedelta, timezone
+from collections import Counter, defaultdict
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import OrderRecord
+from app.services.analytics_trade_sample_service import (
+    analytics_response,
+    load_analytics_trade_sample,
+    trade_local_day,
+)
 
 __all__ = ["TradeFrequencyService"]
 
@@ -29,19 +32,26 @@ class TradeFrequencyService:
     def analyze(
         self, symbol: str | None = None, lookback_days: int = 90
     ) -> dict[str, Any]:
-        timestamps = self._fetch(symbol, lookback_days)
+        sample = load_analytics_trade_sample(
+            self._db,
+            symbol=symbol,
+            lookback_days=lookback_days,
+            include_excursions=False,
+        )
+        trades = sample.trades
+        timestamps = [trade.exit_at for trade in trades]
         if len(timestamps) < 5:
-            return {
+            return analytics_response(sample, {
                 "symbol": symbol or "ALL",
                 "lookback_days": lookback_days,
                 "sample_size": len(timestamps),
                 "error": "Need at least 5 trades.",
-            }
+            })
 
         # trades per day
         day_counts: Counter[str] = Counter()
-        for ts in timestamps:
-            day_counts[ts.strftime("%Y-%m-%d")] += 1
+        for trade in trades:
+            day_counts[trade_local_day(trade.symbol, trade.exit_at).isoformat()] += 1
 
         counts = list(day_counts.values())
         active_days = len(counts)
@@ -50,12 +60,21 @@ class TradeFrequencyService:
         max_day = max(counts)
         max_day_date = max(day_counts, key=day_counts.get)  # type: ignore[arg-type]
 
-        # inter-trade intervals (seconds)
+        # Inter-trade intervals only compare closes for the same symbol and
+        # market-local trade day. Overnight, cross-market, and cross-symbol
+        # gaps are not evidence for or against rapid-fire trading.
+        timestamps_by_symbol_day: dict[tuple[str, str], list[datetime]] = defaultdict(list)
+        for trade in trades:
+            local_day = trade_local_day(trade.symbol, trade.exit_at).isoformat()
+            timestamps_by_symbol_day[(trade.symbol, local_day)].append(trade.exit_at)
+
         intervals: list[float] = []
-        for i in range(1, len(timestamps)):
-            delta = (timestamps[i] - timestamps[i - 1]).total_seconds()
-            if delta >= 0:
-                intervals.append(delta)
+        for group in timestamps_by_symbol_day.values():
+            ordered = sorted(group)
+            intervals.extend(
+                (ordered[index] - ordered[index - 1]).total_seconds()
+                for index in range(1, len(ordered))
+            )
 
         avg_interval = sum(intervals) / len(intervals) if intervals else 0
         min_interval = min(intervals) if intervals else 0
@@ -73,7 +92,7 @@ class TradeFrequencyService:
 
         overtrading = avg_per_day > 10 or rapid_pct > 0.3
 
-        return {
+        return analytics_response(sample, {
             "symbol": symbol or "ALL",
             "lookback_days": lookback_days,
             "total_trades": total_trades,
@@ -83,24 +102,13 @@ class TradeFrequencyService:
             "max_day_date": max_day_date,
             "avg_interval_seconds": round(avg_interval, 1),
             "min_interval_seconds": round(min_interval, 1),
+            "interval_pair_count": len(intervals),
             "rapid_fire_count": rapid,
             "rapid_fire_pct": round(rapid_pct, 4),
             "daily_distribution": daily_distribution,
             "overtrading_flag": overtrading,
             "assessment": _assess(avg_per_day, rapid_pct, overtrading),
-        }
-
-    def _fetch(self, symbol: str | None, days: int) -> list[datetime]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        stmt = select(OrderRecord.filled_at).where(
-            OrderRecord.filled_at.is_not(None),
-            OrderRecord.filled_at >= cutoff,
-        )
-        if symbol:
-            stmt = stmt.where(OrderRecord.symbol == symbol)
-        stmt = stmt.order_by(OrderRecord.filled_at.asc())
-        rows = self._db.scalars(stmt).all()
-        return [r for r in rows if r is not None]
+        })
 
 
 def _assess(avg: float, rapid_pct: float, flag: bool) -> str:

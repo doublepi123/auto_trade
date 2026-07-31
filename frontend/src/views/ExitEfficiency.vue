@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { getExitEfficiencySummary, type ExitEfficiencyResult } from '../api/exitEfficiency'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 
 const loading = ref(false)
 const result = ref<ExitEfficiencyResult | null>(null)
@@ -31,7 +32,7 @@ function pnlColor(v: number): string {
 <template>
   <div class="page-container">
     <h2>离场效率分析</h2>
-    <p class="page-desc">止盈捕获率（净盈 / 最大有利 excursion）、回吐与不利 excursion 容忍（灵感来自 Edgewonk / TraderVue）</p>
+    <p class="page-desc">止盈捕获率（毛盈 / 最大有利 excursion）、回吐与不利 excursion 容忍（灵感来自 Edgewonk / TraderVue）</p>
 
     <el-card class="control-card">
       <el-form inline>
@@ -45,6 +46,17 @@ function pnlColor(v: number): string {
     </el-card>
 
     <template v-if="result">
+      <StatisticsQualityAlert :quality="result.statistics_quality" />
+      <el-alert
+        v-if="result.excursion_quality && result.excursion_quality.status !== 'COMPLETE'"
+        data-testid="excursion-quality-alert"
+        :title="`路径证据 ${result.excursion_quality.status}：${result.eligible_excursion_count}/${result.closed_trade_count} 笔可用`"
+        :description="`仅纳入进场与离场之间存在严格中途快照、且 MFE/MAE 与已实现毛盈亏一致的闭环；已排除 ${result.excursion_quality.excluded_excursion_count} 笔。`"
+        :type="result.excursion_quality.status === 'INSUFFICIENT' ? 'error' : 'warning'"
+        :closable="false"
+        show-icon
+        style="margin-top: 16px"
+      />
       <el-alert v-if="result.error" :title="result.error" type="warning" :closable="false" style="margin-top: 16px" />
 
       <template v-else>
@@ -72,7 +84,7 @@ function pnlColor(v: number): string {
               <div class="stat-custom">
                 <span class="stat-label">桌上留钱比例</span>
                 <span class="stat-value">{{ pct(result.left_on_table_pct) }}</span>
-                <span class="stat-sub">MFE &gt; 2×净盈的盈利单 {{ result.left_on_table_count }} 笔</span>
+                <span class="stat-sub">MFE &gt; 2×毛盈的盈利单 {{ result.left_on_table_count }} 笔</span>
               </div>
             </el-card>
           </el-col>

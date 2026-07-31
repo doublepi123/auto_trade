@@ -25,5 +25,5 @@ def scratch_analysis_summary(
     days: int = Query(default=90, ge=7, le=3650),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Summarize scratch (breakeven) trade rate and holding cost."""
+    """Summarize scratch trade rate, round-trip fees, and holding time."""
     return ScratchAnalysisService(db).summary(days=days)

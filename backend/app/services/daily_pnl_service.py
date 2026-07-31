@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -86,6 +87,9 @@ class ClosedRoundTrip:
     mae_amount: float | None = None
     mfe_pct: float | None = None
     mae_pct: float | None = None
+    excursion_source: str = "NOT_REQUESTED"
+    excursion_interior_observation_count: int = 0
+    excursion_max_gap_seconds: float | None = None
 
 
 class PnlReplayIssueCode(str, Enum):
@@ -93,6 +97,7 @@ class PnlReplayIssueCode(str, Enum):
     PARTIAL_OVERCLOSE = "PARTIAL_OVERCLOSE"
     COST_BASIS_CONFLICT = "COST_BASIS_CONFLICT"
     UNVERIFIED_COST_BASIS = "UNVERIFIED_COST_BASIS"
+    INVALID_FILL_EVIDENCE = "INVALID_FILL_EVIDENCE"
 
 
 class TradeStrategySource(str, Enum):
@@ -521,17 +526,26 @@ class DailyPnlService:
             if existing is None or order.id > existing.id:
                 latest_orders[key] = order
 
-        fills = [
-            fill
-            for order in latest_orders.values()
-            if (fill := self._fill_from_order(order)) is not None
-        ]
+        resolve_day: ToSymbolTradeDay = to_trade_day or _symbol_trade_day
+        fills: list[_Fill] = []
+        issues: list[PnlReplayIssue] = []
+        invalid_issue_fallback = to_dt or datetime.now(timezone.utc)
+        for order in latest_orders.values():
+            invalid_issue = self._invalid_fill_evidence_issue(
+                order,
+                to_trade_day=resolve_day,
+                fallback_at=invalid_issue_fallback,
+            )
+            if invalid_issue is not None:
+                issues.append(invalid_issue)
+                continue
+            fill = self._fill_from_order(order)
+            if fill is not None:
+                fills.append(fill)
         fills.sort(key=lambda item: (item.filled_at, item.id))
 
-        resolve_day: ToSymbolTradeDay = to_trade_day or _symbol_trade_day
         lots: dict[str, dict[str, list[_Lot]]] = {}
         trades: list[ClosedRoundTrip] = []
-        issues: list[PnlReplayIssue] = []
         for fill in fills:
             book = lots.setdefault(fill.symbol, {"long": [], "short": []})
             if fill.side == "BUY":
@@ -612,12 +626,20 @@ class DailyPnlService:
                 or mae_pct is None
             ):
                 continue
-            persisted_excursions[int(order.id)] = (
-                float(mfe_amount),
-                float(mae_amount),
-                float(mfe_pct),
-                float(mae_pct),
-            )
+            try:
+                persisted_excursions[int(order.id)] = (
+                    float(mfe_amount),
+                    float(mae_amount),
+                    float(mfe_pct),
+                    float(mae_pct),
+                )
+            except (TypeError, ValueError, OverflowError):
+                persisted_excursions[int(order.id)] = (
+                    float("nan"),
+                    float("nan"),
+                    float("nan"),
+                    float("nan"),
+                )
         for index, trade in enumerate(filtered):
             excursion = persisted_excursions.get(trade.exit_order_id)
             if excursion is None:
@@ -628,6 +650,7 @@ class DailyPnlService:
                 mae_amount=excursion[1],
                 mfe_pct=excursion[2],
                 mae_pct=excursion[3],
+                excursion_source="LEGACY_UNKNOWN",
             )
         try:
             enriched = self._attach_excursions(filtered)
@@ -635,7 +658,24 @@ class DailyPnlService:
             # Lightweight read-model fakes and legacy integrations may expose
             # orders without the snapshot query surface. PnL remains usable;
             # only optional excursion enrichment is omitted.
-            enriched = filtered
+            enriched = [
+                replace(
+                    trade,
+                    excursion_source=(
+                        "LEGACY_UNKNOWN"
+                        if (
+                            trade.mfe_amount is not None
+                            and trade.mae_amount is not None
+                            and trade.mfe_pct is not None
+                            and trade.mae_pct is not None
+                        )
+                        else "ENDPOINT_ONLY"
+                    ),
+                    excursion_interior_observation_count=0,
+                    excursion_max_gap_seconds=None,
+                )
+                for trade in filtered
+            ]
         return RoundTripReplayResult(enriched, filtered_issues)
 
     @staticmethod
@@ -926,9 +966,202 @@ class DailyPnlService:
             filled_at=fill.filled_at,
             exit_order_id=fill.id,
             exit_broker_order_id=fill.broker_order_id,
-            filled_quantity=float(fill.quantity),
-            matched_quantity=float(matched_quantity),
-            unmatched_quantity=float(unmatched_quantity),
+            filled_quantity=DailyPnlService._finite_float_or_zero(fill.quantity),
+            matched_quantity=DailyPnlService._finite_float_or_zero(
+                matched_quantity
+            ),
+            unmatched_quantity=DailyPnlService._finite_float_or_zero(
+                unmatched_quantity
+            ),
+        )
+
+    def _invalid_fill_evidence_issue(
+        self,
+        order: Any,
+        *,
+        to_trade_day: ToSymbolTradeDay,
+        fallback_at: datetime,
+    ) -> PnlReplayIssue | None:
+        """Return a finite, structured issue for a malformed claimed fill.
+
+        The round-trip replay must not silently discard a row that says it was
+        filled.  Doing so can leave a later exit looking fully reconciled (or
+        allow ``Infinity`` into FIFO arithmetic).  Normal unfilled orders remain
+        out of scope; only FILLED/PARTIAL_FILLED rows, positive executed
+        quantities, and non-finite executed quantities claim execution.
+        """
+
+        status = str(getattr(order, "status", "") or "").upper()
+        raw_executed_quantity = getattr(order, "executed_quantity", None)
+        executed_quantity = self._optional_decimal(raw_executed_quantity)
+        non_finite_executed_quantity = (
+            raw_executed_quantity is not None and executed_quantity is None
+        )
+        claims_execution = (
+            status in {_FILLED_STATUS, _PARTIAL_FILLED_STATUS}
+            or (executed_quantity is not None and executed_quantity > 0)
+            or non_finite_executed_quantity
+        )
+        if not claims_execution:
+            return None
+
+        invalid = False
+        symbol = str(getattr(order, "symbol", "") or "").strip().upper()
+        side = str(getattr(order, "side", "") or "").strip().upper()
+        if not symbol or side not in {
+            "BUY",
+            "SELL",
+            "SELL_SHORT",
+            "BUY_TO_COVER",
+        }:
+            invalid = True
+
+        submitted_raw = getattr(order, "quantity", None)
+        submitted_quantity = self._optional_decimal(submitted_raw)
+        if submitted_raw is not None and (
+            submitted_quantity is None or submitted_quantity <= 0
+        ):
+            invalid = True
+        if raw_executed_quantity is not None and (
+            executed_quantity is None or executed_quantity <= 0
+        ):
+            invalid = True
+        effective_quantity = (
+            executed_quantity
+            if executed_quantity is not None and executed_quantity > 0
+            else submitted_quantity
+            if status == _FILLED_STATUS and raw_executed_quantity is None
+            else None
+        )
+        if effective_quantity is None or effective_quantity <= 0:
+            invalid = True
+
+        raw_executed_price = getattr(order, "executed_price", None)
+        executed_price = self._optional_decimal(raw_executed_price)
+        if raw_executed_price is not None and (
+            executed_price is None or executed_price <= 0
+        ):
+            invalid = True
+        raw_limit_price = getattr(order, "price", None)
+        limit_price = self._optional_decimal(raw_limit_price)
+        if raw_limit_price is not None and (
+            limit_price is None or limit_price <= 0
+        ):
+            invalid = True
+        effective_price = (
+            executed_price
+            if executed_price is not None and executed_price > 0
+            else limit_price
+            if raw_executed_price is None
+            else None
+        )
+        if effective_price is None or effective_price <= 0:
+            invalid = True
+
+        filled_at_raw = getattr(order, "filled_at", None)
+        created_at_raw = getattr(order, "created_at", None)
+        filled_at = self._coerce_datetime(filled_at_raw)
+        created_at = self._coerce_datetime(created_at_raw)
+        if filled_at_raw is not None and filled_at is None:
+            invalid = True
+        if status == _PARTIAL_FILLED_STATUS and filled_at is None:
+            invalid = True
+        evidence_at = filled_at or created_at
+        if evidence_at is None:
+            invalid = True
+            evidence_at = self._coerce_datetime(fallback_at) or datetime.now(
+                timezone.utc
+            )
+        cost_basis_opened_at_raw = getattr(order, "cost_basis_opened_at", None)
+        cost_basis_opened_at = self._coerce_datetime(cost_basis_opened_at_raw)
+        if cost_basis_opened_at_raw is not None and (
+            cost_basis_opened_at is None or cost_basis_opened_at > evidence_at
+        ):
+            invalid = True
+
+        for field_name in ("actual_fee", "estimated_fee"):
+            raw_value = getattr(order, field_name, None)
+            value = self._optional_decimal(raw_value)
+            if raw_value is not None and (value is None or value < 0):
+                invalid = True
+
+        for field_name in ("gross_pnl", "net_pnl"):
+            raw_value = getattr(order, field_name, None)
+            if raw_value is not None and self._optional_decimal(raw_value) is None:
+                invalid = True
+
+        for field_name in ("pnl_fee", "pnl_fee_rate"):
+            raw_value = getattr(order, field_name, None)
+            value = self._optional_decimal(raw_value)
+            if raw_value is not None and (value is None or value < 0):
+                invalid = True
+
+        authoritative = str(
+            getattr(order, "pnl_source", "") or ""
+        ).upper() in {"TRACKED_ENTRY", "BROKER_POSITION"}
+        for field_name in (
+            "cost_basis_price",
+            "cost_basis_quantity",
+            "position_quantity_before",
+        ):
+            raw_value = getattr(order, field_name, None)
+            value = self._optional_decimal(raw_value)
+            if raw_value is not None and (
+                value is None
+                or value < 0
+                or (authoritative and value <= 0)
+            ):
+                invalid = True
+
+        for field_name in (
+            "slippage_amount",
+            "slippage_bps",
+            "ack_latency_ms",
+            "fill_latency_ms",
+        ):
+            raw_value = getattr(order, field_name, None)
+            if raw_value is None:
+                continue
+            try:
+                numeric_value = float(raw_value)
+                finite = math.isfinite(numeric_value)
+            except (TypeError, ValueError, OverflowError):
+                finite = False
+                numeric_value = 0.0
+            if not finite or (
+                field_name in {"ack_latency_ms", "fill_latency_ms"}
+                and numeric_value < 0
+            ):
+                invalid = True
+
+        if not invalid:
+            return None
+
+        safe_quantity = self._finite_float_or_zero(effective_quantity)
+        if safe_quantity < 0:
+            safe_quantity = 0.0
+        safe_symbol = symbol or "UNKNOWN"
+        try:
+            trade_day = to_trade_day(safe_symbol, evidence_at)
+        except (TypeError, ValueError, OverflowError):
+            trade_day = evidence_at.astimezone(timezone.utc).date()
+        try:
+            order_id = int(getattr(order, "id", 0) or 0)
+        except (TypeError, ValueError, OverflowError):
+            order_id = 0
+        return PnlReplayIssue(
+            issue_code=PnlReplayIssueCode.INVALID_FILL_EVIDENCE,
+            symbol=safe_symbol,
+            side=side or "UNKNOWN",
+            trade_day=trade_day,
+            filled_at=evidence_at,
+            exit_order_id=order_id,
+            exit_broker_order_id=str(
+                getattr(order, "broker_order_id", "") or ""
+            ),
+            filled_quantity=safe_quantity,
+            matched_quantity=0.0,
+            unmatched_quantity=safe_quantity,
         )
 
     def _fill_from_order(self, order: Any) -> _Fill | None:
@@ -1079,21 +1312,12 @@ class DailyPnlService:
 
         if not trades:
             return []
-        missing = [
-            trade
-            for trade in trades
-            if (
-                trade.mfe_amount is None
-                or trade.mae_amount is None
-                or trade.mfe_pct is None
-                or trade.mae_pct is None
-            )
-        ]
-        if not missing:
-            return trades
-        symbols = {trade.symbol for trade in missing}
-        start = min(trade.entry_at for trade in missing)
-        end = max(trade.exit_at for trade in missing)
+        # Persisted MFE/MAE columns predate path-provenance metadata.  Always
+        # inspect retained snapshots so those legacy values cannot be mistaken
+        # for observed paths merely because all four numeric columns exist.
+        symbols = {trade.symbol for trade in trades}
+        start = min(trade.entry_at for trade in trades)
+        end = max(trade.exit_at for trade in trades)
         snapshots_by_symbol: dict[str, list[tuple[datetime, float]]] = {}
         for created_at, symbol, last_price in self._db.query(
             RuntimeStateSnapshot.created_at,
@@ -1105,41 +1329,95 @@ class DailyPnlService:
             RuntimeStateSnapshot.created_at <= end,
             RuntimeStateSnapshot.last_price > 0,
         ).all():
+            captured_at = self._coerce_datetime(created_at)
+            try:
+                price = float(last_price)
+            except (TypeError, ValueError, OverflowError):
+                continue
+            if captured_at is None or not math.isfinite(price) or price <= 0:
+                continue
             snapshots_by_symbol.setdefault(str(symbol), []).append(
-                (self._coerce_datetime(created_at) or start, float(last_price))
+                (captured_at, price)
             )
+        for observations in snapshots_by_symbol.values():
+            observations.sort(key=lambda item: item[0])
 
         enriched: list[ClosedRoundTrip] = []
         for trade in trades:
-            if (
+            has_persisted_excursion = (
                 trade.mfe_amount is not None
                 and trade.mae_amount is not None
                 and trade.mfe_pct is not None
                 and trade.mae_pct is not None
-            ):
-                enriched.append(trade)
-                continue
-            prices = [
-                price
+            )
+            interior = [
+                (captured_at, price)
                 for captured_at, price in snapshots_by_symbol.get(trade.symbol, [])
-                if trade.entry_at <= captured_at <= trade.exit_at
+                if trade.entry_at < captured_at < trade.exit_at
             ]
-            prices.extend([trade.entry_price, trade.exit_price])
-            if not prices or trade.entry_price <= 0:
-                enriched.append(trade)
+            if not interior:
+                # Entry and exit prices alone do not describe the path between
+                # them. Legacy persisted values remain diagnostic only and are
+                # explicitly marked so exit-efficiency aggregation can exclude
+                # them rather than manufacture a perfect capture rate.
+                enriched.append(replace(
+                    trade,
+                    excursion_source=(
+                        "LEGACY_UNKNOWN"
+                        if has_persisted_excursion
+                        else "ENDPOINT_ONLY"
+                    ),
+                    excursion_interior_observation_count=0,
+                    excursion_max_gap_seconds=None,
+                ))
                 continue
+            if (
+                not math.isfinite(trade.entry_price)
+                or trade.entry_price <= 0
+                or not math.isfinite(trade.exit_price)
+                or trade.exit_price <= 0
+                or not math.isfinite(trade.quantity)
+                or trade.quantity <= 0
+            ):
+                enriched.append(replace(
+                    trade,
+                    excursion_source="LEGACY_UNKNOWN",
+                    excursion_interior_observation_count=len(interior),
+                    excursion_max_gap_seconds=None,
+                ))
+                continue
+            prices = [price for _, price in interior]
+            prices.extend([trade.entry_price, trade.exit_price])
             if trade.side == "long":
                 favorable_per_unit = max(prices) - trade.entry_price
                 adverse_per_unit = min(prices) - trade.entry_price
             else:
                 favorable_per_unit = trade.entry_price - min(prices)
                 adverse_per_unit = trade.entry_price - max(prices)
+            observation_times = [
+                trade.entry_at,
+                *(captured_at for captured_at, _ in interior),
+                trade.exit_at,
+            ]
+            max_gap_seconds = max(
+                (
+                    (right - left).total_seconds()
+                    for left, right in zip(
+                        observation_times,
+                        observation_times[1:],
+                    )
+                ),
+                default=0.0,
+            )
             enriched.append(replace(
                 trade,
                 mfe_amount=favorable_per_unit * trade.quantity,
                 mae_amount=adverse_per_unit * trade.quantity,
                 mfe_pct=favorable_per_unit / trade.entry_price * 100,
                 mae_pct=adverse_per_unit / trade.entry_price * 100,
+                excursion_source="SNAPSHOT_OBSERVED",
+                excursion_interior_observation_count=len(interior),
+                excursion_max_gap_seconds=max_gap_seconds,
             ))
         return enriched
 
@@ -1221,9 +1499,16 @@ class DailyPnlService:
 
     @staticmethod
     def _executed_quantity(order: Any) -> Decimal:
-        executed_quantity = DailyPnlService._decimal(getattr(order, "executed_quantity", None))
-        if executed_quantity > 0:
-            return executed_quantity
+        raw_executed_quantity = getattr(order, "executed_quantity", None)
+        if raw_executed_quantity is not None:
+            executed_quantity = DailyPnlService._optional_decimal(
+                raw_executed_quantity
+            )
+            return (
+                executed_quantity
+                if executed_quantity is not None and executed_quantity > 0
+                else _ZERO
+            )
         status = str(getattr(order, "status", "") or "").upper()
         if status == _FILLED_STATUS:
             return DailyPnlService._decimal(getattr(order, "quantity", None))
@@ -1239,9 +1524,16 @@ class DailyPnlService:
         limit — callers should treat such entries as estimates and reconcile
         against broker fill data as soon as it becomes available.
         """
-        executed_price = DailyPnlService._decimal(getattr(order, "executed_price", None))
-        if executed_price > 0:
-            return executed_price
+        raw_executed_price = getattr(order, "executed_price", None)
+        if raw_executed_price is not None:
+            executed_price = DailyPnlService._optional_decimal(
+                raw_executed_price
+            )
+            return (
+                executed_price
+                if executed_price is not None and executed_price > 0
+                else _ZERO
+            )
         price = DailyPnlService._decimal(getattr(order, "price", None))
         order_id = str(getattr(order, "id", "?") or "?")
         broker_order_id = str(getattr(order, "broker_order_id", "") or "")
@@ -1662,9 +1954,20 @@ class DailyPnlService:
         if value is None:
             return _ZERO
         try:
-            return Decimal(str(value))
+            candidate = Decimal(str(value))
         except Exception:
             return _ZERO
+        return candidate if candidate.is_finite() else _ZERO
+
+    @staticmethod
+    def _finite_float_or_zero(value: Decimal | None) -> float:
+        if value is None or not value.is_finite():
+            return 0.0
+        try:
+            candidate = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return 0.0
+        return candidate if math.isfinite(candidate) else 0.0
 
     @staticmethod
     def _optional_decimal(value: Any) -> Decimal | None:

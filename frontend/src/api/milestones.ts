@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface Milestone {
   level: number
@@ -22,6 +23,7 @@ export interface MilestoneResult {
     up_acceleration: string
     down_acceleration: string
   }
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

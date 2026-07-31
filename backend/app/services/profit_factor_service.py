@@ -8,13 +8,15 @@ Inspired by QuantStats' factor tearsheet and Edgewonk's edge decomposition.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import OrderRecord
+from app.services.analytics_trade_sample_service import (
+    analytics_response,
+    load_analytics_trade_sample,
+    mixed_currency_error,
+)
 
 __all__ = ["ProfitFactorService"]
 
@@ -28,19 +30,32 @@ class ProfitFactorService:
     def analyze(
         self, symbol: str | None = None, lookback_days: int = 180
     ) -> dict[str, Any]:
-        rows = self._fetch(symbol, lookback_days)
+        sample = load_analytics_trade_sample(
+            self._db,
+            symbol=symbol,
+            lookback_days=lookback_days,
+            include_excursions=False,
+        )
+        mixed_error = mixed_currency_error(
+            sample,
+            symbol=symbol,
+            lookback_days=lookback_days,
+        )
+        if mixed_error is not None:
+            return mixed_error
+        rows = [(trade.symbol, trade.net_pnl) for trade in sample.trades]
         if len(rows) < 5:
-            return {
+            return analytics_response(sample, {
                 "symbol": symbol or "ALL",
                 "lookback_days": lookback_days,
                 "sample_size": len(rows),
                 "error": "Need at least 5 closed trades.",
-            }
+            })
 
         # overall
         gross_profit = sum(p for _, p in rows if p > 0)
         gross_loss = abs(sum(p for _, p in rows if p < 0))
-        overall_pf = gross_profit / gross_loss if gross_loss > 0 else float("inf")
+        overall_pf, overall_pf_state = _profit_factor(gross_profit, gross_loss)
 
         # by symbol
         by_symbol: dict[str, list[float]] = defaultdict(list)
@@ -52,15 +67,25 @@ class ProfitFactorService:
             for sym, pnls in sorted(by_symbol.items(), key=lambda x: -_pf_value(x[1]))
         ]
 
-        # by PnL magnitude bucket
-        small = [p for _, p in rows if abs(p) <= 50]
-        medium = [p for _, p in rows if 50 < abs(p) <= 200]
-        large = [p for _, p in rows if abs(p) > 200]
-
+        # by entry-notional rank; PnL magnitude is an outcome, not trade size.
+        sized = sorted(
+            sample.trades,
+            key=lambda trade: (
+                abs(trade.entry_price * trade.quantity),
+                trade.exit_at,
+                trade.exit_order_id,
+            ),
+        )
+        size_groups: list[list[float]] = [[] for _ in range(4)]
+        for index, trade in enumerate(sized):
+            bucket = min(index * 4 // len(sized), 3)
+            size_groups[bucket].append(trade.net_pnl)
         size_breakdown = [
-            {"segment": "small (≤50)", **_pf_stats(small)},
-            {"segment": "medium (50-200)", **_pf_stats(medium)},
-            {"segment": "large (>200)", **_pf_stats(large)},
+            {"segment": label, **_pf_stats(group)}
+            for label, group in zip(
+                ("Q1 (smallest)", "Q2", "Q3", "Q4 (largest)"),
+                size_groups,
+            )
         ]
 
         # by win/loss contribution
@@ -69,12 +94,15 @@ class ProfitFactorService:
         top3_win = sum(wins[:3]) if len(wins) >= 3 else sum(wins)
         top3_loss = sum(losses[:3]) if len(losses) >= 3 else sum(losses)
 
-        return {
+        return analytics_response(sample, {
             "symbol": symbol or "ALL",
             "lookback_days": lookback_days,
             "sample_size": len(rows),
             "overall": {
-                "profit_factor": round(overall_pf, 4) if overall_pf != float("inf") else None,
+                "profit_factor": (
+                    round(overall_pf, 4) if overall_pf is not None else None
+                ),
+                "profit_factor_state": overall_pf_state,
                 "gross_profit": round(gross_profit, 2),
                 "gross_loss": round(gross_loss, 2),
                 "net_pnl": round(gross_profit - gross_loss, 2),
@@ -85,30 +113,26 @@ class ProfitFactorService:
                 "top3_wins_share": round(top3_win / gross_profit, 4) if gross_profit > 0 else 0,
                 "top3_losses_share": round(abs(top3_loss) / gross_loss, 4) if gross_loss > 0 else 0,
             },
-        }
-
-    def _fetch(self, symbol: str | None, days: int) -> list[tuple[str, float]]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        stmt = select(OrderRecord.symbol, OrderRecord.net_pnl).where(
-            OrderRecord.net_pnl.is_not(None),
-            OrderRecord.filled_at >= cutoff,
-        )
-        if symbol:
-            stmt = stmt.where(OrderRecord.symbol == symbol)
-        rows = self._db.execute(stmt).all()
-        return [(r[0], float(r[1])) for r in rows if r[1] is not None]
+        })
 
 
 def _pf_stats(pnls: list[float]) -> dict[str, Any]:
     if not pnls:
-        return {"trade_count": 0, "profit_factor": None, "net_pnl": 0, "win_rate": 0}
+        return {
+            "trade_count": 0,
+            "profit_factor": None,
+            "profit_factor_state": "UNDEFINED",
+            "net_pnl": 0,
+            "win_rate": 0,
+        }
     gp = sum(p for p in pnls if p > 0)
     gl = abs(sum(p for p in pnls if p < 0))
-    pf = gp / gl if gl > 0 else (float("inf") if gp > 0 else 0)
+    pf, pf_state = _profit_factor(gp, gl)
     wins = sum(1 for p in pnls if p > 0)
     return {
         "trade_count": len(pnls),
-        "profit_factor": round(pf, 4) if pf != float("inf") else None,
+        "profit_factor": round(pf, 4) if pf is not None else None,
+        "profit_factor_state": pf_state,
         "net_pnl": round(sum(pnls), 2),
         "win_rate": round(wins / len(pnls), 4),
     }
@@ -117,4 +141,18 @@ def _pf_stats(pnls: list[float]) -> dict[str, Any]:
 def _pf_value(pnls: list[float]) -> float:
     gp = sum(p for p in pnls if p > 0)
     gl = abs(sum(p for p in pnls if p < 0))
-    return gp / gl if gl > 0 else (999.0 if gp > 0 else 0)
+    pf, pf_state = _profit_factor(gp, gl)
+    if pf_state == "INFINITE":
+        return float("inf")
+    if pf_state == "UNDEFINED":
+        return -1.0
+    assert pf is not None
+    return pf
+
+
+def _profit_factor(gross_profit: float, gross_loss: float) -> tuple[float | None, str]:
+    if gross_loss > 0:
+        return gross_profit / gross_loss, "FINITE"
+    if gross_profit > 0:
+        return None, "INFINITE"
+    return None, "UNDEFINED"

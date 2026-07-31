@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface FeeDragSymbol {
   symbol: string
@@ -25,6 +26,7 @@ export interface FeeDragResult {
   fee_sources: Record<string, number>
   by_symbol: FeeDragSymbol[]
   daily_fees: FeeDragDaily[]
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

@@ -1,6 +1,7 @@
-"""Regime sensitivity API (GET /api/regime-sensitivity/*).
+"""Prior-outcome variability API (GET /api/regime-sensitivity/*).
 
-Read-only volatility-regime performance analysis.  Never writes.
+Read-only analysis of performance conditioned on prior closed-trade PnL
+variability. This is not a market-volatility signal. Never writes.
 """
 from __future__ import annotations
 
@@ -27,7 +28,7 @@ def analyze_regime(
     window: int = Query(default=20, ge=5, le=100),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Compare strategy performance across volatility regimes."""
+    """Compare outcomes across prior closed-trade PnL variability states."""
     return RegimeSensitivityService(db).analyze(
         symbol=symbol, lookback_days=lookback_days, window=window
     )

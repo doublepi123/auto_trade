@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { getCapitalEfficiency, type CapitalEfficiencyResult } from '../api/capitalEfficiency'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 
 const loading = ref(false)
 const result = ref<CapitalEfficiencyResult | null>(null)
@@ -24,8 +25,8 @@ async function run() {
 
 <template>
   <div class="page-container">
-    <h2>资金效率</h2>
-    <p class="page-desc">资本回报率、换手率与利用率，评估策略对资金的使用效率（灵感来自 QuantConnect / Lean）</p>
+    <h2>闭环资金效率</h2>
+    <p class="page-desc">基于已完成 FIFO 闭环交易的资本回报、换手与资本时间利用率；当前未平仓仓位不在证据范围内</p>
 
     <el-card class="control-card">
       <el-form inline>
@@ -45,10 +46,17 @@ async function run() {
     </el-card>
 
     <template v-if="result">
+      <StatisticsQualityAlert :quality="result.statistics_quality" />
       <el-alert v-if="result.error" :title="result.error" type="warning" :closable="false" style="margin-top: 16px" />
 
       <template v-else>
         <el-alert :title="result.assessment" type="info" :closable="false" style="margin-top: 16px" />
+        <el-alert
+          title="证据范围仅包含回看窗口内完成平仓的闭环交易，不包含当前未平仓仓位。"
+          type="warning"
+          :closable="false"
+          style="margin-top: 8px"
+        />
 
         <el-row :gutter="16" style="margin-top: 16px">
           <el-col :span="6">
@@ -68,7 +76,12 @@ async function run() {
           </el-col>
           <el-col :span="6">
             <el-card shadow="hover">
-              <el-statistic title="利用率" :value="result.utilization_rate * 100" :precision="1" suffix="%" />
+              <el-statistic
+                title="闭环资本时间利用率"
+                :value="result.capital_time_utilization_rate * 100"
+                :precision="2"
+                suffix="%"
+              />
             </el-card>
           </el-col>
         </el-row>
@@ -76,11 +89,21 @@ async function run() {
         <el-card style="margin-top: 16px">
           <template #header>效率详情</template>
           <el-descriptions :column="3" border size="small">
-            <el-descriptions-item label="总 PnL">{{ result.total_pnl }}</el-descriptions-item>
-            <el-descriptions-item label="资金基数">{{ result.capital_base }}</el-descriptions-item>
-            <el-descriptions-item label="活跃天数">{{ result.active_days }}</el-descriptions-item>
+            <el-descriptions-item label="总 PnL">{{ result.total_pnl }} {{ result.currency ?? '' }}</el-descriptions-item>
+            <el-descriptions-item label="资金基数">{{ result.capital_base }} {{ result.capital_base_currency ?? '' }}</el-descriptions-item>
+            <el-descriptions-item label="平均闭环占用资金">
+              {{ result.average_closed_round_trip_capital }} {{ result.currency ?? '' }}
+            </el-descriptions-item>
             <el-descriptions-item label="单位交易收益">{{ result.pnl_per_unit_traded }}</el-descriptions-item>
-            <el-descriptions-item label="资金配置效率">{{ (result.capital_efficiency * 100).toFixed(1) }}%</el-descriptions-item>
+            <el-descriptions-item label="盈利交易入场名义本金占比">
+              {{ (result.winning_entry_notional_share * 100).toFixed(1) }}%
+            </el-descriptions-item>
+            <el-descriptions-item label="平仓活跃日率">
+              {{ (result.exit_active_day_rate * 100).toFixed(1) }}%（{{ result.exit_active_days }} 天）
+            </el-descriptions-item>
+            <el-descriptions-item label="入场名义本金合计">
+              {{ result.total_entry_notional }} {{ result.currency ?? '' }}
+            </el-descriptions-item>
             <el-descriptions-item label="样本数">{{ result.sample_size }}</el-descriptions-item>
           </el-descriptions>
         </el-card>

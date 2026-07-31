@@ -1,13 +1,14 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface SizeQuartile {
   quartile: string
   trade_count: number
-  avg_quantity: number
+  avg_entry_notional: number
   total_pnl: number
   avg_pnl: number
   win_rate: number
-  pnl_per_unit: number
+  avg_return_pct: number
 }
 
 export interface SizeImpactResult {
@@ -17,6 +18,7 @@ export interface SizeImpactResult {
   quartiles: SizeQuartile[]
   size_efficiency_trend: string
   assessment: string
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

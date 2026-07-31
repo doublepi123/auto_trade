@@ -9,13 +9,15 @@ estimation.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import OrderRecord
+from app.services.analytics_trade_sample_service import (
+    analytics_response,
+    load_analytics_trade_sample,
+    mixed_currency_error,
+)
 
 __all__ = ["SizeImpactService"]
 
@@ -29,88 +31,99 @@ class SizeImpactService:
     def analyze(
         self, symbol: str | None = None, lookback_days: int = 180
     ) -> dict[str, Any]:
-        rows = self._fetch(symbol, lookback_days)
+        sample = load_analytics_trade_sample(
+            self._db,
+            symbol=symbol,
+            lookback_days=lookback_days,
+            include_excursions=False,
+        )
+        mixed_error = mixed_currency_error(
+            sample,
+            symbol=symbol,
+            lookback_days=lookback_days,
+        )
+        if mixed_error is not None:
+            return mixed_error
+        rows = [
+            (
+                abs(trade.entry_price * trade.quantity),
+                trade.net_pnl,
+                (
+                    trade.net_pnl / abs(trade.entry_price * trade.quantity)
+                    if trade.entry_price and trade.quantity
+                    else 0.0
+                ),
+                trade.exit_at,
+                trade.exit_order_id,
+            )
+            for trade in sample.trades
+        ]
         if len(rows) < 8:
-            return {
+            return analytics_response(sample, {
                 "symbol": symbol or "ALL",
                 "lookback_days": lookback_days,
                 "sample_size": len(rows),
                 "error": "Need at least 8 closed trades with quantity data.",
-            }
+            })
 
         # sort by quantity to form quartiles
-        rows.sort(key=lambda r: r[0])
+        rows.sort(key=lambda r: (r[0], r[3], r[4]))
         n = len(rows)
-        q_size = max(1, n // 4)
-        quartiles: list[list[tuple[float, float]]] = [
-            rows[i * q_size : (i + 1) * q_size] for i in range(3)
+        quartiles: list[list[tuple[float, float, float, Any, int]]] = [
+            [] for _ in range(4)
         ]
-        quartiles.append(rows[3 * q_size :])
+        for index, row in enumerate(rows):
+            quartiles[min(index * 4 // n, 3)].append(row)
 
         labels = ["Q1 (smallest)", "Q2", "Q3", "Q4 (largest)"]
         stats: list[dict[str, Any]] = []
         for label, group in zip(labels, quartiles):
             if not group:
                 continue
-            qtys = [q for q, _ in group]
-            pnls = [p for _, p in group]
+            notionals = [row[0] for row in group]
+            pnls = [row[1] for row in group]
+            returns = [row[2] for row in group]
             total_pnl = sum(pnls)
-            avg_qty = sum(qtys) / len(qtys)
+            avg_notional = sum(notionals) / len(notionals)
             wins = sum(1 for p in pnls if p > 0)
-            # pnl per unit of quantity
-            pnl_per_unit = total_pnl / sum(qtys) if sum(qtys) > 0 else 0
+            avg_return_pct = sum(returns) / len(returns) * 100
             stats.append(
                 {
                     "quartile": label,
                     "trade_count": len(group),
-                    "avg_quantity": round(avg_qty, 1),
+                    "avg_entry_notional": round(avg_notional, 2),
                     "total_pnl": round(total_pnl, 2),
                     "avg_pnl": round(total_pnl / len(group), 2),
                     "win_rate": round(wins / len(group), 4),
-                    "pnl_per_unit": round(pnl_per_unit, 4),
+                    "avg_return_pct": round(avg_return_pct, 4),
                 }
             )
 
         # detect size efficiency trend
         if len(stats) >= 2:
-            first_eff = stats[0]["pnl_per_unit"]
-            last_eff = stats[-1]["pnl_per_unit"]
-            if last_eff > first_eff * 1.2:
+            first_eff = stats[0]["avg_return_pct"]
+            last_eff = stats[-1]["avg_return_pct"]
+            relative_change = (last_eff - first_eff) / max(
+                abs(first_eff),
+                1e-9,
+            )
+            if relative_change > 0.2:
                 trend = "increasing-returns"
-            elif last_eff < first_eff * 0.8:
+            elif relative_change < -0.2:
                 trend = "diminishing-returns"
             else:
                 trend = "stable"
         else:
             trend = "insufficient"
 
-        return {
+        return analytics_response(sample, {
             "symbol": symbol or "ALL",
             "lookback_days": lookback_days,
             "sample_size": n,
             "quartiles": stats,
             "size_efficiency_trend": trend,
             "assessment": _assess(trend),
-        }
-
-    def _fetch(
-        self, symbol: str | None, days: int
-    ) -> list[tuple[float, float]]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        stmt = select(OrderRecord.quantity, OrderRecord.net_pnl).where(
-            OrderRecord.net_pnl.is_not(None),
-            OrderRecord.quantity.is_not(None),
-            OrderRecord.quantity > 0,
-            OrderRecord.filled_at >= cutoff,
-        )
-        if symbol:
-            stmt = stmt.where(OrderRecord.symbol == symbol)
-        rows = self._db.execute(stmt).all()
-        return [
-            (float(r[0]), float(r[1]))
-            for r in rows
-            if r[0] is not None and r[1] is not None
-        ]
+        })
 
 
 def _assess(trend: str) -> str:

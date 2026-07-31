@@ -9,13 +9,16 @@ periodic return analysis.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import OrderRecord
+from app.services.analytics_trade_sample_service import (
+    analytics_response,
+    load_analytics_trade_sample,
+    market_local_datetime,
+    mixed_currency_error,
+)
 
 __all__ = ["IntradaySeasonalityService"]
 
@@ -46,14 +49,36 @@ class IntradaySeasonalityService:
     def analyze(
         self, symbol: str | None = None, lookback_days: int = 180
     ) -> dict[str, Any]:
-        rows = self._fetch(symbol, lookback_days)
+        sample = load_analytics_trade_sample(
+            self._db,
+            symbol=symbol,
+            lookback_days=lookback_days,
+            include_excursions=False,
+        )
+        mixed_error = mixed_currency_error(
+            sample,
+            symbol=symbol,
+            lookback_days=lookback_days,
+        )
+        if mixed_error is not None:
+            return mixed_error
+        rows = [
+            (
+                market_local_datetime(trade.symbol, trade.exit_at),
+                trade.net_pnl,
+            )
+            for trade in sample.trades
+        ]
         if len(rows) < 10:
-            return {
-                "symbol": symbol or "ALL",
-                "lookback_days": lookback_days,
-                "sample_size": len(rows),
-                "error": "Need at least 10 closed trades.",
-            }
+            return analytics_response(
+                sample,
+                {
+                    "symbol": symbol or "ALL",
+                    "lookback_days": lookback_days,
+                    "sample_size": len(rows),
+                    "error": "Need at least 10 closed trades.",
+                },
+            )
 
         by_bucket: dict[str, list[float]] = defaultdict(list)
         unmatched: list[float] = []
@@ -91,30 +116,15 @@ class IntradaySeasonalityService:
         best = max(active, key=lambda x: x["avg_pnl"]) if active else None
         worst = min(active, key=lambda x: x["avg_pnl"]) if active else None
 
-        return {
-            "symbol": symbol or "ALL",
-            "lookback_days": lookback_days,
-            "sample_size": len(rows),
-            "buckets": stats,
-            "unmatched_count": len(unmatched),
-            "best_bucket": best,
-            "worst_bucket": worst,
-        }
-
-    def _fetch(
-        self, symbol: str | None, days: int
-    ) -> list[tuple[datetime, float]]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        stmt = select(OrderRecord.filled_at, OrderRecord.net_pnl).where(
-            OrderRecord.net_pnl.is_not(None),
-            OrderRecord.filled_at >= cutoff,
+        return analytics_response(
+            sample,
+            {
+                "symbol": symbol or "ALL",
+                "lookback_days": lookback_days,
+                "sample_size": len(rows),
+                "buckets": stats,
+                "unmatched_count": len(unmatched),
+                "best_bucket": best,
+                "worst_bucket": worst,
+            },
         )
-        if symbol:
-            stmt = stmt.where(OrderRecord.symbol == symbol)
-        stmt = stmt.order_by(OrderRecord.filled_at.asc())
-        rows = self._db.execute(stmt).all()
-        return [
-            (r[0], float(r[1]))
-            for r in rows
-            if r[0] is not None and r[1] is not None
-        ]

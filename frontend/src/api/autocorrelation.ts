@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface AcfLag {
   lag: number
@@ -10,12 +11,14 @@ export interface AutocorrelationResult {
   symbol: string
   lookback_days: number
   sample_size: number
+  analysis_status?: 'READY' | 'DEGENERATE' | 'INSUFFICIENT_SAMPLE'
   lags: AcfLag[]
   ljung_box_q: number
   significant_lags: number
   confidence_band: number
   pattern: string
   interpretation: string
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

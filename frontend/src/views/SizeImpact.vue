@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { getSizeImpact, type SizeImpactResult } from '../api/sizeImpact'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 
 const loading = ref(false)
 const result = ref<SizeImpactResult | null>(null)
@@ -51,6 +52,7 @@ const trendLabel: Record<string, string> = {
     </el-card>
 
     <template v-if="result">
+      <StatisticsQualityAlert :quality="result.statistics_quality" />
       <el-alert v-if="result.error" :title="result.error" type="warning" :closable="false" style="margin-top: 16px" />
 
       <template v-else>
@@ -82,7 +84,7 @@ const trendLabel: Record<string, string> = {
           <el-table :data="result.quartiles" size="small">
             <el-table-column prop="quartile" label="四分位" width="130" />
             <el-table-column prop="trade_count" label="交易数" width="80" />
-            <el-table-column prop="avg_quantity" label="平均数量" width="100" />
+            <el-table-column prop="avg_entry_notional" label="平均入场名义金额" width="140" />
             <el-table-column prop="total_pnl" label="总 PnL" width="100">
               <template #default="{ row }">
                 <span :style="{ color: pnlColor(row.total_pnl) }">{{ row.total_pnl }}</span>
@@ -96,9 +98,9 @@ const trendLabel: Record<string, string> = {
             <el-table-column prop="win_rate" label="胜率" width="80">
               <template #default="{ row }">{{ (row.win_rate * 100).toFixed(1) }}%</template>
             </el-table-column>
-            <el-table-column prop="pnl_per_unit" label="单位收益" width="100">
+            <el-table-column prop="avg_return_pct" label="平均净收益率" width="120">
               <template #default="{ row }">
-                <span :style="{ color: pnlColor(row.pnl_per_unit) }">{{ row.pnl_per_unit }}</span>
+                <span :style="{ color: pnlColor(row.avg_return_pct) }">{{ row.avg_return_pct }}%</span>
               </template>
             </el-table-column>
           </el-table>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { getRMultiplesDistribution, type RMultiplesResult } from '../api/rMultiples'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 
 const loading = ref(false)
 const result = ref<RMultiplesResult | null>(null)
@@ -28,7 +29,7 @@ function bucketColor(bucket: string): string {
 <template>
   <div class="page-container">
     <h2>R 倍数分布</h2>
-    <p class="page-desc">以平均亏损为 1R 风险单位归一化每笔净盈亏的分布（灵感来自 Edgewonk / QuantStats）</p>
+    <p class="page-desc">以样本平均已实现亏损作为 1R 代理；因缺少入场时冻结风险，这不是真实初始 R 倍数</p>
 
     <el-card class="control-card">
       <el-form inline>
@@ -42,6 +43,7 @@ function bucketColor(bucket: string): string {
     </el-card>
 
     <template v-if="result">
+      <StatisticsQualityAlert :quality="result.statistics_quality" style="margin-top: 16px" />
       <el-alert v-if="result.error" :title="result.error" type="warning" :closable="false" style="margin-top: 16px" />
 
       <template v-else>
@@ -58,7 +60,7 @@ function bucketColor(bucket: string): string {
           </el-col>
           <el-col :span="6">
             <el-card shadow="hover">
-              <el-statistic title="1R 风险单位" :value="result.risk_unit" :precision="2" />
+              <el-statistic title="1R 代理（平均已实现亏损）" :value="result.risk_unit" :precision="2" />
             </el-card>
           </el-col>
           <el-col :span="6">

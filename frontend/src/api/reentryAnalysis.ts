@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface ReentryBucket {
   trades: number
@@ -20,8 +21,13 @@ export interface ReentryAnalysisResult {
   after_loss: ReentryBucket
   after_scratch: ReentryBucket
   first_of_symbol: ReentryBucket
+  overlapping_entry: ReentryBucket
   tilt_avg_pnl_diff: number | null
   by_symbol: ReentrySymbolRow[]
+  currency: string | null
+  currencies: string[]
+  totals_comparable: boolean
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

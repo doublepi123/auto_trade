@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { getConcentration, type ConcentrationResult } from '../api/concentration'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 
 const loading = ref(false)
 const result = ref<ConcentrationResult | null>(null)
@@ -15,17 +16,25 @@ async function run() {
   }
 }
 
-function levelType(l: string): 'danger' | 'warning' | 'success' {
+function levelType(l: string): 'danger' | 'warning' | 'success' | 'info' {
   if (l === 'high') return 'danger'
   if (l === 'moderate') return 'warning'
+  if (l === 'unavailable') return 'info'
   return 'success'
+}
+
+function levelLabel(level: string): string {
+  if (level === 'unavailable') return '不可用'
+  if (level === 'high') return '高'
+  if (level === 'moderate') return '中'
+  return '低'
 }
 </script>
 
 <template>
   <div class="page-container">
     <h2>标的集中度</h2>
-    <p class="page-desc">HHI 与有效 N 度量 PnL 和交易次数的集中度风险（灵感来自 QuantConnect / Lean）</p>
+    <p class="page-desc">HHI 与有效 N 度量集中度；所有标的净 PnL 都为零时，PnL 集中度明确标记为不可用</p>
 
     <el-card class="control-card">
       <el-form inline>
@@ -39,6 +48,7 @@ function levelType(l: string): 'danger' | 'warning' | 'success' {
     </el-card>
 
     <template v-if="result">
+      <StatisticsQualityAlert :quality="result.statistics_quality" />
       <el-alert v-if="result.error" :title="result.error" type="warning" :closable="false" style="margin-top: 16px" />
 
       <template v-else>
@@ -52,12 +62,20 @@ function levelType(l: string): 'danger' | 'warning' | 'success' {
           </el-col>
           <el-col :span="5">
             <el-card shadow="hover">
-              <el-statistic title="HHI (PnL)" :value="result.hhi_pnl" :precision="4" />
+              <el-statistic v-if="result.hhi_pnl !== null" title="HHI (PnL)" :value="result.hhi_pnl" :precision="4" />
+              <div v-else class="stat-custom">
+                <span class="stat-label">HHI (PnL)</span>
+                <span class="stat-value">不可用</span>
+              </div>
             </el-card>
           </el-col>
           <el-col :span="5">
             <el-card shadow="hover">
-              <el-statistic title="有效 N (PnL)" :value="result.effective_n_pnl" :precision="2" />
+              <el-statistic v-if="result.effective_n_pnl !== null" title="有效 N (PnL)" :value="result.effective_n_pnl" :precision="2" />
+              <div v-else class="stat-custom">
+                <span class="stat-label">有效 N (PnL)</span>
+                <span class="stat-value">不可用</span>
+              </div>
             </el-card>
           </el-col>
           <el-col :span="5">
@@ -69,7 +87,7 @@ function levelType(l: string): 'danger' | 'warning' | 'success' {
             <el-card shadow="hover">
               <div class="stat-custom">
                 <span class="stat-label">集中度</span>
-                <el-tag :type="levelType(result.concentration_level)" size="large">{{ result.concentration_level }}</el-tag>
+                <el-tag :type="levelType(result.concentration_level)" size="large">{{ levelLabel(result.concentration_level) }}</el-tag>
               </div>
             </el-card>
           </el-col>
@@ -83,7 +101,8 @@ function levelType(l: string): 'danger' | 'warning' | 'success' {
             <el-table-column prop="total_pnl" label="总 PnL" width="100" />
             <el-table-column prop="pnl_share" label="PnL 份额" width="120">
               <template #default="{ row }">
-                <el-progress :percentage="Math.round(row.pnl_share * 100)" :stroke-width="12" />
+                <el-progress v-if="row.pnl_share !== null" :percentage="Math.round(row.pnl_share * 100)" :stroke-width="12" />
+                <span v-else>不可用</span>
               </template>
             </el-table-column>
             <el-table-column prop="count_share" label="次数份额" width="120">

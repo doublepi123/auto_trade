@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface ParetoPoint {
   top_pct_trades: number
@@ -18,6 +19,10 @@ export interface ProfitConcentrationResult {
   top5_share: number
   gini_winners: number
   pareto_curve: ParetoPoint[]
+  currency: string | null
+  currencies: string[]
+  totals_comparable: boolean
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

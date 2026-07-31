@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface RBucket {
   bucket: string
@@ -9,6 +10,8 @@ export interface RBucket {
 export interface RMultiplesResult {
   days: number
   sample_size: number
+  risk_unit_method: 'MEAN_REALIZED_LOSS_PROXY'
+  true_initial_risk_available: false
   risk_unit: number
   expectancy_r: number
   pct_ge_1r: number
@@ -16,6 +19,10 @@ export interface RMultiplesResult {
   min_r: number
   max_r: number
   histogram: RBucket[]
+  currency: string | null
+  currencies: string[]
+  totals_comparable: boolean
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

@@ -53,7 +53,7 @@
         <router-link to="/decay-detection" class="app-menu-link" :class="{ active: route.path === '/decay-detection' }">衰减检测</router-link>
         <router-link to="/rolling-var" class="app-menu-link" :class="{ active: route.path === '/rolling-var' }">VaR/CVaR</router-link>
         <router-link to="/asymmetry" class="app-menu-link" :class="{ active: route.path === '/asymmetry' }">胜负不对称</router-link>
-        <router-link to="/capital-efficiency" class="app-menu-link" :class="{ active: route.path === '/capital-efficiency' }">资金效率</router-link>
+        <router-link to="/capital-efficiency" class="app-menu-link" :class="{ active: route.path === '/capital-efficiency' }">闭环资金效率</router-link>
         <router-link to="/intraday-seasonality" class="app-menu-link" :class="{ active: route.path === '/intraday-seasonality' }">日内季节性</router-link>
         <router-link to="/drawdown-duration" class="app-menu-link" :class="{ active: route.path === '/drawdown-duration' }">回撤持续期</router-link>
         <router-link to="/prediction-score" class="app-menu-link" :class="{ active: route.path === '/prediction-score' }">条件胜率</router-link>
@@ -68,7 +68,7 @@
         <router-link to="/profit-concentration" class="app-menu-link" :class="{ active: route.path === '/profit-concentration' }">盈利集中</router-link>
         <router-link to="/scratch-analysis" class="app-menu-link" :class="{ active: route.path === '/scratch-analysis' }">保本交易</router-link>
         <router-link to="/reentry-analysis" class="app-menu-link" :class="{ active: route.path === '/reentry-analysis' }">再入场</router-link>
-        <router-link to="/first-trade" class="app-menu-link" :class="{ active: route.path === '/first-trade' }">首单效应</router-link>
+        <router-link to="/first-trade" class="app-menu-link" :class="{ active: route.path === '/first-trade' }">首笔平仓效应</router-link>
         <router-link to="/loss-containment" class="app-menu-link" :class="{ active: route.path === '/loss-containment' }">亏损控制</router-link>
         <router-link to="/daily-consistency" class="app-menu-link" :class="{ active: route.path === '/daily-consistency' }">每日一致</router-link>
       </nav>

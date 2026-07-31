@@ -10,14 +10,16 @@ evaluation.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
 from statistics import median
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import OrderRecord
+from app.services.analytics_trade_sample_service import (
+    analytics_response,
+    load_analytics_trade_sample,
+    mixed_currency_error,
+)
 
 __all__ = ["LossContainmentService"]
 
@@ -37,13 +39,31 @@ class LossContainmentService:
         self._db = db
 
     def summary(self, days: int = 90) -> dict[str, Any]:
-        rows = self._fetch(days)
+        sample = load_analytics_trade_sample(
+            self._db,
+            lookback_days=days,
+            include_excursions=False,
+        )
+        mixed_error = mixed_currency_error(
+            sample,
+            payload={"days": days, "sample_size": len(sample.trades)},
+        )
+        if mixed_error is not None:
+            return mixed_error
+        rows = [
+            (trade.exit_cause or "UNKNOWN", trade.net_pnl)
+            for trade in sample.trades
+            if trade.net_pnl < 0
+        ]
         if len(rows) < 3:
-            return {
-                "days": days,
-                "sample_size": len(rows),
-                "error": "Need at least 3 losing trades.",
-            }
+            return analytics_response(
+                sample,
+                {
+                    "days": days,
+                    "sample_size": len(rows),
+                    "error": "Need at least 3 losing trades.",
+                },
+            )
 
         magnitudes = [-p for _, p in rows]
         total_loss = sum(magnitudes)
@@ -86,32 +106,20 @@ class LossContainmentService:
             {"bucket": label, "count": counts[i]} for i, (label, _lo, _hi) in enumerate(_BUCKETS)
         ]
 
-        return {
-            "days": days,
-            "sample_size": len(rows),
-            "total_loss": round(total_loss, 2),
-            "median_loss": round(med, 2),
-            "mean_loss": round(mean, 2),
-            "worst_loss": round(worst, 2),
-            "worst_to_median": round(worst / med, 2) if med > 0 else None,
-            "top3_loss_share": round(top3_share, 4) if top3_share is not None else None,
-            "tail_breach_count": tail_count,
-            "tail_breach_pct": round(tail_count / len(magnitudes), 4),
-            "by_exit_cause": cause_rows,
-            "histogram": histogram,
-        }
-
-    def _fetch(self, days: int) -> list[tuple[str, float]]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        stmt = (
-            select(OrderRecord.exit_cause, OrderRecord.net_pnl)
-            .where(
-                OrderRecord.net_pnl.is_not(None),
-                OrderRecord.net_pnl < 0,
-                OrderRecord.filled_at >= cutoff,
-            )
-            .order_by(OrderRecord.filled_at.asc())
+        return analytics_response(
+            sample,
+            {
+                "days": days,
+                "sample_size": len(rows),
+                "total_loss": round(total_loss, 2),
+                "median_loss": round(med, 2),
+                "mean_loss": round(mean, 2),
+                "worst_loss": round(worst, 2),
+                "worst_to_median": round(worst / med, 2) if med > 0 else None,
+                "top3_loss_share": round(top3_share, 4) if top3_share is not None else None,
+                "tail_breach_count": tail_count,
+                "tail_breach_pct": round(tail_count / len(magnitudes), 4),
+                "by_exit_cause": cause_rows,
+                "histogram": histogram,
+            },
         )
-        return [
-            (r[0] or "UNKNOWN", float(r[1])) for r in self._db.execute(stmt).all() if r[1] is not None
-        ]
