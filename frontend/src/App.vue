@@ -67,6 +67,7 @@
         <router-link to="/r-multiples" class="app-menu-link" :class="{ active: route.path === '/r-multiples' }">R倍数</router-link>
         <router-link to="/profit-concentration" class="app-menu-link" :class="{ active: route.path === '/profit-concentration' }">盈利集中</router-link>
         <router-link to="/scratch-analysis" class="app-menu-link" :class="{ active: route.path === '/scratch-analysis' }">保本交易</router-link>
+        <router-link to="/reentry-analysis" class="app-menu-link" :class="{ active: route.path === '/reentry-analysis' }">再入场</router-link>
       </nav>
       <div class="header-actions">
         <el-button

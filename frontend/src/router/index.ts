@@ -61,6 +61,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/r-multiples', component: () => import('../views/RMultiples.vue') },
   { path: '/profit-concentration', component: () => import('../views/ProfitConcentration.vue') },
   { path: '/scratch-analysis', component: () => import('../views/ScratchAnalysis.vue') },
+  { path: '/reentry-analysis', component: () => import('../views/ReentryAnalysis.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

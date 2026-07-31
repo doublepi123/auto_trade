@@ -102,6 +102,7 @@ from app.api.skip_analytics import router as skip_analytics_router
 from app.api.r_multiples import router as r_multiples_router
 from app.api.profit_concentration import router as profit_concentration_router
 from app.api.scratch_analysis import router as scratch_analysis_router
+from app.api.reentry_analysis import router as reentry_analysis_router
 from app.config import settings
 from app.database import init_db
 from app.runner import get_runner
@@ -1464,6 +1465,7 @@ app.include_router(skip_analytics_router)
 app.include_router(r_multiples_router)
 app.include_router(profit_concentration_router)
 app.include_router(scratch_analysis_router)
+app.include_router(reentry_analysis_router)
 
 
 # Global exception handler: log unhandled exceptions and return a generic 500 JSON
