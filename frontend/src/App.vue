@@ -54,6 +54,7 @@
         <router-link to="/rolling-var" class="app-menu-link" :class="{ active: route.path === '/rolling-var' }">VaR/CVaR</router-link>
         <router-link to="/asymmetry" class="app-menu-link" :class="{ active: route.path === '/asymmetry' }">胜负不对称</router-link>
         <router-link to="/capital-efficiency" class="app-menu-link" :class="{ active: route.path === '/capital-efficiency' }">资金效率</router-link>
+        <router-link to="/intraday-seasonality" class="app-menu-link" :class="{ active: route.path === '/intraday-seasonality' }">日内季节性</router-link>
       </nav>
       <div class="header-actions">
         <el-button
