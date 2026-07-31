@@ -40,6 +40,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/trade-frequency', component: () => import('../views/TradeFrequency.vue') },
   { path: '/profit-factor', component: () => import('../views/ProfitFactor.vue') },
   { path: '/concentration', component: () => import('../views/Concentration.vue') },
+  { path: '/autocorrelation', component: () => import('../views/Autocorrelation.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
