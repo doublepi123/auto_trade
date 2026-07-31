@@ -40,6 +40,12 @@ describe('Backtest', () => {
     cy.wait('@runBacktest').its('request.body.params.max_drawdown_amount').should('equal', 250)
   })
 
+  it('allows zero to disable the research daily-loss guard', () => {
+    cy.get('[data-testid="max-daily-loss"] input').clear().type('0').blur()
+    cy.get('[data-testid="run-backtest-button"]').click()
+    cy.wait('@runBacktest').its('request.body.params.max_daily_loss').should('equal', 0)
+  })
+
   it('can load sample csv after edits', () => {
     cy.get('[data-testid="backtest-csv-input"]').clear().type('bad')
     cy.contains('载入示例').click()

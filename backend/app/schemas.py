@@ -1889,7 +1889,7 @@ class BacktestParams(BaseModel):
     sell_high: float = Field(gt=0)
     short_selling: bool = Field(default=False)
     min_profit_amount: float = Field(default=0.0, ge=0)
-    max_daily_loss: float = Field(default=5000.0, gt=0)
+    max_daily_loss: float = Field(default=5000.0, ge=0, allow_inf_nan=False)
     max_drawdown_amount: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     max_consecutive_losses: int = Field(default=3, ge=1)
     quantity: float = Field(default=1.0, gt=0)

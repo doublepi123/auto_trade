@@ -14,6 +14,7 @@ client = TestClient(app)
 class _BacktestMetricsJson(TypedDict):
     total_pnl: float
     win_rate: float
+    final_state: str
 
 
 class _BacktestTradeJson(TypedDict):
@@ -407,6 +408,238 @@ class TestBacktestEngine:
         assert result.trades[-1].action == "STOP_LOSS_SELL"
         assert result.trades[-1].price == 95
 
+    def test_daily_loss_at_exact_boundary_precedes_stop_eod_time_and_target(
+        self,
+    ) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            market="US",
+            trading_session_mode="RTH_ONLY",
+            buy_low=100,
+            sell_high=110,
+            min_profit_amount=1_000,
+            max_daily_loss=5,
+            stop_loss_pct=5,
+            max_holding_minutes=1,
+            flatten_minutes_before_close=15,
+        ))
+
+        result = engine.run([
+            bar_at(
+                datetime(2026, 5, 22, 19, 44, tzinfo=timezone.utc),
+                101,
+                102,
+                99,
+                100,
+            ),
+            # Every deterministic exit and the target are eligible. The live
+            # priority chooses DAILY_LOSS at the exact combined-PnL boundary.
+            bar_at(
+                datetime(2026, 5, 22, 19, 45, tzinfo=timezone.utc),
+                100,
+                111,
+                94,
+                95,
+            ),
+        ], include_fee_sensitivity=False)
+        closed = result.trades[-1]
+
+        assert closed.action == "DAILY_LOSS_SELL"
+        assert closed.price == 95
+        assert closed.pnl == -5
+        assert closed.reason.startswith(
+            "DAILY_LOSS: daily loss limit reached using OHLC bar-close "
+            "approximation"
+        )
+        assert "realized=0.00" in closed.reason
+        assert "unrealized=-5.00" in closed.reason
+        assert "combined=-5.00" in closed.reason
+        assert result.metrics.skipped_signals == 0
+
+    def test_daily_loss_does_not_trigger_above_exact_boundary(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            buy_low=100,
+            sell_high=200,
+            max_daily_loss=5,
+        ))
+
+        result = engine.run([
+            bar(0, 101, 102, 99, 100),
+            bar(1, 100, 101, 95.01, 95.01),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == ["BUY"]
+        assert result.metrics.final_state == "long"
+
+    def test_zero_daily_loss_disables_guard_like_live_risk_controller(
+        self,
+    ) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            buy_low=100,
+            sell_high=200,
+            max_daily_loss=0,
+            max_holding_minutes=1,
+        ))
+
+        result = engine.run([
+            bar(0, 101, 102, 99, 100),
+            bar(1, 50, 51, 49, 50),
+            bar(2, 101, 102, 99, 100),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == [
+            "BUY",
+            "TIME_STOP_SELL",
+            "BUY",
+        ]
+        assert result.metrics.final_state == "long"
+
+    def test_negative_daily_loss_is_rejected(self) -> None:
+        try:
+            BacktestEngine(BacktestEngineParams(
+                buy_low=100,
+                sell_high=200,
+                max_daily_loss=-1,
+            ))
+        except ValueError as exc:
+            assert "max_daily_loss must be finite and non-negative" in str(exc)
+        else:
+            raise AssertionError("negative max_daily_loss should raise ValueError")
+
+    def test_non_finite_daily_loss_is_rejected_by_core_engine(self) -> None:
+        for invalid in (float("nan"), float("inf"), float("-inf")):
+            try:
+                BacktestEngine(BacktestEngineParams(
+                    buy_low=100,
+                    sell_high=200,
+                    max_daily_loss=invalid,
+                ))
+            except ValueError as exc:
+                assert "max_daily_loss must be finite and non-negative" in str(exc)
+            else:
+                raise AssertionError(
+                    "non-finite max_daily_loss should raise ValueError"
+                )
+
+    def test_daily_loss_combines_realized_day_pnl_with_open_unrealized(
+        self,
+    ) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            buy_low=100,
+            sell_high=200,
+            max_daily_loss=5,
+            max_holding_minutes=1,
+        ))
+
+        result = engine.run([
+            bar(0, 101, 102, 99, 100),
+            bar(1, 99, 99, 98, 98),
+            bar(2, 101, 102, 99, 100),
+            bar(3, 98, 99, 97, 97),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == [
+            "BUY",
+            "TIME_STOP_SELL",
+            "BUY",
+            "DAILY_LOSS_SELL",
+        ]
+        assert result.trades[1].pnl == -2
+        closed = result.trades[-1]
+        assert closed.pnl == -3
+        assert "realized=-2.00" in closed.reason
+        assert "unrealized=-3.00" in closed.reason
+        assert "combined=-5.00" in closed.reason
+
+    def test_positive_realized_pnl_offsets_open_loss_before_daily_exit(
+        self,
+    ) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            buy_low=100,
+            sell_high=110,
+            max_daily_loss=5,
+        ))
+
+        result = engine.run([
+            bar(0, 101, 102, 99, 100),
+            bar(1, 109, 110, 105, 110),
+            bar(2, 101, 102, 99, 100),
+            bar(3, 86, 86, 84, 85),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == [
+            "BUY",
+            "SELL",
+            "BUY",
+            "DAILY_LOSS_SELL",
+        ]
+        closed = result.trades[-1]
+        assert "realized=10.00" in closed.reason
+        assert "unrealized=-15.00" in closed.reason
+        assert "combined=-5.00" in closed.reason
+
+    def test_short_daily_loss_cover_applies_buy_slippage(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            buy_low=90,
+            sell_high=100,
+            short_selling=True,
+            quantity=10,
+            max_daily_loss=20,
+            slippage_pct=1,
+        ))
+
+        result = engine.run([
+            bar(0, 99, 101, 98, 100),
+            bar(1, 101, 102, 100, 101),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == [
+            "SELL_SHORT",
+            "DAILY_LOSS_COVER",
+        ]
+        closed = result.trades[-1]
+        assert closed.price == 101 * 1.01
+        assert "unrealized=-20.00" in closed.reason
+
+    def test_daily_loss_close_fill_applies_fees_and_blocks_reentry(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            buy_low=100,
+            sell_high=200,
+            quantity=10,
+            max_daily_loss=20,
+            fee_rate=0.001,
+            fixed_fee=1,
+            slippage_pct=1,
+        ))
+
+        result = engine.run([
+            bar(0, 101, 102, 99, 100),
+            bar(1, 100, 100, 99, 99),
+            bar(2, 101, 102, 99, 100),
+        ], include_fee_sensitivity=False)
+        closed = result.trades[-1]
+
+        assert [trade.action for trade in result.trades] == [
+            "BUY",
+            "DAILY_LOSS_SELL",
+        ]
+        expected_exit_price = 99 * 0.99
+        assert closed.price == expected_exit_price
+        assert closed.gross_pnl is not None
+        assert abs(closed.gross_pnl - (-29.9)) < 1e-9
+        assert abs(closed.fee - 1.9801) < 1e-9
+        assert closed.total_fees is not None
+        assert abs(closed.total_fees - 3.9901) < 1e-9
+        assert closed.net_pnl is not None
+        assert abs(closed.net_pnl - (-33.8901)) < 1e-9
+        assert abs(result.metrics.fees_paid - 3.9901) < 1e-9
+        # Like live, the trigger excludes entry/prospective exit fees and uses
+        # the gross open-position PnL at the observed close (99 vs entry 101).
+        assert "realized=0.00" in closed.reason
+        assert "unrealized=-20.00" in closed.reason
+        assert len(result.skipped_signals) == 1
+        assert result.skipped_signals[0].category == "RISK"
+        assert "daily loss limit reached" in result.skipped_signals[0].reason
+
     def test_rth_only_does_not_manufacture_after_hours_exit(self) -> None:
         engine = BacktestEngine(BacktestEngineParams(
             market="US",
@@ -447,10 +680,14 @@ class TestBacktestEngine:
 
         result = engine.run([
             bar_at(datetime(2026, 5, 20, 23, 57, tzinfo=timezone.utc), 105, 106, 99, 100),
-            bar_at(datetime(2026, 5, 20, 23, 58, tzinfo=timezone.utc), 98, 99, 94, 95),
+            # Close remains above the daily-loss boundary, so fixed-stop wins;
+            # its threshold fill then reaches the realized daily limit.
+            bar_at(datetime(2026, 5, 20, 23, 58, tzinfo=timezone.utc), 98, 99, 94, 96),
             # UTC date changed, but New York is still on May 20: remain paused.
             bar_at(datetime(2026, 5, 21, 0, 2, tzinfo=timezone.utc), 105, 106, 99, 100),
-            # New York local midnight has now passed: daily pause resets.
+            # New York local midnight has now passed: a realized-only daily
+            # pause resets because no non-auto-resumable DAILY_LOSS reduction
+            # was latched.
             bar_at(datetime(2026, 5, 21, 4, 1, tzinfo=timezone.utc), 105, 106, 99, 100),
         ], include_fee_sensitivity=False)
 
@@ -459,6 +696,38 @@ class TestBacktestEngine:
         ]
         assert len(result.skipped_signals) == 1
         assert result.skipped_signals[0].category == "RISK"
+
+    def test_daily_loss_forced_exit_requires_manual_resume_across_days(
+        self,
+    ) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            market="US",
+            buy_low=100,
+            sell_high=200,
+            max_daily_loss=5,
+            max_consecutive_losses=10,
+        ))
+
+        result = engine.run([
+            bar_at(datetime(2026, 5, 20, 23, 57, tzinfo=timezone.utc), 101, 102, 99, 100),
+            bar_at(datetime(2026, 5, 20, 23, 58, tzinfo=timezone.utc), 95, 96, 94, 95),
+            # Same exchange-local day remains paused.
+            bar_at(datetime(2026, 5, 21, 0, 2, tzinfo=timezone.utc), 101, 102, 99, 100),
+            # A new exchange-local day does not manufacture the manual resume
+            # required by live after a DAILY_LOSS reduction fill.
+            bar_at(datetime(2026, 5, 21, 4, 1, tzinfo=timezone.utc), 101, 102, 99, 100),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == [
+            "BUY",
+            "DAILY_LOSS_SELL",
+        ]
+        assert len(result.skipped_signals) == 2
+        assert all(
+            signal.category == "RISK"
+            and "requires manual resume" in signal.reason
+            for signal in result.skipped_signals
+        )
 
     def test_rejects_invalid_market_mode_and_execution_windows(self) -> None:
         invalid_overrides = [
@@ -587,7 +856,10 @@ class TestBacktestEngine:
             bar(2, 105, 106, 99, 100),
         ])
 
-        assert [trade.action for trade in result.trades] == ["BUY", "STOP_LOSS_SELL"]
+        assert [trade.action for trade in result.trades] == [
+            "BUY",
+            "DAILY_LOSS_SELL",
+        ]
         assert result.trades[1].pnl == -5
         assert result.metrics.skipped_signals == 1
         assert "daily loss limit reached" in result.skipped_signals[0].reason
@@ -1026,6 +1298,47 @@ class TestBacktestAPI:
 
             assert resp.status_code == 422
             assert field in resp.text
+
+    def test_backtest_api_treats_zero_daily_loss_as_disabled(self) -> None:
+        resp = client.post("/api/backtest/run", json={
+            "params": {
+                "buy_low": 100,
+                "sell_high": 200,
+                "max_daily_loss": 0,
+                "max_holding_minutes": 1,
+            },
+            "csv_text": (
+                "timestamp,open,high,low,close,volume\n"
+                "2026-05-22T10:00:00Z,101,102,99,100,1000\n"
+                "2026-05-22T10:01:00Z,50,51,49,50,1000\n"
+                "2026-05-22T10:02:00Z,101,102,99,100,1000\n"
+            ),
+        })
+
+        assert resp.status_code == 200
+        data = cast(_BacktestResultJson, resp.json())
+        assert [trade["action"] for trade in data["trades"]] == [
+            "BUY",
+            "TIME_STOP_SELL",
+            "BUY",
+        ]
+        assert data["metrics"]["final_state"] == "long"
+
+    def test_backtest_schema_rejects_negative_daily_loss(self) -> None:
+        resp = client.post("/api/backtest/run", json={
+            "params": {
+                "buy_low": 100,
+                "sell_high": 200,
+                "max_daily_loss": -1,
+            },
+            "csv_text": (
+                "timestamp,open,high,low,close,volume\n"
+                "2026-05-22T10:00:00Z,101,102,99,100,1000\n"
+            ),
+        })
+
+        assert resp.status_code == 422
+        assert "max_daily_loss" in resp.text
 
     def test_backtest_schema_rejects_symbol_market_mismatch(self) -> None:
         resp = client.post("/api/backtest/run", json={

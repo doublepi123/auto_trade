@@ -249,7 +249,26 @@ def test_report_date_filter_boundaries_reach_split_and_output() -> None:
     assert parameters["start_date"] == "2026-07-07"
     assert parameters["end_date"] == "2026-07-09"
     assert parameters["trailing_stop_pct"] == 1.25
-    assert any("realized-plus-unrealized" in item for item in limitations)
+    assert any(
+        "realized-plus-unrealized" in item
+        and "bar close" in item
+        and "executable BBO" in item
+        and "last-price pre-pause" in item
+        for item in limitations
+    )
+    assert any(
+        "non-auto-resumable" in item
+        and "operator-resume" in item
+        and "rest of the run" in item
+        for item in limitations
+    )
+    assert any(
+        "RTH_ONLY" in item
+        and "DAILY_LOSS" in item
+        and "PRICE_STOP" in item
+        and "next open" in item
+        for item in limitations
+    )
 
 
 def test_main_prints_json_and_writes_only_explicit_output(
@@ -276,6 +295,7 @@ def test_main_prints_json_and_writes_only_explicit_output(
         "--horizons", "15",
         "--crossing",
         "--max-entries", "1",
+        "--max-daily-loss", "0",
         "--bar-timestamp", "end",
         "--bar-minutes", "1",
     ])
@@ -284,4 +304,5 @@ def test_main_prints_json_and_writes_only_explicit_output(
     stdout_payload = json.loads(capsys.readouterr().out)
     assert stdout_payload == json.loads(output.read_text(encoding="utf-8"))
     assert stdout_payload["parameters"]["symbol"] == "TEST.US"
+    assert stdout_payload["parameters"]["max_daily_loss"] == 0
     assert stdout_payload["fidelity_mode"] == "OHLC_BAR_CLOSE_APPROXIMATION"

@@ -39,12 +39,20 @@ _LIMITATIONS = (
     "so fills are bar-close approximations.",
     "Fresh crossing is a conservative bar-local OHLC approximation; quote-level "
     "crossing age and ordering cannot be reconstructed from candles.",
-    "The backtest daily-loss guard pauses only after realized closed-trade losses; "
-    "it does not reproduce the live realized-plus-unrealized forced-exit priority.",
+    "The daily-loss guard approximates the realized-plus-unrealized priority of "
+    "the live deterministic BBO reduction path with closed-trade net PnL plus "
+    "the open position's gross PnL at the observed "
+    "bar close. Historical executable BBO and intrabar breach timing cannot be "
+    "reconstructed, and the separate live last-price pre-pause fallback is not "
+    "modeled.",
+    "A filled DAILY_LOSS reduction is non-auto-resumable in live execution. The "
+    "bar input contains no operator-resume event, so replay remains paused for "
+    "the rest of the run after that forced exit.",
     "Backtest ANY mode preserves legacy all-hours entry semantics; the live safety "
     "layer still rejects new long entries outside RTH.",
-    "RTH_ONLY skips non-RTH fills but does not latch a non-RTH stop for execution "
-    "at the next open as the live reduction workflow does.",
+    "RTH_ONLY skips non-RTH fills but does not latch any non-RTH deterministic "
+    "reduction (DAILY_LOSS, PRICE_STOP, EOD, or TIME) for execution at the next "
+    "open as the live reduction workflow does.",
     "The simulation has no historical bid/ask spread, latency, order queue, "
     "rejections, partial fills, or broker buying-power replay; fixed quantity is "
     "not dynamic full-buying-power sizing.",
@@ -581,7 +589,12 @@ def build_parser() -> argparse.ArgumentParser:
                         default="RTH_ONLY")
     parser.add_argument("--min-profit", type=_non_negative_float, default=0.0)
     parser.add_argument("--trailing-stop", type=_non_negative_float, default=0.0)
-    parser.add_argument("--max-daily-loss", type=_positive_float, default=5000.0)
+    parser.add_argument(
+        "--max-daily-loss",
+        type=_non_negative_float,
+        default=5000.0,
+        help="daily loss limit; 0 disables the guard",
+    )
     parser.add_argument("--max-consecutive-losses", type=_positive_int, default=3)
     parser.add_argument("--initial-cash", type=_positive_float, default=100000.0)
     parser.add_argument("--discovery-ratio", type=_ratio, default=0.70)

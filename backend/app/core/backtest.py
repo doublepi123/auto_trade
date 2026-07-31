@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import itertools
+import math
 import random
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -170,6 +171,7 @@ class BacktestEngine:
         entries_today = 0
         consecutive_losses = 0
         paused_reason = ""
+        daily_loss_reduction_latched = False
         drawdown_reason = ""
         peak_equity = self.params.initial_cash
         max_drawdown_pct = 0.0
@@ -186,7 +188,13 @@ class BacktestEngine:
                 entries_today = 0
                 daily_pnl = 0.0
                 consecutive_losses = 0
-                if paused_reason.startswith("daily loss limit") or paused_reason.startswith("consecutive loss"):
+                if (
+                    not daily_loss_reduction_latched
+                    and (
+                        paused_reason.startswith("daily loss limit")
+                        or paused_reason.startswith("consecutive loss")
+                    )
+                ):
                     paused_reason = ""
 
             if position is not None:
@@ -195,7 +203,11 @@ class BacktestEngine:
                     highest_price=max(position.highest_price, bar.high),
                     lowest_price=min(position.lowest_price, bar.low),
                 )
-                exit_result = self._try_exit_position(bar, position)
+                exit_result = self._try_exit_position(
+                    bar,
+                    position,
+                    realized_daily_pnl=daily_pnl,
+                )
                 if exit_result is not None:
                     action, price, exit_fee, net_pnl, reason, require_min_profit = exit_result
                     if require_min_profit and net_pnl < self.params.min_profit_amount:
@@ -273,7 +285,21 @@ class BacktestEngine:
                             )
                             # With new entries blocked, closed-trade PnL cannot recover;
                             # the breach therefore remains terminal for this run.
-                        if daily_pnl <= -abs(self.params.max_daily_loss):
+                        if action.startswith("DAILY_LOSS_"):
+                            # Live persists a DAILY_LOSS reduction as a
+                            # non-auto-resumable pause. Historical bars contain
+                            # no operator-resume event, so the strict replay
+                            # remains paused for the rest of the run.
+                            daily_loss_reduction_latched = True
+                            paused_reason = (
+                                "daily loss limit reached; forced exit requires "
+                                "manual resume: "
+                                f"{daily_pnl:.2f}"
+                            )
+                        elif (
+                            self.params.max_daily_loss > 0
+                            and daily_pnl <= -self.params.max_daily_loss
+                        ):
                             paused_reason = f"daily loss limit reached: {daily_pnl:.2f}"
                         elif consecutive_losses >= self.params.max_consecutive_losses:
                             paused_reason = f"max consecutive losses reached: {consecutive_losses}"
@@ -533,8 +559,11 @@ class BacktestEngine:
             raise ValueError("initial_cash must be greater than 0")
         if self.params.min_profit_amount < 0:
             raise ValueError("min_profit_amount cannot be negative")
-        if self.params.max_daily_loss <= 0:
-            raise ValueError("max_daily_loss must be greater than 0")
+        if (
+            not math.isfinite(self.params.max_daily_loss)
+            or self.params.max_daily_loss < 0
+        ):
+            raise ValueError("max_daily_loss must be finite and non-negative")
         if self.params.max_drawdown_amount < 0:
             raise ValueError("max_drawdown_amount cannot be negative")
         if self.params.max_consecutive_losses < 1:
@@ -647,7 +676,13 @@ class BacktestEngine:
             return "SELL_SHORT", "short", price, f"high {bar.high:.2f} >= sell_high {self.params.sell_high:.2f}"
         return None
 
-    def _try_exit_position(self, bar: BacktestBar, position: _OpenPosition) -> tuple[str, float, float, float, str, bool] | None:
+    def _try_exit_position(
+        self,
+        bar: BacktestBar,
+        position: _OpenPosition,
+        *,
+        realized_daily_pnl: float,
+    ) -> tuple[str, float, float, float, str, bool] | None:
         # Live RTH_ONLY execution rejects both entries and exits outside RTH.
         # Keep the position open until an executable session observation rather
         # than manufacturing an after-hours OHLC fill.
@@ -658,8 +693,36 @@ class BacktestEngine:
             return None
         stop_loss_pct = self.params.stop_loss_pct / 100
         trailing_stop_pct = self.params.trailing_stop_pct / 100
-        # Match the live deterministic reduction priority while retaining the
-        # backtest's OHLC-aware fixed-stop fill at the threshold price.
+        # The live deterministic exit policy compares realized daily net PnL
+        # with the open position's gross unrealized PnL at executable BBO.
+        # Historical OHLC has no BBO or intrabar event order, so use this bar's
+        # close both as the trigger observation and as the pre-slippage
+        # forced-exit price. Entry and prospective exit fees are deliberately
+        # not included in the trigger, matching that combined-PnL calculation;
+        # they are included in the resulting closed trade below. A separate
+        # live last-price pre-pause fallback is disclosed, but not replayed.
+        unrealized_at_close = self._unrealized_pnl(position, bar.close)
+        combined_daily_pnl = realized_daily_pnl + unrealized_at_close
+        if (
+            self.params.max_daily_loss > 0
+            and combined_daily_pnl <= -self.params.max_daily_loss
+        ):
+            return self._forced_exit(
+                bar,
+                position,
+                cause="DAILY_LOSS",
+                reason=(
+                    "daily loss limit reached using OHLC bar-close "
+                    "approximation: "
+                    f"realized={realized_daily_pnl:.2f}, "
+                    f"unrealized={unrealized_at_close:.2f}, "
+                    f"combined={combined_daily_pnl:.2f}, "
+                    f"limit={self.params.max_daily_loss:.2f}"
+                ),
+            )
+
+        # Match the remaining live deterministic reduction priority while
+        # retaining the backtest's OHLC-aware fixed-stop fill at its threshold.
         if position.side == "long" and stop_loss_pct > 0:
             stop_price = position.entry_price * (1 - stop_loss_pct)
             if bar.low <= stop_price:

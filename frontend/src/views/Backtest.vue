@@ -75,8 +75,14 @@
             <el-form-item label="新鲜阈值穿越">
               <el-switch v-model="form.entry_crossing_required" />
             </el-form-item>
-            <el-form-item label="单日最大亏损">
-              <el-input-number v-model="form.max_daily_loss" :precision="2" :step="100" :min="1" />
+            <el-form-item label="单日最大亏损（0=关闭）">
+              <el-input-number
+                v-model="form.max_daily_loss"
+                :precision="2"
+                :step="100"
+                :min="0"
+                data-testid="max-daily-loss"
+              />
             </el-form-item>
             <el-form-item label="最大回撤额度">
               <el-input-number v-model="form.max_drawdown_amount" :precision="2" :step="100" :min="0" data-testid="max-drawdown-amount" />
