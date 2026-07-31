@@ -50,6 +50,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/capital-efficiency', component: () => import('../views/CapitalEfficiency.vue') },
   { path: '/intraday-seasonality', component: () => import('../views/IntradaySeasonality.vue') },
   { path: '/drawdown-duration', component: () => import('../views/DrawdownDuration.vue') },
+  { path: '/prediction-score', component: () => import('../views/PredictionScore.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

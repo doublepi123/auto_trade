@@ -56,6 +56,7 @@
         <router-link to="/capital-efficiency" class="app-menu-link" :class="{ active: route.path === '/capital-efficiency' }">资金效率</router-link>
         <router-link to="/intraday-seasonality" class="app-menu-link" :class="{ active: route.path === '/intraday-seasonality' }">日内季节性</router-link>
         <router-link to="/drawdown-duration" class="app-menu-link" :class="{ active: route.path === '/drawdown-duration' }">回撤持续期</router-link>
+        <router-link to="/prediction-score" class="app-menu-link" :class="{ active: route.path === '/prediction-score' }">条件胜率</router-link>
       </nav>
       <div class="header-actions">
         <el-button
