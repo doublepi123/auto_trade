@@ -52,6 +52,7 @@
         <router-link to="/edge-quality" class="app-menu-link" :class="{ active: route.path === '/edge-quality' }">优势评分</router-link>
         <router-link to="/decay-detection" class="app-menu-link" :class="{ active: route.path === '/decay-detection' }">衰减检测</router-link>
         <router-link to="/rolling-var" class="app-menu-link" :class="{ active: route.path === '/rolling-var' }">VaR/CVaR</router-link>
+        <router-link to="/asymmetry" class="app-menu-link" :class="{ active: route.path === '/asymmetry' }">胜负不对称</router-link>
       </nav>
       <div class="header-actions">
         <el-button
