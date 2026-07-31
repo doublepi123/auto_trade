@@ -38,6 +38,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/holding-time', component: () => import('../views/HoldingTime.vue') },
   { path: '/distribution-shape', component: () => import('../views/DistributionShape.vue') },
   { path: '/trade-frequency', component: () => import('../views/TradeFrequency.vue') },
+  { path: '/profit-factor', component: () => import('../views/ProfitFactor.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

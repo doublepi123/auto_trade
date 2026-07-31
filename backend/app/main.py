@@ -79,6 +79,7 @@ from app.api.risk_score import router as risk_score_router
 from app.api.holding_time import router as holding_time_router
 from app.api.distribution_shape import router as distribution_shape_router
 from app.api.trade_frequency import router as trade_frequency_router
+from app.api.profit_factor import router as profit_factor_router
 from app.config import settings
 from app.database import init_db
 from app.runner import get_runner
@@ -1418,6 +1419,7 @@ app.include_router(risk_score_router)
 app.include_router(holding_time_router)
 app.include_router(distribution_shape_router)
 app.include_router(trade_frequency_router)
+app.include_router(profit_factor_router)
 
 
 # Global exception handler: log unhandled exceptions and return a generic 500 JSON
