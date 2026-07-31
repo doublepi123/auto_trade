@@ -44,6 +44,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/size-impact', component: () => import('../views/SizeImpact.vue') },
   { path: '/return-calendar', component: () => import('../views/ReturnCalendar.vue') },
   { path: '/edge-quality', component: () => import('../views/EdgeQuality.vue') },
+  { path: '/decay-detection', component: () => import('../views/DecayDetection.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

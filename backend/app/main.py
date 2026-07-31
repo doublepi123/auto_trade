@@ -85,6 +85,7 @@ from app.api.autocorrelation import router as autocorrelation_router
 from app.api.size_impact import router as size_impact_router
 from app.api.return_calendar import router as return_calendar_router
 from app.api.edge_quality import router as edge_quality_router
+from app.api.decay_detection import router as decay_detection_router
 from app.config import settings
 from app.database import init_db
 from app.runner import get_runner
@@ -1430,6 +1431,7 @@ app.include_router(autocorrelation_router)
 app.include_router(size_impact_router)
 app.include_router(return_calendar_router)
 app.include_router(edge_quality_router)
+app.include_router(decay_detection_router)
 
 
 # Global exception handler: log unhandled exceptions and return a generic 500 JSON
