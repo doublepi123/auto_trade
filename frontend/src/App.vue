@@ -58,6 +58,7 @@
         <router-link to="/drawdown-duration" class="app-menu-link" :class="{ active: route.path === '/drawdown-duration' }">回撤持续期</router-link>
         <router-link to="/prediction-score" class="app-menu-link" :class="{ active: route.path === '/prediction-score' }">条件胜率</router-link>
         <router-link to="/regime-sensitivity" class="app-menu-link" :class="{ active: route.path === '/regime-sensitivity' }">体制敏感性</router-link>
+        <router-link to="/robustness" class="app-menu-link" :class="{ active: route.path === '/robustness' }">稳健性</router-link>
       </nav>
       <div class="header-actions">
         <el-button

@@ -52,6 +52,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/drawdown-duration', component: () => import('../views/DrawdownDuration.vue') },
   { path: '/prediction-score', component: () => import('../views/PredictionScore.vue') },
   { path: '/regime-sensitivity', component: () => import('../views/RegimeSensitivity.vue') },
+  { path: '/robustness', component: () => import('../views/Robustness.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
