@@ -116,6 +116,65 @@ class TestCreateExperiment:
 
 
 class TestRunExperiment:
+    def test_maps_all_session_and_exit_params_to_engine(
+        self, clean_db: None
+    ) -> None:
+        initial = _make_create_request()
+        req = StrategyExperimentCreate(
+            name=initial.name,
+            symbol=initial.symbol,
+            base_params=initial.base_params.model_copy(update={
+                "market": "US",
+                "trading_session_mode": "RTH_ONLY",
+                "trailing_stop_pct": 2.5,
+                "max_holding_minutes": 60,
+                "entry_cutoff_minutes_before_close": 45,
+                "flatten_minutes_before_close": 15,
+            }),
+            # The persisted experiment grid is numeric. Pydantic validates the
+            # integer axes and the conventional 0/1 representation of bool.
+            parameter_grid={
+                "opening_warmup_minutes": StrategyExperimentGridItem(value=30),
+                "entry_crossing_required": StrategyExperimentGridItem(value=1),
+                "max_entries_per_symbol_per_day": (
+                    StrategyExperimentGridItem(value=2)
+                ),
+            },
+        )
+        captured = []
+        original_run = __import__(
+            "app.core.backtest", fromlist=["BacktestEngine"]
+        ).BacktestEngine.run
+
+        def _capture_params(self_eng, bars, **kwargs):
+            captured.append(self_eng.params)
+            return original_run(self_eng, bars, include_fee_sensitivity=False)
+
+        db = SessionLocal()
+        try:
+            svc = StrategyExperimentService(db)
+            created = svc.create_experiment(req)
+            with patch("app.core.backtest.BacktestEngine.run", _capture_params):
+                result = svc.run_experiment(
+                    created.id,
+                    StrategyExperimentRunRequest(csv_text=_CSV),
+                )
+
+            assert result.status == "COMPLETED"
+            assert len(captured) == 1
+            mapped = captured[0]
+            assert mapped.market == "US"
+            assert mapped.trading_session_mode == "RTH_ONLY"
+            assert mapped.opening_warmup_minutes == 30
+            assert mapped.entry_crossing_required is True
+            assert mapped.max_entries_per_symbol_per_day == 2
+            assert mapped.trailing_stop_pct == 2.5
+            assert mapped.max_holding_minutes == 60
+            assert mapped.entry_cutoff_minutes_before_close == 45
+            assert mapped.flatten_minutes_before_close == 15
+        finally:
+            db.close()
+
     def test_creates_one_run_per_valid_combination_and_updates_status(
         self, clean_db: None
     ) -> None:

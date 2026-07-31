@@ -5,8 +5,16 @@ import io
 import itertools
 import random
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+from app.core.market_calendar import (
+    is_closing_window,
+    is_opening_warmup,
+    is_trading_hours,
+    trade_day_for,
+)
+
 
 @dataclass(frozen=True)
 class BacktestBar:
@@ -35,6 +43,14 @@ class BacktestEngineParams:
     slippage_pct: float = 0.0
     stop_loss_pct: float = 0.0
     trailing_stop_pct: float = 0.0
+    market: str = "US"
+    trading_session_mode: str = "ANY"
+    opening_warmup_minutes: int = 0
+    entry_crossing_required: bool = False
+    max_entries_per_symbol_per_day: int = 0
+    max_holding_minutes: int = 0
+    entry_cutoff_minutes_before_close: int = 0
+    flatten_minutes_before_close: int = 0
 
 
 @dataclass(frozen=True)
@@ -150,17 +166,24 @@ class BacktestEngine:
         daily_pnl = 0.0
         cumulative_realized_pnl = 0.0
         peak_realized_pnl = 0.0
-        current_day = ordered_bars[0].timestamp.date()
+        current_day = trade_day_for(self.params.market, ordered_bars[0].timestamp)
+        entries_today = 0
         consecutive_losses = 0
         paused_reason = ""
         drawdown_reason = ""
         peak_equity = self.params.initial_cash
         max_drawdown_pct = 0.0
 
+        # Session and time-exit policies treat ``timestamp`` as the bar's
+        # observation time. Callers using Longport's start-stamped 1-minute
+        # candles must normalize them by +1 minute; the engine deliberately
+        # does not guess a candle period from the input sequence.
         for bar in ordered_bars:
             closed_position_this_bar = False
-            if bar.timestamp.date() != current_day:
-                current_day = bar.timestamp.date()
+            bar_trade_day = trade_day_for(self.params.market, bar.timestamp)
+            if bar_trade_day != current_day:
+                current_day = bar_trade_day
+                entries_today = 0
                 daily_pnl = 0.0
                 consecutive_losses = 0
                 if paused_reason.startswith("daily loss limit") or paused_reason.startswith("consecutive loss"):
@@ -256,10 +279,59 @@ class BacktestEngine:
                             paused_reason = f"max consecutive losses reached: {consecutive_losses}"
 
             if position is None and not closed_position_this_bar:
-                entry_signal = self._entry_signal(bar)
-                if entry_signal is not None:
-                    action, side, price, reason = entry_signal
-                    if drawdown_reason:
+                raw_entry_signal = self._entry_signal(
+                    bar,
+                    require_crossing=False,
+                )
+                if raw_entry_signal is not None:
+                    entry_signal = (
+                        self._entry_signal(bar, require_crossing=True)
+                        if self.params.entry_crossing_required
+                        else raw_entry_signal
+                    )
+                    signal_for_record = entry_signal or raw_entry_signal
+                    action, side, price, reason = signal_for_record
+                    session_reason = self._entry_session_block_reason(bar)
+                    if session_reason:
+                        skipped.append(BacktestSkippedSignal(
+                            timestamp=bar.timestamp,
+                            action=action,
+                            price=price,
+                            reason=session_reason,
+                            state="flat",
+                            category="SESSION",
+                        ))
+                    elif entry_signal is None:
+                        skipped.append(BacktestSkippedSignal(
+                            timestamp=bar.timestamp,
+                            action=action,
+                            price=price,
+                            reason=(
+                                "fresh entry-threshold crossing was not observed "
+                                "in this OHLC bar"
+                            ),
+                            state="flat",
+                            category="REPRICING",
+                        ))
+                    elif (
+                        self.params.max_entries_per_symbol_per_day > 0
+                        and entries_today
+                        >= self.params.max_entries_per_symbol_per_day
+                    ):
+                        skipped.append(BacktestSkippedSignal(
+                            timestamp=bar.timestamp,
+                            action=action,
+                            price=price,
+                            reason=(
+                                "daily entry cap reached for "
+                                f"{self.params.symbol or 'backtest symbol'}: "
+                                f"{entries_today}/"
+                                f"{self.params.max_entries_per_symbol_per_day}"
+                            ),
+                            state="flat",
+                            category="COOLDOWN",
+                        ))
+                    elif drawdown_reason:
                         skipped.append(BacktestSkippedSignal(
                             timestamp=bar.timestamp,
                             action=action,
@@ -278,6 +350,9 @@ class BacktestEngine:
                             category="RISK",
                         ))
                     else:
+                        # ``entry_signal`` is guaranteed non-None here by the
+                        # explicit crossing block above.
+                        action, side, price, reason = entry_signal
                         entry_fee = self._fee(price, self.params.quantity)
                         fees_paid += entry_fee
                         realized_pnl -= entry_fee
@@ -300,6 +375,7 @@ class BacktestEngine:
                             state_after=side,
                             reason=reason,
                         ))
+                        entries_today += 1
 
             unrealized_pnl = self._unrealized_pnl(position, bar.close)
             equity = self.params.initial_cash + realized_pnl + unrealized_pnl
@@ -473,10 +549,88 @@ class BacktestEngine:
             raise ValueError("trailing_stop_pct cannot be negative")
         if self.params.trailing_stop_pct > 100:
             raise ValueError("trailing_stop_pct cannot exceed 100")
+        if self.params.market not in {"US", "HK"}:
+            raise ValueError("market must be US or HK")
+        if self.params.trading_session_mode not in {"ANY", "RTH_ONLY"}:
+            raise ValueError("trading_session_mode must be ANY or RTH_ONLY")
+        if not 0 <= self.params.opening_warmup_minutes <= 390:
+            raise ValueError("opening_warmup_minutes must be in [0, 390]")
+        if not 0 <= self.params.max_entries_per_symbol_per_day <= 1_000:
+            raise ValueError(
+                "max_entries_per_symbol_per_day must be in [0, 1000]"
+            )
+        if not 0 <= self.params.max_holding_minutes <= 10_080:
+            raise ValueError("max_holding_minutes must be in [0, 10080]")
+        if not 0 <= self.params.entry_cutoff_minutes_before_close <= 180:
+            raise ValueError(
+                "entry_cutoff_minutes_before_close must be in [0, 180]"
+            )
+        if not 0 <= self.params.flatten_minutes_before_close <= 180:
+            raise ValueError("flatten_minutes_before_close must be in [0, 180]")
+        if (
+            self.params.entry_cutoff_minutes_before_close > 0
+            and self.params.flatten_minutes_before_close > 0
+            and self.params.flatten_minutes_before_close
+            > self.params.entry_cutoff_minutes_before_close
+        ):
+            raise ValueError(
+                "flatten_minutes_before_close must not exceed "
+                "entry_cutoff_minutes_before_close"
+            )
 
-    def _entry_signal(self, bar: BacktestBar) -> tuple[str, str, float, str] | None:
+    def _entry_session_block_reason(self, bar: BacktestBar) -> str | None:
+        if (
+            self.params.trading_session_mode == "RTH_ONLY"
+            and not is_trading_hours(self.params.market, bar.timestamp)
+        ):
+            return f"non-RTH for {self.params.market}"
+        if (
+            self.params.trading_session_mode == "RTH_ONLY"
+            and is_opening_warmup(
+                self.params.market,
+                self.params.opening_warmup_minutes,
+                bar.timestamp,
+            )
+        ):
+            return f"opening warmup for {self.params.market}"
+        if is_closing_window(
+            self.params.market,
+            self.params.entry_cutoff_minutes_before_close,
+            bar.timestamp,
+        ):
+            return (
+                "entry cutoff within "
+                f"{self.params.entry_cutoff_minutes_before_close} minutes of close"
+            )
+        # A flatten window is also an implicit entry block. Otherwise a
+        # configuration with flatten enabled and the explicit cutoff disabled
+        # could open a new position after the exit pass for this bar and carry
+        # it overnight.
+        if is_closing_window(
+            self.params.market,
+            self.params.flatten_minutes_before_close,
+            bar.timestamp,
+        ):
+            return (
+                "entry blocked within end-of-day flatten window: "
+                f"{self.params.flatten_minutes_before_close} minutes of close"
+            )
+        return None
+
+    def _entry_signal(
+        self,
+        bar: BacktestBar,
+        *,
+        require_crossing: bool,
+    ) -> tuple[str, str, float, str] | None:
         buy_hit = bar.low <= self.params.buy_low
         short_hit = self.params.short_selling and bar.high >= self.params.sell_high
+        if require_crossing:
+            # Conservative, bar-local OHLC approximation. The open must start
+            # on the non-entry side and the same bar must touch the threshold;
+            # neither a stale prior close nor a gap can manufacture a crossing.
+            buy_hit = buy_hit and bar.open > self.params.buy_low
+            short_hit = short_hit and bar.open < self.params.sell_high
         if buy_hit and short_hit:
             buy_distance = abs(bar.open - self.params.buy_low)
             short_distance = abs(bar.open - self.params.sell_high)
@@ -494,9 +648,18 @@ class BacktestEngine:
         return None
 
     def _try_exit_position(self, bar: BacktestBar, position: _OpenPosition) -> tuple[str, float, float, float, str, bool] | None:
+        # Live RTH_ONLY execution rejects both entries and exits outside RTH.
+        # Keep the position open until an executable session observation rather
+        # than manufacturing an after-hours OHLC fill.
+        if (
+            self.params.trading_session_mode == "RTH_ONLY"
+            and not is_trading_hours(self.params.market, bar.timestamp)
+        ):
+            return None
         stop_loss_pct = self.params.stop_loss_pct / 100
         trailing_stop_pct = self.params.trailing_stop_pct / 100
-        # Fixed stops take precedence when both protective levels are touched in one OHLC bar.
+        # Match the live deterministic reduction priority while retaining the
+        # backtest's OHLC-aware fixed-stop fill at the threshold price.
         if position.side == "long" and stop_loss_pct > 0:
             stop_price = position.entry_price * (1 - stop_loss_pct)
             if bar.low <= stop_price:
@@ -511,6 +674,32 @@ class BacktestEngine:
                 exit_fee = self._fee(price, position.quantity)
                 net_pnl = self._gross_exit_pnl(position, price) - position.entry_fee - exit_fee
                 return "STOP_LOSS_COVER", price, exit_fee, net_pnl, "stop loss reached", False
+        if is_closing_window(
+            self.params.market,
+            self.params.flatten_minutes_before_close,
+            bar.timestamp,
+        ):
+            return self._forced_exit(
+                bar,
+                position,
+                cause="EOD_FLATTEN",
+                reason="end-of-day flatten window reached",
+            )
+        if (
+            self.params.max_holding_minutes > 0
+            and bar.timestamp
+            >= position.entry_at
+            + timedelta(minutes=self.params.max_holding_minutes)
+        ):
+            return self._forced_exit(
+                bar,
+                position,
+                cause="TIME_STOP",
+                reason=(
+                    "maximum holding time reached: "
+                    f"{self.params.max_holding_minutes} minutes"
+                ),
+            )
         if position.side == "long" and trailing_stop_pct > 0:
             trailing_price = position.highest_price * (1 - trailing_stop_pct)
             if bar.low <= trailing_price:
@@ -536,6 +725,21 @@ class BacktestEngine:
             net_pnl = self._gross_exit_pnl(position, price) - position.entry_fee - exit_fee
             return "BUY_TO_COVER", price, exit_fee, net_pnl, "exit threshold reached", True
         return None
+
+    def _forced_exit(
+        self,
+        bar: BacktestBar,
+        position: _OpenPosition,
+        *,
+        cause: str,
+        reason: str,
+    ) -> tuple[str, float, float, float, str, bool]:
+        execution_action = "SELL" if position.side == "long" else "BUY_TO_COVER"
+        price = self._apply_slippage(bar.close, execution_action)
+        exit_fee = self._fee(price, position.quantity)
+        net_pnl = self._gross_exit_pnl(position, price) - position.entry_fee - exit_fee
+        action = f"{cause}_{'SELL' if position.side == 'long' else 'COVER'}"
+        return action, price, exit_fee, net_pnl, f"{cause}: {reason}", False
 
     def _apply_slippage(self, price: float, action: str) -> float:
         if self.params.slippage_pct <= 0:

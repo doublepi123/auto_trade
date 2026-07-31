@@ -97,6 +97,9 @@ flowchart LR
 - CSV 历史价格回测（`POST /api/backtest/run`），验证区间参数与风控规则
 - `max_drawdown_amount` 按全程已实现净盈亏高水位限制回撤（`0` 关闭）；触发后本次回测不再开新仓，但已有仓位仍可正常平仓
 - `trailing_stop_pct` 为每笔多/空仓启用按持仓后最高/最低价回撤百分比触发的移动止损，`0` 表示关闭
+- 可选复现市场/时间约束：`market`、`trading_session_mode`、`max_holding_minutes`、`entry_cutoff_minutes_before_close`、`flatten_minutes_before_close`；时间止损和收盘平仓按观测 K 线收盘价加滑点强制退出，不受最低盈利门槛阻挡
+- 回测的 `ANY` 仅保留历史全时段行为；实盘安全层即使配置为 `ANY` 也不允许非 RTH 新增长仓，因此该模式不能视为实盘执行等价
+- 可选复现部署入场门控：`opening_warmup_minutes`、`entry_crossing_required`、`max_entries_per_symbol_per_day`。OHLC 的“新鲜穿越”仅在本根开盘位于阈值外侧且随后触及时成立，属于保守 K 线近似，不等同 30 秒逐笔报价证据
 - **参数扫描**（`POST /api/backtest/sweep`）：在当前 CSV 上对 `buy_low` / `sell_high` / `min_profit_amount`（可选 `quantity` / `fee_rate` / `slippage_pct` / `stop_loss_pct`）做网格搜索，按 Sharpe / Sortino / Calmar / 盈亏比 / 总回报 排名，返回 Top-N 结果表 + `(buy_low, sell_high)` 热力图；`buy_low ≥ sell_high` 的无效组合自动跳过。即时、离线、纯内存，与「实验」页的保存式批量回测不同。
 - Web UI **Backtest** 页：上传/粘贴 CSV、查看收益曲线与交易明细、参数扫描（点击结果行可把最优配置回填表单）
 
@@ -276,6 +279,16 @@ python3 -m pytest tests/test_engine.py -v        # 单模块
 
 # 只读复算轮动证据；不读取持仓、不提交订单
 python3 scripts/evaluate_rotation_walk_forward.py --history-bars 1000
+
+# 只读比较区间策略持仓上限；以下仅为历史复算示例，不是部署参数建议
+# 报告会明确输出 OHLC 近似与非实盘等价限制
+python3 scripts/evaluate_range_exit_horizons.py \
+  --input ../data/research/nvda-full-minute-20260601-20260724.json \
+  --symbol NVDA.US --market US --buy-low 209.65 --sell-high 212.63025 \
+  --stop-loss 1 --fee-rate 0.0005 --slippage 0.02 --quantity 1 \
+  --horizons 15,30,45,60 --warmup 90 --cutoff 45 --flatten 15 \
+  --max-entries 1 --crossing --bar-timestamp start --bar-minutes 1 \
+  --start-date 2026-07-16 --end-date 2026-07-24
 
 # 维护点时指数成分快照；下载源固定到 commit，并校验 SHA-256
 python3 scripts/build_index_membership_snapshot.py

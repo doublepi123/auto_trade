@@ -358,8 +358,11 @@ function parseCsvValues(raw: string): number[] {
 }
 
 function buildBaseParams(): BacktestParams {
+  const normalizedSymbol = symbol.value.trim().toUpperCase() || 'AAPL.US'
   return {
-    symbol: symbol.value.trim().toUpperCase() || 'AAPL.US',
+    symbol: normalizedSymbol,
+    market: normalizedSymbol.endsWith('.HK') ? 'HK' : 'US',
+    trading_session_mode: 'ANY',
     buy_low: buyLow.value,
     sell_high: sellHigh.value,
     short_selling: false,
@@ -372,6 +375,13 @@ function buildBaseParams(): BacktestParams {
     fixed_fee: 0,
     slippage_pct: slippagePct.value,
     stop_loss_pct: 0,
+    trailing_stop_pct: 0,
+    max_holding_minutes: 0,
+    entry_cutoff_minutes_before_close: 0,
+    flatten_minutes_before_close: 0,
+    opening_warmup_minutes: 0,
+    entry_crossing_required: false,
+    max_entries_per_symbol_per_day: 0,
   }
 }
 

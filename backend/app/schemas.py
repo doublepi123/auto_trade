@@ -1880,6 +1880,11 @@ class BrokerBuyingPowerResponse(BaseModel):
 
 class BacktestParams(BaseModel):
     symbol: str = Field(default="", max_length=50)
+    market: Literal["US", "HK"] = "US"
+    trading_session_mode: Literal["ANY", "RTH_ONLY"] = "ANY"
+    opening_warmup_minutes: int = Field(default=0, ge=0, le=390)
+    entry_crossing_required: bool = False
+    max_entries_per_symbol_per_day: int = Field(default=0, ge=0, le=1_000)
     buy_low: float = Field(gt=0)
     sell_high: float = Field(gt=0)
     short_selling: bool = Field(default=False)
@@ -1894,6 +1899,25 @@ class BacktestParams(BaseModel):
     slippage_pct: float = Field(default=0.0, ge=0, le=5)
     stop_loss_pct: float = Field(default=0.0, ge=0, le=100)
     trailing_stop_pct: float = Field(default=0.0, ge=0, le=100)
+    max_holding_minutes: int = Field(default=0, ge=0, le=10_080)
+    entry_cutoff_minutes_before_close: int = Field(default=0, ge=0, le=180)
+    flatten_minutes_before_close: int = Field(default=0, ge=0, le=180)
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_legacy_backtest_market(cls, data: Any) -> Any:
+        # ``market`` did not exist in older persisted backtest/experiment JSON.
+        # Preserve those records by inferring the only unambiguous suffixes;
+        # an explicitly supplied mismatch is still rejected below.
+        if not isinstance(data, dict) or "market" in data:
+            return data
+        symbol = str(data.get("symbol") or "").strip().upper()
+        suffix = symbol.rsplit(".", 1)[-1] if "." in symbol else ""
+        if suffix not in {"US", "HK"}:
+            return data
+        normalized = dict(data)
+        normalized["market"] = suffix
+        return normalized
 
     @field_validator("symbol")
     @classmethod
@@ -1910,6 +1934,22 @@ class BacktestParams(BaseModel):
         if buy_low is not None and v <= buy_low:
             raise ValueError("sell_high must be greater than buy_low")
         return v
+
+    @model_validator(mode="after")
+    def validate_backtest_execution_windows(self) -> "BacktestParams":
+        if self.symbol:
+            _validate_symbol_market_pair(self.symbol, self.market)
+        if (
+            self.entry_cutoff_minutes_before_close > 0
+            and self.flatten_minutes_before_close > 0
+            and self.flatten_minutes_before_close
+            > self.entry_cutoff_minutes_before_close
+        ):
+            raise ValueError(
+                "flatten_minutes_before_close must not exceed "
+                "entry_cutoff_minutes_before_close"
+            )
+        return self
 
 
 class BacktestRunRequest(BaseModel):
@@ -2365,7 +2405,11 @@ class StrategyExperimentCreate(BaseModel):
     _ALLOWED_GRID_KEYS: set[str] = {
         "buy_low", "sell_high", "min_profit_amount", "max_daily_loss",
         "max_consecutive_losses", "quantity", "initial_cash", "fee_rate",
-        "fixed_fee", "slippage_pct", "stop_loss_pct",
+        "fixed_fee", "slippage_pct", "stop_loss_pct", "trailing_stop_pct",
+        "opening_warmup_minutes", "entry_crossing_required",
+        "max_entries_per_symbol_per_day",
+        "max_holding_minutes", "entry_cutoff_minutes_before_close",
+        "flatten_minutes_before_close",
     }
 
     @field_validator("symbol")

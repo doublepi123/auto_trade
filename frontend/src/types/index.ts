@@ -489,6 +489,8 @@ export interface LLMUsageSummary {
 
 export interface BacktestParams {
   symbol: string
+  market: 'US' | 'HK'
+  trading_session_mode: 'ANY' | 'RTH_ONLY'
   buy_low: number
   sell_high: number
   short_selling: boolean
@@ -503,6 +505,12 @@ export interface BacktestParams {
   slippage_pct: number
   stop_loss_pct: number
   trailing_stop_pct?: number
+  max_holding_minutes: number
+  entry_cutoff_minutes_before_close: number
+  flatten_minutes_before_close: number
+  opening_warmup_minutes: number
+  entry_crossing_required: boolean
+  max_entries_per_symbol_per_day: number
 }
 
 export interface BacktestRunRequest {

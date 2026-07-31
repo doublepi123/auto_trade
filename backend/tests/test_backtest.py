@@ -3,8 +3,10 @@ from typing import TypedDict, cast
 
 from fastapi.testclient import TestClient
 
+from app.api.backtest import _params_to_engine
 from app.core.backtest import BacktestBar, BacktestEngine, BacktestEngineParams, parse_backtest_csv
 from app.main import app
+from app.schemas import BacktestParams
 
 client = TestClient(app)
 
@@ -39,7 +41,449 @@ def bar(minute: int, open_: float, high: float, low: float, close: float) -> Bac
     )
 
 
+def bar_at(
+    timestamp: datetime,
+    open_: float,
+    high: float,
+    low: float,
+    close: float,
+) -> BacktestBar:
+    return BacktestBar(
+        timestamp=timestamp,
+        open=open_,
+        high=high,
+        low=low,
+        close=close,
+        volume=1000,
+    )
+
+
 class TestBacktestEngine:
+    def test_new_execution_defaults_preserve_legacy_any_session_behavior(self) -> None:
+        bars = [
+            bar(0, 150, 160, 99, 105),
+            bar(1, 150, 201, 140, 200),
+        ]
+        omitted = BacktestEngineParams(buy_low=100, sell_high=200, quantity=2)
+        explicit_legacy = BacktestEngineParams(
+            buy_low=100,
+            sell_high=200,
+            quantity=2,
+            market="US",
+            trading_session_mode="ANY",
+            opening_warmup_minutes=0,
+            entry_crossing_required=False,
+            max_entries_per_symbol_per_day=0,
+            max_holding_minutes=0,
+            entry_cutoff_minutes_before_close=0,
+            flatten_minutes_before_close=0,
+        )
+
+        omitted_result = BacktestEngine(omitted).run(
+            bars, include_fee_sensitivity=False
+        )
+        explicit_result = BacktestEngine(explicit_legacy).run(
+            bars, include_fee_sensitivity=False
+        )
+
+        # 10:00 UTC is outside US RTH; legacy ANY mode must still enter.
+        assert omitted_result == explicit_result
+        assert [trade.action for trade in omitted_result.trades] == ["BUY", "SELL"]
+
+    def test_opening_warmup_blocks_until_end_boundary(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            market="US",
+            trading_session_mode="RTH_ONLY",
+            opening_warmup_minutes=30,
+            buy_low=100,
+            sell_high=200,
+        ))
+
+        result = engine.run([
+            bar_at(
+                datetime(2026, 5, 22, 13, 59, 59, tzinfo=timezone.utc),
+                101,
+                102,
+                99,
+                100,
+            ),
+            bar_at(
+                datetime(2026, 5, 22, 14, 0, tzinfo=timezone.utc),
+                101,
+                102,
+                99,
+                100,
+            ),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == ["BUY"]
+        assert result.trades[0].timestamp == datetime(
+            2026, 5, 22, 14, 0, tzinfo=timezone.utc
+        )
+        assert len(result.skipped_signals) == 1
+        assert result.skipped_signals[0].category == "SESSION"
+        assert result.skipped_signals[0].reason == "opening warmup for US"
+
+    def test_crossing_blocks_gap_restart_then_allows_bar_local_downcross(
+        self,
+    ) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            market="US",
+            buy_low=100,
+            sell_high=200,
+            entry_crossing_required=True,
+        ))
+
+        result = engine.run([
+            # A stale prior close above the threshold must not turn the next
+            # gap-down bar into a synthetic crossing.
+            bar_at(
+                datetime(2026, 5, 22, 13, 30, tzinfo=timezone.utc),
+                101,
+                102,
+                100.5,
+                101,
+            ),
+            bar_at(
+                datetime(2026, 5, 22, 13, 31, tzinfo=timezone.utc),
+                99,
+                100,
+                98,
+                99,
+            ),
+            # The threshold is crossed from this bar's own open, so it is a
+            # valid conservative OHLC downcross.
+            bar_at(
+                datetime(2026, 5, 22, 13, 32, tzinfo=timezone.utc),
+                101,
+                102,
+                99,
+                100,
+            ),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == ["BUY"]
+        assert result.trades[0].timestamp == datetime(
+            2026, 5, 22, 13, 32, tzinfo=timezone.utc
+        )
+        assert len(result.skipped_signals) == 1
+        assert result.skipped_signals[0].category == "REPRICING"
+        assert "fresh entry-threshold crossing" in (
+            result.skipped_signals[0].reason
+        )
+
+    def test_crossing_blocks_reentry_below_threshold_after_time_exit(
+        self,
+    ) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            market="US",
+            buy_low=100,
+            sell_high=200,
+            entry_crossing_required=True,
+            max_holding_minutes=1,
+        ))
+
+        result = engine.run([
+            bar_at(
+                datetime(2026, 5, 22, 13, 30, tzinfo=timezone.utc),
+                101,
+                102,
+                99,
+                100,
+            ),
+            bar_at(
+                datetime(2026, 5, 22, 13, 31, tzinfo=timezone.utc),
+                99,
+                100,
+                98,
+                99,
+            ),
+            bar_at(
+                datetime(2026, 5, 22, 13, 32, tzinfo=timezone.utc),
+                99,
+                100,
+                98,
+                99,
+            ),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == [
+            "BUY",
+            "TIME_STOP_SELL",
+        ]
+        assert len(result.skipped_signals) == 1
+        assert result.skipped_signals[0].timestamp == datetime(
+            2026, 5, 22, 13, 32, tzinfo=timezone.utc
+        )
+        assert result.skipped_signals[0].category == "REPRICING"
+
+    def test_daily_entry_cap_resets_on_exchange_local_trade_day(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            symbol="AAPL.US",
+            market="US",
+            buy_low=100,
+            sell_high=110,
+            max_entries_per_symbol_per_day=1,
+        ))
+
+        result = engine.run([
+            bar_at(
+                datetime(2026, 5, 20, 23, 57, tzinfo=timezone.utc),
+                101,
+                102,
+                99,
+                100,
+            ),
+            bar_at(
+                datetime(2026, 5, 20, 23, 58, tzinfo=timezone.utc),
+                109,
+                111,
+                108,
+                110,
+            ),
+            # UTC changed, but New York is still May 20: cap remains active.
+            bar_at(
+                datetime(2026, 5, 21, 0, 2, tzinfo=timezone.utc),
+                101,
+                102,
+                99,
+                100,
+            ),
+            # New York local midnight has passed: the entry counter resets.
+            bar_at(
+                datetime(2026, 5, 21, 4, 1, tzinfo=timezone.utc),
+                101,
+                102,
+                99,
+                100,
+            ),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == [
+            "BUY",
+            "SELL",
+            "BUY",
+        ]
+        assert len(result.skipped_signals) == 1
+        assert result.skipped_signals[0].category == "COOLDOWN"
+        assert "1/1" in result.skipped_signals[0].reason
+
+    def test_us_rth_only_skips_premarket_entry_then_allows_open(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            market="US",
+            trading_session_mode="RTH_ONLY",
+            buy_low=100,
+            sell_high=200,
+        ))
+
+        result = engine.run([
+            bar_at(datetime(2026, 5, 22, 13, 29, tzinfo=timezone.utc), 101, 102, 99, 100),
+            bar_at(datetime(2026, 5, 22, 13, 30, tzinfo=timezone.utc), 101, 102, 99, 100),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == ["BUY"]
+        assert len(result.skipped_signals) == 1
+        assert result.skipped_signals[0].category == "SESSION"
+        assert result.skipped_signals[0].reason == "non-RTH for US"
+
+    def test_hk_rth_only_treats_lunch_break_as_non_rth(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            market="HK",
+            trading_session_mode="RTH_ONLY",
+            buy_low=100,
+            sell_high=200,
+        ))
+
+        result = engine.run([
+            bar_at(datetime(2026, 5, 22, 4, 15, tzinfo=timezone.utc), 101, 102, 99, 100),
+            bar_at(datetime(2026, 5, 22, 5, 0, tzinfo=timezone.utc), 101, 102, 99, 100),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == ["BUY"]
+        assert len(result.skipped_signals) == 1
+        assert result.skipped_signals[0].category == "SESSION"
+        assert result.skipped_signals[0].reason == "non-RTH for HK"
+
+    def test_entry_cutoff_skips_signal_with_session_category(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            market="US",
+            trading_session_mode="ANY",
+            buy_low=100,
+            sell_high=200,
+            entry_cutoff_minutes_before_close=15,
+        ))
+
+        result = engine.run([
+            bar_at(datetime(2026, 5, 22, 19, 46, tzinfo=timezone.utc), 101, 102, 99, 100),
+        ], include_fee_sensitivity=False)
+
+        assert result.trades == []
+        assert result.skipped_signals[0].category == "SESSION"
+        assert "entry cutoff within 15 minutes" in result.skipped_signals[0].reason
+
+    def test_time_stop_uses_close_with_slippage_and_bypasses_min_profit(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            market="US",
+            trading_session_mode="RTH_ONLY",
+            buy_low=100,
+            sell_high=200,
+            min_profit_amount=1000,
+            slippage_pct=1,
+            trailing_stop_pct=5,
+            max_holding_minutes=10,
+        ))
+
+        result = engine.run([
+            bar_at(datetime(2026, 5, 22, 13, 30, tzinfo=timezone.utc), 101, 102, 99, 100),
+            bar_at(datetime(2026, 5, 22, 13, 40, tzinfo=timezone.utc), 105, 201, 101, 105),
+        ], include_fee_sensitivity=False)
+        closed = result.trades[-1]
+
+        assert closed.action == "TIME_STOP_SELL"
+        assert closed.reason == "TIME_STOP: maximum holding time reached: 10 minutes"
+        assert closed.price == 105 * 0.99
+        assert closed.holding_minutes == 10
+        assert result.metrics.skipped_signals == 0
+
+    def test_eod_flatten_precedes_time_stop_and_target(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            market="US",
+            trading_session_mode="RTH_ONLY",
+            buy_low=100,
+            sell_high=200,
+            max_holding_minutes=5,
+            flatten_minutes_before_close=15,
+        ))
+
+        result = engine.run([
+            bar_at(datetime(2026, 5, 22, 19, 39, tzinfo=timezone.utc), 101, 102, 99, 100),
+            bar_at(datetime(2026, 5, 22, 19, 45, tzinfo=timezone.utc), 105, 201, 101, 105),
+        ], include_fee_sensitivity=False)
+
+        assert result.trades[-1].action == "EOD_FLATTEN_SELL"
+        assert result.trades[-1].reason == "EOD_FLATTEN: end-of-day flatten window reached"
+        assert result.trades[-1].price == 105
+
+    def test_flatten_window_blocks_new_entry_when_cutoff_is_disabled(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            market="US",
+            trading_session_mode="ANY",
+            buy_low=100,
+            sell_high=200,
+            entry_cutoff_minutes_before_close=0,
+            flatten_minutes_before_close=15,
+        ))
+
+        result = engine.run([
+            bar_at(
+                datetime(2026, 5, 22, 19, 45, tzinfo=timezone.utc),
+                101,
+                102,
+                99,
+                100,
+            ),
+        ], include_fee_sensitivity=False)
+
+        assert result.trades == []
+        assert len(result.skipped_signals) == 1
+        assert result.skipped_signals[0].category == "SESSION"
+        assert "end-of-day flatten window" in result.skipped_signals[0].reason
+
+    def test_fixed_ohlc_stop_precedes_eod_flatten(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            market="US",
+            trading_session_mode="RTH_ONLY",
+            buy_low=100,
+            sell_high=200,
+            stop_loss_pct=5,
+            flatten_minutes_before_close=15,
+        ))
+
+        result = engine.run([
+            bar_at(datetime(2026, 5, 22, 19, 39, tzinfo=timezone.utc), 101, 102, 99, 100),
+            bar_at(datetime(2026, 5, 22, 19, 45, tzinfo=timezone.utc), 96, 99, 94, 96),
+        ], include_fee_sensitivity=False)
+
+        assert result.trades[-1].action == "STOP_LOSS_SELL"
+        assert result.trades[-1].price == 95
+
+    def test_rth_only_does_not_manufacture_after_hours_exit(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            market="US",
+            trading_session_mode="RTH_ONLY",
+            buy_low=100,
+            sell_high=200,
+        ))
+
+        result = engine.run([
+            bar_at(
+                datetime(2026, 5, 22, 19, 44, tzinfo=timezone.utc),
+                101,
+                102,
+                99,
+                100,
+            ),
+            bar_at(
+                datetime(2026, 5, 22, 20, 1, tzinfo=timezone.utc),
+                199,
+                201,
+                198,
+                200,
+            ),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == ["BUY"]
+        assert result.metrics.final_state == "long"
+
+    def test_daily_risk_reset_uses_exchange_local_trade_day(self) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            market="US",
+            buy_low=100,
+            sell_high=110,
+            max_daily_loss=5,
+            max_consecutive_losses=10,
+            stop_loss_pct=5,
+        ))
+
+        result = engine.run([
+            bar_at(datetime(2026, 5, 20, 23, 57, tzinfo=timezone.utc), 105, 106, 99, 100),
+            bar_at(datetime(2026, 5, 20, 23, 58, tzinfo=timezone.utc), 98, 99, 94, 95),
+            # UTC date changed, but New York is still on May 20: remain paused.
+            bar_at(datetime(2026, 5, 21, 0, 2, tzinfo=timezone.utc), 105, 106, 99, 100),
+            # New York local midnight has now passed: daily pause resets.
+            bar_at(datetime(2026, 5, 21, 4, 1, tzinfo=timezone.utc), 105, 106, 99, 100),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == [
+            "BUY", "STOP_LOSS_SELL", "BUY",
+        ]
+        assert len(result.skipped_signals) == 1
+        assert result.skipped_signals[0].category == "RISK"
+
+    def test_rejects_invalid_market_mode_and_execution_windows(self) -> None:
+        invalid_overrides = [
+            {"market": "EU"},
+            {"trading_session_mode": "PREMARKET"},
+            {"opening_warmup_minutes": -1},
+            {"opening_warmup_minutes": 391},
+            {"max_entries_per_symbol_per_day": -1},
+            {"max_entries_per_symbol_per_day": 1001},
+            {"max_holding_minutes": -1},
+            {"entry_cutoff_minutes_before_close": 181},
+            {"flatten_minutes_before_close": 16, "entry_cutoff_minutes_before_close": 15},
+        ]
+
+        for overrides in invalid_overrides:
+            try:
+                BacktestEngine(BacktestEngineParams(
+                    buy_low=100,
+                    sell_high=200,
+                    **overrides,
+                ))
+            except ValueError:
+                continue
+            raise AssertionError(f"invalid params should fail: {overrides}")
+
     def test_closed_trade_uses_net_pnl_and_reports_excursions(self) -> None:
         engine = BacktestEngine(BacktestEngineParams(
             symbol="AAPL.US",
@@ -520,6 +964,96 @@ class TestBacktestMetrics:
         assert result.metrics.profit_loss_ratio is not None
         assert abs(result.metrics.profit_loss_ratio - 10 / 3) < 1e-9
 class TestBacktestAPI:
+    def test_params_mapper_passes_session_entry_gate_and_exit_fields(self) -> None:
+        mapped = _params_to_engine(BacktestParams(
+            symbol="0700.HK",
+            market="HK",
+            trading_session_mode="RTH_ONLY",
+            opening_warmup_minutes=30,
+            entry_crossing_required=True,
+            max_entries_per_symbol_per_day=2,
+            buy_low=300,
+            sell_high=320,
+            trailing_stop_pct=2.5,
+            max_holding_minutes=60,
+            entry_cutoff_minutes_before_close=45,
+            flatten_minutes_before_close=15,
+        ))
+
+        assert mapped.market == "HK"
+        assert mapped.trading_session_mode == "RTH_ONLY"
+        assert mapped.opening_warmup_minutes == 30
+        assert mapped.entry_crossing_required is True
+        assert mapped.max_entries_per_symbol_per_day == 2
+        assert mapped.trailing_stop_pct == 2.5
+        assert mapped.max_holding_minutes == 60
+        assert mapped.entry_cutoff_minutes_before_close == 45
+        assert mapped.flatten_minutes_before_close == 15
+
+    def test_backtest_schema_rejects_inverted_execution_windows(self) -> None:
+        resp = client.post("/api/backtest/run", json={
+            "params": {
+                "buy_low": 100,
+                "sell_high": 200,
+                "entry_cutoff_minutes_before_close": 15,
+                "flatten_minutes_before_close": 16,
+            },
+            "csv_text": (
+                "timestamp,open,high,low,close,volume\n"
+                "2026-05-22T13:30:00Z,101,102,99,100,1000\n"
+            ),
+        })
+
+        assert resp.status_code == 422
+        assert "flatten_minutes_before_close must not exceed" in resp.text
+
+    def test_backtest_schema_rejects_out_of_range_entry_gates(self) -> None:
+        for field, value in (
+            ("opening_warmup_minutes", 391),
+            ("max_entries_per_symbol_per_day", 1001),
+        ):
+            resp = client.post("/api/backtest/run", json={
+                "params": {
+                    "buy_low": 100,
+                    "sell_high": 200,
+                    field: value,
+                },
+                "csv_text": (
+                    "timestamp,open,high,low,close,volume\n"
+                    "2026-05-22T13:30:00Z,101,102,99,100,1000\n"
+                ),
+            })
+
+            assert resp.status_code == 422
+            assert field in resp.text
+
+    def test_backtest_schema_rejects_symbol_market_mismatch(self) -> None:
+        resp = client.post("/api/backtest/run", json={
+            "params": {
+                "symbol": "0700.HK",
+                "market": "US",
+                "buy_low": 100,
+                "sell_high": 200,
+            },
+            "csv_text": (
+                "timestamp,open,high,low,close,volume\n"
+                "2026-05-22T13:30:00Z,101,102,99,100,1000\n"
+            ),
+        })
+
+        assert resp.status_code == 422
+        assert "symbol suffix .HK does not match market US" in resp.text
+
+    def test_backtest_schema_infers_market_for_legacy_hk_params(self) -> None:
+        params = BacktestParams.model_validate({
+            "symbol": "0700.HK",
+            "buy_low": 300,
+            "sell_high": 320,
+        })
+
+        assert params.symbol == "0700.HK"
+        assert params.market == "HK"
+
     def test_run_backtest_endpoint_returns_stable_structure(self) -> None:
         resp = client.post("/api/backtest/run", json={
             "params": {

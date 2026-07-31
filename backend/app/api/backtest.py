@@ -384,6 +384,11 @@ def _load_bars(csv_text: str | None, price_points: list[BacktestPricePoint]) -> 
 def _params_to_engine(p: BacktestParams) -> BacktestEngineParams:
     return BacktestEngineParams(
         symbol=p.symbol,
+        market=p.market,
+        trading_session_mode=p.trading_session_mode,
+        opening_warmup_minutes=p.opening_warmup_minutes,
+        entry_crossing_required=p.entry_crossing_required,
+        max_entries_per_symbol_per_day=p.max_entries_per_symbol_per_day,
         buy_low=p.buy_low,
         sell_high=p.sell_high,
         short_selling=p.short_selling,
@@ -398,6 +403,9 @@ def _params_to_engine(p: BacktestParams) -> BacktestEngineParams:
         slippage_pct=p.slippage_pct,
         stop_loss_pct=p.stop_loss_pct,
         trailing_stop_pct=p.trailing_stop_pct,
+        max_holding_minutes=p.max_holding_minutes,
+        entry_cutoff_minutes_before_close=p.entry_cutoff_minutes_before_close,
+        flatten_minutes_before_close=p.flatten_minutes_before_close,
     )
 
 

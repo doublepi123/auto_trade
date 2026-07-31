@@ -147,6 +147,13 @@ class StrategyExperimentService:
             for params in param_combos:
                 engine_params = BacktestEngineParams(
                     symbol=params.symbol,
+                    market=params.market,
+                    trading_session_mode=params.trading_session_mode,
+                    opening_warmup_minutes=params.opening_warmup_minutes,
+                    entry_crossing_required=params.entry_crossing_required,
+                    max_entries_per_symbol_per_day=(
+                        params.max_entries_per_symbol_per_day
+                    ),
                     buy_low=params.buy_low,
                     sell_high=params.sell_high,
                     short_selling=params.short_selling,
@@ -160,6 +167,12 @@ class StrategyExperimentService:
                     fixed_fee=params.fixed_fee,
                     slippage_pct=params.slippage_pct,
                     stop_loss_pct=params.stop_loss_pct,
+                    trailing_stop_pct=params.trailing_stop_pct,
+                    max_holding_minutes=params.max_holding_minutes,
+                    entry_cutoff_minutes_before_close=(
+                        params.entry_cutoff_minutes_before_close
+                    ),
+                    flatten_minutes_before_close=params.flatten_minutes_before_close,
                 )
                 parameters_json = json.dumps(
                     params.model_dump(), ensure_ascii=False, separators=(",", ":")
