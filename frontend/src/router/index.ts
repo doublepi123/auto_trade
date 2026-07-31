@@ -36,6 +36,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/tag-analytics', component: () => import('../views/TagAnalytics.vue') },
   { path: '/risk-score', component: () => import('../views/RiskScore.vue') },
   { path: '/holding-time', component: () => import('../views/HoldingTime.vue') },
+  { path: '/distribution-shape', component: () => import('../views/DistributionShape.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
