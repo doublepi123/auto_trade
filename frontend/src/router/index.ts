@@ -60,6 +60,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/skip-analytics', component: () => import('../views/SkipAnalytics.vue') },
   { path: '/r-multiples', component: () => import('../views/RMultiples.vue') },
   { path: '/profit-concentration', component: () => import('../views/ProfitConcentration.vue') },
+  { path: '/scratch-analysis', component: () => import('../views/ScratchAnalysis.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
