@@ -69,6 +69,7 @@
         <router-link to="/scratch-analysis" class="app-menu-link" :class="{ active: route.path === '/scratch-analysis' }">保本交易</router-link>
         <router-link to="/reentry-analysis" class="app-menu-link" :class="{ active: route.path === '/reentry-analysis' }">再入场</router-link>
         <router-link to="/first-trade" class="app-menu-link" :class="{ active: route.path === '/first-trade' }">首单效应</router-link>
+        <router-link to="/loss-containment" class="app-menu-link" :class="{ active: route.path === '/loss-containment' }">亏损控制</router-link>
       </nav>
       <div class="header-actions">
         <el-button
