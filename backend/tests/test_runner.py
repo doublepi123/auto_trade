@@ -6,7 +6,7 @@ import json
 import threading
 import time
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any, Callable, cast
@@ -18,7 +18,12 @@ from app import database
 from app import runner as runner_module
 from app.core.broker import OrderResult, Position, Quote
 from app.core.engine import EngineSnapshot, EngineState, StrategyParams
-from app.runner import AppRunner, _ReductionIntent, get_runner
+from app.runner import (
+    AppRunner,
+    _OpeningExecutionPolicy,
+    _ReductionIntent,
+    get_runner,
+)
 from app.services import trade_execution_service as trade_execution_service_module
 from app.services.trade_execution_service import EntryPolicyCheckResult, OrderStatus
 
@@ -4981,18 +4986,299 @@ class TestAppRunner:
                 ).delete(synchronize_session=False)
                 db.commit()
 
-    def test_unrealized_loss_guard_pauses_when_combined_daily_loss_reaches_limit(self) -> None:
+    def test_first_quote_of_new_trade_day_rolls_pnl_before_managed_reduction(
+        self,
+    ) -> None:
         runner = AppRunner()
-        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=196, sell_high=199)
-        runner.risk.config.max_daily_loss = 5000
-        runner.risk.daily_pnl = -200
-        runner._trade_svc.load_tracked_entries({"NVDA.US": (Decimal("100"), Decimal("10000"))})
+        runner._running = True
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=90,
+            sell_high=200,
+        )
+        runner.engine.state = EngineState.LONG
+        runner.risk.config.max_daily_loss = 50
+        current_day = [date(2026, 7, 31)]
+        runner.risk.set_trade_day_provider(lambda: current_day[0])
+        runner.risk.replace_daily_pnl(-50, 0, current_day[0])
+        runner._trade_svc.load_tracked_entries({
+            "NVDA.US": (Decimal("10"), Decimal("1000"))
+        })
+        current_day[0] = date(2026, 8, 1)
 
-        paused = runner._pause_if_unrealized_loss_limit_reached("NVDA.US", 52.0)
+        runner._on_quote(
+            Quote("NVDA.US", 100.0, 99.9, 100.1, _fresh_timestamp())
+        )
 
-        assert paused is True
+        assert runner.risk.daily_pnl == 0.0
+        assert runner.risk.daily_pnl_date == date(2026, 8, 1)
+        assert runner.risk.paused is False
+        assert runner._reduction_intents == {}
+        assert runner.engine.state == EngineState.LONG
+
+    def test_paused_overnight_position_rolls_pnl_without_clearing_pause(
+        self,
+    ) -> None:
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=90,
+            sell_high=200,
+        )
+        runner.engine.state = EngineState.LONG
+        runner.risk.config.max_daily_loss = 50
+        current_day = [date(2026, 7, 31)]
+        runner.risk.set_trade_day_provider(lambda: current_day[0])
+        runner.risk.replace_daily_pnl(-50, 2, current_day[0])
+        runner.risk.pause("manual overnight hold", auto_resumable=False)
+        runner._trade_svc.load_tracked_entries({
+            "NVDA.US": (Decimal("10"), Decimal("1000"))
+        })
+        current_day[0] = date(2026, 8, 1)
+
+        runner._on_quote(
+            Quote("NVDA.US", 100.0, 99.9, 100.1, _fresh_timestamp())
+        )
+
+        assert runner.risk.daily_pnl == 0.0
+        assert runner.risk.consecutive_losses == 0
+        assert runner.risk.daily_pnl_date == date(2026, 8, 1)
         assert runner.risk.paused is True
-        assert "unrealized daily loss limit reached" in runner.risk.pause_reason
+        assert runner.risk.pause_reason == "manual overnight hold"
+        assert runner.risk.pause_auto_resumable is False
+        assert runner._reduction_intents == {}
+        assert runner.engine.state == EngineState.LONG
+
+    @pytest.mark.parametrize("registered_secondary", [False, True])
+    def test_managed_daily_loss_uses_executable_bid_not_last_price(
+        self,
+        registered_secondary: bool,
+    ) -> None:
+        runner = AppRunner()
+        runner._running = True
+        runner.notifier = _NoopNotifier()
+        symbol = "AAPL.US" if registered_secondary else "NVDA.US"
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=90,
+            sell_high=200,
+        )
+        if registered_secondary:
+            runtime = runner._build_symbol_runtime(symbol, "US")
+            runtime.engine.state = EngineState.LONG
+            runner._symbol_runtimes[symbol] = runtime
+            runner._opening_execution_policies[symbol] = _OpeningExecutionPolicy(
+                execution_id=1,
+                symbol=symbol,
+                status="POSITION_OPEN",
+                stop_loss_pct=0,
+                max_holding_minutes=0,
+                reference_entry_price=100,
+                max_price_deviation_bps=0,
+            )
+        else:
+            runner.engine.state = EngineState.LONG
+        runner.risk.config.max_daily_loss = 100
+        runner._trade_svc.load_tracked_entries({
+            symbol: (Decimal("100"), Decimal("10000"))
+        })
+
+        # last=99.0 reaches -100, but the executable long bid=99.1 is only -90.
+        # Both values pass the quote-quality consistency gate.
+        runner._on_quote(
+            Quote(symbol, 99.0, 99.1, 99.2, _fresh_timestamp())
+        )
+
+        assert runner.risk.paused is False
+        assert runner._reduction_intents == {}
+
+    def test_orphan_tracked_position_rolls_day_then_fails_closed_on_bid(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class Notifier:
+            def __init__(self) -> None:
+                self.events: list[tuple[str, str]] = []
+
+            def notify_order(self, *_args: object) -> bool:
+                return True
+
+            def notify_risk_event(self, event_type: str, reason: str) -> bool:
+                self.events.append((event_type, reason))
+                return True
+
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=90,
+            sell_high=200,
+        )
+        notifier = Notifier()
+        runner.notifier = notifier
+        runner.risk.config.max_daily_loss = 10
+        current_day = [date(2026, 7, 31)]
+        runner.risk.set_trade_day_provider(lambda: current_day[0])
+        runner.risk.replace_daily_pnl(-10, 0, current_day[0])
+        runner._trade_svc.load_tracked_entries({
+            "AAPL.US": (Decimal("10"), Decimal("1000"))
+        })
+        events: list[tuple[str, str]] = []
+        persisted: list[bool] = []
+        monkeypatch.setattr(
+            runner,
+            "_record_risk_event",
+            lambda reason, event_type="RISK_REJECTION": events.append(
+                (event_type, reason)
+            ),
+        )
+        monkeypatch.setattr(
+            runner,
+            "_persist_risk_pause_best_effort",
+            lambda: persisted.append(True),
+        )
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+        current_day[0] = date(2026, 8, 1)
+
+        # Yesterday's -10 must reset before the orphan fallback evaluates.
+        runner._on_quote(
+            Quote("AAPL.US", 100.1, 100.0, 100.2, _fresh_timestamp())
+        )
+        assert runner.risk.daily_pnl == 0.0
+        assert runner.risk.paused is False
+
+        # Even with a wide/inconsistent spread, the available executable bid
+        # is more conservative than last and must drive the fail-closed check.
+        runner._on_quote(
+            Quote("AAPL.US", 99.1, 99.0, 120.0, _fresh_timestamp())
+        )
+
+        assert runner.risk.paused is True
+        assert runner.risk.pause_auto_resumable is False
+        assert runner.risk.pause_reason.startswith(
+            "ORPHAN_TRACKED_POSITION_DAILY_LOSS:"
+        )
+        assert "price_source=bid" in runner.risk.pause_reason
+        assert "executable=99.0000" in runner.risk.pause_reason
+        assert events == [
+            (
+                "ORPHAN_TRACKED_POSITION_DAILY_LOSS",
+                runner.risk.pause_reason,
+            )
+        ]
+        assert notifier.events == events
+        assert persisted == [True]
+
+    def test_orphan_tracked_short_uses_executable_ask(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=90,
+            sell_high=200,
+        )
+        runner.notifier = _NoopNotifier()
+        runner.risk.config.max_daily_loss = 10
+        runner._trade_svc.load_tracked_entries({
+            "AAPL.US": (
+                Decimal("10"),
+                Decimal("1000"),
+                "SHORT",
+                None,
+            )
+        })
+        monkeypatch.setattr(runner, "_record_risk_event", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(runner, "_persist_risk_pause_best_effort", lambda: None)
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+        # last loses 9, while the executable cover ask loses exactly 10.
+        runner._on_quote(
+            Quote("AAPL.US", 100.9, 100.8, 101.0, _fresh_timestamp())
+        )
+
+        assert runner.risk.paused is True
+        assert "side=SHORT" in runner.risk.pause_reason
+        assert "price_source=ask" in runner.risk.pause_reason
+        assert "executable=101.0000" in runner.risk.pause_reason
+
+    def test_orphan_tracked_position_uses_last_only_when_bbo_unavailable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=90,
+            sell_high=200,
+        )
+        runner.notifier = _NoopNotifier()
+        runner.risk.config.max_daily_loss = 10
+        runner._trade_svc.load_tracked_entries({
+            "AAPL.US": (
+                Decimal("10"),
+                Decimal("1000"),
+                "LONG",
+                None,
+            )
+        })
+        monkeypatch.setattr(runner, "_record_risk_event", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(runner, "_persist_risk_pause_best_effort", lambda: None)
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+        runner._on_quote(
+            Quote("AAPL.US", 99.0, 0.0, 0.0, _fresh_timestamp())
+        )
+
+        assert runner.risk.paused is True
+        assert "side=LONG" in runner.risk.pause_reason
+        assert "price_source=last_fallback" in runner.risk.pause_reason
+        assert "executable=99.0000" in runner.risk.pause_reason
+
+    def test_orphan_tracked_position_uses_valid_bid_when_last_is_invalid(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=90,
+            sell_high=200,
+        )
+        runner.notifier = _NoopNotifier()
+        runner.risk.config.max_daily_loss = 10
+        runner._trade_svc.load_tracked_entries({
+            "AAPL.US": (
+                Decimal("10"),
+                Decimal("1000"),
+                "LONG",
+                None,
+            )
+        })
+        monkeypatch.setattr(runner, "_record_risk_event", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(runner, "_persist_risk_pause_best_effort", lambda: None)
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+        runner._on_quote(
+            Quote("AAPL.US", float("nan"), 99.0, 99.2, _fresh_timestamp())
+        )
+
+        assert runner.risk.paused is True
+        assert "side=LONG" in runner.risk.pause_reason
+        assert "price_source=bid" in runner.risk.pause_reason
+        assert "executable=99.0000" in runner.risk.pause_reason
 
     def test_paused_runner_updates_price_without_repeated_risk_notification(self) -> None:
         class Notifier:
@@ -6090,6 +6376,123 @@ class TestRecentQuotesDequeBound:
         assert runner.engine.long_entry_rearm_required is True
         assert runner.engine.update_price(94.0).triggered is False
 
+    def test_daily_loss_reduction_fill_latches_persistent_pause(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.submitted: list[tuple[str, str, Decimal, Decimal]] = []
+                self.filled = False
+
+            def get_positions(self) -> list[Position]:
+                if self.filled:
+                    return []
+                return [
+                    Position(
+                        "NVDA.US",
+                        "LONG",
+                        Decimal("5"),
+                        Decimal("100"),
+                    )
+                ]
+
+            def get_quotes(self, symbols: list[str]) -> list[Quote]:
+                return [
+                    Quote(symbols[0], 98.9, 98.8, 99.0, _fresh_timestamp())
+                ]
+
+            def submit_limit_order(
+                self,
+                symbol: str,
+                side: str,
+                quantity: Decimal,
+                price: Decimal,
+            ) -> OrderResult:
+                self.submitted.append((symbol, side, quantity, price))
+                self.filled = True
+                return OrderResult(
+                    "daily-loss-exit",
+                    symbol,
+                    side,
+                    quantity,
+                    price,
+                    "FILLED",
+                )
+
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=95,
+            sell_high=110,
+            min_profit_amount=1000,
+            allow_position_addons=False,
+            stop_loss_pct=0,
+            max_holding_minutes=0,
+        )
+        runner.engine.state = EngineState.LONG
+        runner.risk.config.max_daily_loss = 5
+        runner.broker = Broker()
+        runner.notifier = _NoopNotifier()
+        runner._trade_svc._record_order = lambda *args: None
+        runner._trade_svc._update_order_status = lambda *args, **kwargs: None
+        runner._trade_svc._record_risk_event = lambda reason: None
+        runner._trade_svc._record_order_skipped = lambda *args: None
+        runner._trade_svc._on_fill = None
+        runner._trade_svc.load_tracked_entries({
+            "NVDA.US": (
+                Decimal("5"),
+                Decimal("500"),
+                "LONG",
+                datetime.now(timezone.utc) - timedelta(minutes=5),
+            )
+        })
+        persisted: list[str] = []
+        persisted_risk_pauses: list[tuple[bool, bool, str]] = []
+
+        def persist_reduction(intent: _ReductionIntent, symbol: str) -> bool:
+            persisted.append(intent.cause)
+            runner._reduction_intents[symbol] = intent
+            return True
+
+        def clear_reduction(symbol: str, *, reason: str) -> bool:
+            assert reason == "broker fill completed reduction"
+            runner._reduction_intents.pop(symbol, None)
+            return True
+
+        monkeypatch.setattr(runner, "_persist_reduction", persist_reduction)
+        monkeypatch.setattr(runner, "_clear_reduction", clear_reduction)
+        monkeypatch.setattr(
+            runner._state_svc,
+            "persist",
+            lambda _db, _engine, risk: persisted_risk_pauses.append(
+                (
+                    risk.paused,
+                    risk.pause_auto_resumable,
+                    risk.pause_reason,
+                )
+            ),
+        )
+
+        runner._on_quote(
+            Quote("NVDA.US", 98.9, 98.8, 99.0, _fresh_timestamp())
+        )
+
+        assert runner.broker.submitted == [
+            ("NVDA.US", "SELL", Decimal("5"), Decimal("98.80"))
+        ]
+        assert persisted == ["DAILY_LOSS"]
+        assert runner._reduction_intents == {}
+        assert runner.risk.paused is True
+        assert runner.risk.pause_auto_resumable is False
+        assert runner.risk.pause_reason.startswith("daily loss limit reached:")
+        assert persisted_risk_pauses == [
+            (True, False, runner.risk.pause_reason)
+        ]
+        assert runner.engine.state == EngineState.FLAT
+
     def test_reduction_persistence_failure_blocks_submission_and_restores_engine(
         self,
         monkeypatch,
@@ -6181,6 +6584,9 @@ class TestRecentQuotesDequeBound:
                 Quote("NVDA.US", 99.0, 98.9, 99.1, _fresh_timestamp()),
                 runner.engine,
                 "US",
+                daily_loss_snapshot=(
+                    runner.risk.check_with_daily_loss_snapshot()[1]
+                ),
             )
         )
 

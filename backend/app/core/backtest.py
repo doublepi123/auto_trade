@@ -145,6 +145,14 @@ class _OpenPosition:
     lowest_price: float
 
 
+@dataclass(frozen=True)
+class _DailyLossReductionIntent:
+    reason: str
+    triggered_at: datetime
+    trigger_close: float
+    deferred_until_rth: bool
+
+
 class BacktestEngine:
     def __init__(self, params: BacktestEngineParams) -> None:
         self.params: BacktestEngineParams = params
@@ -171,7 +179,8 @@ class BacktestEngine:
         entries_today = 0
         consecutive_losses = 0
         paused_reason = ""
-        daily_loss_reduction_latched = False
+        daily_loss_pause_latched = False
+        daily_loss_reduction: _DailyLossReductionIntent | None = None
         drawdown_reason = ""
         peak_equity = self.params.initial_cash
         max_drawdown_pct = 0.0
@@ -189,7 +198,7 @@ class BacktestEngine:
                 daily_pnl = 0.0
                 consecutive_losses = 0
                 if (
-                    not daily_loss_reduction_latched
+                    not daily_loss_pause_latched
                     and (
                         paused_reason.startswith("daily loss limit")
                         or paused_reason.startswith("consecutive loss")
@@ -203,10 +212,16 @@ class BacktestEngine:
                     highest_price=max(position.highest_price, bar.high),
                     lowest_price=min(position.lowest_price, bar.low),
                 )
+                if daily_loss_reduction is None:
+                    daily_loss_reduction = self._daily_loss_reduction_for_bar(
+                        bar,
+                        position,
+                        realized_daily_pnl=daily_pnl,
+                    )
                 exit_result = self._try_exit_position(
                     bar,
                     position,
-                    realized_daily_pnl=daily_pnl,
+                    daily_loss_reduction=daily_loss_reduction,
                 )
                 if exit_result is not None:
                     action, price, exit_fee, net_pnl, reason, require_min_profit = exit_result
@@ -290,7 +305,8 @@ class BacktestEngine:
                             # non-auto-resumable pause. Historical bars contain
                             # no operator-resume event, so the strict replay
                             # remains paused for the rest of the run.
-                            daily_loss_reduction_latched = True
+                            daily_loss_pause_latched = True
+                            daily_loss_reduction = None
                             paused_reason = (
                                 "daily loss limit reached; forced exit requires "
                                 "manual resume: "
@@ -676,12 +692,47 @@ class BacktestEngine:
             return "SELL_SHORT", "short", price, f"high {bar.high:.2f} >= sell_high {self.params.sell_high:.2f}"
         return None
 
-    def _try_exit_position(
+    def _daily_loss_reduction_for_bar(
         self,
         bar: BacktestBar,
         position: _OpenPosition,
         *,
         realized_daily_pnl: float,
+    ) -> _DailyLossReductionIntent | None:
+        # Historical OHLC has no executable BBO or intrabar event order. Use
+        # the observed bar close for the trigger, including outside RTH so an
+        # RTH_ONLY replay can preserve live's durable reduction-intent latch.
+        # The intent never manufactures an off-hours fill: execution remains
+        # deferred until _try_exit_position sees an executable RTH bar.
+        if self.params.max_daily_loss <= 0:
+            return None
+        unrealized_at_close = self._unrealized_pnl(position, bar.close)
+        combined_daily_pnl = realized_daily_pnl + unrealized_at_close
+        if combined_daily_pnl > -self.params.max_daily_loss:
+            return None
+        deferred_until_rth = (
+            self.params.trading_session_mode == "RTH_ONLY"
+            and not is_trading_hours(self.params.market, bar.timestamp)
+        )
+        return _DailyLossReductionIntent(
+            reason=(
+                "daily loss limit reached using OHLC bar-close approximation: "
+                f"realized={realized_daily_pnl:.2f}, "
+                f"unrealized={unrealized_at_close:.2f}, "
+                f"combined={combined_daily_pnl:.2f}, "
+                f"limit={self.params.max_daily_loss:.2f}"
+            ),
+            triggered_at=bar.timestamp,
+            trigger_close=bar.close,
+            deferred_until_rth=deferred_until_rth,
+        )
+
+    def _try_exit_position(
+        self,
+        bar: BacktestBar,
+        position: _OpenPosition,
+        *,
+        daily_loss_reduction: _DailyLossReductionIntent | None,
     ) -> tuple[str, float, float, float, str, bool] | None:
         # Live RTH_ONLY execution rejects both entries and exits outside RTH.
         # Keep the position open until an executable session observation rather
@@ -693,32 +744,24 @@ class BacktestEngine:
             return None
         stop_loss_pct = self.params.stop_loss_pct / 100
         trailing_stop_pct = self.params.trailing_stop_pct / 100
-        # The live deterministic exit policy compares realized daily net PnL
-        # with the open position's gross unrealized PnL at executable BBO.
-        # Historical OHLC has no BBO or intrabar event order, so use this bar's
-        # close both as the trigger observation and as the pre-slippage
-        # forced-exit price. Entry and prospective exit fees are deliberately
-        # not included in the trigger, matching that combined-PnL calculation;
-        # they are included in the resulting closed trade below. A separate
-        # live last-price pre-pause fallback is disclosed, but not replayed.
-        unrealized_at_close = self._unrealized_pnl(position, bar.close)
-        combined_daily_pnl = realized_daily_pnl + unrealized_at_close
-        if (
-            self.params.max_daily_loss > 0
-            and combined_daily_pnl <= -self.params.max_daily_loss
-        ):
+        # A latched DAILY_LOSS reduction remains highest priority even when a
+        # later executable observation has recovered above the threshold.
+        # Entry and prospective exit fees were deliberately excluded from the
+        # trigger; the actual forced fill below still applies slippage and fees.
+        if daily_loss_reduction is not None:
+            reason = daily_loss_reduction.reason
+            if daily_loss_reduction.deferred_until_rth:
+                reason = (
+                    f"{reason}; reduction intent latched outside RTH at "
+                    f"{daily_loss_reduction.triggered_at.isoformat()} with "
+                    f"trigger_close={daily_loss_reduction.trigger_close:.4f}; "
+                    "execution deferred to first RTH observation"
+                )
             return self._forced_exit(
                 bar,
                 position,
                 cause="DAILY_LOSS",
-                reason=(
-                    "daily loss limit reached using OHLC bar-close "
-                    "approximation: "
-                    f"realized={realized_daily_pnl:.2f}, "
-                    f"unrealized={unrealized_at_close:.2f}, "
-                    f"combined={combined_daily_pnl:.2f}, "
-                    f"limit={self.params.max_daily_loss:.2f}"
-                ),
+                reason=reason,
             )
 
         # Match the remaining live deterministic reduction priority while

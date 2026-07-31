@@ -43,16 +43,16 @@ _LIMITATIONS = (
     "the live deterministic BBO reduction path with closed-trade net PnL plus "
     "the open position's gross PnL at the observed "
     "bar close. Historical executable BBO and intrabar breach timing cannot be "
-    "reconstructed, and the separate live last-price pre-pause fallback is not "
-    "modeled.",
+    "reconstructed. Live managed positions use executable BBO; the orphan "
+    "tracked-position fail-closed fallback is not modeled.",
     "A filled DAILY_LOSS reduction is non-auto-resumable in live execution. The "
     "bar input contains no operator-resume event, so replay remains paused for "
     "the rest of the run after that forced exit.",
     "Backtest ANY mode preserves legacy all-hours entry semantics; the live safety "
     "layer still rejects new long entries outside RTH.",
-    "RTH_ONLY skips non-RTH fills but does not latch any non-RTH deterministic "
-    "reduction (DAILY_LOSS, PRICE_STOP, EOD, or TIME) for execution at the next "
-    "open as the live reduction workflow does.",
+    "RTH_ONLY never manufactures a non-RTH fill. DAILY_LOSS is durably latched "
+    "and executed at the next RTH observation, matching the live reduction "
+    "workflow; PRICE_STOP, EOD, and TIME are not latched from non-RTH OHLC bars.",
     "The simulation has no historical bid/ask spread, latency, order queue, "
     "rejections, partial fills, or broker buying-power replay; fixed quantity is "
     "not dynamic full-buying-power sizing.",

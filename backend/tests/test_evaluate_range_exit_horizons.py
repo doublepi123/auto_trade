@@ -253,7 +253,8 @@ def test_report_date_filter_boundaries_reach_split_and_output() -> None:
         "realized-plus-unrealized" in item
         and "bar close" in item
         and "executable BBO" in item
-        and "last-price pre-pause" in item
+        and "orphan" in item
+        and "fail-closed" in item
         for item in limitations
     )
     assert any(
@@ -266,7 +267,8 @@ def test_report_date_filter_boundaries_reach_split_and_output() -> None:
         "RTH_ONLY" in item
         and "DAILY_LOSS" in item
         and "PRICE_STOP" in item
-        and "next open" in item
+        and "next RTH observation" in item
+        and "not latched" in item
         for item in limitations
     )
 

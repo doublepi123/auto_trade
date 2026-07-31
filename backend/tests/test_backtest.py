@@ -668,6 +668,143 @@ class TestBacktestEngine:
         assert [trade.action for trade in result.trades] == ["BUY"]
         assert result.metrics.final_state == "long"
 
+    def test_rth_only_latches_lunch_daily_loss_and_exits_after_recovery(
+        self,
+    ) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            market="HK",
+            trading_session_mode="RTH_ONLY",
+            buy_low=100,
+            sell_high=110,
+            max_daily_loss=5,
+            stop_loss_pct=5,
+            max_holding_minutes=1,
+        ))
+
+        result = engine.run([
+            bar_at(
+                datetime(2026, 5, 22, 3, 59, tzinfo=timezone.utc),
+                101,
+                102,
+                99,
+                100,
+            ),
+            # HK lunch is non-RTH. This observation latches DAILY_LOSS but
+            # must not manufacture a fill at the 95 close.
+            bar_at(
+                datetime(2026, 5, 22, 4, 15, tzinfo=timezone.utc),
+                96,
+                97,
+                94,
+                95,
+            ),
+            # Price has fully recovered when the afternoon session opens.
+            # Fixed stop, time stop, and target are all eligible in this bar;
+            # the durable DAILY_LOSS intent still has highest priority and
+            # exits at this RTH close.
+            bar_at(
+                datetime(2026, 5, 22, 5, 0, tzinfo=timezone.utc),
+                100,
+                111,
+                94,
+                100,
+            ),
+            bar_at(
+                datetime(2026, 5, 22, 5, 1, tzinfo=timezone.utc),
+                101,
+                102,
+                99,
+                100,
+            ),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == [
+            "BUY",
+            "DAILY_LOSS_SELL",
+        ]
+        closed = result.trades[-1]
+        assert closed.timestamp == datetime(
+            2026, 5, 22, 5, 0, tzinfo=timezone.utc
+        )
+        assert closed.price == 100
+        assert "reduction intent latched outside RTH" in closed.reason
+        assert "trigger_close=95.0000" in closed.reason
+        assert result.equity_curve[1].position == "long"
+        assert len(result.skipped_signals) == 1
+        assert result.skipped_signals[0].category == "RISK"
+        assert "requires manual resume" in result.skipped_signals[0].reason
+
+    def test_rth_only_daily_loss_intent_survives_exchange_day_rollover(
+        self,
+    ) -> None:
+        engine = BacktestEngine(BacktestEngineParams(
+            market="US",
+            trading_session_mode="RTH_ONLY",
+            buy_low=100,
+            sell_high=200,
+            max_daily_loss=5,
+        ))
+
+        result = engine.run([
+            bar_at(
+                datetime(2026, 5, 20, 19, 59, tzinfo=timezone.utc),
+                101,
+                102,
+                99,
+                100,
+            ),
+            bar_at(
+                datetime(2026, 5, 20, 20, 1, tzinfo=timezone.utc),
+                96,
+                97,
+                94,
+                95,
+            ),
+            # New York local midnight has passed and the price has recovered,
+            # but neither condition clears the durable reduction intent.
+            bar_at(
+                datetime(2026, 5, 21, 4, 1, tzinfo=timezone.utc),
+                100,
+                101,
+                99,
+                100,
+            ),
+            bar_at(
+                datetime(2026, 5, 21, 13, 30, tzinfo=timezone.utc),
+                101,
+                102,
+                100,
+                101,
+            ),
+            bar_at(
+                datetime(2026, 5, 21, 13, 31, tzinfo=timezone.utc),
+                101,
+                102,
+                99,
+                100,
+            ),
+        ], include_fee_sensitivity=False)
+
+        assert [trade.action for trade in result.trades] == [
+            "BUY",
+            "DAILY_LOSS_SELL",
+        ]
+        closed = result.trades[-1]
+        assert closed.timestamp == datetime(
+            2026, 5, 21, 13, 30, tzinfo=timezone.utc
+        )
+        assert closed.price == 101
+        assert "2026-05-20T20:01:00+00:00" in closed.reason
+        assert "trigger_close=95.0000" in closed.reason
+        assert [point.position for point in result.equity_curve[:3]] == [
+            "long",
+            "long",
+            "long",
+        ]
+        assert len(result.skipped_signals) == 1
+        assert result.skipped_signals[0].category == "RISK"
+        assert "requires manual resume" in result.skipped_signals[0].reason
+
     def test_daily_risk_reset_uses_exchange_local_trade_day(self) -> None:
         engine = BacktestEngine(BacktestEngineParams(
             market="US",

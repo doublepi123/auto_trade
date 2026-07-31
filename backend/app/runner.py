@@ -29,7 +29,7 @@ from app.core.fees import one_side_fee_rate
 from app.core.market_calendar import is_closing_window, is_opening_warmup, is_trading_hours, trade_day_for
 from app.core.notifiers.multi_channel import MultiChannelNotifier
 from app.core.notifiers.serverchan import ServerChanNotifier
-from app.core.risk import RiskConfig, RiskController
+from app.core.risk import DailyLossSnapshot, RiskConfig, RiskController
 from app.database import SessionLocal
 from app.models import OrderRecord, TrackedEntry, TradeEvent
 from app.services.daily_pnl_service import DailyPnlService
@@ -1836,13 +1836,20 @@ class AppRunner:
                 )
                 decision.early_return = True
                 return decision
-            risk_result = self.risk.check()
+            risk_result, daily_loss_snapshot = (
+                self.risk.check_with_daily_loss_snapshot()
+            )
             if self._trade_svc.pending_order_for(quote.symbol) is not None:
                 self._trigger_in_flight = True
                 decision.processing_started = True
             else:
                 reduction_intent, newly_latched, should_clear = (
-                    self._reduction_intent_for_quote_locked(quote, active_engine, active_market)
+                    self._reduction_intent_for_quote_locked(
+                        quote,
+                        active_engine,
+                        active_market,
+                        daily_loss_snapshot=daily_loss_snapshot,
+                    )
                 )
                 decision.reduction_should_clear = should_clear
                 if reduction_intent is not None:
@@ -2275,20 +2282,19 @@ class AppRunner:
                     "timestamp": quote.timestamp,
                 }
             )
-            if (
-                (
-                    quote.symbol == self.engine.params.symbol
-                    or self._trade_svc.tracked_position(quote.symbol) is not None
-                )
-                and quote_quality["price_positive"]
-                and quote_quality["spread_reasonable"]
-                and quote_quality["last_bbo_consistent"]
-                and quote_quality["source_timestamp_fresh"]
-            ):
-                self._pause_if_unrealized_loss_limit_reached(
-                    quote.symbol,
-                    float(quote.last_price),
-                )
+            if quote_quality["source_timestamp_fresh"]:
+                with self._state_lock:
+                    has_executable_runtime = (
+                        quote.symbol == self.engine.params.symbol
+                        or (
+                            quote.symbol in self._symbol_runtimes
+                            and quote.symbol in self._opening_execution_policies
+                        )
+                    )
+                if not has_executable_runtime:
+                    self._pause_orphan_tracked_position_if_daily_loss_reached(
+                        quote
+                    )
             decision = self._evaluate_quote_trigger(quote, is_push=is_push)
             processing_started = decision.processing_started
 
@@ -5165,6 +5171,8 @@ class AppRunner:
         quote: Quote,
         engine: StrategyEngine,
         market: str,
+        *,
+        daily_loss_snapshot: DailyLossSnapshot,
     ) -> tuple[_ReductionIntent | None, bool, bool]:
         existing = self._reduction_intents.get(quote.symbol)
         tracked = self._trade_svc.tracked_position(quote.symbol)
@@ -5257,8 +5265,10 @@ class AppRunner:
                 market,
                 engine.params.flatten_minutes_before_close,
             ),
-            combined_daily_pnl=float(self.risk.daily_pnl) + unrealized_pnl,
-            max_daily_loss=float(self.risk.config.max_daily_loss or 0),
+            combined_daily_pnl=(
+                daily_loss_snapshot.realized_pnl + unrealized_pnl
+            ),
+            max_daily_loss=daily_loss_snapshot.max_daily_loss,
         )
         if decision is None:
             return None, False, False
@@ -5438,51 +5448,85 @@ class AppRunner:
                 return "IDLE", "", None
             return "REDUCING", intent.reason, intent.started_at
 
-    def _pause_if_unrealized_loss_limit_reached(self, symbol: str, last_price: float) -> bool:
-        if last_price <= 0:
+    def _pause_orphan_tracked_position_if_daily_loss_reached(
+        self,
+        quote: Quote,
+    ) -> bool:
+        """Fail closed for tracked positions without an executable runtime.
+
+        Managed primary/opening runtimes must never call this fallback: their
+        durable deterministic reduction uses the same quote's executable BBO.
+        An orphan cannot safely submit an order because there is no engine to
+        snapshot/restore, so a confirmed daily-loss breach latches a manual
+        pause and emits an explicit diagnostic event for operator recovery.
+        """
+        tracked = self._trade_svc.tracked_position(quote.symbol)
+        if tracked is None:
             return False
-        with self._state_lock:
-            if self.risk.paused or self.risk.kill_switch:
-                return False
-            max_daily_loss = Decimal(str(self.risk.config.max_daily_loss or 0))
-            realized_pnl = Decimal(str(self.risk.daily_pnl))
+        _, daily_loss_snapshot = self.risk.check_with_daily_loss_snapshot()
+        if daily_loss_snapshot.paused or daily_loss_snapshot.kill_switch:
+            return False
+        max_daily_loss = Decimal(str(daily_loss_snapshot.max_daily_loss))
+        realized_pnl = Decimal(str(daily_loss_snapshot.realized_pnl))
         if max_daily_loss <= 0:
             return False
 
-        tracked = self._trade_svc.tracked_position(symbol)
-        if tracked is None:
-            return False
         quantity = tracked.quantity
         cost = tracked.cost
         if quantity <= 0 or cost <= 0:
             return False
         avg_price = cost / quantity
-        if tracked.side == "SHORT":
-            unrealized_pnl = (avg_price - Decimal(str(last_price))) * quantity
+        side = tracked.side.upper()
+        if side == "SHORT":
+            bbo_price = float(quote.ask)
+            price_source = "ask"
         else:
-            unrealized_pnl = (Decimal(str(last_price)) - avg_price) * quantity
+            bbo_price = float(quote.bid)
+            price_source = "bid"
+        if not math.isfinite(bbo_price) or bbo_price <= 0:
+            bbo_price = float(quote.last_price)
+            price_source = "last_fallback"
+        if not math.isfinite(bbo_price) or bbo_price <= 0:
+            return False
+        executable_price = Decimal(str(bbo_price))
+        if side == "SHORT":
+            unrealized_pnl = (avg_price - executable_price) * quantity
+        else:
+            unrealized_pnl = (executable_price - avg_price) * quantity
         combined_pnl = realized_pnl + unrealized_pnl
         if combined_pnl > -max_daily_loss:
             return False
 
         reason = (
-            "unrealized daily loss limit reached: "
+            "ORPHAN_TRACKED_POSITION_DAILY_LOSS: fail-closed pause for tracked "
+            "position without executable runtime; "
+            f"symbol={quote.symbol}, side={side}, price_source={price_source}, "
+            f"executable={float(executable_price):.4f}, "
             f"realized={float(realized_pnl):.2f}, "
             f"unrealized={float(unrealized_pnl):.2f}, "
             f"combined={float(combined_pnl):.2f}, "
             f"limit={float(max_daily_loss):.2f}"
         )
         self.risk.pause(reason, auto_resumable=False)
+        if self.risk.pause_reason != reason:
+            return False
         try:
-            self._record_risk_event(reason)
+            self._record_risk_event(
+                reason,
+                event_type="ORPHAN_TRACKED_POSITION_DAILY_LOSS",
+            )
         except Exception:
-            logger.exception("failed to record unrealized loss risk event")
+            logger.exception("failed to record orphan tracked-position risk event")
         try:
-            self.notifier.notify_risk_event("UNREALIZED_LOSS_LIMIT", reason)
+            self.notifier.notify_risk_event(
+                "ORPHAN_TRACKED_POSITION_DAILY_LOSS",
+                reason,
+            )
         except Exception:
-            logger.exception("failed to send unrealized loss risk notification")
-        with self._db_session() as db:
-            self._state_svc.persist(db, self.engine, self.risk)
+            logger.exception(
+                "failed to send orphan tracked-position risk notification"
+            )
+        self._persist_risk_pause_best_effort()
         self._broadcast_status()
         return True
 
