@@ -78,6 +78,7 @@ from app.api.tag_analytics import router as tag_analytics_router
 from app.api.risk_score import router as risk_score_router
 from app.api.holding_time import router as holding_time_router
 from app.api.distribution_shape import router as distribution_shape_router
+from app.api.trade_frequency import router as trade_frequency_router
 from app.config import settings
 from app.database import init_db
 from app.runner import get_runner
@@ -1416,6 +1417,7 @@ app.include_router(tag_analytics_router)
 app.include_router(risk_score_router)
 app.include_router(holding_time_router)
 app.include_router(distribution_shape_router)
+app.include_router(trade_frequency_router)
 
 
 # Global exception handler: log unhandled exceptions and return a generic 500 JSON

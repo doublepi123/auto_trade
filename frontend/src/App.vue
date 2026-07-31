@@ -43,6 +43,7 @@
         <router-link to="/risk-score" class="app-menu-link" :class="{ active: route.path === '/risk-score' }">风险评分</router-link>
         <router-link to="/holding-time" class="app-menu-link" :class="{ active: route.path === '/holding-time' }">持仓时长</router-link>
         <router-link to="/distribution-shape" class="app-menu-link" :class="{ active: route.path === '/distribution-shape' }">分布形态</router-link>
+        <router-link to="/trade-frequency" class="app-menu-link" :class="{ active: route.path === '/trade-frequency' }">交易频率</router-link>
       </nav>
       <div class="header-actions">
         <el-button
