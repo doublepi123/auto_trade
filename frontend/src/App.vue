@@ -61,6 +61,7 @@
         <router-link to="/robustness" class="app-menu-link" :class="{ active: route.path === '/robustness' }">稳健性</router-link>
         <router-link to="/milestones" class="app-menu-link" :class="{ active: route.path === '/milestones' }">里程碑</router-link>
         <router-link to="/momentum-ranking" class="app-menu-link" :class="{ active: route.path === '/momentum-ranking' }">动量排名</router-link>
+        <router-link to="/fee-drag" class="app-menu-link" :class="{ active: route.path === '/fee-drag' }">费用拖累</router-link>
       </nav>
       <div class="header-actions">
         <el-button

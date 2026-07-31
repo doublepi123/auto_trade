@@ -96,6 +96,7 @@ from app.api.regime_sensitivity import router as regime_sensitivity_router
 from app.api.robustness import router as robustness_router
 from app.api.milestones import router as milestones_router
 from app.api.momentum_ranking import router as momentum_ranking_router
+from app.api.fee_drag import router as fee_drag_router
 from app.config import settings
 from app.database import init_db
 from app.runner import get_runner
@@ -1452,6 +1453,7 @@ app.include_router(regime_sensitivity_router)
 app.include_router(robustness_router)
 app.include_router(milestones_router)
 app.include_router(momentum_ranking_router)
+app.include_router(fee_drag_router)
 
 
 # Global exception handler: log unhandled exceptions and return a generic 500 JSON
