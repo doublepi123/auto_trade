@@ -2252,6 +2252,28 @@ class AlertRulePage(BaseModel):
     total: int
 
 
+class AlertRuleEffectiveness(BaseModel):
+    """One rule's firing effectiveness summary (read-only aggregate)."""
+
+    id: int
+    name: str
+    symbol: str
+    rule_type: str
+    threshold: float
+    severity: str
+    enabled: bool
+    cooldown_seconds: int
+    created_at: datetime
+    firing_count: int
+    last_fired_at: Optional[datetime] = None
+    never_fired: bool
+
+
+class AlertRuleEffectivenessPage(BaseModel):
+    items: list[AlertRuleEffectiveness]
+    total: int
+
+
 class AlertEvaluateResult(BaseModel):
     evaluated: int
     fired: int

@@ -9,7 +9,15 @@ from app.api.deps import extract_actor, get_audit_logger
 from app.core.audit import AuditLogger
 from app.database import get_db
 from app.runner import get_runner
-from app.schemas import AlertEvaluateResult, AlertFiringOut, AlertFiringPage, AlertRuleCreate, AlertRuleOut, AlertRulePage
+from app.schemas import (
+    AlertEvaluateResult,
+    AlertFiringOut,
+    AlertFiringPage,
+    AlertRuleCreate,
+    AlertRuleEffectivenessPage,
+    AlertRuleOut,
+    AlertRulePage,
+)
 from app.services.alert_rule_service import AlertRuleService
 
 router = APIRouter(
@@ -71,6 +79,21 @@ def list_alert_rules(
 ) -> AlertRulePage:
     items = AlertRuleService(db).list_rules(enabled_only=(enabled is True))
     return AlertRulePage(items=items, total=len(items))
+
+
+@router.get("/effectiveness", response_model=AlertRuleEffectivenessPage)
+def alert_rule_effectiveness(
+    from_date: str | None = Query(default=None, description="Lower bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
+    to_date: str | None = Query(default=None, description="Upper bound (YYYY-MM-DD)", pattern=_DATE_PATTERN),
+    db=Depends(get_db),
+) -> AlertRuleEffectivenessPage:
+    """Read-only per-rule firing effectiveness: firing counts, last fired time
+    and never-fired visibility. Never fires notifications."""
+    items = AlertRuleService(db).effectiveness(
+        from_dt=_day_start(from_date),
+        to_dt=_day_end(to_date),
+    )
+    return AlertRuleEffectivenessPage(items=items, total=len(items))
 
 
 @router.get("/{rule_id}", response_model=AlertRuleOut)

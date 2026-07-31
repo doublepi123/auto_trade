@@ -11,11 +11,16 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models import AlertFiring, AlertRule, RuntimeState
-from app.schemas import AlertEvaluateResult, AlertRuleCreate, AlertRuleOut
+from app.schemas import (
+    AlertEvaluateResult,
+    AlertRuleCreate,
+    AlertRuleEffectiveness,
+    AlertRuleOut,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +179,57 @@ class AlertRuleService:
             stmt = stmt.where(AlertFiring.rule_id == rule_id)
         stmt = stmt.order_by(AlertFiring.fired_at.desc()).limit(max(1, int(limit)))
         return list(self._db.scalars(stmt))
+
+    def effectiveness(
+        self,
+        *,
+        from_dt: datetime | None = None,
+        to_dt: datetime | None = None,
+    ) -> list[AlertRuleEffectiveness]:
+        """Read-only per-rule firing effectiveness. No notification side effects.
+
+        ``firing_count`` is the number of ``AlertFiring`` rows within the optional
+        ``[from_dt, to_dt]`` window. ``last_fired_at`` is the evaluator-maintained
+        ``AlertRule.last_fired_at`` (the most recent successful fire) falling back
+        to the newest firing within the window; ``never_fired`` is True only when a
+        rule has no record of ever firing. Deterministic ordering: rule id desc.
+        """
+        rules = list(self._db.scalars(select(AlertRule).order_by(AlertRule.id.desc())))
+        if not rules:
+            return []
+        agg = select(
+            AlertFiring.rule_id,
+            func.count(AlertFiring.id),
+            func.max(AlertFiring.fired_at),
+        )
+        if from_dt is not None:
+            agg = agg.where(AlertFiring.fired_at >= from_dt)
+        if to_dt is not None:
+            agg = agg.where(AlertFiring.fired_at <= to_dt)
+        agg = agg.group_by(AlertFiring.rule_id)
+        firing_stats: dict[int, tuple[int, datetime | None]] = {
+            rule_id: (int(count), latest)
+            for rule_id, count, latest in self._db.execute(agg)
+        }
+        out: list[AlertRuleEffectiveness] = []
+        for rule in rules:
+            count, window_latest = firing_stats.get(rule.id, (0, None))
+            last = rule.last_fired_at if rule.last_fired_at is not None else window_latest
+            out.append(AlertRuleEffectiveness(
+                id=rule.id,
+                name=rule.name,
+                symbol=rule.symbol,
+                rule_type=rule.rule_type,
+                threshold=float(rule.threshold),
+                severity=rule.severity,
+                enabled=rule.enabled,
+                cooldown_seconds=int(rule.cooldown_seconds),
+                created_at=rule.created_at,
+                firing_count=count,
+                last_fired_at=last,
+                never_fired=last is None,
+            ))
+        return out
 
     def _current_value(self, rule: AlertRule, quote_map: dict[str, float]) -> float | None:
         if rule.rule_type in PRICE_RULES:

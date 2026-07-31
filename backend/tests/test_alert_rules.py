@@ -289,3 +289,115 @@ class TestAlertFiringHistory(_Base):
         # The 23:59 fire is within to_date=2026-06-16 (inclusive end-of-day).
         assert resp.json()["total"] == 1
 
+
+class TestAlertRuleEffectiveness(_Base):
+    def _make_rule(self, **kw) -> int:
+        svc = AlertRuleService(self._db())
+        out = svc.create(AlertRuleCreate(
+            name=kw.get("name", "r"),
+            symbol=kw.get("symbol", "AAPL.US"),
+            rule_type=kw.get("rule_type", "price_above"),
+            threshold=kw.get("threshold", 150.0),
+            severity="WARNING",
+            enabled=kw.get("enabled", True),
+            cooldown_seconds=kw.get("cooldown_seconds", 0),
+        ))
+        return out.id
+
+    def test_never_fired_rule_is_visible(self) -> None:
+        rid = self._make_rule(name="quiet")
+        eff = AlertRuleService(self._db()).effectiveness()
+        assert len(eff) == 1
+        e = eff[0]
+        assert e.id == rid
+        assert e.firing_count == 0
+        assert e.last_fired_at is None
+        assert e.never_fired is True
+        assert e.enabled is True
+
+    def test_firing_count_and_last_fired(self) -> None:
+        self._make_rule(threshold=150.0, cooldown_seconds=0)
+        svc = AlertRuleService(self._db())
+        svc.evaluate(
+            FakeRunner(FakeBroker({"AAPL.US": 160.0}), FakeNotifier()),
+            now=datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc),
+        )
+        svc.evaluate(
+            FakeRunner(FakeBroker({"AAPL.US": 160.0}), FakeNotifier()),
+            now=datetime(2026, 6, 17, 12, 0, tzinfo=timezone.utc),
+        )
+        eff = AlertRuleService(self._db()).effectiveness()
+        assert len(eff) == 1
+        e = eff[0]
+        assert e.firing_count == 2
+        assert e.last_fired_at is not None
+        # SQLite returns naive datetimes; compare against the naive instant.
+        assert e.last_fired_at >= datetime(2026, 6, 17, 12, 0)
+        assert e.never_fired is False
+
+    def test_disabled_rules_included_with_enabled_state(self) -> None:
+        self._make_rule(name="on", enabled=True)
+        self._make_rule(name="off", enabled=False)
+        eff = AlertRuleService(self._db()).effectiveness()
+        assert {e.name: e.enabled for e in eff} == {"on": True, "off": False}
+
+    def test_date_bounded_firing_count(self) -> None:
+        self._make_rule(threshold=150.0, cooldown_seconds=0)
+        svc = AlertRuleService(self._db())
+        svc.evaluate(
+            FakeRunner(FakeBroker({"AAPL.US": 160.0}), FakeNotifier()),
+            now=datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc),
+        )
+        svc.evaluate(
+            FakeRunner(FakeBroker({"AAPL.US": 160.0}), FakeNotifier()),
+            now=datetime(2026, 6, 18, 12, 0, tzinfo=timezone.utc),
+        )
+        eff = AlertRuleService(self._db()).effectiveness(
+            from_dt=datetime(2026, 6, 16, 0, 0, tzinfo=timezone.utc),
+            to_dt=datetime(2026, 6, 17, 23, 59, 59, tzinfo=timezone.utc),
+        )
+        assert len(eff) == 1
+        e = eff[0]
+        assert e.firing_count == 1  # only the 16th fire is inside the window
+        assert e.last_fired_at is not None  # rule.last_fired_at keeps the true last fire
+        assert e.never_fired is False
+
+    def test_effectiveness_never_fires_notifications(self) -> None:
+        self._make_rule(threshold=150.0, cooldown_seconds=0)
+        notifier = FakeNotifier()
+        AlertRuleService(self._db()).effectiveness()  # must be side-effect free
+        assert notifier.calls == []
+
+    def test_api_effectiveness(self) -> None:
+        self._make_rule(name="quiet", threshold=500.0)  # never fires at quote 160
+        self._make_rule(name="loud", threshold=150.0)
+        AlertRuleService(self._db()).evaluate(
+            FakeRunner(FakeBroker({"AAPL.US": 160.0}), FakeNotifier()),
+            now=datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc),
+        )
+        resp = self.client.get("/api/alert-rules/effectiveness")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["total"] == 2
+        by_name = {i["name"]: i for i in data["items"]}
+        assert by_name["quiet"]["firing_count"] == 0
+        assert by_name["quiet"]["never_fired"] is True
+        assert by_name["loud"]["firing_count"] == 1
+        assert by_name["loud"]["never_fired"] is False
+        # deterministic order: rule id desc (loud created last -> first)
+        assert [i["name"] for i in data["items"]] == ["loud", "quiet"]
+
+    def test_api_effectiveness_date_bounds(self) -> None:
+        self._make_rule(threshold=150.0, cooldown_seconds=0)
+        AlertRuleService(self._db()).evaluate(
+            FakeRunner(FakeBroker({"AAPL.US": 160.0}), FakeNotifier()),
+            now=datetime(2026, 6, 18, 12, 0, tzinfo=timezone.utc),
+        )
+        resp = self.client.get(
+            "/api/alert-rules/effectiveness",
+            params={"from_date": "2026-06-16", "to_date": "2026-06-17"},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["items"][0]["firing_count"] == 0  # fire outside window
+        assert resp.json()["items"][0]["never_fired"] is False
+
