@@ -51,6 +51,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/intraday-seasonality', component: () => import('../views/IntradaySeasonality.vue') },
   { path: '/drawdown-duration', component: () => import('../views/DrawdownDuration.vue') },
   { path: '/prediction-score', component: () => import('../views/PredictionScore.vue') },
+  { path: '/regime-sensitivity', component: () => import('../views/RegimeSensitivity.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
