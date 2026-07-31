@@ -12,7 +12,7 @@ from app.config import settings
 from app.core.notifiers.multi_channel import MultiChannelNotifier
 from app.database import get_db
 from app.models import NotificationLog
-from app.schemas import NotificationLogOut, NotificationLogPage
+from app.schemas import NotificationLogOut, NotificationLogPage, NotificationStatsResponse
 from app.services.credentials_service import CredentialsService
 from app.services.notification_log_service import NotificationLogService
 
@@ -47,6 +47,26 @@ def list_notifications(
             to_date=to_date,
             page=page,
             page_size=page_size,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=f"Invalid date: {exc}") from exc
+
+
+@router.get("/stats", response_model=NotificationStatsResponse)
+def notification_stats(
+    severity: str | None = Query(default=None, description="Filter by severity"),
+    from_date: str | None = Query(default=None, description="Start date (YYYY-MM-DD)"),
+    to_date: str | None = Query(default=None, description="End date (YYYY-MM-DD)"),
+    db=Depends(get_db),
+) -> NotificationStatsResponse:
+    """Read-only delivery statistics: totals, success rate, severity/channel
+    breakdowns and a deterministic daily trend. Never returns payloads."""
+    normalized = severity.strip().upper() if severity else None
+    try:
+        return NotificationLogService(db).statistics(
+            severity=normalized,
+            from_date=from_date,
+            to_date=to_date,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"Invalid date: {exc}") from exc

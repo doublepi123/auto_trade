@@ -2326,6 +2326,44 @@ class NotificationLogPage(BaseModel):
     page_size: int
 
 
+class NotificationStatsBucket(BaseModel):
+    """One aggregate bucket (per severity / per channel) in the delivery stats."""
+
+    key: str
+    total: int
+    success: int
+    failed: int
+
+
+class NotificationDailyPoint(BaseModel):
+    """Per-day notification delivery counts (UTC calendar day)."""
+
+    date: str
+    total: int
+    success: int
+    failed: int
+
+
+class NotificationStatsResponse(BaseModel):
+    """Read-only notification delivery statistics.
+
+    Aggregations only — never carries title/content/error payloads. ``success_rate``
+    is a percentage in [0, 100]. ``by_channel`` attributes only the channel that the
+    log can identify (a failing channel recorded in ``error``); everything else is
+    bucketed under ``unknown``.
+    """
+
+    from_date: Optional[str] = None
+    to_date: Optional[str] = None
+    total: int
+    success: int
+    failed: int
+    success_rate: float
+    by_severity: list[NotificationStatsBucket] = Field(default_factory=list)
+    by_channel: list[NotificationStatsBucket] = Field(default_factory=list)
+    daily: list[NotificationDailyPoint] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Daily risk history (runtime_state_snapshots)
 # ---------------------------------------------------------------------------

@@ -16,6 +16,7 @@ from app.core.notifiers.multi_channel import MultiChannelNotifier
 from app.database import get_db
 from app.main import app
 from app.models import Base, NotificationLog
+from app.schemas import NotificationDailyPoint
 from app.services.notification_log_service import NotificationLogService, NotificationLogSink
 
 
@@ -70,6 +71,23 @@ class _Base:
 
     def _factory(self):
         return lambda: Session(bind=self.engine)
+
+    def _add_log(self, title: str, created_at, success: bool = True, severity: str = "INFO", error: str = "") -> None:
+        from datetime import datetime, timezone
+
+        db = self._db()
+        db.add(
+            NotificationLog(
+                title=title,
+                content="",
+                severity=severity,
+                success=success,
+                error=error,
+                created_at=created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc),
+            )
+        )
+        db.commit()
+        db.close()
 
 
 class TestNotificationSinkAndService(_Base):
@@ -141,23 +159,6 @@ class TestNotificationSinkAndService(_Base):
         svc = NotificationLogService(self._db())
         assert svc.list_logs(success=True).total == 1
         assert svc.list_logs(success=False).total == 1
-
-    def _add_log(self, title: str, created_at, success: bool = True, severity: str = "INFO", error: str = "") -> None:
-        from datetime import datetime, timezone
-
-        db = self._db()
-        db.add(
-            NotificationLog(
-                title=title,
-                content="",
-                severity=severity,
-                success=success,
-                error=error,
-                created_at=created_at if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc),
-            )
-        )
-        db.commit()
-        db.close()
 
     def test_service_date_range_filter(self) -> None:
         from datetime import datetime, timezone
@@ -306,3 +307,117 @@ class TestNotificationAPI(_Base):
 
         resp = self.client.post("/api/notifications/999/retry")
         assert resp.status_code == 404
+
+
+class TestNotificationStats(_Base):
+    def test_service_totals_and_rate(self) -> None:
+        sink = NotificationLogSink(self._factory())
+        sink.record("ok1", "", "INFO", True)
+        sink.record("ok2", "", "WARNING", True)
+        sink.record("bad", "", "CRITICAL", False, "boom")
+        stats = NotificationLogService(self._db()).statistics()
+        assert stats.total == 3
+        assert stats.success == 2
+        assert stats.failed == 1
+        assert stats.success_rate == 66.67
+        assert sum(b.total for b in stats.by_channel) == stats.total
+        assert sum(b.total for b in stats.by_severity) == stats.total
+
+    def test_service_empty_log(self) -> None:
+        stats = NotificationLogService(self._db()).statistics()
+        assert stats.total == 0
+        assert stats.success == 0
+        assert stats.failed == 0
+        assert stats.success_rate == 0.0
+        assert stats.by_severity == []
+        assert stats.by_channel == []
+        assert stats.daily == []
+
+    def test_service_severity_breakdown(self) -> None:
+        sink = NotificationLogSink(self._factory())
+        sink.record("a", "", "INFO", True)
+        sink.record("b", "", "INFO", False, "x")
+        sink.record("c", "", "CRITICAL", True)
+        stats = NotificationLogService(self._db()).statistics()
+        sev = {b.key: b for b in stats.by_severity}
+        assert sev["INFO"].total == 2
+        assert sev["INFO"].success == 1
+        assert sev["INFO"].failed == 1
+        assert sev["CRITICAL"].total == 1
+        assert sev["CRITICAL"].success == 1
+
+    def test_service_channel_breakdown_from_error(self) -> None:
+        sink = NotificationLogSink(self._factory())
+        sink.record("ok", "", "INFO", True)  # no error -> unknown
+        sink.record("bad1", "", "CRITICAL", False, "ServerChanNotifier: http 500")
+        sink.record("bad2", "", "CRITICAL", False, "TelegramNotifier: timeout")
+        sink.record("bad3", "", "CRITICAL", False, "SomethingElse: boom")
+        stats = NotificationLogService(self._db()).statistics()
+        chan = {b.key: b for b in stats.by_channel}
+        assert chan["serverchan"].total == 1
+        assert chan["serverchan"].failed == 1
+        assert chan["telegram"].total == 1
+        # success + unrecognized failure prefix both bucket under unknown
+        assert chan["unknown"].total == 2
+        assert sum(b.total for b in stats.by_channel) == stats.total
+
+    def test_service_daily_trend_deterministic(self) -> None:
+        from datetime import datetime, timezone
+
+        self._add_log("a", datetime(2026, 6, 14, 10, 0, 0, tzinfo=timezone.utc))
+        self._add_log("b", datetime(2026, 6, 16, 10, 0, 0, tzinfo=timezone.utc))
+        self._add_log("c", datetime(2026, 6, 16, 11, 0, 0, tzinfo=timezone.utc))
+        stats = NotificationLogService(self._db()).statistics()
+        assert [p.date for p in stats.daily] == ["2026-06-14", "2026-06-16"]
+        assert stats.daily[1].total == 2
+
+    def test_service_date_filter_bounds_stats(self) -> None:
+        from datetime import datetime, timezone
+
+        self._add_log("a", datetime(2026, 6, 14, 10, 0, 0, tzinfo=timezone.utc))
+        self._add_log("b", datetime(2026, 6, 16, 10, 0, 0, tzinfo=timezone.utc))
+        stats = NotificationLogService(self._db()).statistics(from_date="2026-06-16")
+        assert stats.total == 1
+        assert stats.daily == [
+            NotificationDailyPoint(date="2026-06-16", total=1, success=1, failed=0)
+        ]
+
+    def test_api_stats(self) -> None:
+        sink = NotificationLogSink(self._factory())
+        sink.record("api ok", "body", "INFO", True)
+        sink.record("api fail", "body", "CRITICAL", False, "WebhookNotifier: 500")
+        resp = self.client.get("/api/notifications/stats")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["total"] == 2
+        assert data["success"] == 1
+        assert data["failed"] == 1
+        assert data["success_rate"] == 50.0
+        # stats must not leak payload/content/error
+        for forbidden in ("title", "content", "error"):
+            assert forbidden not in data
+        chan = {b["key"]: b for b in data["by_channel"]}
+        assert chan["webhook"]["total"] == 1
+        assert chan["webhook"]["failed"] == 1
+
+    def test_api_stats_respects_date_filter(self) -> None:
+        from datetime import datetime, timezone
+
+        self._add_log("a", datetime(2026, 6, 14, 10, 0, 0, tzinfo=timezone.utc))
+        self._add_log("b", datetime(2026, 6, 16, 10, 0, 0, tzinfo=timezone.utc))
+        resp = self.client.get("/api/notifications/stats", params={"from_date": "2026-06-16"})
+        assert resp.json()["total"] == 1
+        assert [p["date"] for p in resp.json()["daily"]] == ["2026-06-16"]
+
+    def test_api_stats_severity_filter_case_insensitive(self) -> None:
+        sink = NotificationLogSink(self._factory())
+        sink.record("a", "", "INFO", True)
+        sink.record("b", "", "CRITICAL", True)
+        resp = self.client.get("/api/notifications/stats", params={"severity": "critical"})
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["by_severity"] == [{"key": "CRITICAL", "total": 1, "success": 1, "failed": 0}]
+
+    def test_api_stats_invalid_date_returns_422(self) -> None:
+        resp = self.client.get("/api/notifications/stats", params={"to_date": "nope"})
+        assert resp.status_code == 422

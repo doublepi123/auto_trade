@@ -10,11 +10,17 @@ import logging
 from datetime import datetime, time, timezone
 from typing import Callable, Optional
 
-from sqlalchemy import desc, func, or_, select
+from sqlalchemy import case, desc, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import NotificationLog
-from app.schemas import NotificationLogOut, NotificationLogPage
+from app.schemas import (
+    NotificationDailyPoint,
+    NotificationLogOut,
+    NotificationLogPage,
+    NotificationStatsBucket,
+    NotificationStatsResponse,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +31,57 @@ NotificationSink = Callable[[str, str, str, bool, str], None]
 def _parse_date(value: str) -> datetime:
     """Parse a YYYY-MM-DD string into a UTC datetime."""
     return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+
+def _apply_filters(
+    statement,
+    *,
+    severity: str | None = None,
+    q: str | None = None,
+    success: bool | None = None,
+    from_date: str | None = None,
+    to_date: str | None = None,
+):  # noqa: ANN202
+    """Apply the shared notification-log filters to a SELECT statement."""
+    s = statement
+    if severity:
+        s = s.where(NotificationLog.severity == severity)
+    if q:
+        pattern = f"%{q}%"
+        s = s.where(
+            or_(
+                NotificationLog.title.ilike(pattern),
+                NotificationLog.content.ilike(pattern),
+                NotificationLog.error.ilike(pattern),
+            )
+        )
+    if success is not None:
+        s = s.where(NotificationLog.success.is_(success))
+    if from_date:
+        s = s.where(NotificationLog.created_at >= _parse_date(from_date))
+    if to_date:
+        end = datetime.combine(_parse_date(to_date).date(), time.max, tzinfo=timezone.utc)
+        s = s.where(NotificationLog.created_at <= end)
+    return s
+
+
+# Channel labels MultiChannelNotifier records in ``error`` as a "{ClassName}: {detail}"
+# prefix when a channel fails. Only these known labels are surfaced in the channel
+# breakdown; anything else (including all successful rows, which carry no channel
+# attribution) is bucketed under ``unknown``.
+_NOTIFIER_CLASS_CHANNELS: dict[str, str] = {
+    "ServerChanNotifier": "serverchan",
+    "WebhookNotifier": "webhook",
+    "TelegramNotifier": "telegram",
+}
+
+_CHANNEL_CASE = case(
+    *[
+        (NotificationLog.error.like(f"{cls}%"), label)
+        for cls, label in _NOTIFIER_CLASS_CHANNELS.items()
+    ],
+    else_="unknown",
+)
 
 
 class NotificationLogService:
@@ -44,34 +101,24 @@ class NotificationLogService:
     ) -> NotificationLogPage:
         page = max(1, page)
         page_size = max(1, min(page_size, 200))
-        stmt = select(NotificationLog)
-        count_stmt = select(func.count()).select_from(NotificationLog)
-
-        def _apply_filters(statement):  # noqa: ANN202
-            s = statement
-            if severity:
-                s = s.where(NotificationLog.severity == severity)
-            if q:
-                pattern = f"%{q}%"
-                s = s.where(
-                    or_(
-                        NotificationLog.title.ilike(pattern),
-                        NotificationLog.content.ilike(pattern),
-                        NotificationLog.error.ilike(pattern),
-                    )
-                )
-            if success is not None:
-                s = s.where(NotificationLog.success.is_(success))
-            if from_date:
-                s = s.where(NotificationLog.created_at >= _parse_date(from_date))
-            if to_date:
-                end = datetime.combine(_parse_date(to_date).date(), time.max, tzinfo=timezone.utc)
-                s = s.where(NotificationLog.created_at <= end)
-            return s
-
-        stmt = _apply_filters(stmt)
-        count_stmt = _apply_filters(count_stmt)
-        total = self._db.scalar(count_stmt) or 0
+        stmt = _apply_filters(
+            select(NotificationLog),
+            severity=severity,
+            q=q,
+            success=success,
+            from_date=from_date,
+            to_date=to_date,
+        )
+        total = self._db.scalar(
+            _apply_filters(
+                select(func.count()).select_from(NotificationLog),
+                severity=severity,
+                q=q,
+                success=success,
+                from_date=from_date,
+                to_date=to_date,
+            )
+        ) or 0
         stmt = (
             stmt.order_by(desc(NotificationLog.created_at), desc(NotificationLog.id))
             .limit(page_size)
@@ -95,30 +142,112 @@ class NotificationLogService:
         to_date: str | None = None,
     ) -> list[NotificationLogOut]:
         """Return all matching notification rows for export (no pagination)."""
-        stmt = select(NotificationLog)
-
-        if severity:
-            stmt = stmt.where(NotificationLog.severity == severity)
-        if q:
-            pattern = f"%{q}%"
-            stmt = stmt.where(
-                or_(
-                    NotificationLog.title.ilike(pattern),
-                    NotificationLog.content.ilike(pattern),
-                    NotificationLog.error.ilike(pattern),
-                )
-            )
-        if success is not None:
-            stmt = stmt.where(NotificationLog.success.is_(success))
-        if from_date:
-            stmt = stmt.where(NotificationLog.created_at >= _parse_date(from_date))
-        if to_date:
-            end = datetime.combine(_parse_date(to_date).date(), time.max, tzinfo=timezone.utc)
-            stmt = stmt.where(NotificationLog.created_at <= end)
-
+        stmt = _apply_filters(
+            select(NotificationLog),
+            severity=severity,
+            q=q,
+            success=success,
+            from_date=from_date,
+            to_date=to_date,
+        )
         stmt = stmt.order_by(desc(NotificationLog.created_at), desc(NotificationLog.id))
         rows = list(self._db.scalars(stmt))
         return [NotificationLogOut.model_validate(r) for r in rows]
+
+    def statistics(
+        self,
+        *,
+        severity: str | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> NotificationStatsResponse:
+        """Bounded, date-filtered delivery statistics over the notification log.
+
+        Read-only aggregation — never exposes title/content/error payloads. The
+        ``by_channel`` breakdown is derived from the only channel signal the log
+        retains: the notifier class name MultiChannelNotifier prefixes into the
+        ``error`` column when a channel fails. Successful rows (and unrecognized
+        failures) are attributed to ``unknown``.
+        """
+        def _filtered(select_stmt):  # noqa: ANN001
+            return _apply_filters(
+                select_stmt,
+                severity=severity,
+                from_date=from_date,
+                to_date=to_date,
+            )
+
+        total_row = self._db.execute(
+            _filtered(
+                select(
+                    func.count(NotificationLog.id),
+                    func.coalesce(
+                        func.sum(case((NotificationLog.success.is_(True), 1), else_=0)),
+                        0,
+                    ),
+                )
+            )
+        ).one()
+        total = int(total_row[0])
+        success = int(total_row[1])
+        failed = total - success
+        success_rate = round(success / total * 100.0, 2) if total else 0.0
+
+        def _buckets(group_expr) -> list[NotificationStatsBucket]:  # noqa: ANN001
+            rows = self._db.execute(
+                _filtered(
+                    select(
+                        group_expr,
+                        func.count(NotificationLog.id),
+                        func.coalesce(
+                            func.sum(case((NotificationLog.success.is_(True), 1), else_=0)),
+                            0,
+                        ),
+                    )
+                ).group_by(group_expr).order_by(group_expr)
+            )
+            return [
+                NotificationStatsBucket(
+                    key=str(key),
+                    total=int(count),
+                    success=int(ok),
+                    failed=int(count) - int(ok),
+                )
+                for key, count, ok in rows
+            ]
+
+        day = func.date(NotificationLog.created_at)
+        daily_rows = self._db.execute(
+            _filtered(
+                select(
+                    day,
+                    func.count(NotificationLog.id),
+                    func.coalesce(
+                        func.sum(case((NotificationLog.success.is_(True), 1), else_=0)),
+                        0,
+                    ),
+                )
+            ).group_by(day).order_by(day.asc())
+        )
+        return NotificationStatsResponse(
+            from_date=from_date,
+            to_date=to_date,
+            total=total,
+            success=success,
+            failed=failed,
+            success_rate=success_rate,
+            by_severity=_buckets(NotificationLog.severity),
+            by_channel=_buckets(_CHANNEL_CASE),
+            daily=[
+                NotificationDailyPoint(
+                    date=str(date),
+                    total=int(count),
+                    success=int(ok),
+                    failed=int(count) - int(ok),
+                )
+                for date, count, ok in daily_rows
+            ],
+        )
 
 
 class NotificationLogSink:
