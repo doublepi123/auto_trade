@@ -70,6 +70,7 @@
         <router-link to="/reentry-analysis" class="app-menu-link" :class="{ active: route.path === '/reentry-analysis' }">再入场</router-link>
         <router-link to="/first-trade" class="app-menu-link" :class="{ active: route.path === '/first-trade' }">首单效应</router-link>
         <router-link to="/loss-containment" class="app-menu-link" :class="{ active: route.path === '/loss-containment' }">亏损控制</router-link>
+        <router-link to="/daily-consistency" class="app-menu-link" :class="{ active: route.path === '/daily-consistency' }">每日一致</router-link>
       </nav>
       <div class="header-actions">
         <el-button
