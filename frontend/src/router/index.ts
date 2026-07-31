@@ -45,6 +45,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/return-calendar', component: () => import('../views/ReturnCalendar.vue') },
   { path: '/edge-quality', component: () => import('../views/EdgeQuality.vue') },
   { path: '/decay-detection', component: () => import('../views/DecayDetection.vue') },
+  { path: '/rolling-var', component: () => import('../views/RollingVar.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 
