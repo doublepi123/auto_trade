@@ -107,20 +107,32 @@ describe('Alert rule effectiveness overview', () => {
     cy.wait('@effectiveness')
     cy.get('[data-testid="alert-effectiveness-summary"]').should('contain', '规则总数 2')
 
-    cy.intercept('GET', '/api/alert-rules/effectiveness*', {
-      statusCode: 500,
-      body: { detail: 'aggregate failed' },
-    }).as('effectivenessFail')
-    cy.get('[data-testid="alert-effectiveness-reload"]').click()
-    cy.wait('@effectivenessFail')
+    cy.get('[data-testid="alert-effectiveness-window"]').invoke('text').then((appliedWindowLabel) => {
+      const draftFrom = '2026-05-01'
+      const draftTo = '2026-05-15'
+      cy.get('[data-testid="alert-effectiveness-range"] input[placeholder="开始日期"]').clear().type(draftFrom)
+      cy.get('[data-testid="alert-effectiveness-range"] input[placeholder="结束日期"]').clear().type(draftTo)
+      cy.get('h3').click()
 
-    // Previous results stay visible (still labelled by the applied window)
-    // alongside the error — never collapsed to zeros.
-    cy.get('[data-testid="alert-effectiveness-error"]').should('be.visible')
-    cy.get('[data-testid="alert-effectiveness-summary"]').should('contain', '规则总数 2')
-    cy.get('[data-testid="alert-effectiveness-summary"]').should('contain', '窗口内触发 3 次')
-    cy.get('[data-testid="alert-effectiveness-table"]').should('contain', 'AAPL 高点')
-    cy.get('[data-testid="alert-rule-health"]').should('contain', '有触发记录 1')
+      cy.intercept('GET', '/api/alert-rules/effectiveness*', {
+        statusCode: 500,
+        body: { detail: 'aggregate failed' },
+      }).as('effectivenessFail')
+      cy.get('[data-testid="alert-effectiveness-reload"]').click()
+      cy.wait('@effectivenessFail')
+
+      // Previous results and their successfully applied label stay visible
+      // alongside the error; the failed draft range never labels stale data.
+      cy.get('[data-testid="alert-effectiveness-error"]').should('be.visible')
+      cy.get('[data-testid="alert-effectiveness-summary"]').should('contain', '规则总数 2')
+      cy.get('[data-testid="alert-effectiveness-summary"]').should('contain', '窗口内触发 3 次')
+      cy.get('[data-testid="alert-effectiveness-table"]').should('contain', 'AAPL 高点')
+      cy.get('[data-testid="alert-rule-health"]').should('contain', '有触发记录 1')
+      cy.get('[data-testid="alert-effectiveness-window"]')
+        .should('have.text', appliedWindowLabel)
+        .and('not.contain', draftFrom)
+        .and('not.contain', draftTo)
+    })
   })
 
   it('refetches with the selected window and relabels only after success', () => {
