@@ -4,47 +4,31 @@ Projects ONLY persisted, semantically explicit, SUCCESSFUL pause/resume and
 kill-switch transitions. This is evidence, not a synthesized runtime-state
 history.
 
-Authoritative source selection (finding A):
-* Manual pause/resume and kill-switch transitions use ONE authoritative
-  persisted source: successful ``AuditLog`` control actions
-  (``PAUSE`` / ``RESUME`` / ``KILL_SWITCH`` / ``DISABLE_KILL_SWITCH`` with
-  ``result = 'SUCCESS'``). These are explicit and carry pseudonymous
-  actor/result evidence.
-* Duplicate manual-control ``TradeEvent`` rows (``CONTROL_PAUSE`` etc.) are
-  EXCLUDED from pairing/duration — they duplicate the authoritative audit row
-  without a durable correlation key.
-* ``RISK_PAUSED`` is EXCLUDED: the current writer uses it for generic risk
-  rejections, so it is not transition proof.
-* A ``TradeEvent`` automatic transition is included ONLY when its writer is
-  transition-specific and successful (``RISK_AUTO_RESUMED``). Such automatic
-  evidence NEVER pairs with manual audit controls (no durable correlation key)
-  and therefore remains unpaired/unknown — it never contributes a duration and
-  is never double-counted against the audit stream.
-* ``reason`` is a FIXED reason/category code derived from the whitelisted
-  action/event type. Free-form event messages and payloads are never exposed or
-  truncated as a "safe reason". Actor output is pseudonymous only.
+Source predicates (finding A.1) — ONE shared SQL predicate per source, reused
+identically for population count, bounded select, and exact filtered count:
+* Manual source: successful authoritative ``AuditLog`` actions only
+  (``action IN (...)`` AND ``result = 'SUCCESS'``), using the actual stored
+  success casing/value.
+* Automatic source: transition-specific ``RISK_AUTO_RESUMED`` only with
+  successful statuses, normalized IN SQL (``upper(trim(coalesce(status,'')))``)
+  — not filtered later in Python. Failed/other statuses affect neither scans,
+  truncation, rows, nor totals.
 
-Pairing/range/limit truthfulness (finding B):
-* The authoritative audit transition history is paired BEFORE date filters or
-  the response limit are applied, so cross-date pairs never become synthetic
-  OPEN / UNMATCHED_CLOSE states.
-* The database scan is explicitly bounded by a hard cap. If the cap is
-  exceeded, ``pairing_complete=False`` / ``scan_truncated=True`` are returned
-  and ALL durations are suppressed (never silently partial-pair).
-* Duplicate-open segments are wholly ambiguous: ``OPEN, OPEN, CLOSE`` produces
-  no duration for ANY of those transitions; the ambiguous segment only resets
-  after the close. Conflicting sequences remain unknown rather than repaired
-  heuristically.
-* Date filtering is applied AFTER global/conservative pairing; the response
-  limit is applied LAST. ``total`` / ``truncated`` / pairing-context
-  completeness tell callers whether rows were omitted. The summary describes
-  the full filtered population before the response limit, not only returned
-  rows.
-* Durations are never double-counted across sources: manual durations come
-  only from the authoritative audit stream; uncorrelated automatic evidence
-  remains unpaired/unknown.
-* Stable chronological ordering with source/ID tie-breakers is preserved, and
-  ``RuntimeState`` is never read or mutated.
+Snapshot consistency (finding A.2): every metadata query needed for one
+response (global source counts, bounded source selects, exact date-filtered
+total) executes on ONE explicit read snapshot via the shared
+``open_read_snapshot`` helper. A concurrent commit between any two of those
+queries cannot split metadata.
+
+Denominators (finding A.4):
+* ``pairing_context_scanned`` — global rows loaded to establish pairing context.
+* ``filtered_scanned`` — scanned rows matching the requested date filters;
+  feeds summary classification.
+* ``returned`` — rows after the response limit.
+* ``total`` — exact complete filtered population from the same snapshot.
+
+Bounded SQL counts/selects and incomplete-context UNKNOWN behavior are
+preserved from the prior hardening.
 """
 from __future__ import annotations
 
@@ -53,6 +37,7 @@ from datetime import date, datetime, time, timezone
 from typing import Any, Literal
 
 from sqlalchemy import ColumnElement, func, select
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
 from app.models import AuditLog, TradeEvent
@@ -61,6 +46,7 @@ from app.schemas import (
     InterventionEvidenceRow,
     InterventionEvidenceSummary,
 )
+from app.services.snapshot_helper import open_read_snapshot
 
 __all__ = ["InterventionEvidenceService"]
 
@@ -81,10 +67,6 @@ PAIRING_RULE = (
     "suppressed."
 )
 
-# Hard cap on the number of authoritative audit transitions scanned for
-# pairing. If the filtered population exceeds this, complete pairing context
-# cannot be guaranteed, so we report scan_truncated=True and suppress all
-# durations rather than silently partial-pairing.
 _MAX_SCAN_TRANSITIONS = 5000
 _MAX_RESPONSE_ROWS = 1000
 
@@ -107,7 +89,6 @@ class _Transition:
 
 
 # AuditLog action -> (family, direction, kind, fixed reason code).
-# These are the AUTHORITATIVE manual control actions.
 _AUDIT_TRANSITIONS: dict[str, tuple[_Family, _Direction, str, str]] = {
     "PAUSE": ("pause", "open", "PAUSE", "MANUAL_PAUSE"),
     "RESUME": ("pause", "close", "RESUME", "MANUAL_RESUME"),
@@ -121,10 +102,6 @@ _AUDIT_TRANSITIONS: dict[str, tuple[_Family, _Direction, str, str]] = {
 }
 
 # TradeEvent event_type -> (family, direction, kind, fixed reason code).
-# ONLY automatic, transition-specific, successful writers are included.
-# RISK_PAUSED is deliberately excluded (generic risk rejection per writer).
-# Manual CONTROL_* are deliberately excluded (duplicate the authoritative
-# audit stream without a durable correlation key).
 _TRADE_AUTO_TRANSITIONS: dict[str, tuple[_Family, _Direction, str, str]] = {
     "RISK_AUTO_RESUMED": (
         "pause",
@@ -134,8 +111,7 @@ _TRADE_AUTO_TRANSITIONS: dict[str, tuple[_Family, _Direction, str, str]] = {
     ),
 }
 
-# A TradeEvent automatic transition is only transition-proof when its writer
-# reports success. The runner writes status="RUNNING" for a verified resume.
+# Successful automatic statuses, normalized to upper-case for SQL comparison.
 _TRADE_AUTO_SUCCESS_STATUS: frozenset[str] = frozenset(
     {"RUNNING", "SUCCESS", "OK"}
 )
@@ -166,6 +142,49 @@ def _validate_range(
     return from_dt, to_dt
 
 
+# ---------------------------------------------------------------------
+# Shared SQL predicates (finding A.1) — one per source, reused identically
+# for population count, bounded select, and exact filtered count.
+# ---------------------------------------------------------------------
+def _audit_predicate() -> ColumnElement[bool]:
+    """Successful authoritative manual AuditLog control actions only."""
+    return AuditLog.action.in_(tuple(_AUDIT_TRANSITIONS)) & (
+        AuditLog.result == "SUCCESS"
+    )
+
+
+def _auto_status_normalized() -> Any:
+    """Normalize TradeEvent.status in SQL: upper(trim(coalesce(status,'')))."""
+    return func.upper(func.trim(func.coalesce(TradeEvent.status, "")))
+
+
+def _auto_predicate() -> ColumnElement[bool]:
+    """Transition-specific RISK_AUTO_RESUMED with successful status (SQL-normalized).
+
+    Failed/other statuses are excluded IN SQL, so they affect neither scans,
+    truncation, rows, nor totals.
+    """
+    return (TradeEvent.event_type == "RISK_AUTO_RESUMED") & (
+        _auto_status_normalized().in_(tuple(_TRADE_AUTO_SUCCESS_STATUS))
+    )
+
+
+def _with_date_filters(
+    base: ColumnElement[bool],
+    *,
+    model: type[AuditLog] | type[TradeEvent],
+    from_dt: datetime | None,
+    to_dt: datetime | None,
+) -> list[ColumnElement[bool]]:
+    """Append inclusive UTC date predicates to a base predicate."""
+    clauses: list[ColumnElement[bool]] = [base]
+    if from_dt is not None:
+        clauses.append(model.created_at >= from_dt)  # type: ignore[attr-defined]
+    if to_dt is not None:
+        clauses.append(model.created_at <= to_dt)  # type: ignore[attr-defined]
+    return clauses
+
+
 class InterventionEvidenceService:
     """Read-only projection of explicit intervention transitions."""
 
@@ -181,56 +200,77 @@ class InterventionEvidenceService:
     ) -> InterventionEvidenceResponse:
         """Return normalized chronological intervention evidence.
 
-        Raises ``ValueError`` on an inverted date range. ``limit`` is bounded
-        to ``[1, 1000]``. Pairing is computed over the full authoritative
-        population BEFORE date filters / limit; date filtering and the
-        response limit are applied afterward so cross-date pairs stay intact.
-
-        Metadata contract:
-        * ``total`` is the EXACT filtered population (a SQL count, independent
-          of the bounded scan).
-        * ``scanned`` is the bounded scan population used for pairing.
-        * ``returned`` is the number of rows in ``items`` (after the limit).
-        * If either source's global pairing context is scan-truncated,
-          ``pairing_complete=False`` / ``scan_truncated=True``, every duration
-          is suppressed, and every context-dependent manual transition state
-          is reported as ``UNKNOWN`` (not OPEN/PAIRED/UNMATCHED_CLOSE).
+        Raises ``ValueError`` on an inverted date range. All metadata queries
+        for one response run on ONE read snapshot. See the module docstring for
+        the denominator contract.
         """
         capped_limit = max(1, min(int(limit), _MAX_RESPONSE_ROWS))
-        # Validate the response date range up front (also used to filter the
-        # final paired rows). The pairing scan itself is global (unfiltered by
-        # these dates) so cross-date pairs are preserved.
         _validate_range(from_date, to_date)
+        from_dt, to_dt = _validate_range(from_date, to_date)
 
-        # --- Collect the full authoritative + automatic populations (global) ---
-        # Both sources use SQL COUNT for population detection and a bounded
-        # ``LIMIT cap + 1`` row query; no source is loaded unbounded merely to
-        # detect truncation.
-        audit_all, audit_truncated = self._collect_audit_global()
-        auto_all, auto_truncated = self._collect_auto_global()
+        def _query(connection: Connection) -> InterventionEvidenceResponse:
+            return self._build_on_snapshot(
+                connection=connection,
+                from_dt=from_dt,
+                to_dt=to_dt,
+                from_date=from_date,
+                to_date=to_date,
+                capped_limit=capped_limit,
+            )
 
+        return open_read_snapshot(self._db, _query)
+
+    # ------------------------------------------------------------------
+    # One-snapshot build
+    # ------------------------------------------------------------------
+    def _build_on_snapshot(
+        self,
+        *,
+        connection: Connection,
+        from_dt: datetime | None,
+        to_dt: datetime | None,
+        from_date: date | None,
+        to_date: date | None,
+        capped_limit: int,
+    ) -> InterventionEvidenceResponse:
+        # --- Global population counts (shared predicate, same snapshot) ---
+        audit_population = int(
+            connection.scalar(
+                select(func.count())
+                .select_from(AuditLog)
+                .where(_audit_predicate())
+            )
+            or 0
+        )
+        auto_population = int(
+            connection.scalar(
+                select(func.count())
+                .select_from(TradeEvent)
+                .where(_auto_predicate())
+            )
+            or 0
+        )
+        audit_truncated = audit_population > _MAX_SCAN_TRANSITIONS
+        auto_truncated = auto_population > _MAX_SCAN_TRANSITIONS
         scan_truncated = audit_truncated or auto_truncated
         pairing_complete = not scan_truncated
-        scanned_population = len(audit_all) + len(auto_all)
 
-        # --- Pair the authoritative audit stream globally ---
+        # --- Bounded selects (shared predicate, same snapshot) ---
+        audit_all = self._select_audit_bounded(connection)
+        auto_all = self._select_auto_bounded(connection)
+        pairing_context_scanned = len(audit_all) + len(auto_all)
+
+        # --- Pairing ---
         if pairing_complete:
             paired_audit = (
                 self._pair_audit_stream(audit_all) if audit_all else []
             )
-            # Automatic evidence never pairs with the manual audit stream (no
-            # durable correlation key). It is always reported as unpaired.
             auto_rows = [self._auto_unmatched(t) for t in auto_all]
             all_rows = paired_audit + auto_rows
         else:
-            # Scan truncated: complete pairing context could not be guaranteed.
-            # Every context-dependent manual transition state becomes UNKNOWN
-            # (omitted history could change OPEN/PAIRED/UNMATCHED_CLOSE
-            # claims). Automatic uncorrelated evidence remains unknown too.
             all_rows = [self._unknown_row(t) for t in audit_all]
             all_rows.extend(self._unknown_row(t) for t in auto_all)
 
-        # --- Merge and order all rows chronologically ---
         all_rows.sort(
             key=lambda r: (
                 _to_utc(r.timestamp).timestamp(),
@@ -239,30 +279,33 @@ class InterventionEvidenceService:
             )
         )
 
-        # --- Apply date filters AFTER global pairing ---
-        from_dt, to_dt = _validate_range(from_date, to_date)
+        # --- Date filters AFTER global pairing ---
         filtered = [
             r
             for r in all_rows
             if (from_dt is None or _to_utc(r.timestamp) >= from_dt)
             and (to_dt is None or _to_utc(r.timestamp) <= to_dt)
         ]
+        filtered_scanned = len(filtered)
 
-        # Exact filtered population via SQL count, independent of the scan cap.
+        # Extension point: a test can monkeypatch this no-op method to commit a
+        # writer on a separate connection AFTER the bounded scan but BEFORE the
+        # exact-total query, proving both observe the same snapshot. Narrow,
+        # naturally factored hook — not a broad production-only test path.
+        self._after_bounded_scan()
+
+        # --- Exact complete filtered total (shared predicate, same snapshot) ---
         exact_total = self._exact_filtered_total(
-            from_dt=from_dt, to_dt=to_dt
+            connection, from_dt=from_dt, to_dt=to_dt
         )
 
-        # The summary describes the scanned population when classification is
-        # incomplete, never claiming unscanned classification totals.
         summary = self._summarize(
             filtered,
-            scanned_population=scanned_population,
+            filtered_scanned=filtered_scanned,
             exact_total=exact_total,
             classification_complete=pairing_complete,
         )
 
-        # --- Apply response limit LAST ---
         response_truncated = len(filtered) > capped_limit
         items = filtered[:capped_limit]
         truncated = response_truncated or scan_truncated
@@ -271,11 +314,13 @@ class InterventionEvidenceService:
             items=items,
             summary=summary,
             total=exact_total,
-            scanned=scanned_population,
+            pairing_context_scanned=pairing_context_scanned,
+            filtered_scanned=filtered_scanned,
             returned=len(items),
             truncated=truncated,
             pairing_complete=pairing_complete,
             scan_truncated=scan_truncated,
+            classification_complete=pairing_complete,
             pairing_rule=PAIRING_RULE,
             filters=self._filters(
                 from_date=from_date,
@@ -285,41 +330,26 @@ class InterventionEvidenceService:
         )
 
     # ------------------------------------------------------------------
-    # Collection (global; date filters are applied after pairing)
+    # Bounded selects (shared predicate)
     # ------------------------------------------------------------------
-    def _collect_audit_global(
+    def _select_audit_bounded(
         self,
-    ) -> tuple[list[_Transition], bool]:
-        """Collect successful authoritative audit control transitions (bounded).
-
-        Uses SQL COUNT for population detection and a bounded
-        ``LIMIT cap + 1`` row query. Returns the transitions and whether the
-        hard scan cap was exceeded. Only ``result = 'SUCCESS'`` rows are
-        transition proof.
-        """
-        base_filter = (
-            AuditLog.action.in_(tuple(_AUDIT_TRANSITIONS)),
-            AuditLog.result == "SUCCESS",
-        )
-        population = int(
-            self._db.scalar(
-                select(func.count())
-                .select_from(AuditLog)
-                .where(*base_filter)
-            )
-            or 0
-        )
-        truncated = population > _MAX_SCAN_TRANSITIONS
-
+        connection: Connection,
+    ) -> list[_Transition]:
+        # Core column select (Connection does not perform ORM mapping).
         stmt = (
-            select(AuditLog)
-            .where(*base_filter)
+            select(
+                AuditLog.id,
+                AuditLog.action,
+                AuditLog.actor_hash,
+                AuditLog.created_at,
+            )
+            .where(_audit_predicate())
             .order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
             .limit(_MAX_SCAN_TRANSITIONS + 1)
         )
-        rows = list(self._db.scalars(stmt))
         out: list[_Transition] = []
-        for row in rows:
+        for row in connection.execute(stmt).all():
             mapped = _AUDIT_TRANSITIONS.get(row.action)
             if mapped is None:
                 continue
@@ -337,46 +367,30 @@ class InterventionEvidenceService:
                     actor_hash=row.actor_hash or None,
                 )
             )
-        return out, truncated
+        return out
 
-    def _collect_auto_global(
+    def _select_auto_bounded(
         self,
-    ) -> tuple[list[_Transition], bool]:
-        """Collect automatic TradeEvent transitions (bounded).
-
-        Uses SQL COUNT for population detection and a bounded
-        ``LIMIT cap + 1`` row query. Included only when the writer reports
-        success. These never pair with the manual audit stream.
-        """
-        base_filter = TradeEvent.event_type.in_(
-            tuple(_TRADE_AUTO_TRANSITIONS)
-        )
-        population = int(
-            self._db.scalar(
-                select(func.count())
-                .select_from(TradeEvent)
-                .where(base_filter)
-            )
-            or 0
-        )
-        truncated = population > _MAX_SCAN_TRANSITIONS
-
+        connection: Connection,
+    ) -> list[_Transition]:
         stmt = (
-            select(TradeEvent)
-            .where(base_filter)
+            select(
+                TradeEvent.id,
+                TradeEvent.event_type,
+                TradeEvent.status,
+                TradeEvent.created_at,
+            )
+            .where(_auto_predicate())
             .order_by(TradeEvent.created_at.asc(), TradeEvent.id.asc())
             .limit(_MAX_SCAN_TRANSITIONS + 1)
         )
-        rows = list(self._db.scalars(stmt))
         out: list[_Transition] = []
-        for row in rows:
+        for row in connection.execute(stmt).all():
             mapped = _TRADE_AUTO_TRANSITIONS.get(row.event_type)
             if mapped is None:
                 continue
-            # Only count a successful automatic transition as evidence.
-            status = (row.status or "").strip().upper()
-            if status not in _TRADE_AUTO_SUCCESS_STATUS:
-                continue
+            # Status success is already enforced in SQL by _auto_predicate;
+            # no Python-side status filtering remains.
             family, direction, kind, reason_code = mapped
             out.append(
                 _Transition(
@@ -391,50 +405,41 @@ class InterventionEvidenceService:
                     actor_hash=None,
                 )
             )
-        return out, truncated
+        return out
 
     def _exact_filtered_total(
         self,
+        connection: Connection,
         *,
         from_dt: datetime | None,
         to_dt: datetime | None,
     ) -> int:
-        """Exact filtered population via SQL COUNT, independent of the scan cap.
-
-        Counts the audit + automatic evidence rows matching the date filter
-        (the same rows that survive pairing + date filtering). This is the
-        truthful ``total`` even when the bounded scan omitted rows.
-        """
-        audit_filter: list[ColumnElement[bool]] = [
-            AuditLog.action.in_(tuple(_AUDIT_TRANSITIONS)),
-            AuditLog.result == "SUCCESS",
-        ]
-        if from_dt is not None:
-            audit_filter.append(AuditLog.created_at >= from_dt)
-        if to_dt is not None:
-            audit_filter.append(AuditLog.created_at <= to_dt)
+        """Exact complete filtered population (shared predicate, same snapshot)."""
+        audit_clauses = _with_date_filters(
+            _audit_predicate(),
+            model=AuditLog,
+            from_dt=from_dt,
+            to_dt=to_dt,
+        )
         audit_count = int(
-            self._db.scalar(
+            connection.scalar(
                 select(func.count())
                 .select_from(AuditLog)
-                .where(*audit_filter)
+                .where(*audit_clauses)
             )
             or 0
         )
-
-        auto_filter: list[ColumnElement[bool]] = [
-            TradeEvent.event_type.in_(tuple(_TRADE_AUTO_TRANSITIONS)),
-            TradeEvent.status.in_(tuple(_TRADE_AUTO_SUCCESS_STATUS)),
-        ]
-        if from_dt is not None:
-            auto_filter.append(TradeEvent.created_at >= from_dt)
-        if to_dt is not None:
-            auto_filter.append(TradeEvent.created_at <= to_dt)
+        auto_clauses = _with_date_filters(
+            _auto_predicate(),
+            model=TradeEvent,
+            from_dt=from_dt,
+            to_dt=to_dt,
+        )
         auto_count = int(
-            self._db.scalar(
+            connection.scalar(
                 select(func.count())
                 .select_from(TradeEvent)
-                .where(*auto_filter)
+                .where(*auto_clauses)
             )
             or 0
         )
@@ -447,18 +452,11 @@ class InterventionEvidenceService:
         self,
         stream: list[_Transition],
     ) -> list[InterventionEvidenceRow]:
-        """Conservative pairing of the authoritative audit stream.
-
-        Pairing is within each intervention family (pause / kill_switch).
-        Duplicate-open segments are wholly ambiguous: ``OPEN, OPEN, CLOSE``
-        produces no duration for ANY of those transitions. The ambiguous
-        segment only resets after the close. A close with no candidate open is
-        UNMATCHED_CLOSE. A trailing open with no close is OPEN.
-        """
         rows: list[InterventionEvidenceRow] = []
-        # Pending opens per family. When more than one open accumulates before
-        # a close, the whole segment is ambiguous.
-        pending: dict[_Family, list[_Transition]] = {"pause": [], "kill_switch": []}
+        pending: dict[_Family, list[_Transition]] = {
+            "pause": [],
+            "kill_switch": [],
+        }
 
         for t in stream:
             bucket = pending[t.family]
@@ -471,7 +469,6 @@ class InterventionEvidenceService:
                     open_t = bucket[0]
                     duration = self._duration(open_t, t)
                     if duration is None or duration <= 0:
-                        # Close did not strictly follow open -> ambiguous.
                         rows.append(self._row(open_t, "AMBIGUOUS"))
                         rows.append(self._row(t, "AMBIGUOUS"))
                     else:
@@ -487,16 +484,13 @@ class InterventionEvidenceService:
                         )
                     bucket.clear()
                 else:
-                    # Duplicate-open segment: every pending open AND the close
-                    # are ambiguous; no duration for any of them.
                     for open_t in bucket:
                         rows.append(self._row(open_t, "AMBIGUOUS"))
                     rows.append(self._row(t, "AMBIGUOUS"))
                     bucket.clear()
 
-        # Trailing opens with no close (per family).
         for family_bucket in pending.values():
-            for idx, open_t in enumerate(family_bucket):
+            for open_t in family_bucket:
                 if len(family_bucket) > 1:
                     rows.append(self._row(open_t, "AMBIGUOUS"))
                 else:
@@ -539,7 +533,6 @@ class InterventionEvidenceService:
         *,
         open_is_open: bool,
     ) -> InterventionEvidenceRow:
-        # Duration is attached only to the close row of the pair.
         return InterventionEvidenceRow(
             source=t.source,
             source_id=t.source_id,
@@ -558,8 +551,6 @@ class InterventionEvidenceService:
 
     @staticmethod
     def _auto_unmatched(t: _Transition) -> InterventionEvidenceRow:
-        # Automatic evidence has no durable correlation key to the manual
-        # audit stream, so it is always unpaired/unknown.
         status = "UNMATCHED_CLOSE" if t.direction == "close" else "OPEN"
         return InterventionEvidenceRow(
             source=t.source,
@@ -579,12 +570,6 @@ class InterventionEvidenceService:
 
     @staticmethod
     def _unknown_row(t: _Transition) -> InterventionEvidenceRow:
-        """A row whose classification is unknown due to incomplete scan context.
-
-        Used when the global pairing context could not be fully scanned: no
-        context-dependent claim (OPEN / PAIRED / UNMATCHED_CLOSE) is preserved
-        because omitted history could change it.
-        """
         return InterventionEvidenceRow(
             source=t.source,
             source_id=t.source_id,
@@ -604,11 +589,21 @@ class InterventionEvidenceService:
     # ------------------------------------------------------------------
     # Summary / filters
     # ------------------------------------------------------------------
+    def _after_bounded_scan(self) -> None:
+        """No-op extension point between the bounded scan and exact-total query.
+
+        Both run on the same snapshot; a test monkeypatches this to commit a
+        writer on a separate connection, proving the bounded scan and the
+        exact-total query observe the same committed state. Narrow, naturally
+        factored hook — not a broad production-only test path.
+        """
+        return None
+
     @staticmethod
     def _summarize(
         rows: list[InterventionEvidenceRow],
         *,
-        scanned_population: int,
+        filtered_scanned: int,
         exact_total: int,
         classification_complete: bool,
     ) -> InterventionEvidenceSummary:
@@ -619,7 +614,6 @@ class InterventionEvidenceService:
         )
         ambiguous_count = sum(1 for r in rows if r.pairing_status == "AMBIGUOUS")
         unknown_count = sum(1 for r in rows if r.pairing_status == "UNKNOWN")
-        # Only explicit, unambiguous close rows carry a duration; sum those.
         paired_duration = sum(
             r.duration_seconds or 0.0
             for r in rows
@@ -627,7 +621,7 @@ class InterventionEvidenceService:
         )
         return InterventionEvidenceSummary(
             total_evidence=exact_total,
-            scanned_evidence=scanned_population,
+            scanned_evidence=filtered_scanned,
             classification_complete=classification_complete,
             paired_count=paired_count,
             open_count=open_count,

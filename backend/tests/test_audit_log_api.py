@@ -5,6 +5,8 @@ import os
 import tempfile
 from datetime import datetime, timezone
 
+import pytest
+
 os.environ["AUTO_TRADE_DATABASE_URL"] = (
     f"sqlite:///{tempfile.gettempdir()}/auto_trade_test_audit_log_api_{os.getpid()}.db"
 )
@@ -12,6 +14,7 @@ os.environ["AUTO_TRADE_DATABASE_URL"] = (
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import StaticPool
 
 from app.config import settings
 from app.database import get_db
@@ -553,10 +556,12 @@ class TestAuditLogStatsSnapshotConservation:
 class TestAuditLogStatsCallerConnectionSafety:
     """``stats()`` must never touch the caller's connection/transaction.
 
-    Finding 2: when ``Session.get_bind()`` returns a SQLAlchemy ``Connection``
+    Finding B: when ``Session.get_bind()`` returns a SQLAlchemy ``Connection``
     (a session bound directly to a connection inside an active transaction),
-    ``stats()`` must derive the engine and open its OWN connection; it must
-    never begin/commit/rollback or otherwise alter the caller Connection.
+    or the session already has an active transaction, ``stats()`` must FAIL
+    SAFELY with ``SnapshotUnavailable`` BEFORE any transaction command — it must
+    never begin/commit/rollback or otherwise alter the caller Connection. The
+    caller transaction remains active and the sentinel remains rollback-able.
     """
 
     @classmethod
@@ -585,7 +590,7 @@ class TestAuditLogStatsCallerConnectionSafety:
         db.commit()
         db.close()
 
-    def test_stats_never_alters_caller_connection_transaction(self) -> None:
+    def test_stats_rejects_connection_bound_session_safely(self) -> None:
         # Open a caller connection and begin an explicit transaction.
         caller_connection = self.engine.connect()
         caller_trans = caller_connection.begin()
@@ -605,17 +610,15 @@ class TestAuditLogStatsCallerConnectionSafety:
             )
             db.flush()  # stage within the caller transaction, do not commit
 
-            # The caller transaction must still be active after stats().
-            stats = AuditLogService(db).stats()
-            # stats() opens its own connection off the engine, so it does NOT
-            # see the uncommitted sentinel (correct committed-row semantics).
-            assert stats.total == 0
+            # stats() must reject safely BEFORE touching the caller connection.
+            from app.services.snapshot_helper import SnapshotUnavailable
+
+            with pytest.raises(SnapshotUnavailable):
+                AuditLogService(db).stats()
 
             # The caller transaction is still active and the sentinel is still
             # present/rollback-able exactly as before.
             assert caller_trans.is_active
-            assert len(db.new) == 0  # flushed, not committed
-            # The sentinel is visible inside the caller transaction.
             in_tx = db.query(AuditLog).filter(
                 AuditLog.action == "SENTINEL"
             ).count()
@@ -634,6 +637,24 @@ class TestAuditLogStatsCallerConnectionSafety:
             after_rollback.close()
         finally:
             caller_connection.close()
+
+    def test_stats_rejects_active_transaction_session_safely(self) -> None:
+        # A session with an active transaction (autoflush after add) must be
+        # rejected because a second connection could alias it under single-slot
+        # pools.
+        db = Session(bind=self.engine)
+        db.add(AuditLog(action="X", severity="INFO", actor_hash="a",
+                        source_ip="", request_summary="{}", result="SUCCESS"))
+        db.flush()  # starts a transaction on the session's connection
+        try:
+            from app.services.snapshot_helper import SnapshotUnavailable
+
+            assert db.in_transaction()
+            with pytest.raises(SnapshotUnavailable):
+                AuditLogService(db).stats()
+        finally:
+            db.rollback()
+            db.close()
 
 
 class TestAuditLogStatsInFlightSnapshot:
@@ -766,3 +787,150 @@ class TestAuditLogStatsInFlightSnapshot:
         finally:
             writer.close()
             reader.close()
+
+
+class TestAuditLogStatsPoolIsolation:
+    """Finding B: guaranteed caller isolation under aliased-pool scenarios.
+
+    Under StaticPool / SingletonThreadPool / single-slot pools, a second
+    ``engine.connect()`` can return the SAME underlying DBAPI connection as the
+    caller. ``stats()`` must detect connection-bound / active-transaction
+    sessions and fail safely with ``SnapshotUnavailable`` BEFORE any transaction
+    command, leaving the caller transaction active and the sentinel rollback-able.
+    """
+
+    def _assert_rejects_with_active_sentinel(self, engine) -> None:
+        from app.services.snapshot_helper import SnapshotUnavailable
+
+        caller_connection = engine.connect()
+        caller_trans = caller_connection.begin()
+        try:
+            db = Session(bind=caller_connection)
+            db.add(
+                AuditLog(
+                    action="SENTINEL",
+                    severity="INFO",
+                    actor_hash="sentinel",
+                    source_ip="",
+                    request_summary="{}",
+                    result="SUCCESS",
+                )
+            )
+            db.flush()
+            with pytest.raises(SnapshotUnavailable):
+                AuditLogService(db).stats()
+            # Caller transaction still active; sentinel still rollback-able.
+            assert caller_trans.is_active
+            assert (
+                db.query(AuditLog).filter(AuditLog.action == "SENTINEL").count()
+                == 1
+            )
+            db.close()
+            caller_trans.rollback()
+        finally:
+            caller_connection.close()
+
+    def test_static_pool_connection_bound_rejected(self) -> None:
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        try:
+            Base.metadata.create_all(engine)
+            self._assert_rejects_with_active_sentinel(engine)
+        finally:
+            engine.dispose()
+
+    def test_singleton_thread_pool_connection_bound_rejected(self) -> None:
+        from sqlalchemy.pool import SingletonThreadPool
+
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=SingletonThreadPool,
+        )
+        try:
+            Base.metadata.create_all(engine)
+            self._assert_rejects_with_active_sentinel(engine)
+        finally:
+            engine.dispose()
+
+    def test_normal_pooled_file_sqlite_succeeds(self) -> None:
+        # The ordinary production-like path (file SQLite, default QueuePool,
+        # Engine-bound session, no active transaction) must still succeed.
+        db_path = os.path.join(
+            tempfile.gettempdir(),
+            f"auto_trade_test_audit_stats_normal_{os.getpid()}.db",
+        )
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+        engine = create_engine(
+            f"sqlite:///{db_path}",
+            connect_args={"check_same_thread": False},
+        )
+        try:
+            Base.metadata.create_all(engine)
+            db = Session(bind=engine)
+            db.add(AuditLog(action="OK", severity="INFO", actor_hash="a",
+                            source_ip="", request_summary="{}", result="SUCCESS"))
+            db.commit()
+            db.close()
+            reader = Session(bind=engine)
+            stats = AuditLogService(reader).stats()
+            reader.close()
+            assert stats.total == 1
+        finally:
+            engine.dispose()
+            if os.path.exists(db_path):
+                os.unlink(db_path)
+
+
+class TestAuditLogStatsAPI503:
+    """Finding B.5: SnapshotUnavailable maps to HTTP 503 through the route.
+
+    Uses a local FastAPI app with a connection-bound session dependency so the
+    global ``app`` dependency overrides are not disturbed.
+    """
+
+    def test_stats_endpoint_returns_503_for_connection_bound_session(
+        self,
+    ) -> None:
+        from fastapi import FastAPI
+
+        from app.api.audit_log import router as audit_log_router
+
+        db_path = os.path.join(
+            tempfile.gettempdir(),
+            f"auto_trade_test_audit_stats_503_{os.getpid()}.db",
+        )
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+        engine = create_engine(
+            f"sqlite:///{db_path}",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        try:
+            local_app = FastAPI()
+            local_app.include_router(audit_log_router)
+
+            def override_get_db():
+                # A connection-bound session dependency (the unsafe case).
+                conn = engine.connect()
+                try:
+                    yield Session(bind=conn)
+                finally:
+                    conn.close()
+
+            local_app.dependency_overrides[get_db] = override_get_db
+            client = TestClient(local_app)
+            resp = client.get("/api/audit-logs/stats")
+            assert resp.status_code == 503, resp.text
+            assert "snapshot unavailable" in resp.json()["detail"].lower()
+            client.close()
+        finally:
+            engine.dispose()
+            if os.path.exists(db_path):
+                os.unlink(db_path)

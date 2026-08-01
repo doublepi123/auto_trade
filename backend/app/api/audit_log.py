@@ -14,6 +14,7 @@ from app.api.auth import require_api_key
 from app.database import get_db
 from app.schemas import AuditLogPage, AuditLogStatsResponse
 from app.services.audit_log_service import AuditLogService
+from app.services.snapshot_helper import SnapshotUnavailable
 
 router = APIRouter(
     prefix="/api/audit-logs",
@@ -72,3 +73,11 @@ def audit_log_stats(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SnapshotUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "audit statistics snapshot unavailable: caller session cannot "
+                "be given a distinct physical read snapshot"
+            ),
+        ) from exc

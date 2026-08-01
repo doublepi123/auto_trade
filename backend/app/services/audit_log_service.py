@@ -23,6 +23,7 @@ from app.schemas import (
     AuditLogPage,
     AuditLogStatsResponse,
 )
+from app.services.snapshot_helper import SnapshotUnavailable, open_read_snapshot
 
 # Categorical aggregation caps. Daily rows are unbounded (chronological); the
 # categorical dimensions (action / severity / actor) are bounded and report
@@ -197,29 +198,18 @@ class AuditLogService:
         from_date: date | None,
         to_date: date | None,
     ) -> AuditLogStatsResponse:
-        """Execute all aggregates inside one SQLite read snapshot.
+        """Execute all aggregates inside one owned SQLite read snapshot.
 
-        ALWAYS obtains a separate connection from the bind's Engine. If
-        ``Session.get_bind()`` returns a SQLAlchemy ``Connection`` (e.g. a
-        session bound directly to a connection inside an active transaction),
-        uses its ``.engine`` to open a new ``engine.connect()``; the caller
-        Connection is never passed into snapshot code. Only the owned
-        connection/transaction is begun/rolled back/closed — the caller
-        Session/Connection is never altered.
+        Uses the shared ``open_read_snapshot`` helper, which opens its OWN
+        physical connection off the caller's engine and rejects (raising
+        ``SnapshotUnavailable``) when the caller Session is connection-bound or
+        already mid-transaction — cases where a second connection could alias
+        the caller's DBAPI connection (StaticPool / SingletonThreadPool /
+        single-slot pools). The caller Session/Connection is never begun,
+        committed, rolled back, or otherwise altered.
         """
-        bind = self._db.get_bind()
-        if isinstance(bind, Engine):
-            snapshot_engine = bind
-        elif isinstance(bind, Connection):
-            # Session bound directly to a Connection: derive its engine and
-            # open a fresh connection so we never touch the caller's
-            # transaction.
-            snapshot_engine = bind.engine
-        else:  # pragma: no cover - defensive fallback
-            raise RuntimeError(
-                "unsupported session bind for audit stats snapshot"
-            )
-        with snapshot_engine.connect() as connection:
+
+        def _query(connection: Connection) -> AuditLogStatsResponse:
             return self._run_snapshot_on_connection(
                 connection=connection,
                 action=action,
@@ -229,6 +219,8 @@ class AuditLogService:
                 from_date=from_date,
                 to_date=to_date,
             )
+
+        return open_read_snapshot(self._db, _query)
 
     def _run_snapshot_on_connection(
         self,
@@ -241,101 +233,82 @@ class AuditLogService:
         from_date: date | None,
         to_date: date | None,
     ) -> AuditLogStatsResponse:
-        # One explicit read snapshot. In SQLite WAL, BEGIN defers the write
-        # lock and establishes a read snapshot; all SELECTs below observe the
-        # same committed state. We never COMMIT/ROLLBACK this connection, so
-        # nothing is mutated.
-        driver_connection = connection.connection
-        try:
-            driver_connection.rollback()
-        except Exception:
-            pass
-        try:
-            driver_connection.execute("BEGIN")
-        except Exception:
-            # Already in a transaction (e.g. a passed-in connection); the
-            # subsequent SELECTs still share one snapshot.
-            pass
-
-        try:
-            total = int(
-                connection.scalar(
-                    _apply_filters(
-                        select(func.count()).select_from(AuditLog),
-                        action=action,
-                        severity=severity,
-                        from_dt=from_dt,
-                        to_dt=to_dt,
-                    )
+        # The read snapshot (BEGIN) is established by open_read_snapshot; every
+        # SELECT below observes the same committed state. This method never
+        # begins/commits/rolls back the connection.
+        total = int(
+            connection.scalar(
+                _apply_filters(
+                    select(func.count()).select_from(AuditLog),
+                    action=action,
+                    severity=severity,
+                    from_dt=from_dt,
+                    to_dt=to_dt,
                 )
-                or 0
             )
+            or 0
+        )
 
-            # Extension point: a test can monkeypatch this no-op method to
-            # commit a writer on a separate connection AFTER the read snapshot
-            # is established (by the total query above) but BEFORE the
-            # categorical/actor/day queries below, proving all subsequent
-            # queries observe the same snapshot. This is a narrow, naturally
-            # factored hook — not a broad production-only test path.
-            self._after_total_query()
+        # Extension point: a test can monkeypatch this no-op method to
+        # commit a writer on a separate connection AFTER the read snapshot
+        # is established (by the total query above) but BEFORE the
+        # categorical/actor/day queries below, proving all subsequent
+        # queries observe the same snapshot. This is a narrow, naturally
+        # factored hook — not a broad production-only test path.
+        self._after_total_query()
 
-            action_rows = self._sql_categorical(
-                connection=connection,
-                dimension=AuditLog.action,
-                cap=_MAX_ACTION_BUCKETS,
-                action=action,
-                severity=severity,
-                from_dt=from_dt,
-                to_dt=to_dt,
-                total=total,
-            )
-            by_action = [
-                AuditLogCategoryCount(key=key, count=count)
-                for key, count in action_rows
-            ]
+        action_rows = self._sql_categorical(
+            connection=connection,
+            dimension=AuditLog.action,
+            cap=_MAX_ACTION_BUCKETS,
+            action=action,
+            severity=severity,
+            from_dt=from_dt,
+            to_dt=to_dt,
+            total=total,
+        )
+        by_action = [
+            AuditLogCategoryCount(key=key, count=count)
+            for key, count in action_rows
+        ]
 
-            severity_rows = self._sql_categorical(
-                connection=connection,
-                dimension=AuditLog.severity,
-                cap=_MAX_SEVERITY_BUCKETS,
-                action=action,
-                severity=severity,
-                from_dt=from_dt,
-                to_dt=to_dt,
-                total=total,
-            )
-            by_severity = [
-                AuditLogCategoryCount(key=key, count=count)
-                for key, count in severity_rows
-            ]
+        severity_rows = self._sql_categorical(
+            connection=connection,
+            dimension=AuditLog.severity,
+            cap=_MAX_SEVERITY_BUCKETS,
+            action=action,
+            severity=severity,
+            from_dt=from_dt,
+            to_dt=to_dt,
+            total=total,
+        )
+        by_severity = [
+            AuditLogCategoryCount(key=key, count=count)
+            for key, count in severity_rows
+        ]
 
-            actor_rows = self._sql_categorical(
-                connection=connection,
-                dimension=AuditLog.actor_hash,
-                cap=_MAX_ACTOR_BUCKETS,
-                action=action,
-                severity=severity,
-                from_dt=from_dt,
-                to_dt=to_dt,
-                total=total,
-            )
-            by_actor = [
-                AuditLogActorCount(actor_hash=key, count=count)
-                for key, count in actor_rows
-            ]
+        actor_rows = self._sql_categorical(
+            connection=connection,
+            dimension=AuditLog.actor_hash,
+            cap=_MAX_ACTOR_BUCKETS,
+            action=action,
+            severity=severity,
+            from_dt=from_dt,
+            to_dt=to_dt,
+            total=total,
+        )
+        by_actor = [
+            AuditLogActorCount(actor_hash=key, count=count)
+            for key, count in actor_rows
+        ]
 
-            by_day = self._sql_daily(
-                connection=connection,
-                action=action,
-                severity=severity,
-                from_dt=from_dt,
-                to_dt=to_dt,
-            )
-        finally:
-            try:
-                driver_connection.rollback()
-            except Exception:
-                pass
+        by_day = self._sql_daily(
+            connection=connection,
+            action=action,
+            severity=severity,
+            from_dt=from_dt,
+            to_dt=to_dt,
+        )
 
         return AuditLogStatsResponse(
             total=total,

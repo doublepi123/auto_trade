@@ -2484,12 +2484,18 @@ class InterventionEvidenceSummary(BaseModel):
     classification is itself unknown because the global pairing context could
     not be fully scanned.
 
+    Denominators (finding A.4):
+    * ``total_evidence`` — the EXACT complete filtered population from the one
+      response snapshot (independent of the bounded scan).
+    * ``scanned_evidence`` — the ``filtered_scanned`` denominator: scanned rows
+      that match the requested date filters and feed summary classification.
+      Status counts are computed over THIS population, never the global
+      pairing-context count.
+
     When ``classification_complete`` is False, the per-status counts describe
-    only the SCANNED population (not the full filtered population), so callers
-    cannot mistake a partial classification for a complete one. In that case
-    ``scanned_evidence`` is the bounded scan population and
-    ``total_evidence`` is the exact filtered population (independent of the
-    scan cap).
+    only the ``filtered_scanned`` population (not the full filtered
+    population), so callers cannot mistake a partial classification for a
+    complete one.
     """
 
     total_evidence: int = Field(ge=0)
@@ -2506,29 +2512,34 @@ class InterventionEvidenceSummary(BaseModel):
 class InterventionEvidenceResponse(BaseModel):
     """Read-only runtime intervention evidence timeline response.
 
-    Metadata contract:
-    * ``total`` — the EXACT filtered population matching the requested date
-      filters (a SQL count, independent of the bounded scan).
-    * ``scanned`` — the bounded scan population actually used for pairing
-      (<= the scan cap).
-    * ``returned`` — the number of rows in ``items`` (after the response limit).
-    * ``truncated`` — True when rows were omitted by the response limit OR by
-      a scan cap.
+    Metadata contract (finding A.4):
+    * ``total`` — the EXACT complete filtered population matching the requested
+      date filters, from the one response snapshot (a SQL count, independent
+      of the bounded scan).
+    * ``pairing_context_scanned`` — global rows loaded to establish pairing
+      context (before date filters). This is the bounded scan population.
+    * ``filtered_scanned`` — scanned rows that match the requested date filters
+      and feed summary classification.
+    * ``returned`` — rows after the response limit.
+    * ``truncated`` — True when rows were omitted by the response limit OR by a
+      scan cap.
     * ``pairing_complete`` — False when a scan cap was exceeded; in that case
       ``scan_truncated`` is True, ALL durations are suppressed, and every
       context-dependent manual transition state is reported as ``UNKNOWN``
       (not OPEN/PAIRED/UNMATCHED_CLOSE) because omitted history could change
-      it. Automatic uncorrelated evidence remains unknown.
+      it. ``classification_complete`` mirrors ``pairing_complete``.
     """
 
     items: list[InterventionEvidenceRow] = Field(default_factory=list)
     summary: InterventionEvidenceSummary
     total: int = Field(ge=0)
-    scanned: int = Field(ge=0)
+    pairing_context_scanned: int = Field(ge=0)
+    filtered_scanned: int = Field(ge=0)
     returned: int = Field(ge=0)
     truncated: bool = False
     pairing_complete: bool = True
     scan_truncated: bool = False
+    classification_complete: bool = True
     pairing_rule: str
     filters: dict[str, Any] = Field(default_factory=dict)
 

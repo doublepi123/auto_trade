@@ -42,10 +42,22 @@ from app.services.intervention_evidence_service import (
 class _Base:
     @classmethod
     def setup_class(cls) -> None:
+        from sqlalchemy import event as sa_event
+
         cls.engine = create_engine(
             os.environ["AUTO_TRADE_DATABASE_URL"],
             connect_args={"check_same_thread": False},
         )
+
+        @sa_event.listens_for(cls.engine, "connect")
+        def _set_wal_pragmas(dbapi_connection, _record):  # noqa: ANN001
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA busy_timeout=5000")
+            finally:
+                cursor.close()
+
         Base.metadata.drop_all(bind=cls.engine)
         Base.metadata.create_all(bind=cls.engine)
 
@@ -499,15 +511,14 @@ class TestInterventionEvidenceScanCap(_Base):
         assert all(r.duration_seconds is None for r in resp.items)
         # Context-dependent manual states are UNKNOWN, not OPEN/PAIRED.
         assert all(r.pairing_status == "UNKNOWN" for r in resp.items)
-        # Summary counts describe the scanned population (not the
-        # response-limited items).
-        assert resp.summary.unknown_count == resp.scanned
+        # Summary status counts use the filtered_scanned denominator.
+        assert resp.summary.unknown_count == resp.filtered_scanned
         assert resp.summary.open_count == 0
         assert resp.summary.classification_complete is False
         # Exact total is truthful (independent of the scan cap).
         assert resp.total == _MAX_SCAN_TRANSITIONS + 5
-        # Scanned population is bounded (cap + 1 rows fetched to detect cap).
-        assert resp.scanned == _MAX_SCAN_TRANSITIONS + 1
+        # Pairing-context scanned population is bounded (cap + 1 rows fetched).
+        assert resp.pairing_context_scanned == _MAX_SCAN_TRANSITIONS + 1
         assert resp.truncated is True
 
     def test_scan_cap_open_at_cap_plus_1_close_at_cap_plus_2_no_open_claim(
@@ -549,21 +560,23 @@ class TestInterventionEvidenceScanCap(_Base):
         assert resp.summary.paired_duration_seconds == 0.0
         # Exact total counts all 5 audit rows truthfully.
         assert resp.total == 5
-        # Scanned population is bounded (cap + 1 rows fetched to detect cap).
-        assert resp.scanned == cap + 1
+        # Pairing-context scanned population is bounded (cap + 1 fetched).
+        assert resp.pairing_context_scanned == cap + 1
         assert resp.truncated is True
 
     def test_scan_cap_metadata_truthful_when_complete(self) -> None:
-        # Under the cap: pairing complete, scanned == total, not truncated.
+        # Under the cap: pairing complete, denominators consistent, not truncated.
         self._audit("PAUSE", datetime(2026, 6, 14, 10, 0, 0, tzinfo=timezone.utc))
         self._audit("RESUME", datetime(2026, 6, 14, 10, 10, 0, tzinfo=timezone.utc))
         resp = self._build()
         assert resp.pairing_complete is True
         assert resp.scan_truncated is False
         assert resp.total == 2
-        assert resp.scanned == 2
+        assert resp.pairing_context_scanned == 2
+        assert resp.filtered_scanned == 2
         assert resp.returned == 2
         assert resp.truncated is False
+        assert resp.classification_complete is True
         assert resp.summary.classification_complete is True
         assert resp.summary.scanned_evidence == 2
 
@@ -584,13 +597,161 @@ class TestInterventionEvidenceScanCap(_Base):
         resp = self._build()
         assert resp.scan_truncated is True
         assert resp.pairing_complete is False
-        # Scanned automatic rows are bounded (cap + 1 fetched to detect cap).
-        assert resp.scanned == cap + 1
+        # Pairing-context scanned automatic rows are bounded (cap + 1 fetched).
+        assert resp.pairing_context_scanned == cap + 1
         # Exact total is truthful (all 5 automatic rows).
         assert resp.total == 5
         assert resp.truncated is True
         assert all(r.pairing_status == "UNKNOWN" for r in resp.items)
         assert all(r.duration_seconds is None for r in resp.items)
+
+
+class TestInterventionEvidenceSharedPredicate(_Base):
+    """Finding A.1: one shared SQL predicate per source, normalized in SQL."""
+
+    def test_lowercase_successful_auto_status_normalized_in_sql(self) -> None:
+        # The auto status is normalized in SQL (upper/trim/coalesce), so a
+        # lowercase/whitespace-padded success status counts as evidence.
+        self._trade(
+            "RISK_AUTO_RESUMED",
+            datetime(2026, 6, 14, 10, 0, 0, tzinfo=timezone.utc),
+            status="  running  ",
+        )
+        resp = self._build()
+        assert resp.total == 1
+        assert resp.pairing_context_scanned == 1
+        assert len(resp.items) == 1
+        assert resp.items[0].source == "trade_auto"
+        assert resp.items[0].action == "RISK_AUTO_RESUMED"
+
+    def test_failed_auto_status_absent_everywhere(self) -> None:
+        # A failed/non-success auto status must affect neither scans,
+        # truncation, rows, nor totals.
+        self._trade(
+            "RISK_AUTO_RESUMED",
+            datetime(2026, 6, 14, 10, 0, 0, tzinfo=timezone.utc),
+            status="FAILED",
+        )
+        self._trade(
+            "RISK_AUTO_RESUMED",
+            datetime(2026, 6, 14, 11, 0, 0, tzinfo=timezone.utc),
+            status="",
+        )
+        resp = self._build()
+        assert resp.total == 0
+        assert resp.pairing_context_scanned == 0
+        assert resp.items == []
+        assert resp.scan_truncated is False
+
+
+class TestInterventionEvidenceOneSnapshot(_Base):
+    """Finding A.2: all metadata queries on ONE read snapshot."""
+
+    def test_writer_between_scan_and_exact_total_does_not_split(self) -> None:
+        # Seed one audit pair on the committed state.
+        self._audit("PAUSE", datetime(2026, 6, 14, 10, 0, 0, tzinfo=timezone.utc))
+        self._audit("RESUME", datetime(2026, 6, 14, 10, 10, 0, tzinfo=timezone.utc))
+
+        service_db = self._db()
+        service = InterventionEvidenceService(service_db)
+        writer = self._db()
+        committed = []
+
+        def _commit_during_snapshot() -> None:
+            # Writer commits a new audit row AFTER the bounded scan but BEFORE
+            # the exact-total query, on a separate session.
+            writer.add(
+                AuditLog(
+                    action="PAUSE",
+                    severity="INFO",
+                    actor_hash="concurrent",
+                    source_ip="",
+                    request_summary="{}",
+                    result="SUCCESS",
+                    created_at=datetime(2026, 6, 14, 12, 0, tzinfo=timezone.utc),
+                )
+            )
+            writer.commit()
+            committed.append(True)
+
+        service._after_bounded_scan = _commit_during_snapshot  # type: ignore[method-assign]
+        try:
+            resp = service.build()
+            # The bounded scan and exact-total both ran on the same snapshot,
+            # established before the writer committed. The exact total reflects
+            # the pre-commit state (2), not the post-commit state (3).
+            assert committed == [True]
+            assert resp.total == 2
+            assert resp.pairing_context_scanned == 2
+        finally:
+            writer.close()
+            service_db.close()
+
+    def test_no_unsupported_open_when_metadata_changes_concurrently(self) -> None:
+        # A single PAUSE exists on the committed state. A writer commits a
+        # RESUME during the snapshot. Because the bounded scan and exact-total
+        # share one snapshot, the open must NOT become a spurious OPEN from a
+        # split metadata view; it stays consistent with the snapshot.
+        self._audit("PAUSE", datetime(2026, 6, 14, 10, 0, 0, tzinfo=timezone.utc))
+
+        service_db = self._db()
+        service = InterventionEvidenceService(service_db)
+        writer = self._db()
+
+        def _commit_during_snapshot() -> None:
+            writer.add(
+                AuditLog(
+                    action="RESUME",
+                    severity="INFO",
+                    actor_hash="concurrent",
+                    source_ip="",
+                    request_summary="{}",
+                    result="SUCCESS",
+                    created_at=datetime(2026, 6, 14, 10, 5, 0, tzinfo=timezone.utc),
+                )
+            )
+            writer.commit()
+
+        service._after_bounded_scan = _commit_during_snapshot  # type: ignore[method-assign]
+        try:
+            resp = service.build()
+            # Snapshot taken before the writer's RESUME: the PAUSE is an
+            # unmatched OPEN (no close in the scanned snapshot), and the total
+            # is 1 (not 2). The concurrent RESUME is not visible.
+            assert resp.total == 1
+            assert resp.pairing_context_scanned == 1
+            assert resp.items[0].pairing_status == "OPEN"
+        finally:
+            writer.close()
+            service_db.close()
+
+
+class TestInterventionEvidenceDenominators(_Base):
+    """Finding A.4: exact total / scanned / returned denominators."""
+
+    def test_denominators_with_date_filter_and_limit(self) -> None:
+        # Two pairs on different days; filter to one day, limit to 1 row.
+        self._audit("PAUSE", datetime(2026, 6, 14, 10, 0, 0, tzinfo=timezone.utc))
+        self._audit("RESUME", datetime(2026, 6, 14, 10, 10, 0, tzinfo=timezone.utc))
+        self._audit("PAUSE", datetime(2026, 6, 15, 10, 0, 0, tzinfo=timezone.utc))
+        self._audit("RESUME", datetime(2026, 6, 15, 10, 10, 0, tzinfo=timezone.utc))
+        resp = self._build(
+            from_date=datetime(2026, 6, 15).date(),
+            to_date=datetime(2026, 6, 15).date(),
+            limit=1,
+        )
+        # Exact total: only the 2 rows on 2026-06-15.
+        assert resp.total == 2
+        # Pairing context scanned globally (all 4 rows loaded for pairing).
+        assert resp.pairing_context_scanned == 4
+        # Filtered scanned: 2 rows match the date filter.
+        assert resp.filtered_scanned == 2
+        # Returned: 1 row after the limit.
+        assert resp.returned == 1
+        assert resp.truncated is True
+        # Summary uses filtered_scanned, not pairing_context_scanned.
+        assert resp.summary.scanned_evidence == 2
+        assert resp.summary.total_evidence == 2
 
 
 class TestInterventionEvidenceRuntimeState(_Base):
