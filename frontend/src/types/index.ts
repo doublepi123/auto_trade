@@ -1079,6 +1079,46 @@ export interface NotificationLogPage {
   page_size: number
 }
 
+/**
+ * Server-side notification delivery statistics (GET /api/notifications/stats).
+ *
+ * Aggregates over the whole notification log within the optional
+ * [from_date, to_date] window — NOT the currently loaded page. `success_rate`
+ * is a percentage in [0, 100]. `failures_by_channel` is failure-only
+ * attribution (the log does not persist which channel carried a successful
+ * send), so its counts sum to `failed`, not `total`.
+ */
+export interface NotificationStatsBucket {
+  key: string
+  total: number
+  success: number
+  failed: number
+}
+
+export interface NotificationFailureCount {
+  key: string
+  count: number
+}
+
+export interface NotificationDailyPoint {
+  date: string
+  total: number
+  success: number
+  failed: number
+}
+
+export interface NotificationStatsResponse {
+  from_date: string | null
+  to_date: string | null
+  total: number
+  success: number
+  failed: number
+  success_rate: number
+  by_severity: NotificationStatsBucket[]
+  failures_by_channel: NotificationFailureCount[]
+  daily: NotificationDailyPoint[]
+}
+
 export interface RiskHistoryPoint {
   created_at: string
   engine_state: string

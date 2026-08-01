@@ -86,6 +86,87 @@
       </div>
     </div>
 
+    <div class="notif-stats" data-testid="notif-stats">
+      <div class="stats-header">
+        <div class="stats-title">
+          <h4>投递统计</h4>
+          <span class="stats-scope" data-testid="notif-stats-scope">{{ statsScopeLabel }}</span>
+        </div>
+        <div class="stats-controls">
+          <span data-testid="notif-stats-range">
+            <el-date-picker
+              v-model="statsRange"
+              type="daterange"
+              range-separator="至"
+              start-placeholder="统计开始"
+              end-placeholder="统计结束"
+              value-format="YYYY-MM-DD"
+              clearable
+              size="small"
+              style="width: 240px"
+            />
+          </span>
+          <el-button size="small" :loading="statsLoading" data-testid="notif-stats-reload" @click="loadStats">查询统计</el-button>
+        </div>
+      </div>
+      <div v-if="statsError" class="stats-state" data-testid="notif-stats-error">
+        <el-alert type="error" :title="statsError" :closable="false" show-icon />
+        <el-button size="small" style="margin-top: 8px" data-testid="notif-stats-retry" @click="loadStats">重试</el-button>
+      </div>
+      <div v-else-if="statsLoading && !stats" class="stats-state" data-testid="notif-stats-loading">加载中…</div>
+      <div v-else-if="stats && stats.total === 0" class="stats-state" data-testid="notif-stats-empty">所选范围暂无通知记录</div>
+      <div v-else-if="stats" class="stats-body" :class="{ 'stats-refreshing': statsLoading }">
+        <div class="stats-block" data-testid="notif-stats-totals">
+          <div class="stats-block-label">总量</div>
+          <div class="stats-numbers">
+            <span>发送 <strong>{{ stats.total }}</strong></span>
+            <span>成功 <strong>{{ stats.success }}</strong></span>
+            <span>失败 <strong>{{ stats.failed }}</strong></span>
+            <span>成功率 <strong>{{ stats.success_rate }}%</strong></span>
+          </div>
+          <div class="dist-ratio">
+            <div class="dist-ratio-success" :style="{ width: stats.success_rate + '%' }" />
+            <div class="dist-ratio-failure" :style="{ width: (100 - stats.success_rate) + '%' }" />
+          </div>
+        </div>
+        <div class="stats-block" data-testid="notif-stats-severity">
+          <div class="stats-block-label">严重度分布（统计范围）</div>
+          <template v-if="stats.by_severity.length">
+            <div v-for="bucket in stats.by_severity" :key="bucket.key" class="stats-row">
+              <el-tag size="small" :type="severityType(bucket.key)">{{ bucket.key }}</el-tag>
+              <span>{{ bucket.total }} 条 · 成功 {{ bucket.success }} · 失败 {{ bucket.failed }}</span>
+            </div>
+          </template>
+          <div v-else class="stats-none">无数据</div>
+        </div>
+        <div class="stats-block" data-testid="notif-stats-channels">
+          <div class="stats-block-label">失败渠道归因</div>
+          <template v-if="stats.failures_by_channel.length">
+            <div v-for="channel in stats.failures_by_channel" :key="channel.key" class="stats-row">
+              <span class="stats-channel-key">{{ channelLabel(channel.key) }}</span>
+              <span>{{ channel.count }} 次</span>
+            </div>
+          </template>
+          <div v-else class="stats-none">无失败记录</div>
+          <div class="stats-note">仅统计失败记录；成功投递不记录渠道。</div>
+        </div>
+        <div v-if="stats.daily.length" class="stats-block stats-trend" data-testid="notif-stats-trend">
+          <div class="stats-block-label">每日投递（UTC 日期）</div>
+          <svg :viewBox="`0 0 ${trendViewWidth} ${trendViewHeight}`" preserveAspectRatio="none" class="stats-trend-svg" data-testid="notif-stats-trend-svg">
+            <g v-for="bar in trendBars" :key="bar.date">
+              <rect :x="bar.x" :y="bar.successY" :width="bar.width" :height="bar.successHeight" class="bar-success" />
+              <rect :x="bar.x" :y="bar.failedY" :width="bar.width" :height="bar.failedHeight" class="bar-failed" />
+            </g>
+          </svg>
+          <div class="stats-trend-legend">
+            <span><i class="stats-dot stats-dot-success" />成功</span>
+            <span><i class="stats-dot stats-dot-failed" />失败</span>
+            <span class="stats-trend-range">{{ stats.daily[0]?.date }} ~ {{ stats.daily[stats.daily.length - 1]?.date }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div class="notif-summary" data-testid="notif-summary">
       <el-space wrap :size="8">
         <el-tag type="info">当前页 {{ displayedItems.length }}/{{ total }}</el-tag>
@@ -330,9 +411,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import { exportNotifications, getNotifications, retryNotification } from '../api'
+import { exportNotifications, getNotificationStats, getNotifications, retryNotification } from '../api'
 import { useNotificationBadge } from '../composables/useNotificationBadge'
-import type { NotificationLogOut } from '../types'
+import type { NotificationLogOut, NotificationStatsResponse } from '../types'
 import { resolveErrorMessage } from '../utils/error'
 import DataState from '../components/DataState.vue'
 import { usePersistedColumns } from '../composables/usePersistedColumns'
@@ -377,6 +458,70 @@ let loadRequestId = 0
 
 const retryingMap = reactive<Record<number, boolean>>({})
 const PREF_KEY = 'auto_trade_notification_center_prefs_v2'
+
+// Server-side delivery statistics (GET /api/notifications/stats). Aggregates
+// the whole notification log for the chosen window — explicitly NOT the
+// currently loaded page. Loading/filtering stats is read-only: it never calls
+// the retry endpoint and never sends a test notification.
+const stats = ref<NotificationStatsResponse | null>(null)
+const statsLoading = ref(false)
+const statsError = ref('')
+const statsRange = ref<string[] | null>(null)
+
+const statsScopeLabel = computed(() => {
+  if (!stats.value) return '服务端全量日志（非当前页）'
+  const from = stats.value.from_date
+  const to = stats.value.to_date
+  const range = from || to ? `${from ?? '最早'} 至 ${to ?? '最新'}` : '全部时间'
+  return `服务端全量日志（非当前页）· 范围：${range}`
+})
+
+function channelLabel(key: string): string {
+  if (key === 'serverchan') return 'Server酱'
+  if (key === 'webhook') return 'Webhook'
+  if (key === 'telegram') return 'Telegram'
+  if (key === 'unknown') return '未识别渠道'
+  return key
+}
+
+const trendViewWidth = 560
+const trendViewHeight = 64
+const trendBars = computed(() => {
+  const daily = stats.value?.daily ?? []
+  if (!daily.length) return []
+  const maxTotal = Math.max(1, ...daily.map((d) => d.total))
+  const slot = trendViewWidth / daily.length
+  const width = Math.min(24, slot * 0.6)
+  return daily.map((d, i) => {
+    const successHeight = (d.success / maxTotal) * trendViewHeight
+    const failedHeight = (d.failed / maxTotal) * trendViewHeight
+    return {
+      date: d.date,
+      x: i * slot + (slot - width) / 2,
+      width,
+      successY: trendViewHeight - successHeight,
+      successHeight,
+      failedY: trendViewHeight - successHeight - failedHeight,
+      failedHeight,
+    }
+  })
+})
+
+async function loadStats() {
+  statsLoading.value = true
+  statsError.value = ''
+  try {
+    const params: { from_date?: string; to_date?: string } = {}
+    if (statsRange.value?.[0]) params.from_date = statsRange.value[0]
+    if (statsRange.value?.[1]) params.to_date = statsRange.value[1]
+    stats.value = await getNotificationStats(params)
+  } catch (e) {
+    statsError.value = resolveErrorMessage(e, '加载投递统计失败')
+    stats.value = null
+  } finally {
+    statsLoading.value = false
+  }
+}
 
 function sourceLabel(item: NotificationLogOut): string {
   const text = `${item.title} ${item.content} ${item.error || ''}`.toLowerCase()
@@ -724,6 +869,9 @@ async function handleRetry(item: NotificationLogOut) {
     }
     ElMessage.success(updated.success ? '重试成功' : '重试失败，请检查通知渠道配置')
     refreshBadge()
+    // A completed retry changes the aggregate outcome; refresh the read-only
+    // stats so the card does not keep showing a stale failure count.
+    void loadStats()
   } catch (e) {
     ElMessage.error(resolveErrorMessage(e, '重试失败'))
   } finally {
@@ -789,6 +937,7 @@ watch([viewMode, pageSize, sortOrder], savePrefs)
 onMounted(() => {
   loadPrefs()
   load()
+  loadStats()
   startPoll()
 })
 onUnmounted(() => {
@@ -833,6 +982,147 @@ onUnmounted(() => {
 
 .notif-summary {
   padding: 8px 0;
+}
+
+.notif-stats {
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  padding: 12px;
+  background: #fafbfc;
+}
+
+.stats-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.stats-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.stats-title h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.stats-scope {
+  color: #909399;
+  font-size: 12px;
+}
+
+.stats-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.stats-state {
+  padding: 16px;
+  text-align: center;
+  color: #909399;
+  font-size: 13px;
+}
+
+.stats-body {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 16px;
+  transition: opacity 0.15s ease;
+}
+
+.stats-refreshing {
+  opacity: 0.6;
+}
+
+.stats-block-label {
+  margin-bottom: 8px;
+  color: #606266;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.stats-numbers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-bottom: 8px;
+  color: #606266;
+  font-size: 13px;
+}
+
+.stats-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  color: #606266;
+  font-size: 12px;
+}
+
+.stats-channel-key {
+  min-width: 72px;
+  font-weight: 600;
+}
+
+.stats-none,
+.stats-note {
+  color: #909399;
+  font-size: 12px;
+}
+
+.stats-trend {
+  grid-column: 1 / -1;
+}
+
+.stats-trend-svg {
+  display: block;
+  width: 100%;
+  height: 64px;
+}
+
+.stats-trend-svg .bar-success {
+  fill: #14884f;
+}
+
+.stats-trend-svg .bar-failed {
+  fill: #c43838;
+}
+
+.stats-trend-legend {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 6px;
+  color: #909399;
+  font-size: 12px;
+}
+
+.stats-trend-range {
+  margin-left: auto;
+}
+
+.stats-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  margin-right: 4px;
+}
+
+.stats-dot-success {
+  background: #14884f;
+}
+
+.stats-dot-failed {
+  background: #c43838;
 }
 
 .notif-distribution {

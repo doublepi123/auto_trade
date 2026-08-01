@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { NotificationLogOut, NotificationLogPage } from '../types'
+import type { NotificationLogOut, NotificationLogPage, NotificationStatsResponse } from '../types'
 
 export async function getNotifications(
   params: {
@@ -13,6 +13,18 @@ export async function getNotifications(
   } = {},
 ): Promise<NotificationLogPage> {
   const resp = await api.get('/api/notifications', { params })
+  return resp.data
+}
+
+/** Read-only server-side delivery aggregate. Never triggers a send or retry. */
+export async function getNotificationStats(
+  params: {
+    severity?: string
+    from_date?: string
+    to_date?: string
+  } = {},
+): Promise<NotificationStatsResponse> {
+  const resp = await api.get('/api/notifications/stats', { params })
   return resp.data
 }
 

@@ -1034,6 +1034,29 @@ Cypress.Commands.add('stubApi', () => {
     body: { sent: true, symbol: 'AAPL.US', title: '交易日报 · AAPL.US', error: null },
   }).as('runScheduledReport')
 
+  // Registered after the generic '/api/notifications?*' stub so the stats
+  // path takes precedence (later intercepts win).
+  cy.intercept('GET', '/api/notifications/stats*', {
+    body: {
+      from_date: null,
+      to_date: null,
+      total: 3,
+      success: 2,
+      failed: 1,
+      success_rate: 66.67,
+      by_severity: [
+        { key: 'CRITICAL', total: 1, success: 1, failed: 0 },
+        { key: 'INFO', total: 1, success: 1, failed: 0 },
+        { key: 'WARNING', total: 1, success: 0, failed: 1 },
+      ],
+      failures_by_channel: [{ key: 'webhook', count: 1 }],
+      daily: [
+        { date: '2026-06-15', total: 1, success: 0, failed: 1 },
+        { date: '2026-06-16', total: 2, success: 2, failed: 0 },
+      ],
+    },
+  }).as('getNotificationStats')
+
   cy.intercept('GET', '/api/account', {
     body: { total_assets: 0, cash_balances: [], positions: [], available: true, error: null },
   }).as('getAccount')
