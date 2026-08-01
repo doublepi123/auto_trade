@@ -3,11 +3,11 @@ from __future__ import annotations
 import hashlib
 import inspect
 import zlib
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_EVEN, localcontext
 from functools import cache
-from typing import TypedDict, cast
+from typing import Any, TypedDict, cast
 
 import pytest
 
@@ -18,6 +18,10 @@ from app.domain.watchlist_quant_v6 import (
     QUANT_V6_ARTIFACT_CODEC,
     QUANT_V6_ARTIFACT_COMPRESSION_LEVEL,
     QUANT_V6_ARTIFACT_SCHEMA_VERSION,
+    QUANT_V6_ACQUISITION_ADJUSTMENT_MODE,
+    QUANT_V6_ACQUISITION_PERIOD,
+    QUANT_V6_ACQUISITION_SPEC,
+    QUANT_V6_ACQUISITION_SPEC_DIGEST,
     QUANT_V6_ASSESSMENT_ARTIFACT_KIND,
     QUANT_V6_ASSESSMENT_CONTRACT,
     QUANT_V6_EVENT_CONTRACT,
@@ -30,7 +34,9 @@ from app.domain.watchlist_quant_v6 import (
     SESSION_CLUSTER_T90_BY_DF,
     SESSION_COVERED,
     SESSION_MISSING,
+    BarNextOpenStressedEvent,
     QuantV6ArtifactError,
+    QuantV6Assessment,
     QuantV6AssessmentError,
     QuantV6Bar,
     QuantV6SemanticError,
@@ -52,6 +58,7 @@ from app.domain.watchlist_quant_v6 import (
     quant_v6_session_bars_sha256,
     session_cluster_one_sided_90_lcb,
     validate_bar_next_open_stressed_event,
+    validate_quant_v6_threshold_evidence,
 )
 from app.domain.watchlist_quant_v6 import artifact as artifact_module
 from app.domain.watchlist_quant_v6 import semantics as semantics_module
@@ -71,6 +78,13 @@ class _ArtifactMetadata(TypedDict):
     raw_size: int
     compressed_size: int
     payload: bytes
+
+
+def _dataclass_init_values(value: Any) -> dict[str, Any]:
+    return {
+        item.name: getattr(value, item.name)
+        for item in fields(value)
+    }
 
 
 def _artifact_payload(
@@ -294,6 +308,13 @@ def test_semantic_contract_and_t_table_are_runtime_immutable() -> None:
     )
     with pytest.raises(TypeError):
         assessment_spec["minimum_events"] = 1
+    with pytest.raises(TypeError):
+        cast(dict[str, object], QUANT_V6_ACQUISITION_SPEC)[
+            "fallback_allowed"
+        ] = True
+    assert QUANT_V6_SEMANTIC_SPEC["acquisition"] == (
+        QUANT_V6_ACQUISITION_SPEC
+    )
     artifact_envelope = cast(
         dict[str, object],
         QUANT_V6_SEMANTIC_SPEC["artifact_envelope"],
@@ -306,6 +327,20 @@ def test_semantic_contract_and_t_table_are_runtime_immutable() -> None:
         QUANT_V6_ASSESSMENT_ARTIFACT_KIND,
         QUANT_V6_EVENT_ARTIFACT_KIND,
         QUANT_V6_SESSION_INPUT_ARTIFACT_KIND,
+    }
+    assert artifact_envelope["limits"] == {
+        "compressed_bytes": artifact_module.MAX_QUANT_V6_ARTIFACT_COMPRESSED_BYTES,
+        "container_items": artifact_module.MAX_QUANT_V6_ARTIFACT_CONTAINER_ITEMS,
+        "decimal_adjusted_exponent": (
+            artifact_module.MAX_QUANT_V6_DECIMAL_ADJUSTED_EXPONENT
+        ),
+        "decimal_digits": artifact_module.MAX_QUANT_V6_DECIMAL_DIGITS,
+        "integer_abs": artifact_module.MAX_QUANT_V6_ARTIFACT_INTEGER_ABS,
+        "json_depth": artifact_module.MAX_QUANT_V6_ARTIFACT_JSON_DEPTH,
+        "json_nodes": artifact_module.MAX_QUANT_V6_ARTIFACT_JSON_NODES,
+        "key_bytes": artifact_module.MAX_QUANT_V6_ARTIFACT_KEY_BYTES,
+        "raw_bytes": artifact_module.MAX_QUANT_V6_ARTIFACT_RAW_BYTES,
+        "string_bytes": artifact_module.MAX_QUANT_V6_ARTIFACT_STRING_BYTES,
     }
     payload_contracts = cast(
         dict[str, object],
@@ -734,6 +769,96 @@ def test_event_builder_rejects_cross_segment_gap_and_tampered_event() -> None:
         )
 
 
+def test_event_validator_rejects_subclass_with_false_ne_override() -> None:
+    class _FalseNeEvent(BarNextOpenStressedEvent):
+        def __ne__(self, other: object) -> bool:
+            return False
+
+    event = _single_event()
+    values = _dataclass_init_values(event)
+    values["net_pnl"] = event.net_pnl + Decimal("1")
+    forged = _FalseNeEvent(**values)
+
+    with pytest.raises(QuantV6SemanticError, match="unsupported type"):
+        validate_bar_next_open_stressed_event(forged)
+    with pytest.raises(QuantV6AssessmentError, match="events.*unsupported type"):
+        QuantV6SessionLeaf(
+            session_date=_DEFAULT_DAY,
+            status=SESSION_COVERED,
+            session_bars=_target_bars(_DEFAULT_DAY, 1),
+            threshold_evidence=_threshold(_DEFAULT_DAY),
+            fee_rate=_FEE_RATE,
+            events=(forged,),
+        )
+
+
+def test_evidence_chain_rejects_bar_training_threshold_and_leaf_subclasses() -> None:
+    class _BarSubclass(QuantV6Bar):
+        pass
+
+    class _TrainingSubclass(QuantV6TrainingSession):
+        pass
+
+    class _ThresholdSubclass(QuantV6ThresholdEvidence):
+        def __ne__(self, other: object) -> bool:
+            return False
+
+    class _LeafSubclass(QuantV6SessionLeaf):
+        pass
+
+    target_bars = list(_target_bars(_DEFAULT_DAY, 0))
+    target_bars[0] = _BarSubclass(
+        **_dataclass_init_values(target_bars[0])
+    )
+    with pytest.raises(QuantV6SemanticError, match="unsupported QuantV6Bar"):
+        quant_v6_session_bars_sha256(
+            symbol=_SYMBOL,
+            market=_MARKET,
+            session_date=_DEFAULT_DAY,
+            bars=target_bars,
+        )
+
+    threshold = _threshold(_DEFAULT_DAY)
+    training_sessions = list(threshold.training_sessions)
+    training_sessions[0] = _TrainingSubclass(
+        **_dataclass_init_values(training_sessions[0])
+    )
+    with pytest.raises(QuantV6SemanticError, match="unsupported type"):
+        build_quant_v6_threshold_evidence(
+            symbol=_SYMBOL,
+            market=_MARKET,
+            target_session_date=_DEFAULT_DAY,
+            training_sessions=training_sessions,
+        )
+
+    forged_threshold = _ThresholdSubclass(
+        **_dataclass_init_values(threshold)
+    )
+    with pytest.raises(QuantV6SemanticError, match="unsupported type"):
+        validate_quant_v6_threshold_evidence(forged_threshold)
+    with pytest.raises(QuantV6SemanticError, match="unsupported type"):
+        build_bar_next_open_stressed_events(
+            symbol=_SYMBOL,
+            market=_MARKET,
+            session_date=_DEFAULT_DAY,
+            bars=_target_bars(_DEFAULT_DAY, 1)[:9],
+            threshold_evidence=forged_threshold,
+            fee_rate=_FEE_RATE,
+        )
+
+    leaves = list(_strong_leaves())
+    forged_leaf = _LeafSubclass(**_dataclass_init_values(leaves[0]))
+    with pytest.raises(QuantV6AssessmentError, match="unsupported type"):
+        forged_leaf.encoded_replay_input(symbol=_SYMBOL, market=_MARKET)
+    leaves[0] = forged_leaf
+    with pytest.raises(QuantV6AssessmentError, match="unsupported type"):
+        assess_bar_next_open_stressed_window(
+            symbol=_SYMBOL,
+            market=_MARKET,
+            leaves=leaves,
+        )
+
+
 def test_fixed_window_strong_bar_evidence_is_watch_but_never_candidate() -> None:
     assessment = assess_bar_next_open_stressed_window(
         symbol=_SYMBOL,
@@ -761,6 +886,7 @@ def test_fixed_window_strong_bar_evidence_is_watch_but_never_candidate() -> None
     policy = cast(dict[str, object], payload["policy"])
     assert aggregates["session_denominator"] == 30
     assert policy["recommended_action"] == "WATCH"
+    assert policy["position_add_on_allowed"] is False
     assert payload["session_cluster_methodology"] == {
         "missing_session_treatment": "EXCLUDED_NOT_ZERO",
         "sample": "ALL_COVERED_SESSIONS",
@@ -781,9 +907,19 @@ def test_fixed_window_strong_bar_evidence_is_watch_but_never_candidate() -> None
     )
     assert replay_input.kind == QUANT_V6_SESSION_INPUT_ARTIFACT_KIND
     assert replay_input.raw_size < MAX_QUANT_V6_ARTIFACT_RAW_BYTES
-    assert decode_quant_v6_artifact(**asdict(replay_input))["contract"] == (
-        QUANT_V6_SESSION_INPUT_CONTRACT
-    )
+    replay_payload = decode_quant_v6_artifact(**asdict(replay_input))
+    assert replay_payload["contract"] == QUANT_V6_SESSION_INPUT_CONTRACT
+    assert replay_payload["acquisition"] == {
+        "adjustment_mode": QUANT_V6_ACQUISITION_ADJUSTMENT_MODE,
+        "bar_period": QUANT_V6_ACQUISITION_PERIOD,
+        "contract": "watchlist-quant-v6-acquisition-v1",
+        "exact_rth_grid_required": True,
+        "fallback_allowed": False,
+        "history_direction": "FORWARD_AFTER_CURSOR",
+        "quote_context_only": True,
+        "schema_version": 1,
+        "spec_digest_sha256": QUANT_V6_ACQUISITION_SPEC_DIGEST,
+    }
 
 
 @pytest.mark.parametrize("field", ["preimage_digest_sha256", "shock_threshold_bps"])
@@ -928,6 +1064,29 @@ def test_assessment_object_cannot_encode_forged_p0_or_aggregates() -> None:
         replace(assessment, session_cluster_lcb_90_bps=1.0)  # type: ignore[arg-type]
 
 
+def test_assessment_subclass_cannot_bypass_replay_with_false_ne() -> None:
+    class _FalseNeAssessment(QuantV6Assessment):
+        def __ne__(self, other: object) -> bool:
+            return False
+
+    assessment = assess_bar_next_open_stressed_window(
+        symbol=_SYMBOL,
+        market=_MARKET,
+        leaves=_strong_leaves(),
+    )
+    values = _dataclass_init_values(assessment)
+    values["event_count"] = assessment.event_count + 1
+    forged = _FalseNeAssessment(**values)
+    assert forged.promotion_eligible is False
+    assert forged.automatic_promotion_allowed is False
+    assert forged.order_submission_allowed is False
+
+    with pytest.raises(QuantV6AssessmentError, match="unsupported type"):
+        forged.canonical_payload()
+    with pytest.raises(QuantV6AssessmentError, match="unsupported type"):
+        forged.encoded_artifact()
+
+
 def test_assessment_requires_exactly_30_leaves() -> None:
     with pytest.raises(QuantV6AssessmentError, match="exactly 30"):
         assess_bar_next_open_stressed_window(
@@ -1014,11 +1173,11 @@ def test_quant_v6_domain_golden_digests() -> None:
         leaves=_strong_leaves(),
     )
     assert QUANT_V6_SEMANTIC_DIGEST == (
-        "3e19cabe392517eb21a67b10495befcc3b5c32389861b7c64aa1e7364ce8c2cd"
+        "f83e10d59aeef07c139569394ce23b0d6a1f799bf8ef40bd49b860f11c143316"
     )
     assert event.artifact_digest_sha256 == (
-        "c474e092b8f1aa7fb0b8e0519234d19ecfc7c4935b0dffd0b59a1ebe1b66e0cc"
+        "d062e2975f058866d99fe30ae02df761a51f6255061afb50bd6bc38bae6266b4"
     )
     assert assessment.assessment_digest_sha256 == (
-        "3d7da063e0dd41e564f9c0ec1fe54bb0c502fe09f962f909991775873a9010e3"
+        "c092c4dce8678dfce6bfeffd4d4aeb76f3f8541b706b3cfa4a91cb935e3a281b"
     )

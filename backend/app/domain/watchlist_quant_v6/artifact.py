@@ -37,6 +37,11 @@ QUANT_V6_CONTRACT_BY_ARTIFACT_KIND: Mapping[str, str] = MappingProxyType({
 MAX_QUANT_V6_ARTIFACT_RAW_BYTES = 2 * 1024 * 1024
 MAX_QUANT_V6_ARTIFACT_COMPRESSED_BYTES = 512 * 1024
 MAX_QUANT_V6_ARTIFACT_JSON_DEPTH = 64
+MAX_QUANT_V6_ARTIFACT_JSON_NODES = 20_000
+MAX_QUANT_V6_ARTIFACT_CONTAINER_ITEMS = 2_000
+MAX_QUANT_V6_ARTIFACT_STRING_BYTES = 512 * 1024
+MAX_QUANT_V6_ARTIFACT_KEY_BYTES = 256
+MAX_QUANT_V6_ARTIFACT_INTEGER_ABS = 10**36
 MAX_QUANT_V6_DECIMAL_DIGITS = 256
 MAX_QUANT_V6_DECIMAL_ADJUSTED_EXPONENT = 1024
 
@@ -56,6 +61,29 @@ class EncodedQuantV6Artifact:
     raw_size: int
     compressed_size: int
     payload: bytes
+
+
+@dataclass
+class _CanonicalJsonBudget:
+    nodes: int = 0
+    utf8_bytes: int = 0
+
+    def consume_node(self) -> None:
+        self.nodes += 1
+        if self.nodes > MAX_QUANT_V6_ARTIFACT_JSON_NODES:
+            raise QuantV6ArtifactError(
+                "quant-v6 payload exceeds the JSON node limit"
+            )
+        # Account for at least one byte of JSON syntax per value so a graph of
+        # tiny repeated values cannot evade the early byte budget entirely.
+        self.consume_utf8(1)
+
+    def consume_utf8(self, size: int) -> None:
+        self.utf8_bytes += size
+        if self.utf8_bytes > MAX_QUANT_V6_ARTIFACT_RAW_BYTES:
+            raise QuantV6ArtifactError(
+                "quant-v6 payload exceeds the raw size limit"
+            )
 
 
 def canonical_decimal(value: Decimal | int | str) -> str:
@@ -101,21 +129,40 @@ def canonical_quant_v6_json(value: Mapping[str, object]) -> bytes:
     deliberately rejected so platform formatting cannot change an evidence
     digest.
     """
-    normalized = _validated_json_value(dict(value), path="$", require_object=True)
     try:
-        raw = json.dumps(
-            normalized,
+        normalized = _validated_json_value(
+            value,
+            path="$",
+            require_object=True,
+            budget=_CanonicalJsonBudget(),
+        )
+        encoder = json.JSONEncoder(
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,
             allow_nan=False,
-        ).encode("utf-8")
-    except (TypeError, ValueError, RecursionError) as exc:
+        )
+        output = bytearray()
+        for chunk in encoder.iterencode(normalized):
+            encoded = chunk.encode("utf-8")
+            if len(output) + len(encoded) > MAX_QUANT_V6_ARTIFACT_RAW_BYTES:
+                raise QuantV6ArtifactError(
+                    "quant-v6 payload exceeds the raw size limit"
+                )
+            output.extend(encoded)
+        raw = bytes(output)
+    except QuantV6ArtifactError:
+        raise
+    except (
+        TypeError,
+        ValueError,
+        OverflowError,
+        RecursionError,
+        UnicodeEncodeError,
+    ) as exc:
         raise QuantV6ArtifactError("quant-v6 payload is not canonical JSON") from exc
     if not raw:
         raise QuantV6ArtifactError("quant-v6 payload must not be empty")
-    if len(raw) > MAX_QUANT_V6_ARTIFACT_RAW_BYTES:
-        raise QuantV6ArtifactError("quant-v6 payload exceeds the raw size limit")
     return raw
 
 
@@ -229,7 +276,12 @@ def decode_quant_v6_artifact(
         raise QuantV6ArtifactError(
             "quant-v6 artifact payload is not valid JSON"
         ) from exc
-    normalized = _validated_json_value(decoded, path="$", require_object=True)
+    normalized = _validated_json_value(
+        decoded,
+        path="$",
+        require_object=True,
+        budget=_CanonicalJsonBudget(),
+    )
     if not isinstance(normalized, dict):
         raise QuantV6ArtifactError("quant-v6 artifact root must be an object")
     if canonical_quant_v6_json(normalized) != raw:
@@ -276,6 +328,7 @@ def _validated_json_value(
     value: object,
     *,
     path: str,
+    budget: _CanonicalJsonBudget,
     require_object: bool = False,
     depth: int = 0,
 ) -> Any:
@@ -283,32 +336,71 @@ def _validated_json_value(
         raise QuantV6ArtifactError("quant-v6 payload exceeds the JSON nesting limit")
     if require_object and not isinstance(value, Mapping):
         raise QuantV6ArtifactError(f"{path} must be a JSON object")
-    if value is None or isinstance(value, (str, bool, int)):
+    budget.consume_node()
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        encoded_size = len(value.encode("utf-8"))
+        if encoded_size > MAX_QUANT_V6_ARTIFACT_STRING_BYTES:
+            raise QuantV6ArtifactError(f"{path} exceeds the JSON string size limit")
+        budget.consume_utf8(encoded_size)
+        return value
+    if isinstance(value, int):
+        if abs(value) > MAX_QUANT_V6_ARTIFACT_INTEGER_ABS:
+            raise QuantV6ArtifactError(f"{path} exceeds the JSON integer limit")
         return value
     if isinstance(value, Decimal):
-        return canonical_decimal(value)
+        rendered = canonical_decimal(value)
+        budget.consume_utf8(len(rendered.encode("utf-8")))
+        return rendered
     if isinstance(value, float):
         if not math.isfinite(value):
             raise QuantV6ArtifactError(f"{path} contains a non-finite float")
         raise QuantV6ArtifactError(f"{path} contains a native JSON float")
     if isinstance(value, (list, tuple)):
-        return [
-            _validated_json_value(
-                item,
-                path=f"{path}[{index}]",
-                depth=depth + 1,
+        if len(value) > MAX_QUANT_V6_ARTIFACT_CONTAINER_ITEMS:
+            raise QuantV6ArtifactError(
+                f"{path} exceeds the JSON container item limit"
             )
-            for index, item in enumerate(value)
-        ]
+        normalized_items: list[Any] = []
+        for index, item in enumerate(value):
+            if len(normalized_items) >= MAX_QUANT_V6_ARTIFACT_CONTAINER_ITEMS:
+                raise QuantV6ArtifactError(
+                    f"{path} exceeds the JSON container item limit"
+                )
+            normalized_items.append(
+                _validated_json_value(
+                    item,
+                    path=f"{path}[{index}]",
+                    depth=depth + 1,
+                    budget=budget,
+                )
+            )
+        return normalized_items
     if isinstance(value, Mapping):
+        if len(value) > MAX_QUANT_V6_ARTIFACT_CONTAINER_ITEMS:
+            raise QuantV6ArtifactError(
+                f"{path} exceeds the JSON container item limit"
+            )
         normalized: dict[str, Any] = {}
         for key, item in value.items():
+            if len(normalized) >= MAX_QUANT_V6_ARTIFACT_CONTAINER_ITEMS:
+                raise QuantV6ArtifactError(
+                    f"{path} exceeds the JSON container item limit"
+                )
             if not isinstance(key, str):
                 raise QuantV6ArtifactError(f"{path} contains a non-string key")
+            if key in normalized:
+                raise QuantV6ArtifactError(f"{path} contains a duplicate key")
+            encoded_key_size = len(key.encode("utf-8"))
+            if encoded_key_size > MAX_QUANT_V6_ARTIFACT_KEY_BYTES:
+                raise QuantV6ArtifactError(f"{path} contains an oversized key")
+            budget.consume_utf8(encoded_key_size)
             normalized[key] = _validated_json_value(
                 item,
                 path=f"{path}.{key}",
                 depth=depth + 1,
+                budget=budget,
             )
         return normalized
     raise QuantV6ArtifactError(

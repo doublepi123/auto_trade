@@ -10,6 +10,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
@@ -1636,6 +1637,480 @@ class AuditLog(Base):
     request_summary: Mapped[str] = mapped_column(Text, nullable=False, default="")
     result: Mapped[str] = mapped_column(String(16), nullable=False, default="SUCCESS")
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, index=True)
+
+
+class WatchlistQuantV6Registration(Base):
+    """Immutable server-side registration for one historical quant-v6 cohort."""
+
+    __tablename__ = "watchlist_quant_v6_registrations"
+    __table_args__ = (
+        UniqueConstraint(
+            "identity_sha256",
+            name="uq_watchlist_quant_v6_registration_identity",
+        ),
+        UniqueConstraint(
+            "id",
+            "identity_sha256",
+            name="uq_watchlist_quant_v6_registration_id_identity",
+        ),
+        CheckConstraint(
+            "length(identity_sha256) = 64 "
+            "AND identity_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_watchlist_quant_v6_registration_identity_sha",
+        ),
+        CheckConstraint(
+            "schema_version = 1",
+            name="ck_watchlist_quant_v6_registration_schema",
+        ),
+        CheckConstraint(
+            "length(contract_version) > 0 "
+            "AND contract_version = trim(contract_version) "
+            "AND length(selection_rule_version) > 0 "
+            "AND selection_rule_version = trim(selection_rule_version) "
+            "AND length(algorithm_version) > 0 "
+            "AND algorithm_version = trim(algorithm_version)",
+            name="ck_watchlist_quant_v6_registration_versions",
+        ),
+        CheckConstraint(
+            "length(semantic_digest_sha256) = 64 "
+            "AND semantic_digest_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_watchlist_quant_v6_registration_semantic_sha",
+        ),
+        CheckConstraint(
+            "length(evaluator_digest_sha256) = 64 "
+            "AND evaluator_digest_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_watchlist_quant_v6_registration_evaluator_sha",
+        ),
+        CheckConstraint(
+            "length(acquisition_spec_sha256) = 64 "
+            "AND acquisition_spec_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_watchlist_quant_v6_registration_acquisition_sha",
+        ),
+        CheckConstraint(
+            "cohort_source = 'ROTATION_RESEARCH_CATALOG_PIT'",
+            name="ck_watchlist_quant_v6_registration_cohort_source",
+        ),
+        CheckConstraint(
+            "market IN ('US', 'HK')",
+            name="ck_watchlist_quant_v6_registration_market",
+        ),
+        CheckConstraint(
+            "length(source_snapshot_sha256) = 64 "
+            "AND source_snapshot_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_watchlist_quant_v6_registration_source_sha",
+        ),
+        CheckConstraint(
+            "length(cohort_manifest_sha256) = 64 "
+            "AND cohort_manifest_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_watchlist_quant_v6_registration_cohort_sha",
+        ),
+        CheckConstraint(
+            "cohort_member_count > 0",
+            name="ck_watchlist_quant_v6_registration_member_count",
+        ),
+        CheckConstraint(
+            "length(schedule_sha256) = 64 "
+            "AND schedule_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_watchlist_quant_v6_registration_schedule_sha",
+        ),
+        CheckConstraint(
+            "training_session_count = 10 AND target_session_count = 30",
+            name="ck_watchlist_quant_v6_registration_session_counts",
+        ),
+        CheckConstraint(
+            "first_training_session_date < first_target_session_date "
+            "AND first_target_session_date <= last_target_session_date",
+            name="ck_watchlist_quant_v6_registration_session_dates",
+        ),
+        CheckConstraint(
+            "bar_period = 'MIN_5' AND adjustment_mode = 'NO_ADJUST'",
+            name="ck_watchlist_quant_v6_registration_bar_source",
+        ),
+        CheckConstraint(
+            "json_valid(registration_json) = 1 "
+            "AND json_type(registration_json) = 'object'",
+            name="ck_watchlist_quant_v6_registration_json",
+        ),
+        CheckConstraint(
+            "server_generated = 1",
+            name="ck_watchlist_quant_v6_registration_server_generated",
+        ),
+        CheckConstraint(
+            "short_entry_allowed = 0 "
+            "AND position_add_on_allowed = 0 "
+            "AND order_submission_allowed = 0 "
+            "AND automatic_promotion_allowed = 0",
+            name="ck_watchlist_quant_v6_registration_p0",
+        ),
+        CheckConstraint(
+            "data_cutoff_at <= cohort_observed_at "
+            "AND cohort_observed_at <= registered_at",
+            name="ck_watchlist_quant_v6_registration_times",
+        ),
+        Index(
+            "ix_watchlist_quant_v6_registration_market_target_registered",
+            "market",
+            "last_target_session_date",
+            "registered_at",
+        ),
+        Index(
+            "ix_watchlist_quant_v6_registration_registered_id",
+            "registered_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    identity_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    contract_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    selection_rule_version: Mapped[str] = mapped_column(String(160), nullable=False)
+    algorithm_version: Mapped[str] = mapped_column(String(160), nullable=False)
+    semantic_digest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    evaluator_digest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    acquisition_spec_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    cohort_source: Mapped[str] = mapped_column(
+        String(48),
+        default="ROTATION_RESEARCH_CATALOG_PIT",
+        nullable=False,
+    )
+    market: Mapped[str] = mapped_column(String(10), nullable=False)
+    source_snapshot_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    cohort_manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    cohort_member_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    schedule_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    training_session_count: Mapped[int] = mapped_column(
+        Integer,
+        default=10,
+        nullable=False,
+    )
+    target_session_count: Mapped[int] = mapped_column(
+        Integer,
+        default=30,
+        nullable=False,
+    )
+    first_training_session_date: Mapped[date] = mapped_column(Date, nullable=False)
+    first_target_session_date: Mapped[date] = mapped_column(Date, nullable=False)
+    last_target_session_date: Mapped[date] = mapped_column(Date, nullable=False)
+    data_cutoff_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    bar_period: Mapped[str] = mapped_column(
+        String(16),
+        default="MIN_5",
+        nullable=False,
+    )
+    adjustment_mode: Mapped[str] = mapped_column(
+        String(16),
+        default="NO_ADJUST",
+        nullable=False,
+    )
+    registration_json: Mapped[str] = mapped_column(Text, nullable=False)
+    server_generated: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    short_entry_allowed: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+    position_add_on_allowed: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+    order_submission_allowed: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+    automatic_promotion_allowed: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+    cohort_observed_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    registered_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+
+
+class WatchlistQuantV6Artifact(Base):
+    """Immutable content-addressed quant-v6 evidence bytes."""
+
+    __tablename__ = "watchlist_quant_v6_artifacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "digest_sha256",
+            "kind",
+            name="uq_watchlist_quant_v6_artifact_digest_kind",
+        ),
+        CheckConstraint(
+            "length(digest_sha256) = 64 "
+            "AND digest_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_watchlist_quant_v6_artifact_digest_sha",
+        ),
+        CheckConstraint(
+            "schema_version = 1",
+            name="ck_watchlist_quant_v6_artifact_schema",
+        ),
+        CheckConstraint(
+            "kind IN ('WATCHLIST_QUANT_V6_ASSESSMENT', "
+            "'WATCHLIST_QUANT_V6_SESSION_INPUT', 'WATCHLIST_QUANT_V6_EVENT')",
+            name="ck_watchlist_quant_v6_artifact_kind",
+        ),
+        CheckConstraint(
+            "codec = 'zlib' AND compression_level = 9",
+            name="ck_watchlist_quant_v6_artifact_codec",
+        ),
+        CheckConstraint(
+            "raw_size >= 1 AND raw_size <= 2097152",
+            name="ck_watchlist_quant_v6_artifact_raw_size",
+        ),
+        CheckConstraint(
+            "compressed_size >= 1 AND compressed_size <= 524288",
+            name="ck_watchlist_quant_v6_artifact_compressed_size",
+        ),
+        CheckConstraint(
+            "length(payload) = compressed_size",
+            name="ck_watchlist_quant_v6_artifact_payload_size",
+        ),
+        Index(
+            "ix_watchlist_quant_v6_artifact_kind_created",
+            "kind",
+            "created_at",
+        ),
+    )
+
+    digest_sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    kind: Mapped[str] = mapped_column(String(48), nullable=False)
+    codec: Mapped[str] = mapped_column(String(16), default="zlib", nullable=False)
+    compression_level: Mapped[int] = mapped_column(Integer, default=9, nullable=False)
+    raw_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    compressed_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+
+
+class WatchlistQuantV6Publication(Base):
+    """One atomic, immutable publication for a completed registered cohort."""
+
+    __tablename__ = "watchlist_quant_v6_publications"
+    __table_args__ = (
+        UniqueConstraint(
+            "registration_id",
+            name="uq_watchlist_quant_v6_publication_registration",
+        ),
+        UniqueConstraint(
+            "identity_sha256",
+            name="uq_watchlist_quant_v6_publication_identity",
+        ),
+        ForeignKeyConstraint(
+            ["registration_id", "registration_identity_sha256"],
+            [
+                "watchlist_quant_v6_registrations.id",
+                "watchlist_quant_v6_registrations.identity_sha256",
+            ],
+            name="fk_watchlist_quant_v6_publication_registration_identity",
+            ondelete="RESTRICT",
+        ),
+        CheckConstraint(
+            "length(registration_identity_sha256) = 64 "
+            "AND registration_identity_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_watchlist_quant_v6_publication_registration_sha",
+        ),
+        CheckConstraint(
+            "length(identity_sha256) = 64 "
+            "AND identity_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_watchlist_quant_v6_publication_identity_sha",
+        ),
+        CheckConstraint(
+            "schema_version = 1",
+            name="ck_watchlist_quant_v6_publication_schema",
+        ),
+        CheckConstraint(
+            "length(contract_version) > 0 "
+            "AND contract_version = trim(contract_version)",
+            name="ck_watchlist_quant_v6_publication_contract",
+        ),
+        CheckConstraint(
+            "status = 'PUBLISHED'",
+            name="ck_watchlist_quant_v6_publication_status",
+        ),
+        CheckConstraint(
+            "length(manifest_sha256) = 64 "
+            "AND manifest_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_watchlist_quant_v6_publication_manifest_sha",
+        ),
+        CheckConstraint(
+            "json_valid(publication_json) = 1 "
+            "AND json_type(publication_json) = 'object'",
+            name="ck_watchlist_quant_v6_publication_json",
+        ),
+        CheckConstraint(
+            "registered_member_count > 0 "
+            "AND assessment_artifact_count = registered_member_count "
+            "AND session_input_artifact_count >= 0 "
+            "AND event_artifact_count >= 0 "
+            "AND binding_count = assessment_artifact_count "
+            "+ session_input_artifact_count + event_artifact_count",
+            name="ck_watchlist_quant_v6_publication_counts",
+        ),
+        CheckConstraint(
+            "promotion_eligible = 0 "
+            "AND automatic_promotion_allowed = 0 "
+            "AND order_submission_allowed = 0 "
+            "AND short_entry_allowed = 0 "
+            "AND position_add_on_allowed = 0",
+            name="ck_watchlist_quant_v6_publication_p0",
+        ),
+        Index(
+            "ix_watchlist_quant_v6_publication_published_id",
+            "published_at",
+            "id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    registration_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    registration_identity_sha256: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+    )
+    identity_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    contract_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16),
+        default="PUBLISHED",
+        nullable=False,
+    )
+    manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    publication_json: Mapped[str] = mapped_column(Text, nullable=False)
+    registered_member_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    assessment_artifact_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    session_input_artifact_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_artifact_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    binding_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    promotion_eligible: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+    automatic_promotion_allowed: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+    order_submission_allowed: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+    short_entry_allowed: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+    position_add_on_allowed: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+    published_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+
+
+class WatchlistQuantV6PublicationArtifact(Base):
+    """Typed immutable binding between a cohort member and evidence bytes."""
+
+    __tablename__ = "watchlist_quant_v6_publication_artifacts"
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["artifact_sha256", "artifact_kind"],
+            [
+                "watchlist_quant_v6_artifacts.digest_sha256",
+                "watchlist_quant_v6_artifacts.kind",
+            ],
+            name="fk_watchlist_quant_v6_binding_artifact_identity",
+            ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "binding_sha256",
+            name="uq_watchlist_quant_v6_binding_sha",
+        ),
+        CheckConstraint(
+            "member_ordinal >= 0 AND artifact_ordinal >= 0",
+            name="ck_watchlist_quant_v6_binding_ordinals",
+        ),
+        CheckConstraint(
+            "length(symbol) > 3 AND length(symbol) <= 50 "
+            "AND symbol = trim(symbol) AND symbol = upper(symbol)",
+            name="ck_watchlist_quant_v6_binding_symbol",
+        ),
+        CheckConstraint(
+            "market IN ('US', 'HK') "
+            "AND ((market = 'US' AND symbol LIKE '%.US') "
+            "OR (market = 'HK' AND symbol LIKE '%.HK'))",
+            name="ck_watchlist_quant_v6_binding_market",
+        ),
+        CheckConstraint(
+            "role IN ('ASSESSMENT', 'SESSION_INPUT', 'EVENT')",
+            name="ck_watchlist_quant_v6_binding_role",
+        ),
+        CheckConstraint(
+            "artifact_kind IN ('WATCHLIST_QUANT_V6_ASSESSMENT', "
+            "'WATCHLIST_QUANT_V6_SESSION_INPUT', 'WATCHLIST_QUANT_V6_EVENT')",
+            name="ck_watchlist_quant_v6_binding_kind",
+        ),
+        CheckConstraint(
+            "(role = 'ASSESSMENT' "
+            "AND artifact_kind = 'WATCHLIST_QUANT_V6_ASSESSMENT' "
+            "AND session_date IS NULL AND artifact_ordinal = 0) "
+            "OR (role = 'SESSION_INPUT' "
+            "AND artifact_kind = 'WATCHLIST_QUANT_V6_SESSION_INPUT' "
+            "AND session_date IS NOT NULL AND artifact_ordinal < 30) "
+            "OR (role = 'EVENT' "
+            "AND artifact_kind = 'WATCHLIST_QUANT_V6_EVENT' "
+            "AND session_date IS NOT NULL)",
+            name="ck_watchlist_quant_v6_binding_role_kind_session",
+        ),
+        CheckConstraint(
+            "length(artifact_sha256) = 64 "
+            "AND artifact_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_watchlist_quant_v6_binding_artifact_sha",
+        ),
+        CheckConstraint(
+            "length(binding_sha256) = 64 "
+            "AND binding_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_watchlist_quant_v6_binding_sha256",
+        ),
+        Index(
+            "ix_watchlist_quant_v6_binding_member_session_role",
+            "publication_id",
+            "member_ordinal",
+            "session_date",
+            "role",
+        ),
+        Index(
+            "ix_watchlist_quant_v6_binding_artifact_sha",
+            "artifact_sha256",
+        ),
+    )
+
+    publication_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey(
+            "watchlist_quant_v6_publications.id",
+            name="fk_watchlist_quant_v6_binding_publication",
+            ondelete="RESTRICT",
+        ),
+        primary_key=True,
+    )
+    member_ordinal: Mapped[int] = mapped_column(Integer, primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(50), nullable=False)
+    market: Mapped[str] = mapped_column(String(10), nullable=False)
+    role: Mapped[str] = mapped_column(String(20), primary_key=True)
+    artifact_ordinal: Mapped[int] = mapped_column(Integer, primary_key=True)
+    session_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    artifact_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    artifact_kind: Mapped[str] = mapped_column(String(48), nullable=False)
+    binding_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
 
 
 class WatchlistItem(Base):

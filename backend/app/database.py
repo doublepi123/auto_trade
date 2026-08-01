@@ -4,7 +4,14 @@ import logging
 from collections.abc import Generator
 from typing import Any
 
-from sqlalchemy import create_engine, event, inspect, text
+from sqlalchemy import (
+    CheckConstraint,
+    UniqueConstraint,
+    create_engine,
+    event,
+    inspect,
+    text,
+)
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -37,6 +44,8 @@ if settings.database_url.startswith("sqlite"):
         - busy_timeout=5000: wait up to 5s for the writer lock instead of raising
           "database is locked" immediately
         - foreign_keys=ON: SQLite ships with FK enforcement disabled by default
+        - recursive_triggers=ON: conflict-replace deletes must hit immutable-table
+          DELETE triggers instead of bypassing append-only protection
         """
         cursor = dbapi_connection.cursor()
         try:
@@ -44,9 +53,171 @@ if settings.database_url.startswith("sqlite"):
             cursor.execute("PRAGMA synchronous=NORMAL")
             cursor.execute("PRAGMA busy_timeout=5000")
             cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA recursive_triggers=ON")
         finally:
             cursor.close()
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+WATCHLIST_QUANT_V6_TABLE_NAMES = (
+    "watchlist_quant_v6_registrations",
+    "watchlist_quant_v6_artifacts",
+    "watchlist_quant_v6_publications",
+    "watchlist_quant_v6_publication_artifacts",
+)
+
+
+_WATCHLIST_QUANT_V6_DUPLICATE_PREDICATES = {
+    "watchlist_quant_v6_registrations": (
+        "(NEW.id IS NOT NULL AND EXISTS ("
+        "SELECT 1 FROM watchlist_quant_v6_registrations "
+        "WHERE id = NEW.id)) "
+        "OR EXISTS (SELECT 1 FROM watchlist_quant_v6_registrations "
+        "WHERE identity_sha256 = NEW.identity_sha256) "
+        "OR (NEW.id IS NOT NULL AND EXISTS ("
+        "SELECT 1 FROM watchlist_quant_v6_registrations "
+        "WHERE id = NEW.id "
+        "AND identity_sha256 = NEW.identity_sha256))"
+    ),
+    "watchlist_quant_v6_artifacts": (
+        "EXISTS (SELECT 1 FROM watchlist_quant_v6_artifacts "
+        "WHERE digest_sha256 = NEW.digest_sha256) "
+        "OR EXISTS (SELECT 1 FROM watchlist_quant_v6_artifacts "
+        "WHERE digest_sha256 = NEW.digest_sha256 "
+        "AND kind = NEW.kind)"
+    ),
+    "watchlist_quant_v6_publications": (
+        "(NEW.id IS NOT NULL AND EXISTS ("
+        "SELECT 1 FROM watchlist_quant_v6_publications "
+        "WHERE id = NEW.id)) "
+        "OR EXISTS (SELECT 1 FROM watchlist_quant_v6_publications "
+        "WHERE registration_id = NEW.registration_id) "
+        "OR EXISTS (SELECT 1 FROM watchlist_quant_v6_publications "
+        "WHERE identity_sha256 = NEW.identity_sha256)"
+    ),
+    "watchlist_quant_v6_publication_artifacts": (
+        "EXISTS (SELECT 1 "
+        "FROM watchlist_quant_v6_publication_artifacts "
+        "WHERE publication_id = NEW.publication_id "
+        "AND member_ordinal = NEW.member_ordinal "
+        "AND role = NEW.role "
+        "AND artifact_ordinal = NEW.artifact_ordinal) "
+        "OR EXISTS (SELECT 1 "
+        "FROM watchlist_quant_v6_publication_artifacts "
+        "WHERE binding_sha256 = NEW.binding_sha256)"
+    ),
+}
+
+
+_WATCHLIST_QUANT_V6_REFERENCE_PREDICATES = {
+    "watchlist_quant_v6_publications": (
+        "NOT EXISTS (SELECT 1 FROM watchlist_quant_v6_registrations "
+        "WHERE id = NEW.registration_id "
+        "AND identity_sha256 = NEW.registration_identity_sha256 "
+        "AND cohort_member_count = NEW.registered_member_count "
+        "AND json_type(registration_json, '$.cohort.member_count') = 'integer' "
+        "AND json_extract(registration_json, '$.cohort.member_count') "
+        "= NEW.registered_member_count "
+        "AND json_type(registration_json, '$.cohort.members') = 'array' "
+        "AND json_array_length(registration_json, '$.cohort.members') "
+        "= NEW.registered_member_count)"
+    ),
+    "watchlist_quant_v6_publication_artifacts": (
+        "NOT EXISTS (SELECT 1 "
+        "FROM watchlist_quant_v6_publications AS publication "
+        "JOIN watchlist_quant_v6_registrations AS registration "
+        "ON registration.id = publication.registration_id "
+        "AND registration.identity_sha256 "
+        "= publication.registration_identity_sha256 "
+        "AND registration.cohort_member_count "
+        "= publication.registered_member_count "
+        "WHERE publication.id = NEW.publication_id "
+        "AND NEW.member_ordinal >= 0 "
+        "AND NEW.member_ordinal < publication.registered_member_count "
+        "AND json_type(registration.registration_json, "
+        "'$.cohort.members[' || NEW.member_ordinal || ']') = 'object' "
+        "AND json_type(registration.registration_json, "
+        "'$.cohort.members[' || NEW.member_ordinal || '].ordinal') = 'integer' "
+        "AND json_extract(registration.registration_json, "
+        "'$.cohort.members[' || NEW.member_ordinal || '].ordinal') "
+        "= NEW.member_ordinal "
+        "AND json_type(registration.registration_json, "
+        "'$.cohort.members[' || NEW.member_ordinal || '].symbol') = 'text' "
+        "AND json_extract(registration.registration_json, "
+        "'$.cohort.members[' || NEW.member_ordinal || '].symbol') = NEW.symbol "
+        "AND json_type(registration.registration_json, "
+        "'$.cohort.members[' || NEW.member_ordinal || '].market') = 'text' "
+        "AND json_extract(registration.registration_json, "
+        "'$.cohort.members[' || NEW.member_ordinal || '].market') = NEW.market) "
+        "OR NOT EXISTS (SELECT 1 FROM watchlist_quant_v6_artifacts "
+        "WHERE digest_sha256 = NEW.artifact_sha256 "
+        "AND kind = NEW.artifact_kind)"
+    ),
+}
+
+
+def _normalize_sqlite_ddl(value: str) -> str:
+    return " ".join(value.strip().removesuffix(";").split())
+
+
+def _sqlite_type_signature(column_type: object, db_engine: Engine) -> str:
+    compile_type = getattr(column_type, "compile", None)
+    if not callable(compile_type):
+        return str(column_type).upper()
+    return " ".join(
+        str(compile_type(dialect=db_engine.dialect)).upper().split()
+    )
+
+
+def _sqlite_default_signature(value: object | None) -> str | None:
+    if value is None:
+        return None
+    return _normalize_sqlite_ddl(str(value)).upper()
+
+
+def _watchlist_quant_v6_trigger_definitions() -> dict[str, tuple[str, str]]:
+    definitions: dict[str, tuple[str, str]] = {}
+    for table_name in WATCHLIST_QUANT_V6_TABLE_NAMES:
+        for operation in ("UPDATE", "DELETE"):
+            trigger_name = f"trg_{table_name}_no_{operation.lower()}"
+            definitions[trigger_name] = (
+                table_name,
+                f"CREATE TRIGGER {trigger_name} "
+                f"BEFORE {operation} ON {table_name} "
+                "BEGIN "
+                f"SELECT RAISE(ABORT, '{table_name} is append-only'); "
+                "END",
+            )
+        duplicate_trigger = f"trg_{table_name}_no_duplicate_key"
+        definitions[duplicate_trigger] = (
+            table_name,
+            f"CREATE TRIGGER {duplicate_trigger} "
+            f"BEFORE INSERT ON {table_name} "
+            f"WHEN {_WATCHLIST_QUANT_V6_DUPLICATE_PREDICATES[table_name]} "
+            "BEGIN "
+            f"SELECT RAISE(ABORT, '{table_name} duplicate key'); "
+            "END",
+        )
+        reference_predicate = _WATCHLIST_QUANT_V6_REFERENCE_PREDICATES.get(
+            table_name
+        )
+        if reference_predicate is not None:
+            reference_trigger = f"trg_{table_name}_validate_reference"
+            definitions[reference_trigger] = (
+                table_name,
+                f"CREATE TRIGGER {reference_trigger} "
+                f"BEFORE INSERT ON {table_name} "
+                f"WHEN {reference_predicate} "
+                "BEGIN "
+                f"SELECT RAISE(ABORT, '{table_name} invalid reference'); "
+                "END",
+            )
+    return definitions
+
+
+WATCHLIST_QUANT_V6_TRIGGER_NAMES = tuple(
+    _watchlist_quant_v6_trigger_definitions()
+)
 
 
 def init_db() -> None:
@@ -76,6 +247,7 @@ def init_db() -> None:
     _ensure_universe_selection_tables(engine)
     _normalize_universe_selection_run_timestamps(engine)
     _ensure_watchlist_scores_table(engine)
+    _ensure_watchlist_quant_v6_tables(engine)
     _ensure_prompt_versions_table(engine)
     _ensure_experiment_results_table(engine)
     _ensure_strategy_experiments_table(engine)
@@ -1265,6 +1437,301 @@ def _ensure_watchlist_scores_table(db_engine: Engine) -> None:
             "CREATE INDEX IF NOT EXISTS "
             "ix_watchlist_scores_symbol_source_created_at "
             "ON watchlist_scores (symbol, source, created_at)"
+        )
+
+
+def _watchlist_quant_v6_schema_issues(
+    db_engine: Engine,
+    *,
+    require_triggers: bool = True,
+) -> tuple[str, ...]:
+    """Return fail-closed differences from the frozen B1 SQLite signature."""
+    from app.models import Base
+
+    if db_engine.dialect.name != "sqlite":
+        return ("watchlist quant-v6 storage requires SQLite",)
+
+    inspector = inspect(db_engine)
+    actual_table_names = set(inspector.get_table_names())
+    issues: list[str] = []
+    for table_name in WATCHLIST_QUANT_V6_TABLE_NAMES:
+        if table_name not in actual_table_names:
+            issues.append(f"missing table {table_name}")
+            continue
+
+        expected_table = Base.metadata.tables[table_name]
+        expected_columns = tuple(expected_table.columns.keys())
+        actual_column_rows = inspector.get_columns(table_name)
+        actual_columns = tuple(
+            str(column["name"]) for column in actual_column_rows
+        )
+        if actual_columns != expected_columns:
+            issues.append(
+                f"{table_name} columns differ: "
+                f"expected {expected_columns}, found {actual_columns}"
+            )
+        actual_columns_by_name = {
+            str(column["name"]): column for column in actual_column_rows
+        }
+        for expected_column in expected_table.columns:
+            actual_column = actual_columns_by_name.get(expected_column.name)
+            if actual_column is None:
+                continue
+            expected_type = _sqlite_type_signature(
+                expected_column.type,
+                db_engine,
+            )
+            actual_type = _sqlite_type_signature(
+                actual_column["type"],
+                db_engine,
+            )
+            if actual_type != expected_type:
+                issues.append(
+                    f"{table_name} column {expected_column.name} type "
+                    f"differs: expected {expected_type}, found {actual_type}"
+                )
+            expected_nullable = bool(expected_column.nullable)
+            actual_nullable = bool(actual_column.get("nullable"))
+            if actual_nullable != expected_nullable:
+                issues.append(
+                    f"{table_name} column {expected_column.name} "
+                    "nullability differs: "
+                    f"expected {expected_nullable}, found {actual_nullable}"
+                )
+            expected_server_default = (
+                getattr(expected_column.server_default, "arg", None)
+                if expected_column.server_default is not None
+                else None
+            )
+            expected_default = _sqlite_default_signature(
+                expected_server_default
+            )
+            actual_default = _sqlite_default_signature(
+                actual_column.get("default")
+            )
+            if actual_default != expected_default:
+                issues.append(
+                    f"{table_name} column {expected_column.name} "
+                    "server default differs: "
+                    f"expected {expected_default}, found {actual_default}"
+                )
+
+        expected_primary_key = tuple(
+            column.name for column in expected_table.primary_key.columns
+        )
+        actual_primary_key = tuple(
+            inspector.get_pk_constraint(table_name).get(
+                "constrained_columns"
+            )
+            or ()
+        )
+        if actual_primary_key != expected_primary_key:
+            issues.append(
+                f"{table_name} primary key differs: "
+                f"expected {expected_primary_key}, found {actual_primary_key}"
+            )
+
+        expected_checks = {
+            str(constraint.name): " ".join(
+                str(constraint.sqltext).upper().split()
+            )
+            for constraint in expected_table.constraints
+            if isinstance(constraint, CheckConstraint)
+            and constraint.name is not None
+        }
+        actual_checks = {
+            str(constraint["name"]): " ".join(
+                str(constraint.get("sqltext") or "").upper().split()
+            )
+            for constraint in inspector.get_check_constraints(table_name)
+            if constraint.get("name") is not None
+        }
+        for constraint_name, expected_check_sql in expected_checks.items():
+            if actual_checks.get(constraint_name) != expected_check_sql:
+                issues.append(
+                    f"{table_name} check constraint {constraint_name} "
+                    "does not match the frozen predicate"
+                )
+        unexpected_checks = set(actual_checks) - set(expected_checks)
+        if unexpected_checks:
+            issues.append(
+                f"{table_name} has unexpected checks "
+                f"{sorted(unexpected_checks)}"
+            )
+
+        expected_uniques = {
+            str(constraint.name): tuple(
+                column.name for column in constraint.columns
+            )
+            for constraint in expected_table.constraints
+            if isinstance(constraint, UniqueConstraint)
+            and constraint.name is not None
+        }
+        actual_uniques = {
+            str(constraint["name"]): tuple(
+                constraint.get("column_names") or ()
+            )
+            for constraint in inspector.get_unique_constraints(table_name)
+            if constraint.get("name") is not None
+        }
+        for constraint_name, expected_unique_columns in expected_uniques.items():
+            if actual_uniques.get(constraint_name) != expected_unique_columns:
+                issues.append(
+                    f"{table_name} unique constraint {constraint_name} "
+                    f"does not cover {expected_unique_columns}"
+                )
+        unexpected_uniques = set(actual_uniques) - set(expected_uniques)
+        if unexpected_uniques:
+            issues.append(
+                f"{table_name} has unexpected unique constraints "
+                f"{sorted(unexpected_uniques)}"
+            )
+
+        expected_indexes = {
+            str(index.name): tuple(column.name for column in index.columns)
+            for index in expected_table.indexes
+            if index.name is not None
+        }
+        actual_indexes = {
+            str(index["name"]): tuple(index.get("column_names") or ())
+            for index in inspector.get_indexes(table_name)
+            if index.get("name") is not None
+        }
+        for index_name, expected_index_columns in expected_indexes.items():
+            if actual_indexes.get(index_name) != expected_index_columns:
+                issues.append(
+                    f"{table_name} index {index_name} "
+                    f"does not cover {expected_index_columns}"
+                )
+        unexpected_indexes = set(actual_indexes) - set(expected_indexes)
+        if unexpected_indexes:
+            issues.append(
+                f"{table_name} has unexpected indexes "
+                f"{sorted(unexpected_indexes)}"
+            )
+
+        expected_foreign_keys = set()
+        for constraint in expected_table.foreign_key_constraints:
+            elements = tuple(constraint.elements)
+            expected_foreign_keys.add((
+                tuple(constraint.column_keys),
+                elements[0].column.table.name,
+                tuple(element.column.name for element in elements),
+                str(constraint.ondelete or "").upper(),
+            ))
+        actual_foreign_keys = {
+            (
+                tuple(constraint.get("constrained_columns") or ()),
+                str(constraint.get("referred_table") or ""),
+                tuple(constraint.get("referred_columns") or ()),
+                str(
+                    (constraint.get("options") or {}).get("ondelete")
+                    or ""
+                ).upper(),
+            )
+            for constraint in inspector.get_foreign_keys(table_name)
+        }
+        missing_foreign_keys = expected_foreign_keys - actual_foreign_keys
+        if missing_foreign_keys:
+            issues.append(
+                f"{table_name} missing foreign keys "
+                f"{sorted(missing_foreign_keys)}"
+            )
+        unexpected_foreign_keys = (
+            actual_foreign_keys - expected_foreign_keys
+        )
+        if unexpected_foreign_keys:
+            issues.append(
+                f"{table_name} has unexpected foreign keys "
+                f"{sorted(unexpected_foreign_keys)}"
+            )
+
+    if require_triggers:
+        expected_triggers = _watchlist_quant_v6_trigger_definitions()
+        with db_engine.connect() as connection:
+            actual_triggers = {
+                str(row[0]): (str(row[1]), str(row[2] or ""))
+                for row in connection.exec_driver_sql(
+                    "SELECT name, tbl_name, sql FROM sqlite_master "
+                    "WHERE type = 'trigger' AND name LIKE "
+                    "'trg_watchlist_quant_v6_%'"
+                )
+            }
+        missing_triggers = set(expected_triggers) - set(actual_triggers)
+        if missing_triggers:
+            issues.append(
+                "missing immutable-table triggers "
+                f"{sorted(missing_triggers)}"
+            )
+        unexpected_triggers = set(actual_triggers) - set(expected_triggers)
+        if unexpected_triggers:
+            issues.append(
+                "unexpected immutable-table triggers "
+                f"{sorted(unexpected_triggers)}"
+            )
+        for trigger_name, (
+            expected_table_name,
+            expected_ddl,
+        ) in expected_triggers.items():
+            actual_trigger = actual_triggers.get(trigger_name)
+            if actual_trigger is None:
+                continue
+            actual_table_name, actual_ddl = actual_trigger
+            if (
+                actual_table_name != expected_table_name
+                or _normalize_sqlite_ddl(actual_ddl)
+                != _normalize_sqlite_ddl(expected_ddl)
+            ):
+                issues.append(
+                    f"trigger {trigger_name} does not match canonical DDL"
+                )
+
+    return tuple(issues)
+
+
+def _ensure_watchlist_quant_v6_tables(db_engine: Engine) -> None:
+    """Create and verify the immutable B1 tables used outside Alembic.
+
+    Production deploys run Alembic first, while tests and legacy ``init_db``
+    callers also rely on ``Base.metadata.create_all``.  This parity hook
+    installs the fourteen SQLite triggers that metadata alone cannot express and
+    rejects a same-name table whose frozen constraints are incomplete.
+    """
+    from app.models import Base
+
+    if db_engine.dialect.name != "sqlite":
+        raise RuntimeError("watchlist quant-v6 storage requires SQLite")
+
+    for table_name in WATCHLIST_QUANT_V6_TABLE_NAMES:
+        Base.metadata.tables[table_name].create(db_engine, checkfirst=True)
+
+    schema_issues = _watchlist_quant_v6_schema_issues(
+        db_engine,
+        require_triggers=False,
+    )
+    if schema_issues:
+        raise RuntimeError(
+            "incomplete watchlist quant-v6 schema: "
+            + "; ".join(schema_issues)
+        )
+
+    with db_engine.begin() as connection:
+        for _, trigger_ddl in (
+            _watchlist_quant_v6_trigger_definitions().values()
+        ):
+            connection.exec_driver_sql(
+                trigger_ddl.replace(
+                    "CREATE TRIGGER ",
+                    "CREATE TRIGGER IF NOT EXISTS ",
+                    1,
+                )
+            )
+
+    complete_issues = _watchlist_quant_v6_schema_issues(db_engine)
+    if complete_issues:
+        raise RuntimeError(
+            "incomplete watchlist quant-v6 schema: "
+            + "; ".join(complete_issues)
         )
 
 

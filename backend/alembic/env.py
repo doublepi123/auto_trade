@@ -14,7 +14,11 @@ from app.models import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Programmatic migration callers can share a process with the application
+    # (including integrity checks and tests).  Alembic must not disable every
+    # already-created application logger merely because it is absent from the
+    # alembic.ini logger list.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

@@ -129,9 +129,13 @@ _strategy_v2_shadow_lock = asyncio.Lock()
 _opening_momentum_shadow_lock = asyncio.Lock()
 _universe_selection_lock = asyncio.Lock()
 _watchlist_quant_lock = asyncio.Lock()
+_watchlist_quant_v6_evaluation_lock = asyncio.Lock()
 _llm_globals_lock = threading.Lock()
 _watchlist_quant_sync_lock = threading.Lock()
+_watchlist_quant_v6_evaluation_sync_lock = threading.Lock()
+_watchlist_quant_v6_evaluation_stop_event = threading.Event()
 _WATCHLIST_QUANT_POLL_SECONDS = 60
+_WATCHLIST_QUANT_V6_INITIAL_DELAY_SECONDS = 120
 _OPENING_MOMENTUM_POLL_SECONDS = 15
 _OPENING_MOMENTUM_PRIORITY_POLL_SECONDS = 5
 _LLM_SECONDARY_ACTION_PRIORITY = {
@@ -1185,6 +1189,107 @@ async def _watchlist_quant_cron() -> None:
         await asyncio.sleep(_WATCHLIST_QUANT_POLL_SECONDS)
 
 
+def _watchlist_quant_v6_evaluation_tick_sync() -> None:
+    """Publish one quote-only historical cohort without execution authority."""
+    if not settings.watchlist_quant_v6_evaluation_enabled:
+        return
+    from app.services.watchlist_quant_v6_evaluation_service import (
+        build_latest_quant_v6_registration_plan,
+    )
+    from app.services.watchlist_quant_v6_historical_provider import (
+        QuantV6HistoricalBarProvider,
+    )
+    from app.services.watchlist_quant_v6_publication_service import (
+        WatchlistQuantV6PublicationService,
+    )
+
+    with _watchlist_quant_v6_evaluation_sync_lock:
+        # Re-check after waiting for another direct/manual tick. Keeping all
+        # imports and resource construction below the enable gate makes the
+        # default-disabled path side-effect free.
+        if not settings.watchlist_quant_v6_evaluation_enabled:
+            return
+        plan = build_latest_quant_v6_registration_plan(
+            observed_at=datetime.now(timezone.utc),
+        )
+        provider = QuantV6HistoricalBarProvider(
+            cancel_event=_watchlist_quant_v6_evaluation_stop_event,
+        )
+        try:
+            receipt = WatchlistQuantV6PublicationService(
+                SessionLocal,
+            ).register_provider_evaluate_publish(
+                plan=plan,
+                provider=provider,
+            )
+            logger.info(
+                "quant-v6 historical publication id=%d registration=%d "
+                "members=%d bindings=%d created=%s manifest=%s",
+                receipt.publication_id,
+                receipt.registration_id,
+                len(plan.members),
+                receipt.binding_count,
+                receipt.created,
+                receipt.manifest_sha256,
+            )
+        finally:
+            provider.close()
+
+
+async def _run_watchlist_quant_v6_evaluation_tick() -> None:
+    """Run one historical tick and join its worker during cancellation."""
+    if not settings.watchlist_quant_v6_evaluation_enabled:
+        return
+    _watchlist_quant_v6_evaluation_stop_event.clear()
+    worker = asyncio.create_task(
+        asyncio.to_thread(_watchlist_quant_v6_evaluation_tick_sync)
+    )
+    try:
+        await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        # Cancelling a to_thread waiter cannot stop quote/SQLite work. Join it
+        # so the provider and all publication sessions close before teardown.
+        _watchlist_quant_v6_evaluation_stop_event.set()
+        try:
+            await worker
+        except Exception:
+            logger.exception(
+                "quant-v6 historical evaluation failed during shutdown"
+            )
+        raise
+
+
+async def _watchlist_quant_v6_evaluation_cron() -> None:
+    """Run the independent, default-disabled historical evidence publisher."""
+    if not settings.watchlist_quant_v6_evaluation_enabled:
+        return
+    logger.info(
+        "quant-v6 historical evaluation enabled: interval=%dm retry=%dm",
+        settings.watchlist_quant_v6_evaluation_interval_minutes,
+        settings.watchlist_quant_v6_evaluation_retry_interval_minutes,
+    )
+    await asyncio.sleep(_WATCHLIST_QUANT_V6_INITIAL_DELAY_SECONDS)
+    while True:
+        failed = False
+        async with _watchlist_quant_v6_evaluation_lock:
+            try:
+                await _run_watchlist_quant_v6_evaluation_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                failed = True
+                logger.exception(
+                    "quant-v6 historical evaluation failed; retrying in %dm",
+                    settings.watchlist_quant_v6_evaluation_retry_interval_minutes,
+                )
+        delay_minutes = (
+            settings.watchlist_quant_v6_evaluation_retry_interval_minutes
+            if failed
+            else settings.watchlist_quant_v6_evaluation_interval_minutes
+        )
+        await asyncio.sleep(delay_minutes * 60)
+
+
 def _universe_selection_tick_sync() -> None:
     """Refresh the candidate pool and its short-horizon suitability scores."""
     if not settings.universe_selection_enabled:
@@ -1345,6 +1450,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(_opening_momentum_shadow_cron()),
         asyncio.create_task(_universe_selection_cron()),
         asyncio.create_task(_watchlist_quant_cron()),
+        asyncio.create_task(_watchlist_quant_v6_evaluation_cron()),
     )
     try:
         yield

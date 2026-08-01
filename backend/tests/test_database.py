@@ -1823,7 +1823,7 @@ def test_execution_ledger_migration_freezes_legacy_fill_fee(tmp_path) -> None:
 
 
 def test_sqlite_wal_and_busy_timeout_enabled(tmp_path, monkeypatch) -> None:
-    """P0-2: SQLite connection must enable WAL, busy_timeout, and FK enforcement.
+    """P0-2: SQLite must enable concurrency and integrity PRAGMAs.
 
     The runner thread, FastAPI handlers, and asyncio.to_thread tasks all write
     concurrently. Without WAL + busy_timeout, any sustained write load surfaces
@@ -1846,9 +1846,16 @@ def test_sqlite_wal_and_busy_timeout_enabled(tmp_path, monkeypatch) -> None:
         journal_mode = conn.execute(text("PRAGMA journal_mode")).scalar()
         busy_timeout_ms = conn.execute(text("PRAGMA busy_timeout")).scalar()
         fk_enabled = conn.execute(text("PRAGMA foreign_keys")).scalar()
+        recursive_triggers = conn.execute(
+            text("PRAGMA recursive_triggers")
+        ).scalar()
 
     assert str(journal_mode).lower() == "wal", f"journal_mode was {journal_mode!r}"
     assert busy_timeout_ms is not None
     assert busy_timeout_ms >= 5000, f"busy_timeout was {busy_timeout_ms}"
     assert fk_enabled is not None
     assert int(fk_enabled) == 1, f"foreign_keys was {fk_enabled}"
+    assert recursive_triggers is not None
+    assert int(recursive_triggers) == 1, (
+        f"recursive_triggers was {recursive_triggers}"
+    )

@@ -11,6 +11,10 @@ AUTO_TRADE_DATABASE_URL="${AUTO_TRADE_DATABASE_URL:-sqlite:///data/auto_trade.db
 python -c "
 from sqlalchemy import create_engine, inspect, text
 from app.config import settings
+from app.database import (
+    WATCHLIST_QUANT_V6_TABLE_NAMES,
+    _watchlist_quant_v6_schema_issues,
+)
 
 INITIAL_REVISION = '41e077353669'
 LLM_FIELDS_REVISION = '20260602_add_llm_interval_fields'
@@ -19,8 +23,114 @@ MIN_PROFIT_REVISION = '20260522_add_min_profit_amount'
 AUTO_RESUME_REVISION = '20260522_auto_resume_pause'
 LLM_INTERACTIONS_REVISION = '20260522_add_llm_interactions'
 OPENING_MOMENTUM_REVISION = '20260724_opening_momentum'
-HEAD_REVISION = '20260726_opening_stop'
+OPENING_STOP_REVISION = '20260726_opening_stop'
+OPENING_CONTEXT_REVISION = '20260727_opening_context'
+OPENING_EXECUTION_REVISION = '20260727_opening_execution'
+WATCHLIST_QUANT_V6_REVISION = '20260801_watchlist_quant_v6'
+HEAD_REVISION = WATCHLIST_QUANT_V6_REVISION
 # IMPORTANT: 每次新增 alembic 迁移时，必须同步更新 HEAD_REVISION 及 mark_migrated_if_needed 的列检测逻辑
+
+
+def advance_added_columns(
+    *,
+    current_revision,
+    predecessor,
+    revision,
+    label,
+    actual_columns,
+    added_columns,
+):
+    present_columns = actual_columns & added_columns
+    if not present_columns:
+        return current_revision
+    if present_columns != added_columns:
+        missing = sorted(added_columns - present_columns)
+        raise RuntimeError(
+            f'partial {label} schema; missing columns: {missing}'
+        )
+    if current_revision != predecessor:
+        raise RuntimeError(
+            f'{label} schema is outside the expected revision lineage: '
+            f'{current_revision} != {predecessor}'
+        )
+    return revision
+
+
+def opening_execution_schema_issues(inspector):
+    table_name = 'opening_momentum_executions'
+    expected_columns = (
+        'id',
+        'session_date',
+        'algorithm_version',
+        'config_version',
+        'universe_source',
+        'selection_run_id',
+        'status',
+        'reason',
+        'symbol',
+        'signal_at',
+        'armed_at',
+        'entry_due_at',
+        'entry_deadline_at',
+        'requested_at',
+        'universe_size',
+        'market_return_bps',
+        'candidate_return_bps',
+        'excess_return_bps',
+        'reference_entry_price',
+        'max_price_deviation_bps',
+        'stop_loss_pct',
+        'max_holding_minutes',
+        'signal_context_json',
+        'submit_attempts',
+        'entry_order_id',
+        'exit_order_id',
+        'entry_filled_at',
+        'entry_price',
+        'quantity',
+        'exit_filled_at',
+        'exit_price',
+        'net_pnl',
+        'created_at',
+        'updated_at',
+    )
+    actual_columns = tuple(
+        str(column['name'])
+        for column in inspector.get_columns(table_name)
+    )
+    issues = []
+    if actual_columns != expected_columns:
+        issues.append(
+            f'columns differ: expected {expected_columns}, '
+            f'found {actual_columns}'
+        )
+    primary_key = tuple(
+        inspector.get_pk_constraint(table_name).get(
+            'constrained_columns'
+        )
+        or ()
+    )
+    if primary_key != ('id',):
+        issues.append(f'primary key differs: {primary_key}')
+    unique_constraints = {
+        str(constraint.get('name')): tuple(
+            constraint.get('column_names') or ()
+        )
+        for constraint in inspector.get_unique_constraints(table_name)
+    }
+    if unique_constraints.get(
+        'uq_opening_momentum_execution_session'
+    ) != ('session_date',):
+        issues.append('missing session-date unique constraint')
+    indexes = {
+        str(index.get('name')): tuple(index.get('column_names') or ())
+        for index in inspector.get_indexes(table_name)
+    }
+    if indexes.get(
+        'ix_opening_momentum_execution_status_session'
+    ) != ('status', 'session_date'):
+        issues.append('missing status/session index')
+    return tuple(issues)
 
 
 def mark_migrated_if_needed():
@@ -28,7 +138,58 @@ def mark_migrated_if_needed():
     with engine.connect() as conn:
         inspector = inspect(conn)
         tables = set(inspector.get_table_names())
+        quant_table_names = set(WATCHLIST_QUANT_V6_TABLE_NAMES)
+        present_quant_tables = tables & quant_table_names
+        quant_schema_complete = False
+        if present_quant_tables:
+            quant_issues = _watchlist_quant_v6_schema_issues(engine)
+            if quant_issues:
+                raise RuntimeError(
+                    'partial watchlist quant-v6 schema; refusing to stamp: '
+                    + '; '.join(quant_issues)
+                )
+            quant_schema_complete = True
         if 'alembic_version' in tables:
+            recorded_revisions = tuple(
+                conn.execute(
+                    text('SELECT version_num FROM alembic_version')
+                ).scalars()
+            )
+            if len(recorded_revisions) != 1:
+                raise RuntimeError(
+                    'alembic_version must contain exactly one revision; '
+                    f'found {recorded_revisions}'
+                )
+            recorded_revision = recorded_revisions[0]
+            if recorded_revision == WATCHLIST_QUANT_V6_REVISION:
+                if not quant_schema_complete:
+                    quant_issues = _watchlist_quant_v6_schema_issues(engine)
+                    raise RuntimeError(
+                        'alembic_version is quant-v6 but its schema is '
+                        'incomplete: ' + '; '.join(quant_issues)
+                    )
+                return
+            if quant_schema_complete:
+                if recorded_revision != OPENING_EXECUTION_REVISION:
+                    raise RuntimeError(
+                        'complete watchlist quant-v6 schema is outside the '
+                        'expected recorded lineage: '
+                        f'{recorded_revision} != '
+                        f'{OPENING_EXECUTION_REVISION}'
+                    )
+                conn.execute(
+                    text(
+                        'UPDATE alembic_version SET version_num = '
+                        ':version_num'
+                    ),
+                    {'version_num': WATCHLIST_QUANT_V6_REVISION},
+                )
+                conn.commit()
+                print(
+                    'advanced alembic_version from '
+                    f'{OPENING_EXECUTION_REVISION} to '
+                    f'{WATCHLIST_QUANT_V6_REVISION}'
+                )
             return
         if 'strategy_config' not in tables:
             return
@@ -88,11 +249,53 @@ def mark_migrated_if_needed():
             'maximum_adverse_excursion_bps',
             'maximum_favorable_excursion_bps',
         }
-        if (
-            version_num == OPENING_MOMENTUM_REVISION
-            and opening_stop_columns.issubset(opening_columns)
-        ):
-            version_num = HEAD_REVISION
+        version_num = advance_added_columns(
+            current_revision=version_num,
+            predecessor=OPENING_MOMENTUM_REVISION,
+            revision=OPENING_STOP_REVISION,
+            label='opening-stop',
+            actual_columns=opening_columns,
+            added_columns=opening_stop_columns,
+        )
+
+        opening_context_columns = {
+            'candidate_overnight_gap_bps',
+            'candidate_prev_close_to_signal_bps',
+            'benchmark_qqq_return_bps',
+            'benchmark_dia_return_bps',
+        }
+        version_num = advance_added_columns(
+            current_revision=version_num,
+            predecessor=OPENING_STOP_REVISION,
+            revision=OPENING_CONTEXT_REVISION,
+            label='opening-context',
+            actual_columns=opening_columns,
+            added_columns=opening_context_columns,
+        )
+
+        if 'opening_momentum_executions' in tables:
+            execution_issues = opening_execution_schema_issues(inspector)
+            if execution_issues:
+                raise RuntimeError(
+                    'partial opening-execution schema; refusing to stamp: '
+                    + '; '.join(execution_issues)
+                )
+            if version_num != OPENING_CONTEXT_REVISION:
+                raise RuntimeError(
+                    'opening-execution schema is outside the expected '
+                    f'revision lineage: {version_num} != '
+                    f'{OPENING_CONTEXT_REVISION}'
+                )
+            version_num = OPENING_EXECUTION_REVISION
+
+        if quant_schema_complete:
+            if version_num != OPENING_EXECUTION_REVISION:
+                raise RuntimeError(
+                    'watchlist quant-v6 schema is outside the expected '
+                    f'revision lineage: {version_num} != '
+                    f'{OPENING_EXECUTION_REVISION}'
+                )
+            version_num = WATCHLIST_QUANT_V6_REVISION
 
         conn.execute(text(\"CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)\"))
         conn.execute(text('INSERT INTO alembic_version (version_num) VALUES (:version_num)'), {'version_num': version_num})
