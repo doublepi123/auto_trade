@@ -181,7 +181,11 @@ def open_read_snapshot(
         # If BEGIN fails, do NOT swallow and continue — raise immediately so no
         # query proceeds without a guaranteed snapshot.
         try:
-            driver_connection.execute("BEGIN")
+            cursor = driver_connection.cursor()
+            try:
+                cursor.execute("BEGIN")
+            finally:
+                cursor.close()
         except Exception as exc:
             raise SnapshotUnavailable(
                 "read snapshot unavailable: could not establish a read snapshot"

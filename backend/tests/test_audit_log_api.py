@@ -1114,10 +1114,24 @@ class TestSnapshotHelperPoolRejection:
                     real_driver = self._real.connection
 
                     class _Driver:
-                        def execute(self, stmt, *args):
-                            if isinstance(stmt, str) and stmt.upper() == "BEGIN":
-                                raise RuntimeError("injected BEGIN failure")
-                            return real_driver.execute(stmt, *args)
+                        def cursor(self):
+                            real_cursor = real_driver.cursor()
+
+                            class _Cursor:
+                                def execute(self, stmt, *args):
+                                    if (
+                                        isinstance(stmt, str)
+                                        and stmt.upper() == "BEGIN"
+                                    ):
+                                        raise RuntimeError(
+                                            "injected BEGIN failure"
+                                        )
+                                    return real_cursor.execute(stmt, *args)
+
+                                def close(self):
+                                    return real_cursor.close()
+
+                            return _Cursor()
 
                         def rollback(self):
                             return real_driver.rollback()
