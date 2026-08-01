@@ -963,6 +963,55 @@ class UniverseSelectionService:
             .all()
         )
 
+    def list_runs(
+        self,
+        *,
+        page: int = 1,
+        page_size: int = 50,
+        from_date: date | None = None,
+        to_date: date | None = None,
+    ) -> tuple[list[UniverseSelectionRun], int]:
+        """Read-only bounded paginated universe-selection run history.
+
+        Queries stored ``UniverseSelectionRun`` rows only. Never invokes
+        selection, quote fetches, refresh, shadow synchronization, or any
+        write. Ordering is stable newest-first by the authoritative
+        ``as_of_date`` then ``created_at`` then ``id`` (mirroring
+        ``latest_run``), so identical timestamps paginate deterministically
+        without duplicates or omissions.
+
+        ``from_date`` / ``to_date`` form an inclusive range over
+        ``as_of_date`` (the model's authoritative run as-of field). Raises
+        ``ValueError`` on an inverted range. ``page_size`` is capped at 100.
+        Returns ``(rows, total)``.
+        """
+        bounded_page = max(1, int(page))
+        bounded_size = max(1, min(int(page_size), 100))
+        if (
+            from_date is not None
+            and to_date is not None
+            and from_date > to_date
+        ):
+            raise ValueError("from_date must be on or before to_date")
+
+        query = self.db.query(UniverseSelectionRun)
+        if from_date is not None:
+            query = query.filter(UniverseSelectionRun.as_of_date >= from_date)
+        if to_date is not None:
+            query = query.filter(UniverseSelectionRun.as_of_date <= to_date)
+        total = query.count()
+        rows = (
+            query.order_by(
+                UniverseSelectionRun.as_of_date.desc(),
+                UniverseSelectionRun.created_at.desc(),
+                UniverseSelectionRun.id.desc(),
+            )
+            .offset((bounded_page - 1) * bounded_size)
+            .limit(bounded_size)
+            .all()
+        )
+        return list(rows), total
+
     def _rotation_registration_for_month(
         self,
         cohort_month: date,

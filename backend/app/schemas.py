@@ -3987,6 +3987,24 @@ class UniverseSelectionRunResponse(BaseModel):
         return decoded
 
 
+class UniverseSelectionRunPage(BaseModel):
+    """Bounded paginated universe-selection run history (read-only).
+
+    Reuses ``UniverseSelectionRunResponse`` semantics. History rows are
+    projected from stored ``UniverseSelectionRun`` rows only and never invoke
+    selection, quote fetches, refresh, or shadow synchronization. Ordering is
+    stable newest-first by the authoritative ``as_of_date`` then ``created_at``
+    then ``id`` (mirroring ``latest_run``), so identical timestamps paginate
+    deterministically without duplicates or omissions.
+    """
+
+    items: list[UniverseSelectionRunResponse] = Field(default_factory=list)
+    total: int = Field(ge=0)
+    page: int = Field(ge=1)
+    page_size: int = Field(ge=1)
+    filters: dict[str, Any] = Field(default_factory=dict)
+
+
 class UniversePromotionReadinessItem(BaseModel):
     symbol: str = Field(min_length=1, max_length=50)
     memberships: list[Literal["NASDAQ_100", "DJIA"]] = Field(
