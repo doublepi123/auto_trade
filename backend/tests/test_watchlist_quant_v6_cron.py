@@ -27,6 +27,17 @@ from app.services.watchlist_quant_v6_historical_provider import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _outside_opening_research_quiet_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main_module,
+        "_opening_research_quiet_window",
+        lambda _now=None: False,
+    )
+
+
 def test_quant_v6_cron_is_default_disabled_without_io(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -49,6 +60,67 @@ def test_quant_v6_cron_is_default_disabled_without_io(
     )
 
     main_module._watchlist_quant_v6_evaluation_tick_sync()
+
+
+def test_quant_v6_quiet_window_skips_before_plan_or_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_opening_research_quiet_window",
+        lambda _now=None: True,
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_evaluation_service,
+        "build_latest_quant_v6_registration_plan",
+        lambda **_kwargs: pytest.fail("quiet tick built a plan"),
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_historical_provider,
+        "QuantV6HistoricalBarProvider",
+        lambda **_kwargs: pytest.fail("quiet tick created a provider"),
+    )
+
+    assert (
+        main_module._watchlist_quant_v6_evaluation_tick_sync()
+        is main_module._OPENING_RESEARCH_DEFERRED
+    )
+
+
+def test_quant_v6_rechecks_quiet_window_after_sync_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    decisions = iter((False, True))
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_opening_research_quiet_window",
+        lambda _now=None: next(decisions),
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_evaluation_service,
+        "build_latest_quant_v6_registration_plan",
+        lambda **_kwargs: pytest.fail("post-lock quiet tick built a plan"),
+    )
+
+    deadline = QuantV6EvaluationDeadline(30)
+    assert (
+        main_module._watchlist_quant_v6_evaluation_tick_sync(deadline)
+        is main_module._OPENING_RESEARCH_DEFERRED
+    )
+    assert main_module._watchlist_quant_v6_evaluation_sync_lock.acquire(
+        blocking=False
+    )
+    main_module._watchlist_quant_v6_evaluation_sync_lock.release()
 
 
 @pytest.mark.asyncio
@@ -693,6 +765,48 @@ async def test_quant_v6_cron_retries_failed_window_then_resumes_interval(
     assert sleeps == [
         main_module._WATCHLIST_QUANT_V6_INITIAL_DELAY_SECONDS,
         30 * 60,
+        1_440 * 60,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_quant_v6_cron_rechecks_after_quiet_window_defer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    outcomes = iter((main_module._OPENING_RESEARCH_DEFERRED, object()))
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) == 3:
+            raise asyncio.CancelledError
+
+    async def next_outcome() -> object:
+        return next(outcomes)
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_interval_minutes",
+        1_440,
+    )
+    monkeypatch.setattr(main_module.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(
+        main_module,
+        "_run_watchlist_quant_v6_evaluation_tick",
+        next_outcome,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await main_module._watchlist_quant_v6_evaluation_cron()
+
+    assert sleeps == [
+        main_module._WATCHLIST_QUANT_V6_INITIAL_DELAY_SECONDS,
+        main_module._OPENING_RESEARCH_DEFER_RETRY_SECONDS,
         1_440 * 60,
     ]
 

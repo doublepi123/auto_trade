@@ -14,6 +14,17 @@ from app import main as main_module
 from app.core.engine import StrategyParams
 
 
+@pytest.fixture(autouse=True)
+def _outside_opening_research_quiet_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        main_module,
+        "_opening_research_quiet_window",
+        lambda _now=None: False,
+    )
+
+
 @pytest.mark.asyncio
 async def test_lifespan_fails_startup_when_runner_cannot_start(monkeypatch) -> None:
     class FailingRunner:
@@ -651,18 +662,19 @@ async def test_opening_momentum_cron_uses_dynamic_poll_interval(
     assert observed == [5]
 
 
-def test_opening_priority_window_defers_heavy_research_ticks(
+def test_opening_research_quiet_window_defers_heavy_research_ticks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session_factory = MagicMock(
-        side_effect=AssertionError("priority window must avoid DB work")
+        side_effect=AssertionError("research quiet window must avoid DB work")
     )
     monkeypatch.setattr(
         main_module,
-        "_opening_execution_priority_window",
+        "_opening_research_quiet_window",
         lambda: True,
     )
     monkeypatch.setattr(main_module, "SessionLocal", session_factory)
+    monkeypatch.setattr("app.database.SessionLocal", session_factory)
     monkeypatch.setattr(
         main_module.settings,
         "watchlist_quant_auto_score_enabled",
@@ -673,31 +685,231 @@ def test_opening_priority_window_defers_heavy_research_ticks(
         "universe_selection_enabled",
         True,
     )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
 
+    assert (
+        main_module._llm_storage_maintenance_tick_sync()
+        is main_module._OPENING_RESEARCH_DEFERRED
+    )
     main_module._strategy_v2_shadow_tick_sync()
     main_module._watchlist_quant_tick_sync()
-    main_module._universe_selection_tick_sync()
+    assert (
+        main_module._watchlist_quant_v6_evaluation_tick_sync()
+        is main_module._OPENING_RESEARCH_DEFERRED
+    )
+    assert (
+        main_module._universe_selection_tick_sync()
+        is main_module._OPENING_RESEARCH_DEFERRED
+    )
 
     session_factory.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_opening_priority_window_defers_llm_analysis(
+async def test_opening_research_quiet_window_defers_async_research(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session_factory = MagicMock(
-        side_effect=AssertionError("priority window must avoid DB work")
+        side_effect=AssertionError("research quiet window must avoid DB work")
+    )
+    to_thread = MagicMock(
+        side_effect=AssertionError("research quiet window must avoid workers")
     )
     monkeypatch.setattr(
         main_module,
-        "_opening_execution_priority_window",
+        "_opening_research_quiet_window",
         lambda: True,
     )
     monkeypatch.setattr(main_module, "SessionLocal", session_factory)
+    monkeypatch.setattr("app.database.SessionLocal", session_factory)
+    monkeypatch.setattr(main_module.asyncio, "to_thread", to_thread)
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
 
     await main_module._llm_analysis_tick()
+    assert (
+        await main_module._run_llm_storage_maintenance_tick()
+        is main_module._OPENING_RESEARCH_DEFERRED
+    )
+    assert (
+        await main_module._run_watchlist_quant_v6_evaluation_tick()
+        is main_module._OPENING_RESEARCH_DEFERRED
+    )
 
     session_factory.assert_not_called()
+    to_thread.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_storage_maintenance_rechecks_after_research_defer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    attempts = 0
+    outcomes = iter((main_module._OPENING_RESEARCH_DEFERRED, None))
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) == 3:
+            raise asyncio.CancelledError
+
+    async def next_outcome() -> object | None:
+        nonlocal attempts
+        attempts += 1
+        return next(outcomes)
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "llm_storage_maintenance_interval_minutes",
+        720,
+    )
+    monkeypatch.setattr(main_module.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(
+        main_module,
+        "_run_llm_storage_maintenance_tick",
+        next_outcome,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await main_module._llm_storage_maintenance_cron()
+
+    assert attempts == 2
+    assert sleeps == [
+        60,
+        main_module._OPENING_RESEARCH_DEFER_RETRY_SECONDS,
+        720 * 60,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_universe_selection_rechecks_after_research_defer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    attempts = 0
+    outcomes = iter((main_module._OPENING_RESEARCH_DEFERRED, None))
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) == 3:
+            raise asyncio.CancelledError
+
+    async def next_outcome() -> object | None:
+        nonlocal attempts
+        attempts += 1
+        return next(outcomes)
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "universe_selection_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "universe_selection_interval_minutes",
+        90,
+    )
+    monkeypatch.setattr(main_module.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(
+        main_module,
+        "_run_universe_selection_tick",
+        next_outcome,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await main_module._universe_selection_cron()
+
+    assert attempts == 2
+    assert sleeps == [
+        30,
+        main_module._OPENING_RESEARCH_DEFER_RETRY_SECONDS,
+        90 * 60,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_universe_worker_propagates_research_defer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = MagicMock(
+        side_effect=AssertionError("deferred universe worker must avoid DB work")
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_opening_research_quiet_window",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "universe_selection_enabled",
+        True,
+    )
+    monkeypatch.setattr(main_module, "SessionLocal", session_factory)
+
+    assert (
+        await main_module._run_universe_selection_tick()
+        is main_module._OPENING_RESEARCH_DEFERRED
+    )
+    session_factory.assert_not_called()
+
+
+def test_opening_research_quiet_window_does_not_gate_opening_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import opening_momentum_execution_service
+    from app.services import opening_momentum_shadow_service
+
+    calls: list[str] = []
+    db = SimpleNamespace(
+        close=MagicMock(),
+        rollback=MagicMock(),
+    )
+    runner = SimpleNamespace(broker=object())
+
+    class FakeExecutionService:
+        def __init__(self, *_args: object) -> None:
+            pass
+
+        def tick(self) -> None:
+            calls.append("execution")
+
+    class FakeShadowService:
+        def __init__(self, *_args: object) -> None:
+            pass
+
+        def tick(self) -> None:
+            calls.append("shadow")
+
+    monkeypatch.setattr(
+        main_module,
+        "_opening_research_quiet_window",
+        lambda: True,
+    )
+    monkeypatch.setattr(main_module, "SessionLocal", lambda: db)
+    monkeypatch.setattr(main_module, "get_runner", lambda: runner)
+    monkeypatch.setattr(
+        opening_momentum_execution_service,
+        "OpeningMomentumExecutionService",
+        FakeExecutionService,
+    )
+    monkeypatch.setattr(
+        opening_momentum_shadow_service,
+        "OpeningMomentumShadowService",
+        FakeShadowService,
+    )
+
+    main_module._opening_momentum_shadow_tick_sync()
+
+    assert calls == ["execution", "shadow"]
+    db.rollback.assert_not_called()
+    db.close.assert_called_once_with()
 
 
 class TestShouldRunLLMAnalysis:

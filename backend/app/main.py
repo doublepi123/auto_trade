@@ -148,6 +148,8 @@ _WATCHLIST_QUANT_POLL_SECONDS = 60
 _WATCHLIST_QUANT_V6_INITIAL_DELAY_SECONDS = 120
 _OPENING_MOMENTUM_POLL_SECONDS = 15
 _OPENING_MOMENTUM_PRIORITY_POLL_SECONDS = 5
+_OPENING_RESEARCH_DEFER_RETRY_SECONDS = 60
+_OPENING_RESEARCH_DEFERRED = object()
 _LLM_SECONDARY_ACTION_PRIORITY = {
     "CANDIDATE": 0,
     "WATCH": 1,
@@ -294,6 +296,17 @@ def _opening_execution_priority_window(
     )
 
     return opening_execution_reservation_window(now)
+
+
+def _opening_research_quiet_window(
+    now: datetime | None = None,
+) -> bool:
+    """Reserve opening capacity without changing live execution authority."""
+    from app.domain.opening_research_quiet_window import (
+        is_opening_research_quiet_window,
+    )
+
+    return is_opening_research_quiet_window(now)
 
 
 def _opening_momentum_poll_seconds(
@@ -544,8 +557,8 @@ async def _ws_cleanup_task() -> None:
 
 
 async def _llm_analysis_tick() -> None:
-    if _opening_execution_priority_window():
-        logger.debug("LLM analysis deferred during opening execution priority window")
+    if _opening_research_quiet_window():
+        logger.debug("LLM analysis deferred during opening research quiet window")
         return
     from app.database import SessionLocal
     from app.services.llm_advisor_service import LLMAdvisorService, build_recent_analysis_context
@@ -975,8 +988,13 @@ async def _alert_rules_cron() -> None:
                 _cron_record_failure(_CRON_ALERT_RULES, sys.exc_info()[1])  # type: ignore[arg-type]
 
 
-def _llm_storage_maintenance_tick_sync() -> None:
+def _llm_storage_maintenance_tick_sync() -> object | None:
     """Bound observational storage without running on the event loop."""
+    if _opening_research_quiet_window():
+        logger.debug(
+            "LLM storage maintenance deferred during opening research quiet window"
+        )
+        return _OPENING_RESEARCH_DEFERRED
     from app.services.llm_interaction_service import LLMInteractionService
     from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 
@@ -1023,24 +1041,36 @@ async def _llm_storage_maintenance_cron() -> None:
     """Run bounded observation maintenance; VACUUM remains offline-only."""
     await asyncio.sleep(60)
     while True:
+        deferred = False
         try:
-            await _run_llm_storage_maintenance_tick()
+            outcome = await _run_llm_storage_maintenance_tick()
+            deferred = outcome is _OPENING_RESEARCH_DEFERRED
             _cron_record_success(_CRON_LLM_STORAGE_MAINTENANCE)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("observational storage maintenance failed")
             _cron_record_failure(_CRON_LLM_STORAGE_MAINTENANCE, sys.exc_info()[1])  # type: ignore[arg-type]
-        await asyncio.sleep(settings.llm_storage_maintenance_interval_minutes * 60)
+        delay_seconds = (
+            _OPENING_RESEARCH_DEFER_RETRY_SECONDS
+            if deferred
+            else settings.llm_storage_maintenance_interval_minutes * 60
+        )
+        await asyncio.sleep(delay_seconds)
 
 
-async def _run_llm_storage_maintenance_tick() -> None:
+async def _run_llm_storage_maintenance_tick() -> object | None:
     """Run one bounded maintenance tick and join its thread during shutdown."""
+    if _opening_research_quiet_window():
+        logger.debug(
+            "LLM storage maintenance deferred during opening research quiet window"
+        )
+        return _OPENING_RESEARCH_DEFERRED
     worker = asyncio.create_task(
         asyncio.to_thread(_llm_storage_maintenance_tick_sync)
     )
     try:
-        await asyncio.shield(worker)
+        return await asyncio.shield(worker)
     except asyncio.CancelledError:
         # Cancelling the asyncio waiter does not stop ``to_thread``. Waiting
         # here keeps SQLite commits from racing application/container teardown.
@@ -1055,9 +1085,9 @@ async def _run_llm_storage_maintenance_tick() -> None:
 
 def _strategy_v2_shadow_tick_sync() -> None:
     """Advance every active Strategy v2 simulator without touching orders."""
-    if _opening_execution_priority_window():
+    if _opening_research_quiet_window():
         logger.debug(
-            "Strategy v2 shadow deferred during opening execution priority window"
+            "Strategy v2 shadow deferred during opening research quiet window"
         )
         return
     from app.core.market_calendar import market_for_symbol
@@ -1259,9 +1289,9 @@ def _watchlist_quant_tick_sync() -> None:
     """Refresh due deterministic watchlist scores during open sessions."""
     if not settings.watchlist_quant_auto_score_enabled:
         return
-    if _opening_execution_priority_window():
+    if _opening_research_quiet_window():
         logger.debug(
-            "watchlist quant scoring deferred during opening execution priority window"
+            "watchlist quant scoring deferred during opening research quiet window"
         )
         return
     from app.services.watchlist_quant_service import (
@@ -1349,6 +1379,11 @@ def _watchlist_quant_v6_evaluation_tick_sync(
     """Publish one quote-only historical cohort without execution authority."""
     if not settings.watchlist_quant_v6_evaluation_enabled:
         return None
+    if _opening_research_quiet_window():
+        logger.debug(
+            "quant-v6 evaluation deferred during opening research quiet window"
+        )
+        return _OPENING_RESEARCH_DEFERRED
     from app.services.watchlist_quant_v6_deadline import (
         QuantV6EvaluationDeadline,
     )
@@ -1375,6 +1410,11 @@ def _watchlist_quant_v6_evaluation_tick_sync(
         # default-disabled path side-effect free.
         if not settings.watchlist_quant_v6_evaluation_enabled:
             return None
+        if _opening_research_quiet_window():
+            logger.debug(
+                "quant-v6 evaluation deferred during opening research quiet window"
+            )
+            return _OPENING_RESEARCH_DEFERRED
         deadline.checkpoint()
         plan = build_latest_quant_v6_registration_plan(
             observed_at=datetime.now(timezone.utc),
@@ -1424,6 +1464,11 @@ async def _run_watchlist_quant_v6_evaluation_tick() -> object | None:
     """Run one bounded historical tick and always join its worker."""
     if not settings.watchlist_quant_v6_evaluation_enabled:
         return None
+    if _opening_research_quiet_window():
+        logger.debug(
+            "quant-v6 evaluation deferred during opening research quiet window"
+        )
+        return _OPENING_RESEARCH_DEFERRED
     from app.services.watchlist_quant_v6_deadline import (
         QuantV6EvaluationDeadline,
         QuantV6EvaluationStoppedError,
@@ -1497,9 +1542,11 @@ async def _watchlist_quant_v6_evaluation_cron() -> None:
     await asyncio.sleep(_WATCHLIST_QUANT_V6_INITIAL_DELAY_SECONDS)
     while True:
         failed = False
+        deferred = False
         async with _watchlist_quant_v6_evaluation_lock:
             try:
-                await _run_watchlist_quant_v6_evaluation_tick()
+                outcome = await _run_watchlist_quant_v6_evaluation_tick()
+                deferred = outcome is _OPENING_RESEARCH_DEFERRED
                 _cron_record_success(_CRON_WATCHLIST_QUANT_V6_EVALUATION)
             except asyncio.CancelledError:
                 raise
@@ -1513,23 +1560,27 @@ async def _watchlist_quant_v6_evaluation_cron() -> None:
                     _CRON_WATCHLIST_QUANT_V6_EVALUATION,
                     sys.exc_info()[1],  # type: ignore[arg-type]
                 )
-        delay_minutes = (
-            settings.watchlist_quant_v6_evaluation_retry_interval_minutes
-            if failed
-            else settings.watchlist_quant_v6_evaluation_interval_minutes
-        )
-        await asyncio.sleep(delay_minutes * 60)
+        if deferred:
+            delay_seconds = _OPENING_RESEARCH_DEFER_RETRY_SECONDS
+        else:
+            delay_minutes = (
+                settings.watchlist_quant_v6_evaluation_retry_interval_minutes
+                if failed
+                else settings.watchlist_quant_v6_evaluation_interval_minutes
+            )
+            delay_seconds = delay_minutes * 60
+        await asyncio.sleep(delay_seconds)
 
 
-def _universe_selection_tick_sync() -> None:
+def _universe_selection_tick_sync() -> object | None:
     """Refresh the candidate pool and its short-horizon suitability scores."""
     if not settings.universe_selection_enabled:
-        return
-    if _opening_execution_priority_window():
+        return None
+    if _opening_research_quiet_window():
         logger.debug(
-            "universe selection deferred during opening execution priority window"
+            "universe selection deferred during opening research quiet window"
         )
-        return
+        return _OPENING_RESEARCH_DEFERRED
     from app.api.universe import build_universe_selection_service
     from app.services.watchlist_quant_service import (
         QuantScoringOutsideRTHError,
@@ -1593,13 +1644,13 @@ def _universe_selection_tick_sync() -> None:
         db.close()
 
 
-async def _run_universe_selection_tick() -> None:
+async def _run_universe_selection_tick() -> object | None:
     """Join the worker thread before shutdown so DB writes cannot race stop."""
     worker = asyncio.create_task(
         asyncio.to_thread(_universe_selection_tick_sync)
     )
     try:
-        await asyncio.shield(worker)
+        return await asyncio.shield(worker)
     except asyncio.CancelledError:
         try:
             await worker
@@ -1616,18 +1667,23 @@ async def _universe_selection_cron() -> None:
         return
     await asyncio.sleep(30)
     while True:
+        deferred = False
         async with _universe_selection_lock:
             try:
-                await _run_universe_selection_tick()
+                outcome = await _run_universe_selection_tick()
+                deferred = outcome is _OPENING_RESEARCH_DEFERRED
                 _cron_record_success(_CRON_UNIVERSE_SELECTION)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("universe selection cron failed")
                 _cron_record_failure(_CRON_UNIVERSE_SELECTION, sys.exc_info()[1])  # type: ignore[arg-type]
-        await asyncio.sleep(
-            settings.universe_selection_interval_minutes * 60
+        delay_seconds = (
+            _OPENING_RESEARCH_DEFER_RETRY_SECONDS
+            if deferred
+            else settings.universe_selection_interval_minutes * 60
         )
+        await asyncio.sleep(delay_seconds)
 
 
 @asynccontextmanager
