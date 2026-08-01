@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 PRICE_RULES = {"price_above", "price_below"}
 # Rule types that read ``RuntimeState`` instead of live broker quotes. They
 # never trigger a quote fetch — the cron can evaluate them without a broker.
-STATE_RULES = {"daily_loss", "consecutive_losses"}
+STATE_RULES = {"daily_loss", "consecutive_losses", "kill_switch_engaged"}
 
 
 class _NotifierLike(Protocol):
@@ -280,6 +280,11 @@ class AlertRuleService:
                 return float(state.daily_pnl)
             if rule.rule_type == "consecutive_losses":
                 return float(state.consecutive_losses)
+            if rule.rule_type == "kill_switch_engaged":
+                # Boolean state projected as 1.0 (engaged) / 0.0 (clear). The
+                # schema forces threshold == 1.0, so only a truly engaged
+                # kill switch can satisfy ``value >= threshold``.
+                return 1.0 if state.kill_switch else 0.0
         return None
 
     def _runtime_state_for_rule(self, rule: AlertRule) -> RuntimeState | None:
@@ -325,6 +330,13 @@ def _check(rule: AlertRule, value: float) -> tuple[bool, str]:
         # compare as ints to avoid float drift on a count.
         triggered = int(value) >= int(rule.threshold)
         return triggered, f"{rule.symbol} 连续亏损 {int(value)} ≥ 阈值 {int(rule.threshold)}"
+    if rule.rule_type == "kill_switch_engaged":
+        # threshold is forced to 1.0 at the schema layer; value is 1.0 when
+        # the kill switch is engaged and 0.0 otherwise. Notification-only —
+        # evaluation never mutates RiskController or RuntimeState.
+        triggered = value >= rule.threshold
+        status = "已触发" if triggered else "未触发"
+        return triggered, f"{rule.symbol} 熔断开关 {status}"
     return False, ""
 
 

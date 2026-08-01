@@ -347,6 +347,176 @@ class TestConsecutiveLossesValidation(_Base):
         assert resp.status_code == 200, resp.text
 
 
+class TestKillSwitchRule(_Base):
+    """kill_switch_engaged rule: notification-only, fires when
+    RuntimeState.kill_switch is true. Reuses the same symbol/account-wide
+    state lookup as consecutive_losses. Never mutates RiskController or
+    RuntimeState."""
+
+    def _make_rule(self, **kw) -> int:
+        svc = AlertRuleService(self._db())
+        out = svc.create(AlertRuleCreate(
+            name=kw.get("name", "kill"),
+            symbol=kw.get("symbol", "AAPL.US"),
+            rule_type="kill_switch_engaged",
+            threshold=kw.get("threshold", 1.0),
+            severity="CRITICAL",
+            enabled=True,
+            cooldown_seconds=kw.get("cooldown_seconds", 300),
+        ))
+        return out.id
+
+    def test_fires_when_kill_switch_true(self) -> None:
+        db = self._db()
+        db.add(RuntimeState(symbol="AAPL.US", kill_switch=True))
+        db.commit()
+        db.close()
+        rid = self._make_rule(symbol="AAPL.US")
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
+        assert result.fired == 1
+        assert len(notifier.calls) == 1
+        rows = AlertRuleService(self._db()).history(rid)
+        assert len(rows) == 1
+        assert rows[0].trigger_value == 1.0
+        assert rows[0].threshold == 1.0
+        assert "熔断开关" in rows[0].message
+
+    def test_does_not_fire_when_kill_switch_false(self) -> None:
+        db = self._db()
+        db.add(RuntimeState(symbol="AAPL.US", kill_switch=False))
+        db.commit()
+        db.close()
+        self._make_rule(symbol="AAPL.US")
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
+        assert result.fired == 0
+        assert notifier.calls == []
+
+    def test_no_state_row_does_not_fire(self) -> None:
+        self._make_rule(symbol="AAPL.US")
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
+        assert result.fired == 0
+        assert notifier.calls == []
+
+    def test_symbol_isolation_does_not_use_unrelated_state(self) -> None:
+        # AAPL rule, only TSLA has kill_switch=true. Must NOT fall back.
+        db = self._db()
+        db.add(RuntimeState(symbol="TSLA.US", kill_switch=True))
+        db.commit()
+        db.close()
+        self._make_rule(symbol="AAPL.US")
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
+        assert result.fired == 0
+        assert notifier.calls == []
+
+    def test_account_wide_uses_most_recent_state(self) -> None:
+        db = self._db()
+        db.add(RuntimeState(symbol="AAPL.US", kill_switch=False))
+        db.add(RuntimeState(symbol="TSLA.US", kill_switch=True))
+        db.commit()
+        db.close()
+        svc = AlertRuleService(self._db())
+        svc.create(AlertRuleCreate(
+            name="acct kill", symbol="", rule_type="kill_switch_engaged", threshold=1.0,
+        ))
+        notifier = FakeNotifier()
+        result = svc.evaluate(FakeRunner(None, notifier))
+        assert result.fired == 1
+
+    def test_cooldown_skips_second_fire(self) -> None:
+        db = self._db()
+        db.add(RuntimeState(symbol="AAPL.US", kill_switch=True))
+        db.commit()
+        db.close()
+        self._make_rule(symbol="AAPL.US", cooldown_seconds=300)
+        now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
+        notifier = FakeNotifier()
+        svc = AlertRuleService(self._db())
+        r1 = svc.evaluate(FakeRunner(None, notifier), now=now)
+        assert r1.fired == 1
+        r2 = svc.evaluate(FakeRunner(None, notifier), now=now + timedelta(minutes=1))
+        assert r2.fired == 0
+        assert r2.skipped_cooldown == 1
+        r3 = svc.evaluate(FakeRunner(None, notifier), now=now + timedelta(minutes=6))
+        assert r3.fired == 1
+
+    def test_evaluation_does_not_mutate_runtime_state(self) -> None:
+        # Proof that evaluation is notification-only: kill_switch must remain
+        # exactly as seeded after evaluate runs.
+        db = self._db()
+        db.add(RuntimeState(symbol="AAPL.US", kill_switch=True, consecutive_losses=7, daily_pnl=-300.0))
+        db.commit()
+        state_id = db.query(RuntimeState).one().id
+        db.close()
+        self._make_rule(symbol="AAPL.US")
+        AlertRuleService(self._db()).evaluate(FakeRunner(None, FakeNotifier()))
+        db = self._db()
+        state = db.get(RuntimeState, state_id)
+        assert state is not None
+        assert state.kill_switch is True  # unchanged
+        assert state.consecutive_losses == 7  # unchanged
+        assert state.daily_pnl == -300.0  # unchanged
+        db.close()
+
+    def test_no_broker_quote_fetch_for_state_rule(self) -> None:
+        class ExplodingBroker:
+            def get_quotes(self, symbols: list[str]) -> list[FakeQuote]:
+                raise AssertionError("kill_switch_engaged must not fetch quotes")
+
+        db = self._db()
+        db.add(RuntimeState(symbol="AAPL.US", kill_switch=True))
+        db.commit()
+        db.close()
+        self._make_rule(symbol="AAPL.US")
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(ExplodingBroker(), notifier))
+        assert result.fired == 1
+
+
+class TestKillSwitchValidation(_Base):
+    def test_threshold_must_be_exactly_one(self) -> None:
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "kill", "symbol": "AAPL.US", "rule_type": "kill_switch_engaged",
+            "threshold": 0,
+        })
+        assert resp.status_code == 422
+
+    def test_threshold_two_rejected(self) -> None:
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "kill", "symbol": "AAPL.US", "rule_type": "kill_switch_engaged",
+            "threshold": 2,
+        })
+        assert resp.status_code == 422
+
+    def test_threshold_fractional_rejected(self) -> None:
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "kill", "symbol": "AAPL.US", "rule_type": "kill_switch_engaged",
+            "threshold": 1.5,
+        })
+        assert resp.status_code == 422
+
+    def test_threshold_one_accepted(self) -> None:
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "kill", "symbol": "AAPL.US", "rule_type": "kill_switch_engaged",
+            "threshold": 1.0, "severity": "CRITICAL", "enabled": True, "cooldown_seconds": 300,
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["rule_type"] == "kill_switch_engaged"
+        assert resp.json()["threshold"] == 1.0
+
+    def test_false_state_never_fires_with_zero_threshold_blocked(self) -> None:
+        # The schema blocks threshold=0, so a false (0.0) state can never
+        # satisfy value >= threshold. Confirm the guard holds.
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "kill", "symbol": "AAPL.US", "rule_type": "kill_switch_engaged",
+            "threshold": 0,
+        })
+        assert resp.status_code == 422
+
+
 class TestAlertRuleAPI(_Base):
     def test_crud_and_evaluate(self) -> None:
         create = self.client.post("/api/alert-rules", json={

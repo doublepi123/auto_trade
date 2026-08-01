@@ -2255,12 +2255,23 @@ class AlertRuleCreate(BaseModel):
       - ``consecutive_losses``: active ``RuntimeState.consecutive_losses`` >=
         ``threshold``; ``threshold`` must be a positive integer-like value
         (>= 1) so a zero threshold can never fire on a fresh state row.
+      - ``kill_switch_engaged``: notification-only; fires when the active
+        ``RuntimeState.kill_switch`` is true. ``threshold`` must be exactly
+        ``1.0`` (the numeric storage contract is preserved, but a fixed
+        threshold guarantees a false state can never trigger because of a
+        threshold of 0).
     """
 
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=128)
     symbol: str = Field(default="", max_length=50)
-    rule_type: Literal["price_above", "price_below", "daily_loss", "consecutive_losses"]
+    rule_type: Literal[
+        "price_above",
+        "price_below",
+        "daily_loss",
+        "consecutive_losses",
+        "kill_switch_engaged",
+    ]
     threshold: float
     severity: Literal["INFO", "WARNING", "CRITICAL"] = "WARNING"
     enabled: bool = True
@@ -2277,6 +2288,12 @@ class AlertRuleCreate(BaseModel):
                 raise ValueError(
                     "consecutive_losses threshold must be a positive integer >= 1"
                 )
+        if self.rule_type == "kill_switch_engaged":
+            # The numeric threshold storage contract is preserved, but this
+            # boolean-state rule requires exactly 1.0 so a false (0) state can
+            # never satisfy ``value >= threshold`` and accidentally fire.
+            if self.threshold != 1.0:
+                raise ValueError("kill_switch_engaged threshold must be exactly 1.0")
         return self
 
 
