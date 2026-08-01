@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Protocol
 
@@ -29,6 +30,27 @@ _LAST_SENT: dict[str, float] = {}
 # local so preview/normalization does not depend on importing the report
 # service's private regex.
 _PREVIEW_SYMBOL_RE = re.compile(r"^[A-Z0-9\-]{1,12}\.(US|HK)$")
+
+
+@dataclass(frozen=True)
+class ReportScheduleStatus:
+    """Safe, serializable operational snapshot of the scheduled-report state.
+
+    All monotonic timestamps are deliberately excluded; only derived, clamped
+    durations are exposed. ``state_scope``/``resets_on_restart`` make the
+    process-local, non-persistent nature of the throttle explicit.
+    """
+
+    enabled: bool
+    configured_symbol: str
+    effective_symbol: str
+    interval_hours: int
+    has_process_send_history: bool
+    last_sent_age_seconds: float | None
+    next_eligible_in_seconds: float | None
+    eligible_now: bool
+    state_scope: str = "process"
+    resets_on_restart: bool = True
 
 
 def normalize_preview_symbol(symbol: str) -> str:
@@ -178,6 +200,66 @@ class ReportScheduleService:
 
         title, content = self.build_summary(symbol, target_date=resolved_target)
         return symbol, resolved_target, title, content
+
+    def status(self) -> ReportScheduleStatus:
+        """Return a safe operational snapshot of the scheduled-report state.
+
+        Read-only: does not call the notifier, mutate ``_LAST_SENT``, write
+        DB/audit rows, or change config. Reuses the same effective-symbol and
+        interval resolution as ``maybe_send`` so status cannot drift from the
+        actual send decision. Negative elapsed/remaining values (clock
+        rollback) are clamped to zero.
+        """
+        cfg = self._db.query(StrategyConfig).order_by(
+            StrategyConfig.id.desc()
+        ).first()
+        enabled = bool(getattr(cfg, "report_schedule_enabled", False)) if cfg else False
+        configured_symbol = (
+            str(getattr(cfg, "report_schedule_symbol", "") or "").strip().upper()
+            if cfg
+            else ""
+        )
+        effective_symbol = self.resolve_effective_symbol(cfg) if cfg else ""
+        interval_hours = max(
+            1, int(getattr(cfg, "report_schedule_interval_hours", 24) or 24)
+        )
+
+        now = self._clock()
+        last = self._state.get(effective_symbol) if effective_symbol else None
+        has_history = last is not None
+
+        if has_history:
+            # Clamp negative elapsed (clock rollback) to zero.
+            elapsed = max(0.0, now - last)
+            last_sent_age_seconds: float | None = elapsed
+            window_seconds = interval_hours * 3600
+            remaining = window_seconds - elapsed
+            next_eligible_in_seconds: float | None = max(0.0, remaining)
+        else:
+            last_sent_age_seconds = None
+            next_eligible_in_seconds = None
+
+        # eligible_now mirrors maybe_send's gate: enabled + effective symbol +
+        # throttle elapsed (or no prior send). Computed from clamped values so
+        # a rolled-back clock cannot make a recently-sent report appear
+        # eligible again.
+        throttle_elapsed = (
+            (last is None) or (max(0.0, now - last) >= interval_hours * 3600)
+        )
+        eligible_now = bool(
+            enabled and effective_symbol and throttle_elapsed
+        )
+
+        return ReportScheduleStatus(
+            enabled=enabled,
+            configured_symbol=configured_symbol,
+            effective_symbol=effective_symbol,
+            interval_hours=interval_hours,
+            has_process_send_history=bool(has_history),
+            last_sent_age_seconds=last_sent_age_seconds,
+            next_eligible_in_seconds=next_eligible_in_seconds,
+            eligible_now=eligible_now,
+        )
 
     def maybe_send(self, runner: _RunnerLike) -> bool:
         """Send a scheduled report if enabled and the throttle window elapsed.

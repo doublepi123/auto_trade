@@ -3903,3 +3903,23 @@ class ReportSchedulePreviewResponse(BaseModel):
     target_date: str
     title: str
     content: str
+
+
+class ReportScheduleStatusResponse(BaseModel):
+    """Safe operational snapshot of the scheduled-report throttle.
+
+    All fields are derived/sanitized; raw monotonic timestamps are never
+    exposed. ``state_scope``/``resets_on_restart`` make the process-local,
+    non-persistent nature of the send-history throttle explicit.
+    """
+
+    enabled: bool
+    configured_symbol: str
+    effective_symbol: str
+    interval_hours: int
+    has_process_send_history: bool
+    last_sent_age_seconds: float | None = None
+    next_eligible_in_seconds: float | None = None
+    eligible_now: bool
+    state_scope: str = "process"
+    resets_on_restart: bool = True

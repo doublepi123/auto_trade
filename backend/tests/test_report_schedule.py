@@ -423,3 +423,306 @@ class TestReportSchedulePreviewAPI(_Base):
         resp = self.client.get("/api/reports/schedule/preview")
         assert resp.status_code == 200
         assert svc_mod._LAST_SENT == snapshot_before
+
+
+class TestReportScheduleStatusService(_Base):
+    """Service-level status: safe fields, clamping, process semantics, no mutation."""
+
+    def test_status_disabled(self) -> None:
+        self._cfg(report_schedule_enabled=False, report_schedule_symbol="AAPL.US")
+        svc = ReportScheduleService(self._db(), clock=lambda: 1000.0, state={})
+        st = svc.status()
+        assert st.enabled is False
+        assert st.effective_symbol == "AAPL.US"
+        assert st.eligible_now is False
+        assert st.has_process_send_history is False
+        assert st.last_sent_age_seconds is None
+        assert st.next_eligible_in_seconds is None
+
+    def test_status_missing_config(self) -> None:
+        svc = ReportScheduleService(self._db(), clock=lambda: 1.0, state={})
+        st = svc.status()
+        assert st.enabled is False
+        assert st.configured_symbol == ""
+        assert st.effective_symbol == ""
+        assert st.eligible_now is False
+        assert st.interval_hours == 24
+
+    def test_status_missing_symbol(self) -> None:
+        self._cfg(report_schedule_enabled=True, report_schedule_symbol="", symbol="")
+        svc = ReportScheduleService(self._db(), clock=lambda: 1.0, state={})
+        st = svc.status()
+        assert st.enabled is True
+        assert st.effective_symbol == ""
+        assert st.eligible_now is False
+
+    def test_status_never_sent_eligible_now(self) -> None:
+        self._cfg(
+            report_schedule_enabled=True,
+            report_schedule_symbol="AAPL.US",
+            report_schedule_interval_hours=24,
+        )
+        svc = ReportScheduleService(self._db(), clock=lambda: 1000.0, state={})
+        st = svc.status()
+        assert st.enabled is True
+        assert st.effective_symbol == "AAPL.US"
+        assert st.has_process_send_history is False
+        assert st.last_sent_age_seconds is None
+        assert st.next_eligible_in_seconds is None
+        assert st.eligible_now is True
+
+    def test_status_recently_sent_not_eligible(self) -> None:
+        self._cfg(
+            report_schedule_enabled=True,
+            report_schedule_symbol="AAPL.US",
+            report_schedule_interval_hours=1,
+        )
+        state = {"AAPL.US": 1000.0}
+        svc = ReportScheduleService(self._db(), clock=lambda: 1000.0 + 60.0, state=state)
+        st = svc.status()
+        assert st.has_process_send_history is True
+        assert st.last_sent_age_seconds == 60.0
+        # 1 hour window, 60s elapsed -> 3540s remaining.
+        assert st.next_eligible_in_seconds == 3540.0
+        assert st.eligible_now is False
+
+    def test_status_elapsed_past_window_eligible(self) -> None:
+        self._cfg(
+            report_schedule_enabled=True,
+            report_schedule_symbol="AAPL.US",
+            report_schedule_interval_hours=1,
+        )
+        state = {"AAPL.US": 1000.0}
+        svc = ReportScheduleService(
+            self._db(), clock=lambda: 1000.0 + 3600.0 + 1.0, state=state
+        )
+        st = svc.status()
+        assert st.last_sent_age_seconds == 3601.0
+        assert st.next_eligible_in_seconds == 0.0
+        assert st.eligible_now is True
+
+    def test_status_clock_rollback_clamps_negative_elapsed(self) -> None:
+        self._cfg(
+            report_schedule_enabled=True,
+            report_schedule_symbol="AAPL.US",
+            report_schedule_interval_hours=1,
+        )
+        # last recorded at 2000, clock now reads 1000 (rollback).
+        state = {"AAPL.US": 2000.0}
+        svc = ReportScheduleService(self._db(), clock=lambda: 1000.0, state=state)
+        st = svc.status()
+        # elapsed clamped to 0, not negative.
+        assert st.last_sent_age_seconds == 0.0
+        # remaining = window - 0 = full window.
+        assert st.next_eligible_in_seconds == 3600.0
+        assert st.eligible_now is False
+
+    def test_status_clock_rollback_clamps_remaining_to_zero_when_over_elapsed(self) -> None:
+        # Even if (unclamped) elapsed would exceed the window, a rollback that
+        # produces a negative raw elapsed must still clamp to 0 -> not eligible.
+        self._cfg(
+            report_schedule_enabled=True,
+            report_schedule_symbol="AAPL.US",
+            report_schedule_interval_hours=1,
+        )
+        state = {"AAPL.US": 1000.0}
+        # Clock rolled back below last: raw elapsed negative -> clamp to 0.
+        svc = ReportScheduleService(self._db(), clock=lambda: 500.0, state=state)
+        st = svc.status()
+        assert st.last_sent_age_seconds == 0.0
+        assert st.eligible_now is False
+
+    def test_status_process_semantics_fields(self) -> None:
+        self._cfg(report_schedule_enabled=True, report_schedule_symbol="AAPL.US")
+        svc = ReportScheduleService(self._db(), clock=lambda: 1.0, state={})
+        st = svc.status()
+        assert st.state_scope == "process"
+        assert st.resets_on_restart is True
+
+    def test_status_interval_hours_minimum_clamp(self) -> None:
+        self._cfg(
+            report_schedule_enabled=True,
+            report_schedule_symbol="AAPL.US",
+            report_schedule_interval_hours=0,
+        )
+        svc = ReportScheduleService(self._db(), clock=lambda: 1.0, state={})
+        st = svc.status()
+        # Mirrors maybe_send: `int(... or 24)` treats 0 as falsy -> 24, then
+        # max(1, ...) guarantees a positive window. Status must match exactly.
+        assert st.interval_hours == 24
+
+    def test_status_does_not_mutate_state(self) -> None:
+        self._cfg(report_schedule_enabled=True, report_schedule_symbol="AAPL.US")
+        state: dict[str, float] = {"AAPL.US": 100.0}
+        svc = ReportScheduleService(self._db(), clock=lambda: 200.0, state=state)
+        svc.status()
+        assert state == {"AAPL.US": 100.0}
+
+    def test_status_does_not_call_notifier(self, monkeypatch) -> None:
+        self._cfg(report_schedule_enabled=True, report_schedule_symbol="AAPL.US")
+
+        def _boom(*_a: object, **_k: object) -> None:
+            raise AssertionError("status must not call the notifier")
+
+        monkeypatch.setattr("app.services.report_schedule_service.get_runner", _boom, raising=False)
+        svc = ReportScheduleService(self._db(), state={})
+        svc.status()  # must not raise
+
+    def test_status_does_not_write_db_or_audit(self) -> None:
+        self._cfg(report_schedule_enabled=True, report_schedule_symbol="AAPL.US")
+        svc = ReportScheduleService(self._db(), clock=lambda: 1.0, state={})
+        # status() must not create/modify StrategyConfig rows. After calling,
+        # there should still be exactly one config row (the one we seeded).
+        svc.status()
+        db = self._db()
+        count = db.query(StrategyConfig).count()
+        db.close()
+        assert count == 1
+
+    def test_status_uses_same_symbol_resolution_as_maybe_send(self) -> None:
+        # configured_symbol set, strategy symbol different -> effective is configured.
+        self._cfg(
+            report_schedule_enabled=True,
+            report_schedule_symbol="0700.HK",
+            symbol="AAPL.US",
+        )
+        svc = ReportScheduleService(self._db(), clock=lambda: 1.0, state={})
+        st = svc.status()
+        assert st.configured_symbol == "0700.HK"
+        assert st.effective_symbol == "0700.HK"
+
+    def test_status_falls_back_to_strategy_symbol(self) -> None:
+        self._cfg(report_schedule_enabled=True, report_schedule_symbol="", symbol="MSFT.US")
+        svc = ReportScheduleService(self._db(), clock=lambda: 1.0, state={})
+        st = svc.status()
+        assert st.configured_symbol == ""
+        assert st.effective_symbol == "MSFT.US"
+
+
+class TestReportScheduleStatusAPI(_Base):
+    """GET /api/reports/schedule/status — read-only, authenticated, no side effects."""
+
+    def test_status_disabled(self) -> None:
+        self._cfg(report_schedule_enabled=False, report_schedule_symbol="AAPL.US")
+        resp = self.client.get("/api/reports/schedule/status")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["enabled"] is False
+        assert data["effective_symbol"] == "AAPL.US"
+        assert data["eligible_now"] is False
+        assert data["state_scope"] == "process"
+        assert data["resets_on_restart"] is True
+
+    def test_status_missing_config(self) -> None:
+        resp = self.client.get("/api/reports/schedule/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["enabled"] is False
+        assert data["configured_symbol"] == ""
+        assert data["effective_symbol"] == ""
+        assert data["eligible_now"] is False
+        assert data["interval_hours"] == 24
+
+    def test_status_never_sent(self) -> None:
+        self._cfg(report_schedule_enabled=True, report_schedule_symbol="AAPL.US")
+        resp = self.client.get("/api/reports/schedule/status")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["enabled"] is True
+        assert data["has_process_send_history"] is False
+        assert data["last_sent_age_seconds"] is None
+        assert data["next_eligible_in_seconds"] is None
+        assert data["eligible_now"] is True
+
+    def test_status_recently_sent(self) -> None:
+        import app.services.report_schedule_service as svc_mod
+
+        self._cfg(
+            report_schedule_enabled=True,
+            report_schedule_symbol="AAPL.US",
+            report_schedule_interval_hours=1,
+        )
+        # Seed process-local throttle state, then read status.
+        svc = ReportScheduleService(self._db(), clock=lambda: 1000.0, state=svc_mod._LAST_SENT)
+        svc.maybe_send(FakeRunner(FakeNotifier()))
+        try:
+            # Advance clock 60s via a service that reads the same module state.
+            svc2 = ReportScheduleService(
+                self._db(), clock=lambda: 1060.0, state=svc_mod._LAST_SENT
+            )
+            st = svc2.status()
+            assert st.has_process_send_history is True
+            assert st.last_sent_age_seconds == 60.0
+            assert st.eligible_now is False
+            assert st.next_eligible_in_seconds == 3540.0
+        finally:
+            svc_mod._LAST_SENT.clear()
+
+    def test_status_no_throttle_mutation(self) -> None:
+        import app.services.report_schedule_service as svc_mod
+
+        self._cfg(report_schedule_enabled=True, report_schedule_symbol="AAPL.US")
+        svc_mod._LAST_SENT["AAPL.US"] = 500.0
+        try:
+            snapshot = dict(svc_mod._LAST_SENT)
+            resp = self.client.get("/api/reports/schedule/status")
+            assert resp.status_code == 200
+            assert svc_mod._LAST_SENT == snapshot
+        finally:
+            svc_mod._LAST_SENT.clear()
+
+    def test_status_no_notifier_side_effect(self, monkeypatch) -> None:
+        self._cfg(report_schedule_enabled=True, report_schedule_symbol="AAPL.US")
+
+        def _boom(*_a: object, **_k: object) -> bool:
+            raise AssertionError("status must not call the notifier")
+
+        monkeypatch.setattr("app.api.reports.get_runner", lambda: FakeRunner(_boom))
+        resp = self.client.get("/api/reports/schedule/status")
+        assert resp.status_code == 200
+
+    def test_status_no_audit_side_effect(self, monkeypatch) -> None:
+        self._cfg(report_schedule_enabled=True, report_schedule_symbol="AAPL.US")
+        recorded: list[str] = []
+
+        class _SpyAudit:
+            def record(self, *args: object, **kwargs: object) -> None:
+                recorded.append("audit")
+
+        monkeypatch.setattr("app.api.reports.get_audit_logger", lambda: _SpyAudit())
+        resp = self.client.get("/api/reports/schedule/status")
+        assert resp.status_code == 200
+        assert recorded == []
+
+    def test_status_requires_auth_when_api_key_set(self, monkeypatch) -> None:
+        from app.api import auth as auth_mod
+
+        monkeypatch.setattr(auth_mod.settings, "api_key", "secret-key", raising=False)
+        monkeypatch.setattr(auth_mod.settings, "env", "prod", raising=False)
+        try:
+            resp = self.client.get("/api/reports/schedule/status")
+            assert resp.status_code == 401
+            resp2 = self.client.get(
+                "/api/reports/schedule/status",
+                headers={"X-API-Key": "secret-key"},
+            )
+            # No config -> still 200 (status is safe even with no config).
+            assert resp2.status_code == 200
+        finally:
+            monkeypatch.setattr(auth_mod.settings, "api_key", "", raising=False)
+            monkeypatch.setattr(auth_mod.settings, "env", "dev", raising=False)
+
+    def test_status_does_not_expose_raw_timestamps(self) -> None:
+        import app.services.report_schedule_service as svc_mod
+
+        self._cfg(report_schedule_enabled=True, report_schedule_symbol="AAPL.US")
+        svc_mod._LAST_SENT["AAPL.US"] = 12345.678
+        try:
+            resp = self.client.get("/api/reports/schedule/status")
+            assert resp.status_code == 200
+            text = resp.text
+            # The raw monotonic timestamp must never appear in the response.
+            assert "12345.678" not in text
+            assert "12345" not in text
+        finally:
+            svc_mod._LAST_SENT.clear()

@@ -13,7 +13,11 @@ from app.core.audit import AuditLogger
 from app.database import get_db
 from app.models import StrategyConfig
 from app.runner import get_runner
-from app.schemas import ReportResponse, ReportSchedulePreviewResponse
+from app.schemas import (
+    ReportResponse,
+    ReportSchedulePreviewResponse,
+    ReportScheduleStatusResponse,
+)
 from app.services.report_schedule_service import ReportScheduleService
 from app.services.report_service import ReportService
 
@@ -93,6 +97,33 @@ def preview_scheduled_report(
         target_date=target_date,
         title=title,
         content=content,
+    )
+
+
+@router.get("/schedule/status", response_model=ReportScheduleStatusResponse)
+def get_scheduled_report_status(
+    db: Session = Depends(get_db),
+) -> ReportScheduleStatusResponse:
+    """Return a safe operational snapshot of the scheduled-report state.
+
+    Read-only: does not call the notifier, mutate the process-local throttle,
+    write DB/audit rows, or change config. Exposes only derived, clamped
+    durations (never raw monotonic timestamps) and makes the process-local,
+    restart-resetting nature of the send history explicit.
+    """
+    svc = ReportScheduleService(db)
+    st = svc.status()
+    return ReportScheduleStatusResponse(
+        enabled=st.enabled,
+        configured_symbol=st.configured_symbol,
+        effective_symbol=st.effective_symbol,
+        interval_hours=st.interval_hours,
+        has_process_send_history=st.has_process_send_history,
+        last_sent_age_seconds=st.last_sent_age_seconds,
+        next_eligible_in_seconds=st.next_eligible_in_seconds,
+        eligible_now=st.eligible_now,
+        state_scope=st.state_scope,
+        resets_on_restart=st.resets_on_restart,
     )
 
 
