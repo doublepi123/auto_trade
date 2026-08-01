@@ -2746,6 +2746,40 @@ class LLMUsageSummaryResponse(BaseModel):
     by_type: list[LLMUsageTypeSummary]
 
 
+class LLMUsageBySymbol(BaseModel):
+    """One symbol's LLM usage aggregate (read-only, safe projection).
+
+    Blank symbols are represented explicitly as ``UNSPECIFIED`` rather than
+    silently dropped. No prompt, raw/parsed response, errors, order ids or
+    context are exposed.
+    """
+
+    symbol: str
+    market: str
+    interactions: int
+    successful_interactions: int
+    success_rate: float
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    latest_interaction_at: Optional[datetime] = None
+
+
+class LLMUsageBySymbolResponse(BaseModel):
+    """LLM usage aggregated by symbol (and market), bounded by ``limit``.
+
+    ``total_groups`` is the count of distinct (symbol, market) groups before
+    ``limit`` is applied, so callers can tell a truncated result from a
+    complete one. Deterministic ordering: total tokens desc, interactions
+    desc, then symbol/market asc.
+    """
+
+    days: int
+    limit: int
+    total_groups: int
+    items: list[LLMUsageBySymbol]
+
+
 class MarketSessionStatus(BaseModel):
     """Granular market session phase for the session-clock widget."""
 
