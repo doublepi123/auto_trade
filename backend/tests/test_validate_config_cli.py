@@ -139,6 +139,54 @@ class TestValidateSettings:
         assert not any(i.code == "NON_SQLITE_DATABASE" for i in report.issues)
 
     @pytest.mark.parametrize(
+        "good_url",
+        [
+            "sqlite://",
+            "sqlite:///:memory:",
+            "sqlite:///relative.db",
+            "sqlite:////absolute.db",
+            "sqlite+pysqlite:///:memory:",
+            "sqlite+pysqlite:///./data/auto_trade.db",
+        ],
+    )
+    def test_valid_sqlite_forms_accepted(self, monkeypatch, tmp_path, good_url) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AUTO_TRADE_DATABASE_URL", good_url)
+        s = Settings()
+        report = validate_settings(s)
+        assert not any(i.code == "NON_SQLITE_DATABASE" for i in report.issues)
+
+    @pytest.mark.parametrize(
+        "bad_authority_url",
+        [
+            "sqlite://host/db",  # host component SQLite cannot accept
+            "sqlite://user:very-secret@host/db",  # username + password + host
+            "sqlite://:5432/db",  # port component
+            "sqlite+pysqlite://host/db",  # pysqlite with host
+            "sqlite+pysqlite://user:secret@host/db",  # pysqlite with credentials
+        ],
+    )
+    def test_sqlite_authority_components_are_error(
+        self, monkeypatch, tmp_path, bad_authority_url
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AUTO_TRADE_DATABASE_URL", bad_authority_url)
+        s = Settings()
+        report = validate_settings(s)
+        assert any(
+            i.code == "NON_SQLITE_DATABASE" and i.severity == "ERROR"
+            for i in report.issues
+        )
+        # No hostname/username/password/path leakage in any issue message.
+        for i in report.issues:
+            assert "host" not in i.message
+            assert "very-secret" not in i.message
+            assert "secret" not in i.message
+            assert "user" not in i.message
+            assert "/db" not in i.message
+            assert bad_authority_url not in i.message
+
+    @pytest.mark.parametrize(
         "bad_url",
         [
             "sqliteevil://x/y",  # lookalike dialect
@@ -148,6 +196,8 @@ class TestValidateSettings:
             "sqlite:/relative.db",  # malformed (single slash)
             "postgresql://user:pass@host/db",  # different dialect
             "mysql+pymysql://user:pass@host/db",  # different dialect
+            "sqlite://host/db",  # SQLite with host authority (invalid)
+            "sqlite://user:very-secret@host/db",  # SQLite with credentials (invalid)
             "",  # empty
         ],
     )
@@ -172,6 +222,72 @@ class TestValidateSettings:
             assert code == 1, f"expected exit 1 for {bad_url}, got {code}: {out}"
             assert "NON_SQLITE_DATABASE" in out
             assert bad_url not in out
+
+    def test_sqlite_authority_url_subprocess_exit_one_no_leak(self, tmp_path) -> None:
+        # Fresh subprocess: ``sqlite://host/db`` must ERROR, exit 1, and not
+        # leak the hostname/path in text or JSON output.
+        bad_url = "sqlite://host/db"
+        # Text output.
+        code, out, err = _run_cli_subprocess(
+            {"AUTO_TRADE_DATABASE_URL": bad_url},
+            cwd=tmp_path,
+        )
+        assert code == 1, f"expected exit 1 for {bad_url}, got {code}: {out}"
+        assert "NON_SQLITE_DATABASE" in out
+        combined = out + err
+        assert "host" not in combined
+        assert "/db" not in combined
+        assert bad_url not in combined
+        # JSON output.
+        code_j, out_j, err_j = _run_cli_subprocess(
+            {"AUTO_TRADE_DATABASE_URL": bad_url},
+            as_json=True,
+            cwd=tmp_path,
+        )
+        assert code_j == 1
+        data = json.loads(out_j)
+        assert data["has_errors"] is True
+        assert any(i["code"] == "NON_SQLITE_DATABASE" for i in data["issues"])
+        combined_j = out_j + err_j
+        assert "host" not in combined_j
+        assert "/db" not in combined_j
+        assert bad_url not in combined_j
+
+    def test_sqlite_credential_url_subprocess_exit_one_no_leak(self, tmp_path) -> None:
+        # Fresh subprocess: a credential-bearing SQLite URL must ERROR, exit 1,
+        # and not leak the username/password/hostname/path in text or JSON.
+        bad_url = "sqlite://user:very-secret@host/db"
+        # Text output.
+        code, out, err = _run_cli_subprocess(
+            {"AUTO_TRADE_DATABASE_URL": bad_url},
+            cwd=tmp_path,
+        )
+        assert code == 1, f"expected exit 1 for credential url, got {code}: {out}"
+        assert "NON_SQLITE_DATABASE" in out
+        combined = out + err
+        assert "very-secret" not in combined
+        assert "secret" not in combined
+        assert "user" not in combined
+        assert "host" not in combined
+        assert "/db" not in combined
+        assert bad_url not in combined
+        # JSON output.
+        code_j, out_j, err_j = _run_cli_subprocess(
+            {"AUTO_TRADE_DATABASE_URL": bad_url},
+            as_json=True,
+            cwd=tmp_path,
+        )
+        assert code_j == 1
+        data = json.loads(out_j)
+        assert data["has_errors"] is True
+        assert any(i["code"] == "NON_SQLITE_DATABASE" for i in data["issues"])
+        combined_j = out_j + err_j
+        assert "very-secret" not in combined_j
+        assert "secret" not in combined_j
+        assert "user" not in combined_j
+        assert "host" not in combined_j
+        assert "/db" not in combined_j
+        assert bad_url not in combined_j
 
     def test_p0_short_entries_violation_is_error(self, monkeypatch, tmp_path) -> None:
         # Settings clamps allow_short_entries to False, so we patch the

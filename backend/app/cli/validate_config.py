@@ -88,8 +88,13 @@ def _is_supported_sqlite_url(db_url: str) -> bool:
 
     Uses SQLAlchemy ``make_url`` for real URL parsing (not a prefix check) and
     an explicit driver allowlist so lookalikes (``sqliteevil://``,
-    ``sqlite+evil://``, bare ``sqlite``, ``sqlitefoo``) are rejected. Does not
-    import ``app.database``. Never echoes the URL value.
+    ``sqlite+evil://``, bare ``sqlite``, ``sqlitefoo``) are rejected. Also
+    rejects any parsed URL with authority components the SQLite dialect cannot
+    accept: a non-null username, password, host, or port. Valid forms such as
+    ``sqlite://``, ``sqlite:///:memory:``, ``sqlite:///relative.db``,
+    ``sqlite:////absolute.db``, and the supported ``sqlite+pysqlite`` equivalents
+    remain accepted. Does not import ``app.database`` or instantiate/connect an
+    engine. Never echoes the URL/credential values.
     """
     from sqlalchemy.engine import make_url  # noqa: PLC0415 — local import keeps the helper pure/testable
 
@@ -101,7 +106,16 @@ def _is_supported_sqlite_url(db_url: str) -> bool:
         return False
     # drivername is the full "dialect+driver" or bare "dialect"; compare against
     # the explicit allowlist so lookalikes cannot slip through.
-    return url.drivername in supported_drivers
+    if url.drivername not in supported_drivers:
+        return False
+    # The SQLite dialect has no notion of a server authority: any username,
+    # password, host, or port is invalid (e.g. ``sqlite://host/db`` or
+    # ``sqlite://user:pass@host/db``). Reject these without echoing the values.
+    if url.username is not None or url.password is not None:
+        return False
+    if url.host is not None or url.port is not None:
+        return False
+    return True
 
 
 def validate_settings(settings: Any) -> ValidationReport:
