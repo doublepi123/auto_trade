@@ -2365,6 +2365,32 @@ class AlertFiringPage(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Database storage health (read-only SQLite operational snapshot)
+# ---------------------------------------------------------------------------
+
+
+class DatabaseHealthSnapshot(BaseModel):
+    """Safe operational snapshot of the repository's SQLite database.
+
+    No filesystem/database paths, connection URLs, table contents or secrets
+    are exposed. ``wal_size_bytes`` is ``None`` for in-memory SQLite (no WAL
+    file exists) and ``0`` for a file-backed DB whose ``-wal`` sidecar is
+    absent (e.g. journal mode is not WAL or no writes have occurred).
+    """
+
+    checked_at: datetime
+    dialect: str
+    journal_mode: Optional[str] = None
+    page_size_bytes: Optional[int] = None
+    page_count: Optional[int] = None
+    freelist_count: Optional[int] = None
+    used_page_count: Optional[int] = None
+    database_size_bytes: Optional[int] = None
+    free_space_bytes: Optional[int] = None
+    wal_size_bytes: Optional[int] = None
+
+
+# ---------------------------------------------------------------------------
 # Strategy presets (named param snapshots)
 # ---------------------------------------------------------------------------
 
