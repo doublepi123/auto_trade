@@ -55,6 +55,7 @@ from app.api.strategy_experiments import router as strategy_experiments_router
 from app.api.trade import router as trade_router
 from app.api.universe import router as universe_router
 from app.api.watchlist import router as watchlist_router
+from app.api.watchlist_quant_v6 import router as watchlist_quant_v6_router
 from app.api.ws import router as ws_router
 from app.api.ws import manager as ws_manager
 from app.api.signal_consensus import router as signal_consensus_router
@@ -1638,6 +1639,10 @@ _OPENAPI_TAGS: list[dict[str, str]] = [
         "description": "横截面开盘动量前向影子观测。",
     },
     {"name": "universe", "description": "版本化动态候选池与只读观察标的。"},
+    {
+        "name": "watchlist-quant-v6",
+        "description": "Quant-v6 已持久化不可变研究证据（只读）。",
+    },
     {"name": "trade", "description": "订单、账户、事件与交易控制。"},
     {"name": "credentials", "description": "长桥凭据与多渠道通知。"},
     {"name": "llm", "description": "DeepSeek LLM 顾问区间建议。"},
@@ -1677,6 +1682,7 @@ app.include_router(strategy_experiments_router)
 app.include_router(credentials_router)
 app.include_router(trade_router)
 app.include_router(universe_router)
+app.include_router(watchlist_quant_v6_router)
 app.include_router(watchlist_router)
 app.include_router(llm_advisor_router)
 app.include_router(backtest_router)
