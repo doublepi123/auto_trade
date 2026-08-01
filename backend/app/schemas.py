@@ -2436,6 +2436,62 @@ class AuditLogStatsResponse(BaseModel):
     filters: dict[str, Any] = Field(default_factory=dict)
 
 
+class InterventionEvidenceRow(BaseModel):
+    """One normalized, persisted explicit intervention transition.
+
+    Projected only from semantically explicit pause/resume and kill-switch
+    evidence in ``trade_events`` and ``audit_logs``. This is evidence, not a
+    synthesized runtime-state history: gaps are not inferred and ambiguous
+    transitions are reported as such rather than guessed.
+
+    ``pairing_status`` is one of ``PAIRED`` / ``OPEN`` / ``UNMATCHED_CLOSE`` /
+    ``AMBIGUOUS``. ``duration_seconds`` is reported ONLY for an explicit,
+    unambiguous open→close pair under the conservative pairing rule; it is
+    ``None`` for every other status.
+    """
+
+    source: Literal["trade", "audit"]
+    source_id: int
+    timestamp: datetime
+    family: Literal["pause", "kill_switch"]
+    kind: str
+    direction: Literal["open", "close"]
+    reason: str = ""
+    action: str = ""
+    actor_hash: str | None = None
+    pairing_status: Literal["PAIRED", "OPEN", "UNMATCHED_CLOSE", "AMBIGUOUS"]
+    paired_source: Literal["trade", "audit"] | None = None
+    paired_source_id: int | None = None
+    duration_seconds: float | None = None
+
+
+class InterventionEvidenceSummary(BaseModel):
+    """Summary that distinguishes known paired duration from unknown evidence.
+
+    ``paired_duration_seconds`` sums ONLY explicit, unambiguous open→close
+    pairs. ``open_count`` / ``unmatched_close_count`` / ``ambiguous_count``
+    count evidence rows whose duration is unknown. There is deliberately no
+    synthetic total: ambiguous or open evidence must not be presented as
+    realized downtime.
+    """
+
+    total_evidence: int = Field(ge=0)
+    paired_count: int = Field(ge=0)
+    open_count: int = Field(ge=0)
+    unmatched_close_count: int = Field(ge=0)
+    ambiguous_count: int = Field(ge=0)
+    paired_duration_seconds: float = Field(ge=0)
+
+
+class InterventionEvidenceResponse(BaseModel):
+    """Read-only runtime intervention evidence timeline response."""
+
+    items: list[InterventionEvidenceRow] = Field(default_factory=list)
+    summary: InterventionEvidenceSummary
+    pairing_rule: str
+    filters: dict[str, Any] = Field(default_factory=dict)
+
+
 class ControlRequest(BaseModel):
     reason: str = Field(default="manual")
 

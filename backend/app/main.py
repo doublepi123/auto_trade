@@ -60,6 +60,7 @@ from app.api.ws import manager as ws_manager
 from app.api.signal_consensus import router as signal_consensus_router
 from app.api.universe_explainer import router as universe_explainer_router
 from app.api.risk_timeline import router as risk_timeline_router
+from app.api.intervention_evidence import router as intervention_evidence_router
 from app.api.platform_catalog import router as platform_catalog_router
 from app.api.attribution import router as attribution_router
 from app.api.regime import router as regime_router
@@ -1584,6 +1585,7 @@ app.include_router(ws_router)
 app.include_router(signal_consensus_router)
 app.include_router(universe_explainer_router)
 app.include_router(risk_timeline_router)
+app.include_router(intervention_evidence_router)
 app.include_router(platform_catalog_router)
 app.include_router(attribution_router)
 app.include_router(regime_router)
