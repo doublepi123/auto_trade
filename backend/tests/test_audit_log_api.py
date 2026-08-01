@@ -1183,3 +1183,155 @@ class TestSnapshotHelperPoolRejection:
             engine.dispose()
             if os.path.exists(db_path):
                 os.unlink(db_path)
+
+    def test_queue_pool_overflow_succeeds_with_owner_held(self) -> None:
+        # pool_size=1, max_overflow=1: holding one owner connection still
+        # leaves overflow capacity, so the snapshot succeeds immediately
+        # through overflow (not rejected as exhausted).
+        from sqlalchemy.pool import QueuePool
+
+        from app.services.snapshot_helper import open_read_snapshot
+
+        db_path = os.path.join(
+            tempfile.gettempdir(),
+            f"auto_trade_test_snapshot_overflow_{os.getpid()}.db",
+        )
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+        engine = create_engine(
+            f"sqlite:///{db_path}",
+            connect_args={"check_same_thread": False},
+            poolclass=QueuePool,
+            pool_size=1,
+            max_overflow=1,
+        )
+        try:
+            Base.metadata.create_all(engine)
+            db = Session(bind=engine)
+            db.add(AuditLog(action="OK", severity="INFO", actor_hash="a",
+                            source_ip="", request_summary="{}", result="SUCCESS"))
+            db.commit()
+            db.close()
+
+            # Hold one owner connection (fills the base slot).
+            owner_conn = engine.connect()
+            try:
+                reader = Session(bind=engine)
+
+                def _query(conn):
+                    from sqlalchemy import func, select
+
+                    return int(
+                        conn.scalar(
+                            select(func.count()).select_from(AuditLog)
+                        )
+                        or 0
+                    )
+
+                # Snapshot succeeds via overflow capacity.
+                count = open_read_snapshot(reader, _query)
+                reader.close()
+                assert count == 1
+            finally:
+                owner_conn.close()
+        finally:
+            engine.dispose()
+            if os.path.exists(db_path):
+                os.unlink(db_path)
+
+    def test_queue_pool_no_overflow_rejects_with_owner_held(self) -> None:
+        # pool_size=1, max_overflow=0: holding one owner connection exhausts
+        # the full finite capacity (base + overflow = 1 + 0 = 1), so the
+        # snapshot rejects immediately without waiting.
+        from sqlalchemy.pool import QueuePool
+
+        from app.services.snapshot_helper import (
+            SnapshotUnavailable,
+            open_read_snapshot,
+        )
+
+        db_path = os.path.join(
+            tempfile.gettempdir(),
+            f"auto_trade_test_snapshot_no_overflow_{os.getpid()}.db",
+        )
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+        engine = create_engine(
+            f"sqlite:///{db_path}",
+            connect_args={"check_same_thread": False},
+            poolclass=QueuePool,
+            pool_size=1,
+            max_overflow=0,
+        )
+        try:
+            Base.metadata.create_all(engine)
+            owner_conn = engine.connect()
+            try:
+                reader = Session(bind=engine)
+                with pytest.raises(SnapshotUnavailable) as exc_info:
+                    open_read_snapshot(reader, lambda conn: None)
+                assert "exhausted" in str(exc_info.value).lower()
+                reader.close()
+            finally:
+                owner_conn.close()
+        finally:
+            engine.dispose()
+            if os.path.exists(db_path):
+                os.unlink(db_path)
+
+    def test_queue_pool_unlimited_overflow_succeeds_with_multiple_holders(
+        self,
+    ) -> None:
+        # max_overflow=-1 (unlimited): holding multiple connections never
+        # pre-rejects for exhaustion; engine.connect() can always obtain an
+        # overflow connection.
+        from sqlalchemy.pool import QueuePool
+
+        from app.services.snapshot_helper import open_read_snapshot
+
+        db_path = os.path.join(
+            tempfile.gettempdir(),
+            f"auto_trade_test_snapshot_unlimited_{os.getpid()}.db",
+        )
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+        engine = create_engine(
+            f"sqlite:///{db_path}",
+            connect_args={"check_same_thread": False},
+            poolclass=QueuePool,
+            pool_size=1,
+            max_overflow=-1,
+        )
+        try:
+            Base.metadata.create_all(engine)
+            db = Session(bind=engine)
+            db.add(AuditLog(action="OK", severity="INFO", actor_hash="a",
+                            source_ip="", request_summary="{}", result="SUCCESS"))
+            db.commit()
+            db.close()
+
+            # Hold several connections beyond base size.
+            holders = [engine.connect() for _ in range(3)]
+            try:
+                reader = Session(bind=engine)
+
+                def _query(conn):
+                    from sqlalchemy import func, select
+
+                    return int(
+                        conn.scalar(
+                            select(func.count()).select_from(AuditLog)
+                        )
+                        or 0
+                    )
+
+                count = open_read_snapshot(reader, _query)
+                reader.close()
+                assert count == 1
+            finally:
+                for h in holders:
+                    h.close()
+        finally:
+            engine.dispose()
+            if os.path.exists(db_path):
+                os.unlink(db_path)

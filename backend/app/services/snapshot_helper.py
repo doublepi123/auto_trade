@@ -100,9 +100,17 @@ def _reject_unsafe_pool(engine: Engine) -> None:
 
     ``StaticPool`` and ``SingletonThreadPool`` are unconditionally rejected:
     they can hand the SAME underlying DBAPI connection to a second caller,
-    which would alias any active owner. An exhausted ``QueuePool`` (all slots
-    checked out) is rejected via public pool state APIs without a blocking
-    connect.
+    which would alias any active owner. An exhausted ``QueuePool`` (all finite
+    slots checked out) is rejected via public pool state APIs without a
+    blocking connect.
+
+    ``QueuePool.size()`` returns only the BASE pool size; finite total capacity
+    is base size + configured ``max_overflow``. Overflow is unlimited when
+    ``max_overflow`` is negative (SQLAlchemy convention, typically -1), in
+    which case we never pre-reject for exhaustion (``engine.connect()`` can
+    always obtain an overflow connection). If the configured max-overflow
+    cannot be determined reliably, the early exhaustion optimization is skipped
+    rather than returning a false ``SnapshotUnavailable``.
     """
     pool = engine.pool
     if isinstance(pool, (StaticPool, SingletonThreadPool)):
@@ -110,15 +118,31 @@ def _reject_unsafe_pool(engine: Engine) -> None:
             f"read snapshot requires a multi-connection pool; "
             f"{type(pool).__name__} may alias the caller connection"
         )
-    # For a QueuePool, detect exhaustion without a blocking connect. If every
-    # slot (size + overflow) is checked out, a connect would block until the
-    # pool timeout; reject up front instead.
     if isinstance(pool, QueuePool):
         try:
-            capacity = int(pool.size())
+            base_size = int(pool.size())
             checked_out = int(pool.checkedout())
-        except Exception:  # pragma: no cover - defensive for pool API changes
-            raise SnapshotUnavailable(_UNAVAILABLE_MESSAGE)
+        except Exception:
+            # Pool state APIs changed or unavailable: skip the early exhaustion
+            # optimization rather than risk a false rejection.
+            return
+        # ``_max_overflow`` is the configured max_overflow attribute on
+        # QueuePool. There is no public getter in the installed SQLAlchemy, so
+        # a narrow guarded attribute read is used. If it is missing/unreadable,
+        # skip the optimization (never a false rejection).
+        max_overflow = getattr(pool, "_max_overflow", None)
+        try:
+            max_overflow_int = int(max_overflow) if max_overflow is not None else None
+        except (TypeError, ValueError):
+            max_overflow_int = None
+        if max_overflow_int is None:
+            # Cannot determine overflow capacity: skip early rejection.
+            return
+        if max_overflow_int < 0:
+            # Unlimited overflow: engine.connect() can always obtain an
+            # overflow connection; never pre-reject for exhaustion.
+            return
+        capacity = base_size + max_overflow_int
         if checked_out >= capacity:
             raise SnapshotUnavailable(
                 "read snapshot unavailable: connection pool is exhausted"
