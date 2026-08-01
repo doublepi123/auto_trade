@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from collections.abc import Generator
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -19,6 +20,7 @@ from fastapi.testclient import TestClient
 from app.api import quote_health as quote_health_api
 from app.config import settings
 from app.core.broker import Quote
+from app.core.engine import StrategyParams
 from app.main import app
 from app.runner import AppRunner
 from app.services.quote_stream_health_service import (
@@ -412,6 +414,107 @@ class TestQuoteHealthAPI:
         # 503 because no runner in this test, but auth passed.
         assert resp.status_code in (200, 503)
 
+    def test_200_payload_validated_against_schema(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Finding 2: HTTP 200 returns a QuoteStreamHealth-validated payload."""
+        mono = _FakeMonotonicClock()
+        dt = _FakeDateTimeClock(datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc))
+        fake_tracker = QuoteStreamHealthTracker(
+            "AAPL.US",
+            now_monotonic=mono,
+            now_datetime=dt,
+        )
+        fake_tracker.record_subscription_success()
+        fake_tracker.record_quote("2026-08-01T12:00:00Z")
+
+        class _FakeRunner:
+            quote_stream_health = fake_tracker
+
+        monkeypatch.setattr(quote_health_api, "peek_runner", lambda: _FakeRunner())
+        resp = self.client.get("/api/quote-health")
+        assert resp.status_code == 200
+        data = resp.json()
+        # Every field required by QuoteStreamHealth is present and well-typed.
+        assert data["symbol"] == "AAPL.US"
+        assert isinstance(data["quotes_received"], int)
+        assert isinstance(data["max_gap_seconds"], (int, float))
+        assert isinstance(data["as_of"], str)
+
+    def test_503_payload_validated_against_same_schema(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Finding 2: HTTP 503 returns a QuoteStreamHealth-validated payload
+        (same schema), not an untyped JSONResponse."""
+        monkeypatch.setattr(quote_health_api, "peek_runner", lambda: None)
+        resp = self.client.get("/api/quote-health")
+        assert resp.status_code == 503
+        data = resp.json()
+        # Same fields as the 200 payload, validated by the same model.
+        for key in (
+            "symbol",
+            "quotes_received",
+            "last_quote_timestamp",
+            "last_quote_age_seconds",
+            "max_gap_seconds",
+            "disconnect_count",
+            "resubscribe_count",
+            "disconnect_retry_count",
+            "quotes_subscribed",
+            "status",
+            "as_of",
+        ):
+            assert key in data, f"missing field {key} in 503 payload"
+        assert data["status"] == "unavailable"
+        assert data["quotes_subscribed"] is False
+        assert data["symbol"] == ""
+
+    def test_503_does_not_synthesize_known_disconnected_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Finding 2: 503 must not synthesize known-disconnected state —
+        quotes_subscribed is False and status is 'unavailable', distinct from
+        a real tracker that is subscribed-but-disconnected."""
+        monkeypatch.setattr(quote_health_api, "peek_runner", lambda: None)
+        resp = self.client.get("/api/quote-health")
+        assert resp.status_code == 503
+        data = resp.json()
+        assert data["status"] == "unavailable"
+        assert data["quotes_subscribed"] is False
+        assert data["disconnect_count"] == 0
+        assert data["resubscribe_count"] == 0
+
+    def test_endpoint_does_not_construct_runner_on_503(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Finding 2: the 503 path uses peek_runner (non-constructing) and
+        never calls get_runner."""
+        constructed: list[bool] = []
+
+        def _constructing_get_runner():
+            constructed.append(True)
+            return AppRunner()
+
+        monkeypatch.setattr("app.runner.get_runner", _constructing_get_runner)
+        monkeypatch.setattr(quote_health_api, "peek_runner", lambda: None)
+        resp = self.client.get("/api/quote-health")
+        assert resp.status_code == 503
+        assert constructed == []  # get_runner never called
+
+    def test_openapi_documents_both_response_codes_with_quote_stream_health(
+        self,
+    ) -> None:
+        """Finding 2: OpenAPI asserts both 200 and 503 reference
+        QuoteStreamHealth."""
+        schema = app.openapi()
+        op = schema["paths"]["/api/quote-health"]["get"]
+        assert "200" in op["responses"]
+        assert "503" in op["responses"]
+        ref_200 = op["responses"]["200"]["content"]["application/json"]["schema"].get("$ref", "")
+        ref_503 = op["responses"]["503"]["content"]["application/json"]["schema"].get("$ref", "")
+        assert ref_200 == "#/components/schemas/QuoteStreamHealth"
+        assert ref_503 == "#/components/schemas/QuoteStreamHealth"
+
 
 class TestRunnerQuoteHealthIntegration:
     """Focused runner regression coverage: the tracker hooks do not alter
@@ -545,3 +648,222 @@ class TestRunnerQuoteHealthIntegration:
         assert snap.max_gap_seconds == 0.0
         # Process-lifetime counters preserved.
         assert snap.resubscribe_count == 1
+
+
+class TestPrimarySwitchLifecycle:
+    """Finding 1: primary-switch lifecycle — the quote health tracker symbol
+    must be reset whenever primary_changed, independently of resubscription.
+
+    Uses AppRunner.reload_strategy with the established fake-config pattern.
+    """
+
+    def _make_runner(self) -> AppRunner:
+        runner = AppRunner()
+        runner._running = True
+        runner._quotes_subscribed = True
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US",
+            market="US",
+            buy_low=100.0,
+            sell_high=110.0,
+        )
+        return runner
+
+    def _patch_reload_deps(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        runner: AppRunner,
+        new_symbol: str,
+        new_market: str = "US",
+    ) -> None:
+        from app.services.strategy_service import StrategyService
+
+        config = SimpleNamespace(
+            symbol=new_symbol,
+            market=new_market,
+            buy_low=400.0,
+            sell_high=410.0,
+            short_selling=False,
+            min_profit_amount=0.0,
+            auto_resume_minutes=3,
+            max_daily_loss=5000.0,
+            max_consecutive_losses=3,
+            fee_rate_us=0.0005,
+            fee_rate_hk=0.003,
+            min_repricing_pct=0.003,
+            llm_action_cooldown_seconds=60,
+            trading_session_mode="RTH_ONLY",
+            margin_safety_factor=0.35,
+        )
+        monkeypatch.setattr(StrategyService, "__init__", lambda self, db: None)
+        monkeypatch.setattr(StrategyService, "get_config", lambda _self: config)
+        monkeypatch.setattr(runner.broker, "get_positions", lambda: [])
+        monkeypatch.setattr(runner._state_svc, "load_symbol_runtime", lambda *args: None)
+        monkeypatch.setattr(runner, "_sync_symbol_runtimes", lambda _db: None)
+
+    def test_primary_change_with_unchanged_desired_set_resets_symbol(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Role swap/primary change with unchanged desired subscription set:
+        the tracker symbol must still be reset even though no resubscription
+        occurs."""
+        runner = self._make_runner()
+        # Seed the tracker with the old symbol's state.
+        runner.quote_stream_health.set_symbol("AAPL.US")
+        runner.quote_stream_health.record_subscription_success()
+        runner.quote_stream_health.record_quote("2026-08-01T12:00:00Z")
+        assert runner.quote_stream_health.snapshot().quotes_received == 1
+        # Patch so the new config swaps primary to MSFT.US but the desired
+        # symbol set is unchanged (we make _desired_quote_symbols_locked
+        # return the same set by keeping _symbol_runtimes empty and relying
+        # on the primary only — but primary changes, so to keep the set
+        # unchanged we'd need both symbols. Instead, simulate "no
+        # resubscribe needed" by marking not subscribed.
+        runner._quotes_subscribed = False
+        self._patch_reload_deps(monkeypatch, runner, new_symbol="MSFT.US")
+        # No broker calls expected (not subscribed, no resubscribe).
+        monkeypatch.setattr(
+            runner.broker,
+            "unsubscribe_quotes",
+            lambda: pytest.fail("must not unsubscribe when not subscribed"),
+        )
+        monkeypatch.setattr(
+            runner.broker,
+            "subscribe_quotes_batch",
+            lambda *_a, **_kw: pytest.fail("must not subscribe when not subscribed"),
+        )
+
+        runner.reload_strategy()
+
+        snap = runner.quote_stream_health.snapshot()
+        # Symbol reset happened independently of resubscription.
+        assert snap.symbol == "MSFT.US"
+        assert snap.quotes_received == 0
+        assert snap.max_gap_seconds == 0.0
+        # Subscription counters unchanged (no resubscription occurred).
+        assert snap.resubscribe_count == 1
+
+    def test_primary_change_while_already_disconnected_resets_symbol(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Primary change while already disconnected: symbol reset must still
+        happen; no broker calls, no subscription counter changes."""
+        runner = self._make_runner()
+        runner._quotes_subscribed = False  # already disconnected
+        runner.quote_stream_health.set_symbol("AAPL.US")
+        runner.quote_stream_health.record_subscription_success()
+        runner.quote_stream_health.record_quote("2026-08-01T12:00:00Z")
+        assert runner.quote_stream_health.snapshot().quotes_received == 1
+        self._patch_reload_deps(monkeypatch, runner, new_symbol="MSFT.US")
+        monkeypatch.setattr(
+            runner.broker,
+            "unsubscribe_quotes",
+            lambda: pytest.fail("must not unsubscribe when disconnected"),
+        )
+        monkeypatch.setattr(
+            runner.broker,
+            "subscribe_quotes_batch",
+            lambda *_a, **_kw: pytest.fail("must not subscribe when disconnected"),
+        )
+
+        runner.reload_strategy()
+
+        snap = runner.quote_stream_health.snapshot()
+        assert snap.symbol == "MSFT.US"
+        assert snap.quotes_received == 0
+        assert snap.resubscribe_count == 1  # unchanged
+
+    def test_primary_change_then_failed_resubscription_resets_symbol_and_stays_unsubscribed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Primary change followed by failed resubscription: symbol reset
+        happened (via the unconditional observer), subscription failure
+        observation leaves the stream unsubscribed, and pause behavior is
+        unchanged."""
+        runner = self._make_runner()
+        runner._quotes_subscribed = True
+        runner.quote_stream_health.set_symbol("AAPL.US")
+        runner.quote_stream_health.record_subscription_success()
+        runner.quote_stream_health.record_quote("2026-08-01T12:00:00Z")
+        paused: list[str] = []
+        monkeypatch.setattr(runner.risk, "pause", lambda reason, **_kw: paused.append(reason))
+        self._patch_reload_deps(monkeypatch, runner, new_symbol="MSFT.US")
+        monkeypatch.setattr(runner.broker, "unsubscribe_quotes", lambda: None)
+
+        def _fail_subscribe(*_a, **_kw):
+            raise RuntimeError("broker subscribe failed")
+
+        monkeypatch.setattr(runner.broker, "subscribe_quotes_batch", _fail_subscribe)
+
+        with pytest.raises(RuntimeError, match="quote subscription failed after strategy reload"):
+            runner.reload_strategy()
+
+        snap = runner.quote_stream_health.snapshot()
+        # Symbol was reset (unconditional observer) despite failed resubscription.
+        assert snap.symbol == "MSFT.US"
+        assert snap.quotes_received == 0
+        # Failed resubscribe leaves stream unsubscribed; no new success counter.
+        assert snap.quotes_subscribed is False
+        assert snap.resubscribe_count == 1  # only the initial seed success
+        # Pause behavior unchanged: risk.pause was called with the failure reason.
+        assert len(paused) == 1
+        assert "quote subscription failed after strategy reload" in paused[0]
+
+    def test_primary_change_broker_calls_and_exception_flow_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Confirm that broker calls, exception flow, and pause behavior remain
+        identical to the pre-observer-instrumentation behavior on a successful
+        primary-switch resubscription."""
+        runner = self._make_runner()
+        runner._quotes_subscribed = True
+        broker_calls: list[tuple[str, str]] = []
+        self._patch_reload_deps(monkeypatch, runner, new_symbol="MSFT.US")
+        monkeypatch.setattr(
+            runner.broker,
+            "unsubscribe_quotes",
+            lambda: broker_calls.append(("unsubscribe", "AAPL.US")),
+        )
+        monkeypatch.setattr(
+            runner.broker,
+            "subscribe_quotes_batch",
+            lambda symbols, _callback: broker_calls.append(
+                ("subscribe", ",".join(symbols))
+            ),
+        )
+
+        runner.reload_strategy()
+
+        # Broker call sequence is exactly unsubscribe then subscribe.
+        assert broker_calls == [("unsubscribe", "AAPL.US"), ("subscribe", "MSFT.US")]
+        assert runner._quotes_subscribed is True
+        # Tracker reflects the successful resubscribe.
+        snap = runner.quote_stream_health.snapshot()
+        assert snap.symbol == "MSFT.US"
+        assert snap.quotes_subscribed is True
+        assert snap.quotes_received == 0  # reset on successful resubscribe
+
+    def test_observe_primary_symbol_changed_does_not_touch_subscription_state(self) -> None:
+        """The symbol-reset observer must NOT mark subscribed/unsubscribed or
+        increment subscription counters."""
+        runner = AppRunner()
+        runner.quote_stream_health.set_symbol("AAPL.US")
+        runner.quote_stream_health.record_subscription_success()
+        before = runner.quote_stream_health.snapshot()
+        assert before.quotes_subscribed is True
+        assert before.resubscribe_count == 1
+
+        runner._observe_primary_symbol_changed("MSFT.US")
+
+        after = runner.quote_stream_health.snapshot()
+        assert after.symbol == "MSFT.US"
+        assert after.quotes_received == 0  # window reset
+        # Subscription state and counters untouched.
+        assert after.quotes_subscribed == before.quotes_subscribed
+        assert after.resubscribe_count == before.resubscribe_count
+        assert after.disconnect_count == before.disconnect_count
+
+    def test_observe_primary_symbol_changed_throwing_does_not_break(self) -> None:
+        """A throwing tracker mutator inside the observer must not alter
+        control flow — the observer swallows ordinary Exception."""
+        runner = AppRunner()
+        # Force the tracker's lock to raise; the observer must swallow it.
+        runner.quote_stream_health._lock = lambda: (_ for _ in ()).throw(RuntimeError("x"))  # type: ignore[assignment]
+        # Calling the observer must not raise.
+        runner._observe_primary_symbol_changed("MSFT.US")

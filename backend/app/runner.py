@@ -1183,6 +1183,21 @@ class AppRunner:
         except Exception:
             logger.debug("quote-health subscription observation failed", exc_info=True)
 
+    def _observe_primary_symbol_changed(self, symbol: str) -> None:
+        """Narrow no-throw observer for a primary-symbol change.
+
+        Resets symbol-bound/current-window quote state through the existing
+        no-throw observer boundary. Must NOT itself mark the stream
+        subscribed/unsubscribed, increment subscription counters, invoke broker
+        methods, change pause/recovery behavior, or alter existing
+        resubscription decisions — subscription success/failure observation
+        remains solely responsible for subscribed state and counters.
+        """
+        try:
+            self.quote_stream_health.set_symbol(symbol)
+        except Exception:
+            logger.debug("quote-health primary-symbol observation failed", exc_info=True)
+
     def _desired_quote_symbols_locked(self) -> list[str]:
         primary_symbol = self.engine.params.symbol
         symbols: list[str] = []
@@ -1812,6 +1827,16 @@ class AppRunner:
                         need_resubscribe = True
                         self._quotes_subscribed = False
 
+            # Observer-only: reset symbol-bound/current-window quote state
+            # whenever the primary symbol changed, independently of whether a
+            # resubscription is needed, the desired symbol set is unchanged,
+            # the broker is already disconnected, or a resubscription later
+            # succeeds/fails. This does NOT mark the stream subscribed/
+            # unsubscribed, increment counters, invoke broker methods, or alter
+            # pause/recovery or resubscription decisions.
+            if primary_changed:
+                self._observe_primary_symbol_changed(new_params.symbol or "")
+
             if need_resubscribe:
                 try:
                     self.broker.unsubscribe_quotes()
@@ -1823,11 +1848,7 @@ class AppRunner:
                         with self._state_lock:
                             self._quotes_subscribed = True
                             self._last_push_quote_at = time.monotonic()
-                        # Observer-only: primary-symbol change updates the
-                        # tracker symbol (resetting symbol-bound state) and
-                        # records the successful resubscribe.
-                        if primary_changed:
-                            self.quote_stream_health.set_symbol(new_params.symbol or "")
+                        # Observer-only: record the successful resubscribe.
                         self._observe_quote_subscription(True)
                         logger.info(
                             "re-subscribed to quote streams after strategy reload: %s",

@@ -9,16 +9,17 @@ threshold.
 
 This endpoint never constructs an ``AppRunner``/``BrokerGateway`` or contacts
 the broker. It uses :func:`app.runner.peek_runner` (non-constructing) to look
-up the current runner's bound tracker. If no runner/tracker exists, it returns
-an explicit ``unavailable`` response with HTTP 503 — it never synthesizes an
-all-zero disconnected tracker.
+up the current runner's bound tracker. When no runner/tracker exists it
+returns a ``QuoteStreamHealth`` payload (validated by the same schema) with
+HTTP 503 and ``status="unavailable"`` — it never synthesizes known-disconnected
+state.
+
+Both HTTP 200 and 503 are validated by the ``QuoteStreamHealth`` response model
+and documented in the OpenAPI ``responses`` block.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
-
-from fastapi import APIRouter, Depends
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, Depends, Response
 
 from app.api.auth import require_api_key
 from app.runner import peek_runner
@@ -52,33 +53,58 @@ def _peek_quote_stream_health_tracker() -> QuoteStreamHealthTracker | None:
     return None
 
 
-@router.get("/quote-health", response_model=None)
-def get_quote_health() -> JSONResponse | QuoteStreamHealth:
+def _unavailable_payload() -> QuoteStreamHealth:
+    """Build the typed unavailable payload (no runner/tracker).
+
+    Returned with HTTP 503 so callers can distinguish "no runtime yet" from a
+    known disconnected stream. Never synthesizes known-disconnected state —
+    ``quotes_subscribed`` is ``False`` and ``status`` is ``"unavailable"``.
+    """
+    from datetime import datetime, timezone
+
+    return QuoteStreamHealth(
+        symbol="",
+        quotes_received=0,
+        last_quote_timestamp=None,
+        last_quote_age_seconds=None,
+        max_gap_seconds=0.0,
+        disconnect_count=0,
+        resubscribe_count=0,
+        disconnect_retry_count=0,
+        quotes_subscribed=False,
+        status="unavailable",
+        as_of=datetime.now(timezone.utc),
+    )
+
+
+@router.get(
+    "/quote-health",
+    response_model=QuoteStreamHealth,
+    responses={
+        503: {
+            "description": (
+                "No runner/quote-stream health tracker is available yet. The "
+                "body is still a validated QuoteStreamHealth with "
+                "status='unavailable'."
+            ),
+            "model": QuoteStreamHealth,
+        },
+    },
+)
+def get_quote_health(response: Response) -> QuoteStreamHealth:
     """Read-only process-local quote stream health snapshot (authenticated).
 
-    Returns HTTP 503 with an ``unavailable`` status when no runner/tracker
-    exists, so callers can distinguish "no runtime yet" from a known
-    disconnected stream. Never instantiates ``AppRunner``/``BrokerGateway``
-    or contacts the broker.
+    Returns HTTP 200 with the current tracker snapshot when a runner/tracker
+    exists. Returns HTTP 503 with a validated ``QuoteStreamHealth`` payload
+    (``status="unavailable"``) when no runner/tracker exists, so callers can
+    distinguish "no runtime yet" from a known disconnected stream. Never
+    instantiates ``AppRunner``/``BrokerGateway`` or contacts the broker.
     """
     tracker = _peek_quote_stream_health_tracker()
     if tracker is None:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "symbol": "",
-                "quotes_received": 0,
-                "last_quote_timestamp": None,
-                "last_quote_age_seconds": None,
-                "max_gap_seconds": 0.0,
-                "disconnect_count": 0,
-                "resubscribe_count": 0,
-                "disconnect_retry_count": 0,
-                "quotes_subscribed": False,
-                "status": "unavailable",
-                "as_of": datetime.now(timezone.utc).isoformat(),
-            },
-        )
+        # Typed payload validated by the same response_model; status 503.
+        response.status_code = 503
+        return _unavailable_payload()
     snap = tracker.snapshot()
     return QuoteStreamHealth(
         symbol=snap.symbol,
