@@ -99,25 +99,37 @@ class LLMUsageService:
         raw/parsed response, errors, order ids or context. Deterministic
         ordering: total tokens desc, interactions desc, then symbol/market
         asc. ``total_groups`` is the distinct group count before ``limit``.
+
+        A single ``COALESCE(SUM(total_tokens), 0)`` expression is reused in
+        both the projection and the ordering, so all-NULL and explicit-zero
+        token groups are ordered by the documented secondary keys (interactions
+        desc, then symbol/market asc) rather than by NULL sort quirks. Blank
+        symbols are normalized with SQL ``TRIM`` before ``NULLIF`` so
+        whitespace-only symbols also map to ``UNSPECIFIED``.
         """
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        # Project blank symbols to the UNSPECIFIED sentinel at the SQL layer so
-        # grouping is deterministic and the sentinel survives ordering.
+        # TRIM (with whitespace chars) before NULLIF so whitespace-only symbols
+        # (spaces, tabs, etc.) also map to UNSPECIFIED.
         symbol_expr = func.coalesce(
-            func.nullif(LLMInteraction.symbol, ""),
+            func.nullif(func.trim(LLMInteraction.symbol, " \t\r\n"), ""),
             UNSPECIFIED_SYMBOL,
         )
+        # Single total-tokens expression reused in projection AND ordering so
+        # all-NULL and explicit-zero groups sort identically by the secondary
+        # keys (interactions desc, then symbol/market asc).
+        total_tokens_expr = func.coalesce(func.sum(LLMInteraction.total_tokens), 0)
+        interactions_expr = func.count(LLMInteraction.id)
         base = self.db.query(
             symbol_expr.label("symbol"),
             LLMInteraction.market,
-            func.count(LLMInteraction.id).label("interactions"),
+            interactions_expr.label("interactions"),
             func.coalesce(
                 func.sum(case((LLMInteraction.success.is_(True), 1), else_=0)),
                 0,
             ).label("successful_interactions"),
             func.coalesce(func.sum(LLMInteraction.prompt_tokens), 0).label("prompt_tokens"),
             func.coalesce(func.sum(LLMInteraction.completion_tokens), 0).label("completion_tokens"),
-            func.coalesce(func.sum(LLMInteraction.total_tokens), 0).label("total_tokens"),
+            total_tokens_expr.label("total_tokens"),
             func.max(LLMInteraction.created_at).label("latest_interaction_at"),
         ).filter(LLMInteraction.created_at >= cutoff)
 
@@ -127,8 +139,8 @@ class LLMUsageService:
         rows = (
             base.group_by(symbol_expr, LLMInteraction.market)
             .order_by(
-                func.sum(LLMInteraction.total_tokens).desc(),
-                func.count(LLMInteraction.id).desc(),
+                total_tokens_expr.desc(),
+                interactions_expr.desc(),
                 symbol_expr.asc(),
                 LLMInteraction.market.asc(),
             )
@@ -139,6 +151,7 @@ class LLMUsageService:
         for row in rows:
             interactions = int(row.interactions)
             successful = int(row.successful_interactions)
+            # success_rate is a fraction in [0, 1].
             success_rate = (successful / interactions) if interactions else 0.0
             items.append(
                 LLMUsageBySymbol(

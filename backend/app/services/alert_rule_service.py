@@ -1,9 +1,10 @@
 """Conditional alert rules — user-defined thresholds evaluated by a cron.
 
-Broker/notifier-agnostic: ``evaluate`` reads live quotes (price rules) and the
-active ``RuntimeState.daily_pnl`` (daily_loss rules) via an injected runner and
-dispatches through its notifier, respecting a per-rule cooldown. Never touches
-the live order path — it only reads and notifies.
+Broker/notifier-agnostic: ``evaluate`` reads live quotes (price rules) and
+the active ``RuntimeState`` (daily_loss / consecutive_losses /
+kill_switch_engaged rules) via an injected runner and dispatches through its
+notifier, respecting a per-rule cooldown. Never touches the live order path
+— it only reads and notifies.
 """
 from __future__ import annotations
 
@@ -14,7 +15,7 @@ from typing import Any, Protocol
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models import AlertFiring, AlertRule, RuntimeState
+from app.models import AlertFiring, AlertRule, RuntimeState, StrategyConfig
 from app.schemas import (
     AlertEvaluateResult,
     AlertRuleCreate,
@@ -25,9 +26,13 @@ from app.schemas import (
 logger = logging.getLogger(__name__)
 
 PRICE_RULES = {"price_above", "price_below"}
-# Rule types that read ``RuntimeState`` instead of live broker quotes. They
-# never trigger a quote fetch — the cron can evaluate them without a broker.
-STATE_RULES = {"daily_loss", "consecutive_losses", "kill_switch_engaged"}
+# Account-wide-only rule types that read the authoritative account state
+# (latest StrategyConfig symbol -> that symbol's RuntimeState, falling back to
+# the legacy ``symbol == ""`` row). They never bind to a secondary symbol's
+# row and never trigger a broker quote fetch.
+ACCOUNT_RULES = {"consecutive_losses", "kill_switch_engaged"}
+# All rule types that read ``RuntimeState`` instead of live broker quotes.
+STATE_RULES = {"daily_loss"} | ACCOUNT_RULES
 
 
 class _NotifierLike(Protocol):
@@ -272,12 +277,22 @@ class AlertRuleService:
     def _current_value(self, rule: AlertRule, quote_map: dict[str, float]) -> float | None:
         if rule.rule_type in PRICE_RULES:
             return quote_map.get(rule.symbol)
-        if rule.rule_type in STATE_RULES:
-            state = self._runtime_state_for_rule(rule)
+        if rule.rule_type == "daily_loss":
+            # daily_loss keeps its pre-c566e76 contract: read the RuntimeState
+            # row matching rule.symbol; a blank symbol with no blank row falls
+            # back to the latest row by id. Symbol-specific missing state must
+            # NOT fall back to an unrelated symbol's row.
+            state = self._daily_loss_state(rule)
+            return float(state.daily_pnl) if state is not None else None
+        if rule.rule_type in ACCOUNT_RULES:
+            # Account-wide-only: resolve the authoritative account state from
+            # the latest StrategyConfig symbol, never a secondary symbol's row.
+            # A manually-persisted legacy rule with a non-empty symbol is
+            # still resolved from the authoritative account state (the symbol
+            # is ignored for evaluation), never that secondary symbol's row.
+            state = self._account_runtime_state()
             if state is None:
                 return None
-            if rule.rule_type == "daily_loss":
-                return float(state.daily_pnl)
             if rule.rule_type == "consecutive_losses":
                 return float(state.consecutive_losses)
             if rule.rule_type == "kill_switch_engaged":
@@ -287,19 +302,58 @@ class AlertRuleService:
                 return 1.0 if state.kill_switch else 0.0
         return None
 
-    def _runtime_state_for_rule(self, rule: AlertRule) -> RuntimeState | None:
-        """Resolve the ``RuntimeState`` row a state-backed rule reads from.
+    def _daily_loss_state(self, rule: AlertRule) -> RuntimeState | None:
+        """Resolve the ``RuntimeState`` row a daily_loss rule reads from.
 
-        Symbol-specific rules read only that symbol's row — a missing row
-        returns ``None`` (data unavailable) rather than falling back to an
-        unrelated symbol's state. Symbol-empty (account-wide) rules use the
-        most recently updated row regardless of symbol.
+        Preserves the exact pre-c566e76 contract: query RuntimeState matching
+        ``rule.symbol`` (ordered by id desc); when ``rule.symbol`` is blank
+        and no blank row exists, fall back to the latest row by id regardless
+        of symbol. A symbol-specific rule with no matching state row returns
+        ``None`` (data unavailable) — it never falls back to an unrelated
+        symbol's row.
         """
-        if rule.symbol:
-            return self._db.scalar(
-                select(RuntimeState).where(RuntimeState.symbol == rule.symbol)
+        state = self._db.scalar(
+            select(RuntimeState)
+            .where(RuntimeState.symbol == rule.symbol)
+            .order_by(RuntimeState.id.desc())
+        )
+        if state is None and not rule.symbol:
+            state = self._db.scalar(select(RuntimeState).order_by(RuntimeState.id.desc()))
+        return state
+
+    def _account_runtime_state(self) -> RuntimeState | None:
+        """Resolve the authoritative account ``RuntimeState`` (read-only).
+
+        Mirrors the read-only portion of
+        ``StrategyService.get_primary_runtime_state`` without any of its
+        mutations (no row creation, no legacy-row symbol reassignment):
+
+        1. Query the latest ``StrategyConfig`` (by id desc) and normalize its
+           ``symbol``.
+        2. If a primary symbol is configured, read that symbol's
+           ``RuntimeState`` row.
+        3. If no primary-symbol row is available, fall back to the legacy
+           ``RuntimeState`` row with ``symbol == ""``.
+        4. If neither exists, return ``None`` (no data) — never fall back to
+           an arbitrary secondary symbol's row.
+        """
+        config = self._db.scalar(select(StrategyConfig).order_by(StrategyConfig.id.desc()))
+        primary_symbol = (config.symbol or "").strip().upper() if config is not None else ""
+        if primary_symbol:
+            named = self._db.scalar(
+                select(RuntimeState).where(RuntimeState.symbol == primary_symbol)
             )
-        return self._db.scalar(select(RuntimeState).order_by(RuntimeState.id.desc()))
+            if named is not None:
+                return named
+            # No primary-symbol row — fall back to the legacy empty-symbol row.
+            legacy = self._db.scalar(
+                select(RuntimeState).where(RuntimeState.symbol == "")
+            )
+            if legacy is not None:
+                return legacy
+            return None
+        # No primary symbol configured: use the legacy empty-symbol row only.
+        return self._db.scalar(select(RuntimeState).where(RuntimeState.symbol == ""))
 
     @staticmethod
     def _to_out(rule: AlertRule) -> AlertRuleOut:
@@ -327,16 +381,18 @@ def _check(rule: AlertRule, value: float) -> tuple[bool, str]:
         return triggered, f"{rule.symbol} 日内盈亏 {value:.2f} ≤ 阈值 {rule.threshold:.2f}"
     if rule.rule_type == "consecutive_losses":
         # threshold is validated as a positive integer at the schema layer;
-        # compare as ints to avoid float drift on a count.
+        # compare as ints to avoid float drift on a count. Account-wide rule —
+        # the message is branded with the rule name, not a per-rule symbol.
         triggered = int(value) >= int(rule.threshold)
-        return triggered, f"{rule.symbol} 连续亏损 {int(value)} ≥ 阈值 {int(rule.threshold)}"
+        return triggered, f"账户连续亏损 {int(value)} ≥ 阈值 {int(rule.threshold)}"
     if rule.rule_type == "kill_switch_engaged":
         # threshold is forced to 1.0 at the schema layer; value is 1.0 when
         # the kill switch is engaged and 0.0 otherwise. Notification-only —
-        # evaluation never mutates RiskController or RuntimeState.
+        # evaluation never mutates RiskController or RuntimeState. Account-wide
+        # rule — branded with the rule name, not a per-rule symbol.
         triggered = value >= rule.threshold
         status = "已触发" if triggered else "未触发"
-        return triggered, f"{rule.symbol} 熔断开关 {status}"
+        return triggered, f"账户熔断开关 {status}"
     return False, ""
 
 

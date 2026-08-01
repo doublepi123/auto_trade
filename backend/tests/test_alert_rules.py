@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.main import app
-from app.models import AlertFiring, AlertRule, Base, RuntimeState
+from app.models import AlertFiring, AlertRule, Base, RuntimeState, StrategyConfig
 from app.schemas import AlertRuleCreate
 from app.services.alert_rule_service import AlertRuleService
 
@@ -176,128 +176,184 @@ class TestAlertRuleService(_Base):
         assert notifier.calls == []
 
 
-class TestConsecutiveLossesRule(_Base):
-    """consecutive_losses rule: fires when RuntimeState.consecutive_losses
-    >= threshold. No broker quote fetch; symbol isolation; cooldown; no-state."""
+class _AccountRuleMixin:
+    """Shared helpers for account-wide-only rule tests (consecutive_losses,
+    kill_switch_engaged). The authoritative account state is resolved from the
+    latest StrategyConfig symbol -> that symbol's RuntimeState, falling back
+    to the legacy ``symbol == ""`` row."""
 
-    def _make_rule(self, **kw) -> int:
-        svc = AlertRuleService(self._db())
+    # Subclasses set this to the rule type under test.
+    rule_type: str = ""
+
+    def _make_rule(self, base: _Base, **kw) -> int:
+        svc = AlertRuleService(base._db())
         out = svc.create(AlertRuleCreate(
-            name=kw.get("name", "streak"),
-            symbol=kw.get("symbol", "AAPL.US"),
-            rule_type="consecutive_losses",
-            threshold=kw.get("threshold", 3),
-            severity="WARNING",
+            name=kw.get("name", "acct"),
+            symbol="",  # account-wide-only
+            rule_type=kw.get("rule_type", self.rule_type),  # type: ignore[arg-type]
+            threshold=kw.get("threshold", 3 if self.rule_type == "consecutive_losses" else 1.0),
+            severity=kw.get("severity", "WARNING"),
             enabled=True,
             cooldown_seconds=kw.get("cooldown_seconds", 300),
         ))
         return out.id
 
-    def test_fires_when_consecutive_losses_at_threshold(self) -> None:
-        db = self._db()
-        db.add(RuntimeState(symbol="AAPL.US", consecutive_losses=3))
+    def _seed_primary(self, base: _Base, symbol: str, **state) -> int:
+        """Seed a StrategyConfig (primary symbol) + its RuntimeState row."""
+        db = base._db()
+        db.add(StrategyConfig(symbol=symbol, market="US"))
+        db.commit()
+        cfg = db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
+        assert cfg is not None
+        config_id = cfg.id
+        db.add(RuntimeState(symbol=symbol, **state))
         db.commit()
         db.close()
-        rid = self._make_rule(symbol="AAPL.US", threshold=3)
+        return config_id
+
+
+class TestConsecutiveLossesRule(_AccountRuleMixin, _Base):
+    """consecutive_losses rule: account-wide-only, fires when the authoritative
+    account RuntimeState.consecutive_losses >= threshold. No broker quote fetch;
+    cooldown; no-state. Reads the latest StrategyConfig symbol's state, falling
+    back to the legacy empty-symbol row — never an arbitrary secondary row."""
+
+    rule_type = "consecutive_losses"
+
+    def test_fires_when_account_consecutive_losses_at_threshold(self) -> None:
+        self._seed_primary(self, "AAPL.US", consecutive_losses=3)
+        rid = self._make_rule(self, threshold=3)
         notifier = FakeNotifier()
         result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
         assert result.fired == 1
         assert len(notifier.calls) == 1
-        # firing recorded with the count as trigger_value
         rows = AlertRuleService(self._db()).history(rid)
         assert len(rows) == 1
         assert rows[0].trigger_value == 3.0
         assert rows[0].threshold == 3.0
         assert "连续亏损" in rows[0].message
 
-    def test_fires_when_consecutive_losses_exceeds_threshold(self) -> None:
-        db = self._db()
-        db.add(RuntimeState(symbol="AAPL.US", consecutive_losses=5))
-        db.commit()
-        db.close()
-        self._make_rule(symbol="AAPL.US", threshold=3)
+    def test_fires_when_account_consecutive_losses_exceeds_threshold(self) -> None:
+        self._seed_primary(self, "AAPL.US", consecutive_losses=5)
+        self._make_rule(self, threshold=3)
         notifier = FakeNotifier()
         result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
         assert result.fired == 1
 
     def test_does_not_fire_below_threshold(self) -> None:
+        self._seed_primary(self, "AAPL.US", consecutive_losses=2)
+        self._make_rule(self, threshold=3)
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
+        assert result.fired == 0
+        assert notifier.calls == []
+
+    def test_uses_primary_symbol_state_not_newer_secondary(self) -> None:
+        # Older-ID primary row has high consecutive_losses; a newer, more
+        # recently updated secondary row is clear. Account rule must use the
+        # primary (authoritative) state, not the most-recently-updated row.
         db = self._db()
-        db.add(RuntimeState(symbol="AAPL.US", consecutive_losses=2))
+        db.add(StrategyConfig(symbol="AAPL.US", market="US"))
+        db.commit()
+        # Primary row (older id) with high streak.
+        db.add(RuntimeState(symbol="AAPL.US", consecutive_losses=5))
+        db.commit()
+        # Secondary row (newer id, more recently updated) clear.
+        db.add(RuntimeState(symbol="TSLA.US", consecutive_losses=0))
+        db.commit()
+        # Touch the secondary row's updated_at so it is "most recently updated".
+        tsla = db.query(RuntimeState).filter(RuntimeState.symbol == "TSLA.US").first()
+        assert tsla is not None
+        ts = db.get(RuntimeState, tsla.id)
+        assert ts is not None
+        ts.updated_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
         db.commit()
         db.close()
-        self._make_rule(symbol="AAPL.US", threshold=3)
+        self._make_rule(self, threshold=3)
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
+        assert result.fired == 1  # primary streak=5, not secondary streak=0
+
+    def test_falls_back_to_legacy_empty_row_when_no_primary_symbol_row(self) -> None:
+        # Primary symbol configured, but no RuntimeState row for it; a legacy
+        # empty-symbol row exists with high streak. Must fall back to legacy.
+        db = self._db()
+        db.add(StrategyConfig(symbol="AAPL.US", market="US"))
+        db.commit()
+        db.add(RuntimeState(symbol="", consecutive_losses=4))
+        db.commit()
+        db.close()
+        self._make_rule(self, threshold=3)
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
+        assert result.fired == 1
+
+    def test_no_primary_and_no_legacy_row_does_not_fire(self) -> None:
+        # No StrategyConfig, no RuntimeState at all -> no data, never fires.
+        self._make_rule(self, threshold=3)
         notifier = FakeNotifier()
         result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
         assert result.fired == 0
         assert notifier.calls == []
 
-    def test_no_state_row_does_not_fire(self) -> None:
-        # Symbol-specific rule with no matching RuntimeState row -> data
-        # unavailable, never fires (no fallback to an unrelated row).
-        self._make_rule(symbol="AAPL.US", threshold=3)
-        notifier = FakeNotifier()
-        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
-        assert result.fired == 0
-        assert notifier.calls == []
-
-    def test_symbol_isolation_does_not_use_unrelated_state(self) -> None:
-        # AAPL rule, only TSLA has a state row with a high streak. Must NOT
-        # fall back to TSLA's streak and fire an AAPL-branded alert.
+    def test_no_primary_symbol_uses_legacy_empty_row_only(self) -> None:
+        # No StrategyConfig configured; only named rows exist (no empty row).
+        # Must NOT fall back to an arbitrary named row.
         db = self._db()
         db.add(RuntimeState(symbol="TSLA.US", consecutive_losses=10))
         db.commit()
         db.close()
-        self._make_rule(symbol="AAPL.US", threshold=3)
+        self._make_rule(self, threshold=3)
         notifier = FakeNotifier()
         result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
         assert result.fired == 0
         assert notifier.calls == []
 
-    def test_account_wide_uses_most_recent_state(self) -> None:
-        # Symbol-empty rule uses the most recently updated RuntimeState row.
+    def test_legacy_persisted_rule_with_symbol_uses_account_state(self) -> None:
+        # A manually-persisted legacy rule with a non-empty symbol (created
+        # before the account-wide-only validation) must still use the
+        # authoritative account state, never that secondary symbol's row.
         db = self._db()
-        db.add(RuntimeState(symbol="AAPL.US", consecutive_losses=1))
-        db.add(RuntimeState(symbol="TSLA.US", consecutive_losses=4))
+        db.add(StrategyConfig(symbol="AAPL.US", market="US"))
+        db.commit()
+        db.add(RuntimeState(symbol="AAPL.US", consecutive_losses=5))
+        # Secondary row the legacy rule's symbol points at — must be ignored.
+        db.add(RuntimeState(symbol="TSLA.US", consecutive_losses=0))
         db.commit()
         db.close()
-        svc = AlertRuleService(self._db())
-        svc.create(AlertRuleCreate(
-            name="acct streak", symbol="", rule_type="consecutive_losses", threshold=3,
+        # Bypass schema validation to simulate a legacy-persisted rule.
+        db = self._db()
+        db.add(AlertRule(
+            name="legacy streak", symbol="TSLA.US", rule_type="consecutive_losses",
+            threshold=3, severity="WARNING", enabled=True, cooldown_seconds=300,
         ))
+        db.commit()
+        db.close()
         notifier = FakeNotifier()
-        result = svc.evaluate(FakeRunner(None, notifier))
-        assert result.fired == 1
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
+        assert result.fired == 1  # uses primary AAPL streak=5, not TSLA streak=0
 
     def test_cooldown_skips_second_fire(self) -> None:
-        db = self._db()
-        db.add(RuntimeState(symbol="AAPL.US", consecutive_losses=5))
-        db.commit()
-        db.close()
-        self._make_rule(symbol="AAPL.US", threshold=3, cooldown_seconds=300)
+        self._seed_primary(self, "AAPL.US", consecutive_losses=5)
+        self._make_rule(self, threshold=3, cooldown_seconds=300)
         now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
         notifier = FakeNotifier()
         svc = AlertRuleService(self._db())
         r1 = svc.evaluate(FakeRunner(None, notifier), now=now)
         assert r1.fired == 1
-        # within cooldown
         r2 = svc.evaluate(FakeRunner(None, notifier), now=now + timedelta(minutes=1))
         assert r2.fired == 0
         assert r2.skipped_cooldown == 1
-        # past cooldown
         r3 = svc.evaluate(FakeRunner(None, notifier), now=now + timedelta(minutes=6))
         assert r3.fired == 1
 
     def test_no_broker_quote_fetch_for_state_rule(self) -> None:
-        # A broker that raises if touched proves state rules never fetch quotes.
         class ExplodingBroker:
             def get_quotes(self, symbols: list[str]) -> list[FakeQuote]:
                 raise AssertionError("consecutive_losses must not fetch quotes")
 
-        db = self._db()
-        db.add(RuntimeState(symbol="AAPL.US", consecutive_losses=5))
-        db.commit()
-        db.close()
-        self._make_rule(symbol="AAPL.US", threshold=3)
+        self._seed_primary(self, "AAPL.US", consecutive_losses=5)
+        self._make_rule(self, threshold=3)
         notifier = FakeNotifier()
         result = AlertRuleService(self._db()).evaluate(FakeRunner(ExplodingBroker(), notifier))
         assert result.fired == 1
@@ -306,33 +362,48 @@ class TestConsecutiveLossesRule(_Base):
 class TestConsecutiveLossesValidation(_Base):
     def test_threshold_must_be_positive(self) -> None:
         resp = self.client.post("/api/alert-rules", json={
-            "name": "streak", "symbol": "AAPL.US", "rule_type": "consecutive_losses",
+            "name": "streak", "symbol": "", "rule_type": "consecutive_losses",
             "threshold": 0,
         })
         assert resp.status_code == 422
 
     def test_threshold_must_be_integer_like(self) -> None:
         resp = self.client.post("/api/alert-rules", json={
-            "name": "streak", "symbol": "AAPL.US", "rule_type": "consecutive_losses",
+            "name": "streak", "symbol": "", "rule_type": "consecutive_losses",
             "threshold": 2.5,
         })
         assert resp.status_code == 422
 
     def test_negative_threshold_rejected(self) -> None:
         resp = self.client.post("/api/alert-rules", json={
-            "name": "streak", "symbol": "AAPL.US", "rule_type": "consecutive_losses",
+            "name": "streak", "symbol": "", "rule_type": "consecutive_losses",
             "threshold": -1,
+        })
+        assert resp.status_code == 422
+
+    def test_non_empty_symbol_rejected(self) -> None:
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "streak", "symbol": "AAPL.US", "rule_type": "consecutive_losses",
+            "threshold": 3,
+        })
+        assert resp.status_code == 422
+
+    def test_whitespace_symbol_rejected(self) -> None:
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "streak", "symbol": "  ", "rule_type": "consecutive_losses",
+            "threshold": 3,
         })
         assert resp.status_code == 422
 
     def test_valid_positive_integer_threshold_accepted(self) -> None:
         resp = self.client.post("/api/alert-rules", json={
-            "name": "streak", "symbol": "AAPL.US", "rule_type": "consecutive_losses",
+            "name": "streak", "symbol": "", "rule_type": "consecutive_losses",
             "threshold": 3, "severity": "WARNING", "enabled": True, "cooldown_seconds": 300,
         })
         assert resp.status_code == 200, resp.text
         assert resp.json()["rule_type"] == "consecutive_losses"
         assert resp.json()["threshold"] == 3.0
+        assert resp.json()["symbol"] == ""
 
     def test_existing_rule_types_still_validated(self) -> None:
         # Backward compatibility: a bogus rule type is still rejected.
@@ -347,31 +418,17 @@ class TestConsecutiveLossesValidation(_Base):
         assert resp.status_code == 200, resp.text
 
 
-class TestKillSwitchRule(_Base):
-    """kill_switch_engaged rule: notification-only, fires when
-    RuntimeState.kill_switch is true. Reuses the same symbol/account-wide
-    state lookup as consecutive_losses. Never mutates RiskController or
-    RuntimeState."""
+class TestKillSwitchRule(_AccountRuleMixin, _Base):
+    """kill_switch_engaged rule: account-wide-only, notification-only, fires
+    when the authoritative account RuntimeState.kill_switch is true. Reuses
+    the same authoritative account state resolver as consecutive_losses.
+    Never mutates RiskController or RuntimeState."""
 
-    def _make_rule(self, **kw) -> int:
-        svc = AlertRuleService(self._db())
-        out = svc.create(AlertRuleCreate(
-            name=kw.get("name", "kill"),
-            symbol=kw.get("symbol", "AAPL.US"),
-            rule_type="kill_switch_engaged",
-            threshold=kw.get("threshold", 1.0),
-            severity="CRITICAL",
-            enabled=True,
-            cooldown_seconds=kw.get("cooldown_seconds", 300),
-        ))
-        return out.id
+    rule_type = "kill_switch_engaged"
 
-    def test_fires_when_kill_switch_true(self) -> None:
-        db = self._db()
-        db.add(RuntimeState(symbol="AAPL.US", kill_switch=True))
-        db.commit()
-        db.close()
-        rid = self._make_rule(symbol="AAPL.US")
+    def test_fires_when_account_kill_switch_true(self) -> None:
+        self._seed_primary(self, "AAPL.US", kill_switch=True)
+        rid = self._make_rule(self, threshold=1.0, severity="CRITICAL")
         notifier = FakeNotifier()
         result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
         assert result.fired == 1
@@ -382,56 +439,89 @@ class TestKillSwitchRule(_Base):
         assert rows[0].threshold == 1.0
         assert "熔断开关" in rows[0].message
 
-    def test_does_not_fire_when_kill_switch_false(self) -> None:
-        db = self._db()
-        db.add(RuntimeState(symbol="AAPL.US", kill_switch=False))
-        db.commit()
-        db.close()
-        self._make_rule(symbol="AAPL.US")
+    def test_does_not_fire_when_account_kill_switch_false(self) -> None:
+        self._seed_primary(self, "AAPL.US", kill_switch=False)
+        self._make_rule(self, threshold=1.0)
         notifier = FakeNotifier()
         result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
         assert result.fired == 0
         assert notifier.calls == []
 
-    def test_no_state_row_does_not_fire(self) -> None:
-        self._make_rule(symbol="AAPL.US")
-        notifier = FakeNotifier()
-        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
-        assert result.fired == 0
-        assert notifier.calls == []
-
-    def test_symbol_isolation_does_not_use_unrelated_state(self) -> None:
-        # AAPL rule, only TSLA has kill_switch=true. Must NOT fall back.
+    def test_uses_primary_symbol_state_not_newer_secondary(self) -> None:
+        # Older-ID primary row has kill_switch=true; a newer, more recently
+        # updated secondary row is clear. Account rule must use the primary.
         db = self._db()
-        db.add(RuntimeState(symbol="TSLA.US", kill_switch=True))
+        db.add(StrategyConfig(symbol="AAPL.US", market="US"))
         db.commit()
-        db.close()
-        self._make_rule(symbol="AAPL.US")
-        notifier = FakeNotifier()
-        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
-        assert result.fired == 0
-        assert notifier.calls == []
-
-    def test_account_wide_uses_most_recent_state(self) -> None:
-        db = self._db()
-        db.add(RuntimeState(symbol="AAPL.US", kill_switch=False))
-        db.add(RuntimeState(symbol="TSLA.US", kill_switch=True))
-        db.commit()
-        db.close()
-        svc = AlertRuleService(self._db())
-        svc.create(AlertRuleCreate(
-            name="acct kill", symbol="", rule_type="kill_switch_engaged", threshold=1.0,
-        ))
-        notifier = FakeNotifier()
-        result = svc.evaluate(FakeRunner(None, notifier))
-        assert result.fired == 1
-
-    def test_cooldown_skips_second_fire(self) -> None:
-        db = self._db()
         db.add(RuntimeState(symbol="AAPL.US", kill_switch=True))
         db.commit()
+        db.add(RuntimeState(symbol="TSLA.US", kill_switch=False))
+        db.commit()
+        tsla = db.query(RuntimeState).filter(RuntimeState.symbol == "TSLA.US").first()
+        assert tsla is not None
+        ts = db.get(RuntimeState, tsla.id)
+        assert ts is not None
+        ts.updated_at = datetime(2030, 1, 1, tzinfo=timezone.utc)
+        db.commit()
         db.close()
-        self._make_rule(symbol="AAPL.US", cooldown_seconds=300)
+        self._make_rule(self, threshold=1.0)
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
+        assert result.fired == 1  # primary kill_switch=true, not secondary false
+
+    def test_falls_back_to_legacy_empty_row_when_no_primary_symbol_row(self) -> None:
+        db = self._db()
+        db.add(StrategyConfig(symbol="AAPL.US", market="US"))
+        db.commit()
+        db.add(RuntimeState(symbol="", kill_switch=True))
+        db.commit()
+        db.close()
+        self._make_rule(self, threshold=1.0)
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
+        assert result.fired == 1
+
+    def test_no_primary_and_no_legacy_row_does_not_fire(self) -> None:
+        self._make_rule(self, threshold=1.0)
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
+        assert result.fired == 0
+        assert notifier.calls == []
+
+    def test_no_primary_symbol_uses_legacy_empty_row_only(self) -> None:
+        # No StrategyConfig; only named rows exist. Must NOT fall back.
+        db = self._db()
+        db.add(RuntimeState(symbol="TSLA.US", kill_switch=True))
+        db.commit()
+        db.close()
+        self._make_rule(self, threshold=1.0)
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
+        assert result.fired == 0
+        assert notifier.calls == []
+
+    def test_legacy_persisted_rule_with_symbol_uses_account_state(self) -> None:
+        db = self._db()
+        db.add(StrategyConfig(symbol="AAPL.US", market="US"))
+        db.commit()
+        db.add(RuntimeState(symbol="AAPL.US", kill_switch=True))
+        db.add(RuntimeState(symbol="TSLA.US", kill_switch=False))
+        db.commit()
+        db.close()
+        db = self._db()
+        db.add(AlertRule(
+            name="legacy kill", symbol="TSLA.US", rule_type="kill_switch_engaged",
+            threshold=1.0, severity="CRITICAL", enabled=True, cooldown_seconds=300,
+        ))
+        db.commit()
+        db.close()
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
+        assert result.fired == 1  # uses primary AAPL kill_switch=true
+
+    def test_cooldown_skips_second_fire(self) -> None:
+        self._seed_primary(self, "AAPL.US", kill_switch=True)
+        self._make_rule(self, threshold=1.0, cooldown_seconds=300)
         now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
         notifier = FakeNotifier()
         svc = AlertRuleService(self._db())
@@ -444,14 +534,13 @@ class TestKillSwitchRule(_Base):
         assert r3.fired == 1
 
     def test_evaluation_does_not_mutate_runtime_state(self) -> None:
-        # Proof that evaluation is notification-only: kill_switch must remain
+        # Proof that evaluation is notification-only: account state must remain
         # exactly as seeded after evaluate runs.
-        db = self._db()
-        db.add(RuntimeState(symbol="AAPL.US", kill_switch=True, consecutive_losses=7, daily_pnl=-300.0))
-        db.commit()
-        state_id = db.query(RuntimeState).one().id
-        db.close()
-        self._make_rule(symbol="AAPL.US")
+        self._seed_primary(self, "AAPL.US", kill_switch=True, consecutive_losses=7, daily_pnl=-300.0)
+        seeded = self._db().query(RuntimeState).filter(RuntimeState.symbol == "AAPL.US").first()
+        assert seeded is not None
+        state_id = seeded.id
+        self._make_rule(self, threshold=1.0)
         AlertRuleService(self._db()).evaluate(FakeRunner(None, FakeNotifier()))
         db = self._db()
         state = db.get(RuntimeState, state_id)
@@ -466,11 +555,8 @@ class TestKillSwitchRule(_Base):
             def get_quotes(self, symbols: list[str]) -> list[FakeQuote]:
                 raise AssertionError("kill_switch_engaged must not fetch quotes")
 
-        db = self._db()
-        db.add(RuntimeState(symbol="AAPL.US", kill_switch=True))
-        db.commit()
-        db.close()
-        self._make_rule(symbol="AAPL.US")
+        self._seed_primary(self, "AAPL.US", kill_switch=True)
+        self._make_rule(self, threshold=1.0)
         notifier = FakeNotifier()
         result = AlertRuleService(self._db()).evaluate(FakeRunner(ExplodingBroker(), notifier))
         assert result.fired == 1
@@ -479,42 +565,152 @@ class TestKillSwitchRule(_Base):
 class TestKillSwitchValidation(_Base):
     def test_threshold_must_be_exactly_one(self) -> None:
         resp = self.client.post("/api/alert-rules", json={
-            "name": "kill", "symbol": "AAPL.US", "rule_type": "kill_switch_engaged",
+            "name": "kill", "symbol": "", "rule_type": "kill_switch_engaged",
             "threshold": 0,
         })
         assert resp.status_code == 422
 
     def test_threshold_two_rejected(self) -> None:
         resp = self.client.post("/api/alert-rules", json={
-            "name": "kill", "symbol": "AAPL.US", "rule_type": "kill_switch_engaged",
+            "name": "kill", "symbol": "", "rule_type": "kill_switch_engaged",
             "threshold": 2,
         })
         assert resp.status_code == 422
 
     def test_threshold_fractional_rejected(self) -> None:
         resp = self.client.post("/api/alert-rules", json={
-            "name": "kill", "symbol": "AAPL.US", "rule_type": "kill_switch_engaged",
+            "name": "kill", "symbol": "", "rule_type": "kill_switch_engaged",
             "threshold": 1.5,
+        })
+        assert resp.status_code == 422
+
+    def test_non_empty_symbol_rejected(self) -> None:
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "kill", "symbol": "AAPL.US", "rule_type": "kill_switch_engaged",
+            "threshold": 1.0,
+        })
+        assert resp.status_code == 422
+
+    def test_whitespace_symbol_rejected(self) -> None:
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "kill", "symbol": "  ", "rule_type": "kill_switch_engaged",
+            "threshold": 1.0,
         })
         assert resp.status_code == 422
 
     def test_threshold_one_accepted(self) -> None:
         resp = self.client.post("/api/alert-rules", json={
-            "name": "kill", "symbol": "AAPL.US", "rule_type": "kill_switch_engaged",
+            "name": "kill", "symbol": "", "rule_type": "kill_switch_engaged",
             "threshold": 1.0, "severity": "CRITICAL", "enabled": True, "cooldown_seconds": 300,
         })
         assert resp.status_code == 200, resp.text
         assert resp.json()["rule_type"] == "kill_switch_engaged"
         assert resp.json()["threshold"] == 1.0
+        assert resp.json()["symbol"] == ""
 
     def test_false_state_never_fires_with_zero_threshold_blocked(self) -> None:
         # The schema blocks threshold=0, so a false (0.0) state can never
         # satisfy value >= threshold. Confirm the guard holds.
         resp = self.client.post("/api/alert-rules", json={
-            "name": "kill", "symbol": "AAPL.US", "rule_type": "kill_switch_engaged",
+            "name": "kill", "symbol": "", "rule_type": "kill_switch_engaged",
             "threshold": 0,
         })
         assert resp.status_code == 422
+
+
+class TestFiniteThresholdValidation(_Base):
+    """threshold must reject NaN and infinity for all rule types — clean 422
+    validation rather than runtime conversion errors."""
+
+    def test_nan_threshold_rejected_for_price_above(self) -> None:
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "x", "symbol": "AAPL.US", "rule_type": "price_above",
+            "threshold": "NaN",
+        })
+        assert resp.status_code == 422
+
+    def test_positive_inf_threshold_rejected_for_price_below(self) -> None:
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "x", "symbol": "AAPL.US", "rule_type": "price_below",
+            "threshold": "Infinity",
+        })
+        assert resp.status_code == 422
+
+    def test_negative_inf_threshold_rejected_for_daily_loss(self) -> None:
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "x", "symbol": "AAPL.US", "rule_type": "daily_loss",
+            "threshold": "-Infinity",
+        })
+        assert resp.status_code == 422
+
+    def test_nan_threshold_rejected_for_consecutive_losses(self) -> None:
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "x", "symbol": "", "rule_type": "consecutive_losses",
+            "threshold": "NaN",
+        })
+        assert resp.status_code == 422
+
+    def test_inf_threshold_rejected_for_kill_switch_engaged(self) -> None:
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "x", "symbol": "", "rule_type": "kill_switch_engaged",
+            "threshold": "Infinity",
+        })
+        assert resp.status_code == 422
+
+    def test_finite_threshold_still_accepted(self) -> None:
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "x", "symbol": "AAPL.US", "rule_type": "price_above",
+            "threshold": 150.0,
+        })
+        assert resp.status_code == 200, resp.text
+
+
+class TestDailyLossStateLookup(_Base):
+    """Regression tests for the restored pre-c566e76 daily_loss contract:
+    query RuntimeState matching rule.symbol; blank symbol with no blank row
+    falls back to the latest row by id. Symbol-specific missing state must
+    NOT fall back."""
+
+    def test_blank_daily_loss_uses_legacy_empty_row(self) -> None:
+        # A legacy empty-symbol row plus named rows: blank daily_loss must use
+        # the empty row (not the latest-by-id named row).
+        db = self._db()
+        db.add(RuntimeState(symbol="", daily_pnl=-700.0))
+        db.add(RuntimeState(symbol="AAPL.US", daily_pnl=-100.0))
+        db.add(RuntimeState(symbol="TSLA.US", daily_pnl=-200.0))
+        db.commit()
+        db.close()
+        svc = AlertRuleService(self._db())
+        svc.create(AlertRuleCreate(name="acct loss", symbol="", rule_type="daily_loss", threshold=-500.0))
+        notifier = FakeNotifier()
+        result = svc.evaluate(FakeRunner(None, notifier))
+        assert result.fired == 1  # empty row -700 <= -500
+
+    def test_blank_daily_loss_falls_back_to_latest_when_no_empty_row(self) -> None:
+        # No empty row; blank daily_loss falls back to the latest row by id.
+        db = self._db()
+        db.add(RuntimeState(symbol="AAPL.US", daily_pnl=-100.0))
+        db.add(RuntimeState(symbol="TSLA.US", daily_pnl=-600.0))  # latest by id
+        db.commit()
+        db.close()
+        svc = AlertRuleService(self._db())
+        svc.create(AlertRuleCreate(name="acct loss", symbol="", rule_type="daily_loss", threshold=-500.0))
+        notifier = FakeNotifier()
+        result = svc.evaluate(FakeRunner(None, notifier))
+        assert result.fired == 1  # TSLA -600 <= -500
+
+    def test_symbol_specific_daily_loss_does_not_fall_back(self) -> None:
+        # AAPL daily_loss rule, only TSLA has a state row -> no fallback.
+        db = self._db()
+        db.add(RuntimeState(symbol="TSLA.US", daily_pnl=-600.0))
+        db.commit()
+        db.close()
+        svc = AlertRuleService(self._db())
+        svc.create(AlertRuleCreate(name="aapl loss", symbol="AAPL.US", rule_type="daily_loss", threshold=-500.0))
+        notifier = FakeNotifier()
+        result = svc.evaluate(FakeRunner(None, notifier))
+        assert result.fired == 0
+        assert notifier.calls == []
 
 
 class TestAlertRuleAPI(_Base):

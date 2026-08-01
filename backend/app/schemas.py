@@ -2252,14 +2252,25 @@ class AlertRuleCreate(BaseModel):
     ``rule_type`` semantics:
       - ``price_above`` / ``price_below``: live quote vs ``threshold`` (price rules).
       - ``daily_loss``: active ``RuntimeState.daily_pnl`` <= ``threshold`` (signed P&L).
-      - ``consecutive_losses``: active ``RuntimeState.consecutive_losses`` >=
-        ``threshold``; ``threshold`` must be a positive integer-like value
-        (>= 1) so a zero threshold can never fire on a fresh state row.
-      - ``kill_switch_engaged``: notification-only; fires when the active
-        ``RuntimeState.kill_switch`` is true. ``threshold`` must be exactly
-        ``1.0`` (the numeric storage contract is preserved, but a fixed
-        threshold guarantees a false state can never trigger because of a
-        threshold of 0).
+        Reads the ``RuntimeState`` row matching ``rule.symbol``; a blank symbol
+        with no blank row falls back to the latest row by id (legacy contract).
+      - ``consecutive_losses``: account-wide-only; fires when the authoritative
+        account ``RuntimeState.consecutive_losses`` >= ``threshold``. ``threshold``
+        must be a positive integer-like value (>= 1) so a zero threshold can
+        never fire on a fresh state row. ``symbol`` must be blank.
+      - ``kill_switch_engaged``: account-wide-only, notification-only; fires when
+        the authoritative account ``RuntimeState.kill_switch`` is true.
+        ``threshold`` must be exactly ``1.0`` (the numeric storage contract is
+        preserved, but a fixed threshold guarantees a false state can never
+        trigger because of threshold 0). ``symbol`` must be blank.
+
+    The authoritative account state is resolved from the latest
+    ``StrategyConfig`` symbol, then that symbol's ``RuntimeState`` row; if no
+    primary-symbol row exists, the legacy ``RuntimeState`` row with
+    ``symbol == ""`` is used; if neither exists, no data is returned. This
+    never mutates ``RuntimeState`` (unlike ``RuntimeStateService.get_primary_runtime_state``).
+
+    ``threshold`` rejects NaN and infinity for all rule types.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -2272,7 +2283,7 @@ class AlertRuleCreate(BaseModel):
         "consecutive_losses",
         "kill_switch_engaged",
     ]
-    threshold: float
+    threshold: float = Field(allow_inf_nan=False)
     severity: Literal["INFO", "WARNING", "CRITICAL"] = "WARNING"
     enabled: bool = True
     cooldown_seconds: int = Field(default=300, ge=0, le=86400)
@@ -2294,6 +2305,21 @@ class AlertRuleCreate(BaseModel):
             # never satisfy ``value >= threshold`` and accidentally fire.
             if self.threshold != 1.0:
                 raise ValueError("kill_switch_engaged threshold must be exactly 1.0")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_symbol_for_account_rule_types(self) -> "AlertRuleCreate":
+        # consecutive_losses and kill_switch_engaged are account-wide-only:
+        # they read the authoritative account state, never a secondary symbol's
+        # row. Reject any non-blank symbol (including whitespace-only) so a
+        # persisted rule can never silently bind to an unrelated symbol's
+        # RuntimeState. The raw value is checked (not the stripped value) so
+        # whitespace-only symbols are also rejected.
+        if self.rule_type in ("consecutive_losses", "kill_switch_engaged"):
+            if self.symbol != "":
+                raise ValueError(
+                    f"{self.rule_type} is account-wide-only; symbol must be blank"
+                )
         return self
 
 
@@ -2373,9 +2399,15 @@ class DatabaseHealthSnapshot(BaseModel):
     """Safe operational snapshot of the repository's SQLite database.
 
     No filesystem/database paths, connection URLs, table contents or secrets
-    are exposed. ``wal_size_bytes`` is ``None`` for in-memory SQLite (no WAL
-    file exists) and ``0`` for a file-backed DB whose ``-wal`` sidecar is
-    absent (e.g. journal mode is not WAL or no writes have occurred).
+    are exposed. ``database_size_bytes`` and ``free_space_bytes`` are logical
+    SQLite page metrics (``page_size_bytes * page_count`` and
+    ``page_size_bytes * freelist_count``) for both in-memory and file-backed
+    databases — they reflect SQLite's internal page accounting, not the
+    on-disk file size. ``wal_size_bytes`` is ``None`` for in-memory SQLite
+    (no WAL file is applicable, including ``:memory:`` and shared-memory URI
+    variants), ``0`` for a file-backed DB whose ``-wal`` sidecar is absent,
+    and ``None`` when the WAL file size cannot be determined (e.g. permission
+    or I/O error) — never misreported as merely absent.
     """
 
     checked_at: datetime
@@ -2752,13 +2784,16 @@ class LLMUsageBySymbol(BaseModel):
     Blank symbols are represented explicitly as ``UNSPECIFIED`` rather than
     silently dropped. No prompt, raw/parsed response, errors, order ids or
     context are exposed.
+
+    ``success_rate`` is a fraction in ``[0, 1]`` — ``successful_interactions
+    / interactions``, or ``0.0`` when there are no interactions.
     """
 
     symbol: str
     market: str
     interactions: int
     successful_interactions: int
-    success_rate: float
+    success_rate: float = Field(ge=0.0, le=1.0)
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int

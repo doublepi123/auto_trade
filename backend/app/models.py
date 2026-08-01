@@ -1799,11 +1799,15 @@ class AlertRule(Base):
     kill_switch_engaged}. Price rules use live quotes; ``daily_loss`` fires
     when the active runtime_state's ``daily_pnl`` <= ``threshold`` (threshold
     is signed P&L, typically negative, e.g. -500 = "down 500");
-    ``consecutive_losses`` fires when the active runtime_state's
-    ``consecutive_losses`` >= ``threshold`` (threshold is a positive integer);
-    ``kill_switch_engaged`` is notification-only and fires when the active
-    runtime_state's ``kill_switch`` is true (threshold fixed at 1.0). A
-    per-rule ``cooldown_seconds`` (vs ``last_fired_at``) prevents spam.
+    ``consecutive_losses`` and ``kill_switch_engaged`` are account-wide-only
+    (``symbol`` must be blank) and read the authoritative account state — the
+    latest StrategyConfig symbol's RuntimeState, falling back to the legacy
+    ``symbol == ""`` row. ``consecutive_losses`` fires when the account
+    runtime_state's ``consecutive_losses`` >= ``threshold`` (threshold is a
+    positive integer); ``kill_switch_engaged`` is notification-only and fires
+    when the account runtime_state's ``kill_switch`` is true (threshold fixed
+    at 1.0). A per-rule ``cooldown_seconds`` (vs ``last_fired_at``) prevents
+    spam.
     """
 
     __tablename__ = "alert_rules"

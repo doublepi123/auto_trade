@@ -1,10 +1,8 @@
-"""Database storage-health API — read-only, authenticated. Per-file sqlite.
+"""Database storage-health API — read-only, authenticated.
 
-The API endpoint binds the module-level ``engine`` from ``app.database``
-(not a ``get_db`` dependency), so the file-backed API test sets
-``AUTO_TRADE_DATABASE_URL`` before importing ``app.main`` so the module-level
-engine is file-backed. In-memory behavior is covered by direct service unit
-tests that construct their own engines.
+The API route depends on ``get_db``/Session (not the module-level engine) so
+FastAPI dependency overrides are reliable. File-backed, in-memory, memory-URI,
+relative-file, and stat-error behaviors are all covered.
 """
 from __future__ import annotations
 
@@ -18,20 +16,20 @@ os.environ["AUTO_TRADE_DATABASE_URL"] = (
 from datetime import timezone
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, event, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.config import settings
-from app.database import engine as app_engine
+from app.database import get_db
 from app.main import app
 from app.models import Base
 from app.services.database_health_service import DatabaseHealthService, snapshot_from_session
-from sqlalchemy.orm import Session
 
 
 class TestDatabaseHealthServiceInMemory:
-    """Direct service tests against an in-memory SQLite engine."""
+    """Direct service tests against in-memory SQLite engines (memory variants)."""
 
     @classmethod
     def setup_class(cls) -> None:
@@ -74,6 +72,39 @@ class TestDatabaseHealthServiceInMemory:
         assert snap.checked_at.utcoffset() == timezone.utc.utcoffset(None)
 
 
+class TestDatabaseHealthServiceMemoryUri:
+    """``:memory:`` and shared-memory URI variants are treated as in-memory
+    (no WAL applicability -> wal_size_bytes=None)."""
+
+    def test_memory_uri_variant(self) -> None:
+        engine = create_engine(
+            "sqlite:///:memory:",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        try:
+            snap = DatabaseHealthService(engine).snapshot()
+            assert snap.dialect == "sqlite"
+            assert snap.wal_size_bytes is None  # :memory: -> no WAL applicable
+        finally:
+            engine.dispose()
+
+    def test_shared_memory_uri_variant(self) -> None:
+        engine = create_engine(
+            "sqlite:///file:dh_shared_mem?mode=memory&cache=shared&uri=true",
+            connect_args={"check_same_thread": False, "uri": True},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        try:
+            snap = DatabaseHealthService(engine).snapshot()
+            assert snap.dialect == "sqlite"
+            assert snap.wal_size_bytes is None  # shared-memory URI -> no WAL
+        finally:
+            engine.dispose()
+
+
 class TestDatabaseHealthServiceFileBacked:
     """Direct service tests against a file-backed SQLite engine with WAL."""
 
@@ -89,7 +120,6 @@ class TestDatabaseHealthServiceFileBacked:
             f"sqlite:///{cls.path}", connect_args={"check_same_thread": False}
         )
         # Enable WAL so the -wal sidecar is created on write.
-        from sqlalchemy import event
 
         @event.listens_for(cls.engine, "connect")
         def _set_wal(dbapi_connection, _connection_record) -> None:  # noqa: ANN001
@@ -136,6 +166,110 @@ class TestDatabaseHealthServiceFileBacked:
         assert snap.free_space_bytes == snap.page_size_bytes * snap.freelist_count
 
 
+class TestDatabaseHealthServiceRelativeFile:
+    """Relative file resolution: the resolved main filename from
+    ``PRAGMA database_list`` (absolute) is used to stat ``<resolved>-wal``,
+    not the (possibly relative) URL database."""
+
+    @classmethod
+    def setup_class(cls) -> None:
+        cls.cwd = os.getcwd()
+        cls.path = os.path.join(tempfile.gettempdir(), f"auto_trade_dh_rel_{os.getpid()}.db")
+        for p in (cls.path, f"{cls.path}-wal", f"{cls.path}-shm"):
+            if os.path.exists(p):
+                os.remove(p)
+        # Use a relative URL by changing cwd; the engine URL database will be
+        # relative, but database_list resolves to the absolute path.
+        os.chdir(tempfile.gettempdir())
+        rel_name = os.path.basename(cls.path)
+        cls.engine: Engine = create_engine(
+            f"sqlite:///{rel_name}", connect_args={"check_same_thread": False}
+        )
+
+        @event.listens_for(cls.engine, "connect")
+        def _set_wal(dbapi_connection, _connection_record) -> None:  # noqa: ANN001
+            cur = dbapi_connection.cursor()
+            try:
+                cur.execute("PRAGMA journal_mode=WAL")
+            finally:
+                cur.close()
+
+        Base.metadata.create_all(bind=cls.engine)
+        with cls.engine.connect() as conn:
+            conn.execute(text("CREATE TABLE IF NOT EXISTS dh_rel (x INTEGER)"))
+            conn.execute(text("INSERT INTO dh_rel VALUES (1)"))
+            conn.commit()
+
+    @classmethod
+    def teardown_class(cls) -> None:
+        cls.engine.dispose()
+        os.chdir(cls.cwd)
+        for p in (cls.path, f"{cls.path}-wal", f"{cls.path}-shm"):
+            if os.path.exists(p):
+                os.remove(p)
+
+    def test_relative_file_resolves_wal(self) -> None:
+        snap = DatabaseHealthService(self.engine).snapshot()
+        assert snap.dialect == "sqlite"
+        assert snap.journal_mode == "wal"
+        # The resolved absolute path was used to stat the -wal sidecar.
+        assert snap.wal_size_bytes is not None
+        assert snap.wal_size_bytes >= 0
+
+
+class TestDatabaseHealthServiceStatError:
+    """Non-FileNotFoundError stat errors return None (unavailable), not 0."""
+
+    def test_permission_error_returns_none(self) -> None:
+        # Build a file-backed engine, then monkeypatch os.path.getsize to raise
+        # PermissionError (a non-FileNotFoundError OSError) to prove the WAL
+        # size is reported as None (unavailable) rather than 0 (absent).
+        path = os.path.join(tempfile.gettempdir(), f"auto_trade_dh_stat_{os.getpid()}.db")
+        for p in (path, f"{path}-wal", f"{path}-shm"):
+            if os.path.exists(p):
+                os.remove(p)
+        engine = create_engine(f"sqlite:///{path}", connect_args={"check_same_thread": False})
+
+        @event.listens_for(engine, "connect")
+        def _set_wal(dbapi_connection, _connection_record) -> None:  # noqa: ANN001
+            cur = dbapi_connection.cursor()
+            try:
+                cur.execute("PRAGMA journal_mode=WAL")
+            finally:
+                cur.close()
+
+        Base.metadata.create_all(bind=engine)
+        with engine.connect() as conn:
+            conn.execute(text("CREATE TABLE IF NOT EXISTS dh_stat (x INTEGER)"))
+            conn.execute(text("INSERT INTO dh_stat VALUES (1)"))
+            conn.commit()
+        engine.dispose()
+        try:
+            # Reopen read-only-ish; the -wal sidecar now exists.
+            engine2 = create_engine(f"sqlite:///{path}", connect_args={"check_same_thread": False})
+            import app.services.database_health_service as dh_mod
+
+            original_getsize = dh_mod.os.path.getsize
+
+            def _raise_permission(p: str) -> int:
+                if p.endswith("-wal"):
+                    raise PermissionError("simulated permission denied")
+                return original_getsize(p)
+
+            dh_mod.os.path.getsize = _raise_permission  # type: ignore[assignment]
+            try:
+                snap = DatabaseHealthService(engine2).snapshot()
+            finally:
+                dh_mod.os.path.getsize = original_getsize  # type: ignore[assignment]
+            # Permission error -> None (unavailable), not 0 (absent).
+            assert snap.wal_size_bytes is None
+            engine2.dispose()
+        finally:
+            for p in (path, f"{path}-wal", f"{path}-shm"):
+                if os.path.exists(p):
+                    os.remove(p)
+
+
 class TestDatabaseHealthSnapshotFromSession:
     def test_snapshot_from_session_uses_bound_engine(self) -> None:
         engine = create_engine(
@@ -154,14 +288,51 @@ class TestDatabaseHealthSnapshotFromSession:
 
 
 class TestDatabaseHealthAPI:
-    """API tests against the module-level file-backed engine (env-set)."""
+    """API tests via get_db dependency override (file-backed engine)."""
 
     @classmethod
     def setup_class(cls) -> None:
-        # Reset the file-backed DB to a known state.
-        Base.metadata.drop_all(bind=app_engine)
-        Base.metadata.create_all(bind=app_engine)
+        cls.path = os.path.join(
+            tempfile.gettempdir(), f"auto_trade_dh_api_{os.getpid()}.db"
+        )
+        for p in (cls.path, f"{cls.path}-wal", f"{cls.path}-shm"):
+            if os.path.exists(p):
+                os.remove(p)
+        cls.engine: Engine = create_engine(
+            f"sqlite:///{cls.path}", connect_args={"check_same_thread": False}
+        )
+
+        @event.listens_for(cls.engine, "connect")
+        def _set_wal(dbapi_connection, _connection_record) -> None:  # noqa: ANN001
+            cur = dbapi_connection.cursor()
+            try:
+                cur.execute("PRAGMA journal_mode=WAL")
+            finally:
+                cur.close()
+
+        Base.metadata.create_all(bind=cls.engine)
+        with cls.engine.connect() as conn:
+            conn.execute(text("CREATE TABLE IF NOT EXISTS dh_api (x INTEGER)"))
+            conn.execute(text("INSERT INTO dh_api VALUES (1)"))
+            conn.commit()
+
+        def override_get_db():
+            db = Session(bind=cls.engine)
+            try:
+                yield db
+            finally:
+                db.close()
+
+        app.dependency_overrides[get_db] = override_get_db
         cls.client = TestClient(app)
+
+    @classmethod
+    def teardown_class(cls) -> None:
+        app.dependency_overrides.pop(get_db, None)
+        cls.engine.dispose()
+        for p in (cls.path, f"{cls.path}-wal", f"{cls.path}-shm"):
+            if os.path.exists(p):
+                os.remove(p)
 
     def setup_method(self) -> None:
         settings.api_key = ""

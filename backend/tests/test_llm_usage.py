@@ -313,3 +313,46 @@ class TestLLMUsageBySymbol:
         assert resp.items[0].successful_interactions == 1
         assert resp.items[0].success_rate == 0.5
         assert resp.items[0].total_tokens == 200
+
+    def test_all_null_and_explicit_zero_token_groups_ordered_by_secondary_keys(self) -> None:
+        # An all-NULL token group (total_tokens=NULL -> COALESCE to 0) and an
+        # explicit-zero group (total_tokens=0) both have total_tokens=0, so
+        # ordering must fall back to the documented secondary keys: interactions
+        # desc, then symbol/market asc. Use a limit that proves correct
+        # selection/order.
+        # NULL group: 2 interactions (more) -> should sort before the 1-interaction group.
+        self._add(symbol="NULL.US", market="US", total_tokens=None)
+        self._add(symbol="NULL.US", market="US", total_tokens=None)
+        # Explicit-zero group: 1 interaction (fewer) -> sorts after NULL group.
+        self._add(symbol="ZERO.US", market="US", total_tokens=0)
+        resp = self.client.get("/api/llm-usage/by-symbol?days=30&limit=1")
+        data = resp.json()
+        assert data["total_groups"] == 2
+        assert len(data["items"]) == 1
+        # Both groups have total_tokens=0; the NULL group has 2 interactions
+        # vs ZERO's 1, so NULL sorts first and is selected by limit=1.
+        assert data["items"][0]["symbol"] == "NULL.US"
+        assert data["items"][0]["interactions"] == 2
+        assert data["items"][0]["total_tokens"] == 0
+
+    def test_whitespace_only_symbol_normalized_to_unspecified(self) -> None:
+        # Whitespace-only symbols are TRIMmed to "" before NULLIF/UNSPECIFIED,
+        # so they map to UNSPECIFIED rather than a literal "   " group.
+        self._add(symbol="   ", market="US", total_tokens=100)
+        self._add(symbol="\t", market="US", total_tokens=50)
+        resp = self.client.get("/api/llm-usage/by-symbol?days=30")
+        data = resp.json()
+        symbols = [i["symbol"] for i in data["items"]]
+        assert symbols == ["UNSPECIFIED"]
+        assert data["items"][0]["interactions"] == 2
+        assert data["items"][0]["total_tokens"] == 150
+
+    def test_success_rate_is_fraction_in_unit_interval(self) -> None:
+        self._add(symbol="AAPL.US", market="US", success=True, total_tokens=10)
+        self._add(symbol="AAPL.US", market="US", success=False, total_tokens=10)
+        self._add(symbol="AAPL.US", market="US", success=True, total_tokens=10)
+        resp = self.client.get("/api/llm-usage/by-symbol?days=30")
+        data = resp.json()
+        item = data["items"][0]
+        assert 0.0 <= item["success_rate"] <= 1.0
+        assert item["success_rate"] == 2 / 3
