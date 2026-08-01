@@ -1034,6 +1034,30 @@ Cypress.Commands.add('stubApi', () => {
     body: { sent: true, symbol: 'AAPL.US', title: '交易日报 · AAPL.US', error: null },
   }).as('runScheduledReport')
 
+  cy.intercept('GET', '/api/reports/schedule/status', {
+    body: {
+      enabled: true,
+      configured_symbol: 'AAPL.US',
+      effective_symbol: 'AAPL.US',
+      interval_hours: 24,
+      has_process_send_history: true,
+      last_sent_age_seconds: 7200,
+      next_eligible_in_seconds: 79200,
+      eligible_now: false,
+      state_scope: 'process',
+      resets_on_restart: true,
+    },
+  }).as('getReportScheduleStatus')
+
+  cy.intercept('GET', '/api/reports/schedule/preview*', {
+    body: {
+      symbol: 'AAPL.US',
+      target_date: '2026-06-16',
+      title: '交易日报 · AAPL.US · 2026-06-16',
+      content: '成交 3 笔，实现盈亏 +250.00；胜率 66.7%。',
+    },
+  }).as('getReportSchedulePreview')
+
   // Registered after the generic '/api/notifications?*' stub so the stats
   // path takes precedence (later intercepts win).
   cy.intercept('GET', '/api/notifications/stats*', {

@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { ReportResponse } from '../types'
+import type { ReportResponse, ReportSchedulePreviewResponse, ReportScheduleStatusResponse } from '../types'
 
 export async function getDailyReport(params: {
   symbol: string
@@ -56,6 +56,23 @@ export interface ScheduledReportRunResult {
 
 export async function runScheduledReportNow(): Promise<ScheduledReportRunResult> {
   const resp = await api.post<ScheduledReportRunResult>('/api/reports/schedule/run')
+  return resp.data
+}
+
+/** Read-only scheduled-report throttle snapshot. Never sends or mutates. */
+export async function getReportScheduleStatus(): Promise<ReportScheduleStatusResponse> {
+  const resp = await api.get<ReportScheduleStatusResponse>('/api/reports/schedule/status')
+  return resp.data
+}
+
+/**
+ * Side-effect-free preview of the scheduled daily report. Never dispatches a
+ * notification and never mutates the process-local throttle state.
+ */
+export async function getReportSchedulePreview(
+  params: { symbol?: string; date?: string } = {},
+): Promise<ReportSchedulePreviewResponse> {
+  const resp = await api.get<ReportSchedulePreviewResponse>('/api/reports/schedule/preview', { params })
   return resp.data
 }
 

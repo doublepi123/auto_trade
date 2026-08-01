@@ -1119,6 +1119,40 @@ export interface NotificationStatsResponse {
   daily: NotificationDailyPoint[]
 }
 
+/**
+ * Scheduled-report throttle snapshot (GET /api/reports/schedule/status).
+ *
+ * Derived from the SAVED strategy config plus the process-local send history:
+ * `state_scope` is "process" and `resets_on_restart` is true, i.e. the
+ * last-sent/next-eligible fields reflect in-memory state that resets when the
+ * backend restarts. `last_sent_age_seconds` / `next_eligible_in_seconds` are
+ * null when this process has never sent a scheduled report.
+ */
+export interface ReportScheduleStatusResponse {
+  enabled: boolean
+  configured_symbol: string
+  effective_symbol: string
+  interval_hours: number
+  has_process_send_history: boolean
+  last_sent_age_seconds: number | null
+  next_eligible_in_seconds: number | null
+  eligible_now: boolean
+  state_scope: string
+  resets_on_restart: boolean
+}
+
+/**
+ * Side-effect-free preview of the scheduled daily report
+ * (GET /api/reports/schedule/preview). Exactly what would be sent, without
+ * dispatching or mutating the throttle state.
+ */
+export interface ReportSchedulePreviewResponse {
+  symbol: string
+  target_date: string
+  title: string
+  content: string
+}
+
 export interface RiskHistoryPoint {
   created_at: string
   engine_state: string

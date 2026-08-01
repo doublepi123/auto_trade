@@ -244,6 +244,43 @@
         <el-form-item label="推送间隔（小时）">
           <el-input-number v-model="form.report_schedule_interval_hours" :min="1" :max="720" :step="1" data-testid="report-schedule-interval" />
         </el-form-item>
+        <el-form-item label="运行状态">
+          <div class="schedule-status" data-testid="report-schedule-status">
+            <span v-if="scheduleStatusLoading && !scheduleStatus" class="schedule-status-note" data-testid="report-schedule-status-loading">加载中…</span>
+            <template v-else-if="scheduleStatusError">
+              <span class="schedule-status-error" data-testid="report-schedule-status-error">{{ scheduleStatusError }}</span>
+              <el-button link size="small" type="primary" data-testid="report-schedule-status-retry" @click="loadScheduleStatus">重试</el-button>
+            </template>
+            <template v-else-if="scheduleStatus">
+              <div class="schedule-status-grid">
+                <span>
+                  定时发送
+                  <el-tag size="small" :type="scheduleStatus.enabled ? 'success' : 'info'" data-testid="report-schedule-enabled-tag">
+                    {{ scheduleStatus.enabled ? '已启用' : '未启用' }}
+                  </el-tag>
+                </span>
+                <span>
+                  生效标的
+                  <strong data-testid="report-schedule-effective-symbol">{{ scheduleStatus.effective_symbol || '—' }}</strong>
+                  <em
+                    v-if="scheduleStatus.configured_symbol && scheduleStatus.configured_symbol !== scheduleStatus.effective_symbol"
+                    class="schedule-status-sub"
+                  >配置 {{ scheduleStatus.configured_symbol }}</em>
+                </span>
+                <span>推送间隔 {{ scheduleStatus.interval_hours }} 小时</span>
+                <span>上次发送 <span data-testid="report-schedule-last-sent">{{ lastSentLabel }}</span></span>
+                <span>下次发送 <span data-testid="report-schedule-next-eligible">{{ nextEligibleLabel }}</span></span>
+              </div>
+              <div class="schedule-status-note" data-testid="report-schedule-asof">
+                获取于 {{ scheduleStatusFetchedAt }} · 为服务端已保存配置（未保存的修改不在其中）· 发送记录保存在进程内，重启后重置
+              </div>
+            </template>
+            <div class="schedule-status-actions">
+              <el-button size="small" plain :loading="scheduleStatusLoading" data-testid="report-schedule-status-refresh" @click="loadScheduleStatus">刷新状态</el-button>
+              <el-button size="small" plain data-testid="report-schedule-preview-open" @click="openSchedulePreview">预览报告内容</el-button>
+            </div>
+          </div>
+        </el-form-item>
         <el-form-item label="立即发送测试">
           <el-button plain :loading="reportSending" data-testid="report-schedule-test" @click="sendReportNow">发送一次</el-button>
           <span v-if="reportSendResult" style="margin-left: 10px; font-size: 12px" :style="{ color: reportSendResult.sent ? '#14884f' : '#c43838' }">
@@ -288,18 +325,53 @@
         </el-form-item>
       </el-form>
     </el-card>
+
+    <el-dialog
+      v-model="previewDialog.visible"
+      title="定时报告预览"
+      width="560px"
+      data-testid="report-schedule-preview-dialog"
+    >
+      <el-alert
+        type="info"
+        :closable="false"
+        title="预览不发送通知，也不更新定时发送记录。"
+        style="margin-bottom: 12px"
+        data-testid="report-schedule-preview-note"
+      />
+      <div v-loading="previewDialog.loading">
+        <div v-if="previewDialog.error" data-testid="report-schedule-preview-error">
+          <el-alert type="error" :title="previewDialog.error" :closable="false" show-icon />
+          <el-button size="small" style="margin-top: 8px" data-testid="report-schedule-preview-retry" @click="loadSchedulePreview">重试</el-button>
+        </div>
+        <template v-else-if="previewDialog.data">
+          <div class="preview-meta" data-testid="report-schedule-preview-meta">
+            <el-tag size="small">{{ previewDialog.data.symbol }}</el-tag>
+            <span>目标日期 {{ previewDialog.data.target_date }}</span>
+          </div>
+          <h4 class="preview-title" data-testid="report-schedule-preview-title">{{ previewDialog.data.title }}</h4>
+          <pre class="preview-content" data-testid="report-schedule-preview-content">{{ previewDialog.data.content }}</pre>
+        </template>
+        <div v-else-if="previewDialog.loading" class="preview-loading" data-testid="report-schedule-preview-loading">加载中…</div>
+      </div>
+      <template #footer>
+        <el-button @click="previewDialog.visible = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref, onMounted } from 'vue'
+import { computed, reactive, ref, onMounted } from 'vue'
 import { onBeforeRouteLeave, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { getStrategy, updateStrategy, getLLMIntervalStatus, analyzeLLMInterval, previewLLMInterval, enableLLMInterval, disableLLMInterval, getLLMInteractions, listStrategyPresets, createStrategyPreset, deleteStrategyPreset, applyStrategyPreset } from '../api'
-import { runScheduledReportNow } from '../api/reports'
+import { runScheduledReportNow, getReportScheduleStatus, getReportSchedulePreview } from '../api/reports'
 import { useFormState } from '../composables/useFormState'
-import type { LLMIntervalStatus, LLMAnalyzeResponse, LLMInteractionRecord, StrategyPreset } from '../types'
+import type { LLMIntervalStatus, LLMAnalyzeResponse, LLMInteractionRecord, ReportSchedulePreviewResponse, ReportScheduleStatusResponse, StrategyPreset } from '../types'
 import { formatCurrency } from '../utils/format'
+import { relativeAgeLabel } from '../utils/time'
+import { resolveErrorMessage } from '../utils/error'
 import { downloadCsv } from '../utils/csv'
 
 interface StrategyForm {
@@ -452,6 +524,81 @@ const { form, loading, saving, saved, error, isDirty, load, save } = useFormStat
 
 const reportSending = ref(false)
 const reportSendResult = ref<{ sent: boolean; error: string | null } | null>(null)
+
+// Scheduled-report diagnostics. The status snapshot is read-only (derived
+// from the saved config + process-local send history); the preview is fetched
+// only on an explicit click and never dispatches or mutates throttle state.
+const scheduleStatus = ref<ReportScheduleStatusResponse | null>(null)
+const scheduleStatusLoading = ref(false)
+const scheduleStatusError = ref('')
+const scheduleStatusFetchedAt = ref('')
+
+const previewDialog = reactive({
+  visible: false,
+  loading: false,
+  error: '',
+  data: null as ReportSchedulePreviewResponse | null,
+})
+
+async function loadScheduleStatus() {
+  scheduleStatusLoading.value = true
+  scheduleStatusError.value = ''
+  try {
+    scheduleStatus.value = await getReportScheduleStatus()
+    scheduleStatusFetchedAt.value = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  } catch (e) {
+    scheduleStatusError.value = resolveErrorMessage(e, '加载定时报告状态失败')
+    scheduleStatus.value = null
+  } finally {
+    scheduleStatusLoading.value = false
+  }
+}
+
+function formatWaitSeconds(seconds: number): string {
+  const s = Math.max(0, Math.round(seconds))
+  if (s < 60) return `${s} 秒`
+  const minutes = Math.floor(s / 60)
+  if (minutes < 60) return `${minutes} 分钟`
+  const hours = Math.floor(minutes / 60)
+  const restMinutes = minutes % 60
+  return restMinutes ? `${hours} 小时 ${restMinutes} 分钟` : `${hours} 小时`
+}
+
+const lastSentLabel = computed(() => {
+  const st = scheduleStatus.value
+  if (!st) return '—'
+  if (!st.has_process_send_history || st.last_sent_age_seconds === null) return '本次进程未发送'
+  return relativeAgeLabel(st.last_sent_age_seconds)
+})
+
+const nextEligibleLabel = computed(() => {
+  const st = scheduleStatus.value
+  if (!st) return '—'
+  if (!st.enabled) return '未启用'
+  if (st.eligible_now) return '现在可发送'
+  if (st.next_eligible_in_seconds === null) return '—'
+  return `约 ${formatWaitSeconds(st.next_eligible_in_seconds)}后`
+})
+
+function openSchedulePreview() {
+  previewDialog.visible = true
+  previewDialog.data = null
+  previewDialog.error = ''
+  loadSchedulePreview()
+}
+
+async function loadSchedulePreview() {
+  previewDialog.loading = true
+  previewDialog.error = ''
+  try {
+    previewDialog.data = await getReportSchedulePreview()
+  } catch (e) {
+    previewDialog.error = resolveErrorMessage(e, '加载预览失败')
+    previewDialog.data = null
+  } finally {
+    previewDialog.loading = false
+  }
+}
 
 async function sendReportNow() {
   reportSending.value = true
@@ -941,6 +1088,7 @@ onMounted(async () => {
   }
   loadLLMStatus()
   loadLLMInteractions()
+  loadScheduleStatus()
 })
 
 onBeforeRouteLeave(() => {
@@ -952,6 +1100,80 @@ onBeforeRouteLeave(() => {
 </script>
 
 <style scoped>
+.schedule-status {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.schedule-status-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 20px;
+  font-size: 13px;
+  color: #606266;
+  line-height: 1.8;
+}
+
+.schedule-status-sub {
+  margin-left: 6px;
+  color: #909399;
+  font-size: 12px;
+  font-style: normal;
+}
+
+.schedule-status-note {
+  color: #909399;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.schedule-status-error {
+  color: var(--el-color-danger);
+  font-size: 12px;
+}
+
+.schedule-status-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.preview-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: #606266;
+  font-size: 13px;
+}
+
+.preview-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+}
+
+.preview-content {
+  margin: 0;
+  padding: 10px;
+  background: #f8fafc;
+  border: 1px solid #e1e7f0;
+  border-radius: 6px;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.preview-loading {
+  padding: 16px;
+  text-align: center;
+  color: #909399;
+  font-size: 13px;
+}
+
 .range-readout {
   display: flex;
   flex-wrap: wrap;
