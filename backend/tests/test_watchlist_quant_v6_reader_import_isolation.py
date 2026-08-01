@@ -10,6 +10,7 @@ from pathlib import Path
 _BACKEND_ROOT = Path(__file__).resolve().parents[1]
 _FORBIDDEN_READER_MODULES = (
     "app.domain.watchlist_quant_v6.evaluator",
+    "app.services.watchlist_quant_v6_deadline",
     "app.services.watchlist_quant_v6_evaluation_service",
     "app.services.watchlist_quant_v6_historical_provider",
     "app.services.watchlist_quant_v6_publication_service",

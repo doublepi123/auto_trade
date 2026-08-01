@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import zlib
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, fields, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_EVEN, localcontext
@@ -11,6 +12,7 @@ from typing import Any, TypedDict, cast
 
 import pytest
 
+import app.domain.watchlist_quant_v6.assessment as assessment_module
 from app.domain.watchlist_quant_v6 import (
     BAR_NEXT_OPEN_STRESSED,
     MAX_QUANT_V6_ARTIFACT_RAW_BYTES,
@@ -54,6 +56,7 @@ from app.domain.watchlist_quant_v6 import (
     encode_quant_v6_artifact,
     quant_v6_consecutive_trading_session_dates,
     quant_v6_expected_rth_bar_starts,
+    quant_v6_payload_sha256,
     quant_v6_previous_trading_session_dates,
     quant_v6_session_bars_sha256,
     session_cluster_one_sided_90_lcb,
@@ -865,6 +868,9 @@ def test_fixed_window_strong_bar_evidence_is_watch_but_never_candidate() -> None
         market=_MARKET,
         leaves=_strong_leaves(),
     )
+    encoded = assessment.encoded_artifact()
+    payload = decode_quant_v6_artifact(**asdict(encoded))
+
     assert assessment.covered_sessions == 29
     assert assessment.event_count == 60
     assert assessment.event_sessions == 20
@@ -880,7 +886,6 @@ def test_fixed_window_strong_bar_evidence_is_watch_but_never_candidate() -> None
     assert assessment.automatic_promotion_allowed is False
     assert assessment.order_submission_allowed is False
     assert assessment.blockers == ("HISTORICAL_CAPTURE_PROMOTION_INELIGIBLE",)
-    payload = assessment.canonical_payload()
     assert len(cast(list[object], payload["leaves"])) == 30
     aggregates = cast(dict[str, object], payload["aggregates"])
     policy = cast(dict[str, object], payload["policy"])
@@ -894,13 +899,9 @@ def test_fixed_window_strong_bar_evidence_is_watch_but_never_candidate() -> None
         "zero_event_covered_session_return_bps": "0",
     }
     assert payload["contract"] == QUANT_V6_ASSESSMENT_CONTRACT
-    encoded = assessment.encoded_artifact()
     assert encoded.kind == QUANT_V6_ASSESSMENT_ARTIFACT_KIND
-    assert encoded.digest_sha256 == assessment.assessment_digest_sha256
+    assert encoded.digest_sha256 == quant_v6_payload_sha256(payload)
     assert encoded.raw_size < MAX_QUANT_V6_ARTIFACT_RAW_BYTES
-    assert decode_quant_v6_artifact(**asdict(encoded))["contract"] == (
-        "watchlist-quant-v6-assessment-v1"
-    )
     replay_input = assessment.leaves[0].encoded_replay_input(
         symbol=_SYMBOL,
         market=_MARKET,
@@ -920,6 +921,131 @@ def test_fixed_window_strong_bar_evidence_is_watch_but_never_candidate() -> None
         "schema_version": 1,
         "spec_digest_sha256": QUANT_V6_ACQUISITION_SPEC_DIGEST,
     }
+
+
+def test_assessment_noop_checkpoint_preserves_canonical_bytes_and_digest() -> None:
+    leaves = _strong_leaves(
+        missing=29,
+        event_session_counts=(2,),
+    )
+    assessment = assess_bar_next_open_stressed_window(
+        symbol=_SYMBOL,
+        market=_MARKET,
+        leaves=leaves,
+    )
+
+    baseline_bytes = canonical_quant_v6_json(assessment.canonical_payload())
+    baseline_artifact = assessment.encoded_artifact()
+    checkpoint_bytes = canonical_quant_v6_json(
+        assessment.canonical_payload(checkpoint=lambda: None)
+    )
+    checkpoint_artifact = assessment.encoded_artifact(
+        checkpoint=lambda: None,
+    )
+
+    assert checkpoint_bytes == baseline_bytes
+    assert checkpoint_artifact.digest_sha256 == baseline_artifact.digest_sha256
+    assert checkpoint_artifact.payload == baseline_artifact.payload
+
+
+def test_checkpoint_sentinel_propagates_from_second_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leaf = _strong_leaves(
+        missing=29,
+        event_session_counts=(2,),
+    )[0]
+    visited_events: list[BarNextOpenStressedEvent] = []
+    checkpoint_calls = 0
+    sentinel = RuntimeError("checkpoint sentinel")
+    original = assessment_module._validated_event_artifact_digest
+
+    def _track_event(
+        event: BarNextOpenStressedEvent,
+        *,
+        checkpoint: Callable[[], None] | None = None,
+    ) -> str:
+        visited_events.append(event)
+        return original(event, checkpoint=checkpoint)
+
+    def _checkpoint() -> None:
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+        if len(visited_events) == 2:
+            raise sentinel
+
+    monkeypatch.setattr(
+        assessment_module,
+        "_validated_event_artifact_digest",
+        _track_event,
+    )
+
+    with pytest.raises(RuntimeError) as caught:
+        leaf.canonical_payload(
+            symbol=_SYMBOL,
+            market=_MARKET,
+            checkpoint=_checkpoint,
+        )
+
+    assert caught.value is sentinel
+    assert len(visited_events) == 2
+    assert checkpoint_calls > 1
+
+
+def test_checkpoint_sentinel_propagates_from_second_covered_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leaves = _strong_leaves(
+        missing=28,
+        event_session_counts=(0, 0),
+    )
+    replayed_sessions: list[date] = []
+    checkpoint_calls = 0
+    sentinel = RuntimeError("checkpoint sentinel")
+    original = assessment_module.build_bar_next_open_stressed_session_events
+
+    def _track_session(
+        *,
+        symbol: str,
+        market: str,
+        session_date: date,
+        bars: Sequence[QuantV6Bar],
+        threshold_evidence: QuantV6ThresholdEvidence,
+        fee_rate: Decimal | int | str,
+    ) -> tuple[BarNextOpenStressedEvent, ...]:
+        replayed_sessions.append(session_date)
+        return original(
+            symbol=symbol,
+            market=market,
+            session_date=session_date,
+            bars=bars,
+            threshold_evidence=threshold_evidence,
+            fee_rate=fee_rate,
+        )
+
+    def _checkpoint() -> None:
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+        if len(replayed_sessions) == 2:
+            raise sentinel
+
+    monkeypatch.setattr(
+        assessment_module,
+        "build_bar_next_open_stressed_session_events",
+        _track_session,
+    )
+
+    with pytest.raises(RuntimeError) as caught:
+        assess_bar_next_open_stressed_window(
+            symbol=_SYMBOL,
+            market=_MARKET,
+            leaves=leaves,
+            checkpoint=_checkpoint,
+        )
+
+    assert caught.value is sentinel
+    assert len(replayed_sessions) == 2
+    assert checkpoint_calls > 1
 
 
 @pytest.mark.parametrize("field", ["preimage_digest_sha256", "shock_threshold_bps"])

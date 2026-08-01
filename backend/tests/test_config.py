@@ -36,6 +36,7 @@ class TestSettings:
         assert (
             s.watchlist_quant_v6_evaluation_retry_interval_minutes == 60
         )
+        assert s.watchlist_quant_v6_evaluation_timeout_seconds == 1_800
         assert s.watchlist_quant_v6_provider_page_timeout_seconds == 30.0
 
     def test_quant_v6_evaluation_controls_read_environment(
@@ -54,6 +55,10 @@ class TestSettings:
             "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_RETRY_INTERVAL_MINUTES",
             "30",
         )
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_TIMEOUT_SECONDS",
+            "900",
+        )
 
         configured = Settings()
 
@@ -63,6 +68,7 @@ class TestSettings:
             configured.watchlist_quant_v6_evaluation_retry_interval_minutes
             == 30
         )
+        assert configured.watchlist_quant_v6_evaluation_timeout_seconds == 900
 
     @pytest.mark.parametrize("value", ["59", "10081"])
     def test_quant_v6_evaluation_interval_is_bounded(
@@ -109,6 +115,37 @@ class TestSettings:
             ValidationError,
             match="retry interval must not exceed",
         ):
+            Settings()
+
+    @pytest.mark.parametrize("value", ["60", "3600"])
+    def test_quant_v6_evaluation_timeout_accepts_boundaries(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_TIMEOUT_SECONDS",
+            value,
+        )
+
+        configured = Settings()
+
+        assert configured.watchlist_quant_v6_evaluation_timeout_seconds == int(
+            value
+        )
+
+    @pytest.mark.parametrize("value", ["59", "3601", "not-a-number"])
+    def test_quant_v6_evaluation_timeout_rejects_invalid_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_TIMEOUT_SECONDS",
+            value,
+        )
+
+        with pytest.raises(ValidationError):
             Settings()
 
     @pytest.mark.parametrize("value", ["4.99", "120.01", "nan"])

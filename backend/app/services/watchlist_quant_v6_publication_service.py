@@ -70,6 +70,9 @@ from app.services.watchlist_quant_v6_evaluation_service import (
     evaluate_quant_v6_registration,
     validate_quant_v6_registration_plan,
 )
+from app.services.watchlist_quant_v6_deadline import (
+    QuantV6EvaluationDeadline,
+)
 
 
 QUANT_V6_PUBLICATION_SCHEMA_VERSION = 1
@@ -102,6 +105,18 @@ _PUBLICATION_POLICY: Mapping[str, object] = {
     "promotion_eligible": False,
     "short_entry_allowed": False,
 }
+
+
+def _evaluation_checkpoint(
+    evaluation_deadline: QuantV6EvaluationDeadline | None,
+) -> None:
+    if evaluation_deadline is not None:
+        evaluation_deadline.checkpoint()
+
+
+def _noop_evaluation_checkpoint() -> None:
+    """Allow generic evaluators to cooperate without requiring a deadline."""
+    return None
 
 
 class QuantV6PublicationError(RuntimeError):
@@ -333,11 +348,13 @@ def _manifest_sha256(
     *,
     registration_identity_sha256: str,
     binding_payloads: Sequence[Mapping[str, object]],
+    evaluation_deadline: QuantV6EvaluationDeadline | None = None,
 ) -> str:
     """Hash the canonical manifest incrementally without a cohort size cap."""
     digest = hashlib.sha256()
     digest.update(b'{"bindings":[')
     for index, payload in enumerate(binding_payloads):
+        _evaluation_checkpoint(evaluation_deadline)
         if index:
             digest.update(b",")
         digest.update(canonical_quant_v6_json(payload))
@@ -1461,7 +1478,9 @@ def _validate_candidate_closure(
         QuantV6PendingArtifactBinding,
     ],
     present_grid_starts: frozenset[datetime],
+    evaluation_deadline: QuantV6EvaluationDeadline | None = None,
 ) -> None:
+    _evaluation_checkpoint(evaluation_deadline)
     assessment_binding = binding_by_key[(ASSESSMENT_ROLE, 0)]
     assessment = decoded_by_key[(ASSESSMENT_ROLE, 0)]
     declarations = _parse_assessment_leaf_declarations(
@@ -1487,6 +1506,7 @@ def _validate_candidate_closure(
         declarations,
         strict=True,
     )):
+        _evaluation_checkpoint(evaluation_deadline)
         if declaration.session_date != target_date:
             raise QuantV6PublicationError(
                 f"assessment leaf date conflicts for {evaluation.member.symbol}"
@@ -1576,6 +1596,7 @@ def _validate_candidate_closure(
                 f"session event replay failed for {evaluation.member.symbol}"
             ) from exc
         for event in replayed_events:
+            _evaluation_checkpoint(evaluation_deadline)
             event_key = (EVENT_ROLE, next_event_ordinal)
             event_binding = binding_by_key.get(event_key)
             if event_binding is None:
@@ -1624,12 +1645,24 @@ def _validate_candidate_closure(
             f"event binding closure failed for {evaluation.member.symbol}"
         )
     try:
+        _evaluation_checkpoint(evaluation_deadline)
         rebuilt_assessment = assess_bar_next_open_stressed_window(
             symbol=evaluation.member.symbol,
             market=evaluation.member.market,
             leaves=replayed_leaves,
+            checkpoint=(
+                evaluation_deadline.checkpoint
+                if evaluation_deadline is not None
+                else None
+            ),
         )
-        rebuilt_assessment_artifact = rebuilt_assessment.encoded_artifact()
+        rebuilt_assessment_artifact = rebuilt_assessment.encoded_artifact(
+            checkpoint=(
+                evaluation_deadline.checkpoint
+                if evaluation_deadline is not None
+                else None
+            )
+        )
     except QuantV6AssessmentError as exc:
         raise QuantV6PublicationError(
             f"assessment typed replay failed for {evaluation.member.symbol}"
@@ -1653,6 +1686,7 @@ def _validate_candidate_closure(
         raise QuantV6PublicationError(
             f"assessment summary conflicts for {evaluation.member.symbol}"
         )
+    _evaluation_checkpoint(evaluation_deadline)
 
 
 def _prepare_publication(
@@ -1662,7 +1696,9 @@ def _prepare_publication(
     persisted_acquisition_outcomes: (
         Sequence[Mapping[str, object]] | None
     ) = None,
+    evaluation_deadline: QuantV6EvaluationDeadline | None = None,
 ) -> _PreparedPublication:
+    _evaluation_checkpoint(evaluation_deadline)
     normalized = tuple(evaluations)
     if len(normalized) != len(plan.members):
         raise QuantV6PublicationError(
@@ -1713,6 +1749,7 @@ def _prepare_publication(
         ordered_evaluations,
         strict=True,
     ):
+        _evaluation_checkpoint(evaluation_deadline)
         if (
             type(evaluation.member) is not type(expected_member)
             or evaluation.member.canonical_payload()
@@ -1798,6 +1835,7 @@ def _prepare_publication(
         ] = {}
         decoded_by_key: dict[tuple[str, int], dict[str, Any]] = {}
         for binding in evaluation.bindings:
+            _evaluation_checkpoint(evaluation_deadline)
             if type(binding) is not QuantV6PendingArtifactBinding:
                 raise QuantV6PublicationError(
                     "candidate contains an unsupported binding type"
@@ -1908,7 +1946,9 @@ def _prepare_publication(
             present_grid_starts=(
                 acquisition_projection.present_grid_starts
             ),
+            evaluation_deadline=evaluation_deadline,
         )
+        _evaluation_checkpoint(evaluation_deadline)
 
     ordered_bindings = tuple(sorted(
         all_bindings,
@@ -1918,18 +1958,25 @@ def _prepare_publication(
             value.artifact_ordinal,
         ),
     ))
-    payloads = tuple(_binding_payload(value) for value in ordered_bindings)
+    payload_list: list[dict[str, object]] = []
+    assessment_count = 0
+    session_input_count = 0
+    event_count = 0
+    for binding in ordered_bindings:
+        _evaluation_checkpoint(evaluation_deadline)
+        payload_list.append(_binding_payload(binding))
+        if binding.role == ASSESSMENT_ROLE:
+            assessment_count += 1
+        elif binding.role == SESSION_INPUT_ROLE:
+            session_input_count += 1
+        elif binding.role == EVENT_ROLE:
+            event_count += 1
+    payloads = tuple(payload_list)
     manifest_sha256 = _manifest_sha256(
         registration_identity_sha256=plan.identity_sha256,
         binding_payloads=payloads,
+        evaluation_deadline=evaluation_deadline,
     )
-    assessment_count = sum(
-        value.role == ASSESSMENT_ROLE for value in ordered_bindings
-    )
-    session_input_count = sum(
-        value.role == SESSION_INPUT_ROLE for value in ordered_bindings
-    )
-    event_count = sum(value.role == EVENT_ROLE for value in ordered_bindings)
     if assessment_count != len(plan.members):
         raise QuantV6PublicationError(
             "publication assessment count does not match registration"
@@ -1950,6 +1997,7 @@ def _prepare_publication(
         raise QuantV6PublicationError(
             "publication JSON is outside the bounded root size limit"
         )
+    _evaluation_checkpoint(evaluation_deadline)
     return _PreparedPublication(
         bindings=ordered_bindings,
         artifacts=tuple(artifacts[key] for key in sorted(artifacts)),
@@ -2001,17 +2049,22 @@ def _verify_artifact_row(
 def _load_artifact_rows(
     session: Session,
     digests: Sequence[str],
+    *,
+    evaluation_deadline: QuantV6EvaluationDeadline | None = None,
 ) -> dict[str, WatchlistQuantV6Artifact]:
     """Load content-addressed rows in bounded SQLite-safe batches."""
+    _evaluation_checkpoint(evaluation_deadline)
     ordered_digests = tuple(dict.fromkeys(digests))
     rows: dict[str, WatchlistQuantV6Artifact] = {}
     for offset in range(0, len(ordered_digests), _ARTIFACT_QUERY_CHUNK_SIZE):
+        _evaluation_checkpoint(evaluation_deadline)
         chunk = ordered_digests[offset:offset + _ARTIFACT_QUERY_CHUNK_SIZE]
         for row in session.scalars(
             select(WatchlistQuantV6Artifact).where(
                 WatchlistQuantV6Artifact.digest_sha256.in_(chunk)
             )
         ):
+            _evaluation_checkpoint(evaluation_deadline)
             if row.digest_sha256 in rows:
                 raise QuantV6PublicationConflictError(
                     "artifact query returned a duplicate content identity"
@@ -2137,7 +2190,9 @@ def _parse_persisted_acquisition_outcomes(
     payload: dict[str, Any],
     *,
     plan: QuantV6RegistrationPlan,
+    evaluation_deadline: QuantV6EvaluationDeadline | None = None,
 ) -> tuple[dict[str, object], ...]:
+    _evaluation_checkpoint(evaluation_deadline)
     publication = _require_exact_dict(
         payload,
         label="persisted publication payload",
@@ -2183,6 +2238,7 @@ def _parse_persisted_acquisition_outcomes(
         raw_members,
         strict=True,
     ):
+        _evaluation_checkpoint(evaluation_deadline)
         outcome = _require_exact_dict(
             raw_outcome,
             label=f"persisted acquisition member {expected_member.ordinal}",
@@ -2285,6 +2341,7 @@ def _rebuild_persisted_evaluations(
     publication: WatchlistQuantV6Publication,
     plan: QuantV6RegistrationPlan,
     publication_payload: dict[str, Any],
+    evaluation_deadline: QuantV6EvaluationDeadline | None = None,
 ) -> tuple[
     tuple[QuantV6CandidateEvaluation, ...],
     tuple[dict[str, object], ...],
@@ -2292,8 +2349,10 @@ def _rebuild_persisted_evaluations(
     outcomes = _parse_persisted_acquisition_outcomes(
         publication_payload,
         plan=plan,
+        evaluation_deadline=evaluation_deadline,
     )
-    rows = tuple(session.scalars(
+    _evaluation_checkpoint(evaluation_deadline)
+    row_result = session.scalars(
         select(WatchlistQuantV6PublicationArtifact)
         .where(
             WatchlistQuantV6PublicationArtifact.publication_id
@@ -2304,7 +2363,12 @@ def _rebuild_persisted_evaluations(
             WatchlistQuantV6PublicationArtifact.role,
             WatchlistQuantV6PublicationArtifact.artifact_ordinal,
         )
-    ))
+    )
+    loaded_rows: list[WatchlistQuantV6PublicationArtifact] = []
+    for row in row_result:
+        _evaluation_checkpoint(evaluation_deadline)
+        loaded_rows.append(row)
+    rows = tuple(loaded_rows)
     if len(rows) != publication.binding_count:
         raise QuantV6PublicationConflictError(
             "persisted publication binding rows conflict with its header"
@@ -2312,11 +2376,13 @@ def _rebuild_persisted_evaluations(
     artifact_rows = _load_artifact_rows(
         session,
         tuple(row.artifact_sha256 for row in rows),
+        evaluation_deadline=evaluation_deadline,
     )
     grouped: dict[int, list[QuantV6PendingArtifactBinding]] = {
         member.ordinal: [] for member in plan.members
     }
     for row in rows:
+        _evaluation_checkpoint(evaluation_deadline)
         if type(row.member_ordinal) is not int or row.member_ordinal not in grouped:
             raise QuantV6PublicationConflictError(
                 "persisted binding member ordinal is outside registration"
@@ -2334,6 +2400,7 @@ def _rebuild_persisted_evaluations(
 
     evaluations: list[QuantV6CandidateEvaluation] = []
     for member, outcome in zip(plan.members, outcomes, strict=True):
+        _evaluation_checkpoint(evaluation_deadline)
         bindings = tuple(sorted(
             grouped[member.ordinal],
             key=lambda value: (
@@ -2397,6 +2464,7 @@ def _rebuild_persisted_evaluations(
                 label="persisted acquisition rejected rows",
             ),
         ))
+    _evaluation_checkpoint(evaluation_deadline)
     return tuple(evaluations), outcomes
 
 
@@ -2418,22 +2486,28 @@ class WatchlistQuantV6PublicationService:
     def register_plan(
         self,
         plan: QuantV6RegistrationPlan,
+        *,
+        evaluation_deadline: QuantV6EvaluationDeadline | None = None,
     ) -> QuantV6RegistrationReceipt:
         """Commit one immutable registration before historical acquisition."""
+        _evaluation_checkpoint(evaluation_deadline)
         validate_quant_v6_registration_plan(plan)
         fields = _registration_fields(plan)
         registered_at = max(
             self._now(),
             _aware_utc(plan.cohort_observed_at, label="cohort_observed_at"),
         )
+        _evaluation_checkpoint(evaluation_deadline)
         session = self._session_factory()
         try:
+            _evaluation_checkpoint(evaluation_deadline)
             existing = session.scalar(select(WatchlistQuantV6Registration).where(
                 WatchlistQuantV6Registration.identity_sha256
                 == plan.identity_sha256
             ))
             if existing is not None:
                 _verify_registration_row(existing, plan)
+                _evaluation_checkpoint(evaluation_deadline)
                 return QuantV6RegistrationReceipt(
                     registration_id=existing.id,
                     identity_sha256=existing.identity_sha256,
@@ -2444,6 +2518,7 @@ class WatchlistQuantV6PublicationService:
                 registered_at=registered_at,
             )
             session.add(row)
+            _evaluation_checkpoint(evaluation_deadline)
             session.commit()
             session.refresh(row)
             _verify_registration_row(row, plan)
@@ -2454,6 +2529,7 @@ class WatchlistQuantV6PublicationService:
             )
         except IntegrityError as exc:
             session.rollback()
+            _evaluation_checkpoint(evaluation_deadline)
             existing = session.scalar(select(WatchlistQuantV6Registration).where(
                 WatchlistQuantV6Registration.identity_sha256
                 == plan.identity_sha256
@@ -2463,6 +2539,7 @@ class WatchlistQuantV6PublicationService:
                     "registration insert conflicted without an identical row"
                 ) from exc
             _verify_registration_row(existing, plan)
+            _evaluation_checkpoint(evaluation_deadline)
             return QuantV6RegistrationReceipt(
                 registration_id=existing.id,
                 identity_sha256=existing.identity_sha256,
@@ -2483,7 +2560,9 @@ class WatchlistQuantV6PublicationService:
         plan: QuantV6RegistrationPlan,
         prepared: _PreparedPublication,
         verify_artifact_payloads: bool = True,
+        evaluation_deadline: QuantV6EvaluationDeadline | None = None,
     ) -> QuantV6PublicationReceipt:
+        _evaluation_checkpoint(evaluation_deadline)
         _verify_registration_row(registration, plan)
         _verify_publication_row(
             publication,
@@ -2491,7 +2570,8 @@ class WatchlistQuantV6PublicationService:
             plan=plan,
             prepared=prepared,
         )
-        rows = tuple(session.scalars(
+        _evaluation_checkpoint(evaluation_deadline)
+        row_result = session.scalars(
             select(WatchlistQuantV6PublicationArtifact)
             .where(
                 WatchlistQuantV6PublicationArtifact.publication_id
@@ -2502,7 +2582,12 @@ class WatchlistQuantV6PublicationService:
                 WatchlistQuantV6PublicationArtifact.role,
                 WatchlistQuantV6PublicationArtifact.artifact_ordinal,
             )
-        ))
+        )
+        loaded_rows: list[WatchlistQuantV6PublicationArtifact] = []
+        for row in row_result:
+            _evaluation_checkpoint(evaluation_deadline)
+            loaded_rows.append(row)
+        rows = tuple(loaded_rows)
         if len(rows) != prepared.binding_count:
             raise QuantV6PublicationConflictError(
                 "persisted publication binding count is incomplete"
@@ -2527,11 +2612,13 @@ class WatchlistQuantV6PublicationService:
             _load_artifact_rows(
                 session,
                 tuple(row.artifact_sha256 for row in rows),
+                evaluation_deadline=evaluation_deadline,
             )
             if verify_artifact_payloads
             else {}
         )
         for row in rows:
+            _evaluation_checkpoint(evaluation_deadline)
             key = (row.member_ordinal, row.role, row.artifact_ordinal)
             expected = expected_by_key.pop(key, None)
             if expected is None:
@@ -2591,6 +2678,7 @@ class WatchlistQuantV6PublicationService:
             binding_payloads=tuple(
                 value[3] for value in sorted(persisted_payloads)
             ),
+            evaluation_deadline=evaluation_deadline,
         )
         if (
             not _same_digest(recomputed_manifest, prepared.manifest_sha256)
@@ -2625,6 +2713,7 @@ class WatchlistQuantV6PublicationService:
             raise QuantV6PublicationConflictError(
                 "persisted publication root conflicts with its bindings"
             )
+        _evaluation_checkpoint(evaluation_deadline)
         return QuantV6PublicationReceipt(
             publication_id=publication.id,
             registration_id=registration.id,
@@ -2640,9 +2729,12 @@ class WatchlistQuantV6PublicationService:
         *,
         plan: QuantV6RegistrationPlan,
         prepared: _PreparedPublication,
+        evaluation_deadline: QuantV6EvaluationDeadline | None = None,
     ) -> QuantV6PublicationReceipt | None:
+        _evaluation_checkpoint(evaluation_deadline)
         session = self._session_factory()
         try:
+            _evaluation_checkpoint(evaluation_deadline)
             registration = session.scalar(select(WatchlistQuantV6Registration).where(
                 WatchlistQuantV6Registration.identity_sha256
                 == plan.identity_sha256
@@ -2662,6 +2754,7 @@ class WatchlistQuantV6PublicationService:
                 publication=publication,
                 plan=plan,
                 prepared=prepared,
+                evaluation_deadline=evaluation_deadline,
             )
         finally:
             session.close()
@@ -2670,10 +2763,13 @@ class WatchlistQuantV6PublicationService:
         self,
         *,
         plan: QuantV6RegistrationPlan,
+        evaluation_deadline: QuantV6EvaluationDeadline | None = None,
     ) -> QuantV6PublicationReceipt | None:
         """Replay persisted evidence fully before skipping provider I/O."""
+        _evaluation_checkpoint(evaluation_deadline)
         session = self._session_factory()
         try:
+            _evaluation_checkpoint(evaluation_deadline)
             registration = session.scalar(select(WatchlistQuantV6Registration).where(
                 WatchlistQuantV6Registration.identity_sha256
                 == plan.identity_sha256
@@ -2691,6 +2787,7 @@ class WatchlistQuantV6PublicationService:
             publication_payload = _decode_canonical_publication_payload(
                 publication
             )
+            _evaluation_checkpoint(evaluation_deadline)
             try:
                 (
                     persisted_evaluations,
@@ -2700,6 +2797,7 @@ class WatchlistQuantV6PublicationService:
                     publication=publication,
                     plan=plan,
                     publication_payload=publication_payload,
+                    evaluation_deadline=evaluation_deadline,
                 )
                 prepared = _prepare_publication(
                     plan=plan,
@@ -2707,6 +2805,7 @@ class WatchlistQuantV6PublicationService:
                     persisted_acquisition_outcomes=(
                         persisted_acquisition_outcomes
                     ),
+                    evaluation_deadline=evaluation_deadline,
                 )
             except QuantV6PublicationConflictError:
                 raise
@@ -2720,6 +2819,7 @@ class WatchlistQuantV6PublicationService:
                 publication=publication,
                 plan=plan,
                 prepared=prepared,
+                evaluation_deadline=evaluation_deadline,
             )
         finally:
             session.close()
@@ -2729,13 +2829,21 @@ class WatchlistQuantV6PublicationService:
         *,
         plan: QuantV6RegistrationPlan,
         evaluations: Sequence[QuantV6CandidateEvaluation],
+        evaluation_deadline: QuantV6EvaluationDeadline | None = None,
     ) -> QuantV6PublicationReceipt:
         """Atomically publish every member and every evidence binding."""
+        _evaluation_checkpoint(evaluation_deadline)
         validate_quant_v6_registration_plan(plan)
-        prepared = _prepare_publication(plan=plan, evaluations=evaluations)
+        prepared = _prepare_publication(
+            plan=plan,
+            evaluations=evaluations,
+            evaluation_deadline=evaluation_deadline,
+        )
         for attempt in range(2):
+            _evaluation_checkpoint(evaluation_deadline)
             session = self._session_factory()
             try:
+                _evaluation_checkpoint(evaluation_deadline)
                 registration = session.scalar(
                     select(WatchlistQuantV6Registration).where(
                         WatchlistQuantV6Registration.identity_sha256
@@ -2758,6 +2866,7 @@ class WatchlistQuantV6PublicationService:
                         publication=existing,
                         plan=plan,
                         prepared=prepared,
+                        evaluation_deadline=evaluation_deadline,
                     )
 
                 published_at = max(
@@ -2773,9 +2882,11 @@ class WatchlistQuantV6PublicationService:
                         artifact.digest_sha256
                         for artifact in prepared.artifacts
                     ),
+                    evaluation_deadline=evaluation_deadline,
                 )
                 missing_artifacts: list[EncodedQuantV6Artifact] = []
                 for artifact in prepared.artifacts:
+                    _evaluation_checkpoint(evaluation_deadline)
                     artifact_row = existing_artifacts.get(
                         artifact.digest_sha256
                     )
@@ -2783,8 +2894,10 @@ class WatchlistQuantV6PublicationService:
                         _verify_artifact_row(artifact_row, artifact)
                         continue
                     missing_artifacts.append(artifact)
-                session.add_all(
-                    WatchlistQuantV6Artifact(
+                artifact_rows_to_add: list[WatchlistQuantV6Artifact] = []
+                for artifact in missing_artifacts:
+                    _evaluation_checkpoint(evaluation_deadline)
+                    artifact_rows_to_add.append(WatchlistQuantV6Artifact(
                         digest_sha256=artifact.digest_sha256,
                         schema_version=artifact.schema_version,
                         kind=artifact.kind,
@@ -2796,11 +2909,12 @@ class WatchlistQuantV6PublicationService:
                         compressed_size=artifact.compressed_size,
                         payload=artifact.payload,
                         created_at=published_at,
-                    )
-                    for artifact in missing_artifacts
-                )
+                    ))
+                session.add_all(artifact_rows_to_add)
+                _evaluation_checkpoint(evaluation_deadline)
                 session.flush()
 
+                _evaluation_checkpoint(evaluation_deadline)
                 publication = WatchlistQuantV6Publication(
                     **_publication_row_fields(
                         registration_id=registration.id,
@@ -2812,23 +2926,32 @@ class WatchlistQuantV6PublicationService:
                 )
                 session.add(publication)
                 session.flush()
-                session.add_all(
-                    WatchlistQuantV6PublicationArtifact(
-                        publication_id=publication.id,
-                        member_ordinal=binding.member_ordinal,
-                        symbol=binding.symbol,
-                        market=binding.market,
-                        role=binding.role,
-                        artifact_ordinal=binding.artifact_ordinal,
-                        session_date=binding.session_date,
-                        artifact_sha256=binding.artifact.digest_sha256,
-                        artifact_kind=binding.artifact.kind,
-                        binding_sha256=binding.binding_sha256,
-                        created_at=published_at,
+                binding_rows_to_add: list[
+                    WatchlistQuantV6PublicationArtifact
+                ] = []
+                for binding in prepared.bindings:
+                    _evaluation_checkpoint(evaluation_deadline)
+                    binding_rows_to_add.append(
+                        WatchlistQuantV6PublicationArtifact(
+                            publication_id=publication.id,
+                            member_ordinal=binding.member_ordinal,
+                            symbol=binding.symbol,
+                            market=binding.market,
+                            role=binding.role,
+                            artifact_ordinal=binding.artifact_ordinal,
+                            session_date=binding.session_date,
+                            artifact_sha256=(
+                                binding.artifact.digest_sha256
+                            ),
+                            artifact_kind=binding.artifact.kind,
+                            binding_sha256=binding.binding_sha256,
+                            created_at=published_at,
+                        )
                     )
-                    for binding in prepared.bindings
-                )
+                session.add_all(binding_rows_to_add)
+                _evaluation_checkpoint(evaluation_deadline)
                 session.flush()
+                _evaluation_checkpoint(evaluation_deadline)
                 receipt = self._verify_complete_publication(
                     session,
                     registration=registration,
@@ -2836,7 +2959,9 @@ class WatchlistQuantV6PublicationService:
                     plan=plan,
                     prepared=prepared,
                     verify_artifact_payloads=False,
+                    evaluation_deadline=evaluation_deadline,
                 )
+                _evaluation_checkpoint(evaluation_deadline)
                 session.commit()
                 return QuantV6PublicationReceipt(
                     publication_id=receipt.publication_id,
@@ -2852,9 +2977,11 @@ class WatchlistQuantV6PublicationService:
             except IntegrityError as exc:
                 session.rollback()
                 session.close()
+                _evaluation_checkpoint(evaluation_deadline)
                 existing_receipt = self._load_existing_publication(
                     plan=plan,
                     prepared=prepared,
+                    evaluation_deadline=evaluation_deadline,
                 )
                 if existing_receipt is not None:
                     return existing_receipt
@@ -2877,16 +3004,28 @@ class WatchlistQuantV6PublicationService:
         *,
         plan: QuantV6RegistrationPlan,
         evaluation_callback: Callable[
-            [QuantV6RegistrationPlan],
+            [QuantV6RegistrationPlan, Callable[[], None]],
             Sequence[QuantV6CandidateEvaluation],
         ],
+        evaluation_deadline: QuantV6EvaluationDeadline | None = None,
     ) -> QuantV6PublicationReceipt:
-        """Commit registration, then evaluate, then atomically publish."""
-        self.register_plan(plan)
-        evaluations = tuple(evaluation_callback(plan))
+        """Register, cooperatively evaluate, then atomically publish."""
+        self.register_plan(
+            plan,
+            evaluation_deadline=evaluation_deadline,
+        )
+        _evaluation_checkpoint(evaluation_deadline)
+        callback_checkpoint = (
+            evaluation_deadline.checkpoint
+            if evaluation_deadline is not None
+            else _noop_evaluation_checkpoint
+        )
+        evaluations = tuple(evaluation_callback(plan, callback_checkpoint))
+        _evaluation_checkpoint(evaluation_deadline)
         return self.publish_registration(
             plan=plan,
             evaluations=evaluations,
+            evaluation_deadline=evaluation_deadline,
         )
 
     def register_provider_evaluate_publish(
@@ -2894,19 +3033,31 @@ class WatchlistQuantV6PublicationService:
         *,
         plan: QuantV6RegistrationPlan,
         provider: QuantV6HistoricalProvider,
+        evaluation_deadline: QuantV6EvaluationDeadline | None = None,
     ) -> QuantV6PublicationReceipt:
         """Run the frozen server evaluator only after registration commits."""
-        self.register_plan(plan)
-        existing = self._load_trusted_existing_publication(plan=plan)
+        self.register_plan(
+            plan,
+            evaluation_deadline=evaluation_deadline,
+        )
+        _evaluation_checkpoint(evaluation_deadline)
+        existing = self._load_trusted_existing_publication(
+            plan=plan,
+            evaluation_deadline=evaluation_deadline,
+        )
         if existing is not None:
             return existing
+        _evaluation_checkpoint(evaluation_deadline)
         evaluations = evaluate_quant_v6_registration(
             registration=plan,
             provider=provider,
+            evaluation_deadline=evaluation_deadline,
         )
+        _evaluation_checkpoint(evaluation_deadline)
         return self.publish_registration(
             plan=plan,
             evaluations=evaluations,
+            evaluation_deadline=evaluation_deadline,
         )
 
 

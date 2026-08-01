@@ -4,13 +4,14 @@ import inspect
 import hashlib
 import json
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from functools import cache
+from typing import Any
 
 import pytest
 from sqlalchemy import create_engine, event, func, select
@@ -45,6 +46,7 @@ from app.services.watchlist_quant_v6_evaluation_service import (
     SESSION_INPUT_ROLE,
     QuantV6CandidateEvaluation,
     QuantV6PendingArtifactBinding,
+    QuantV6RegistrationPlan,
     _build_registration_plan,
     build_latest_quant_v6_registration_plan,
     evaluate_quant_v6_registration,
@@ -52,9 +54,15 @@ from app.services.watchlist_quant_v6_evaluation_service import (
 from app.services.watchlist_quant_v6_historical_provider import (
     QuantV6HistoricalBarFetch,
 )
+from app.services.watchlist_quant_v6_deadline import (
+    QuantV6EvaluationCancelledError,
+    QuantV6EvaluationDeadline,
+    QuantV6EvaluationDeadlineExceededError,
+)
 from app.services.watchlist_quant_v6_publication_service import (
     QuantV6PublicationConflictError,
     QuantV6PublicationError,
+    QuantV6PublicationReceipt,
     WatchlistQuantV6PublicationService,
     _binding_preimage,
     _registration_fields,
@@ -375,6 +383,73 @@ def test_registration_is_committed_before_callback_and_survives_failure(
     assert _counts(engine) == (1, 1, 1, 1)
 
 
+def test_deadline_after_evaluation_never_starts_publication(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+    factory = _factory(engine)
+    deadline = QuantV6EvaluationDeadline(60)
+
+    def finish_then_expire(
+        _plan: object,
+        _checkpoint: Callable[[], None],
+    ) -> tuple[QuantV6CandidateEvaluation, ...]:
+        evaluations = _missing_evaluations()
+        deadline.expire()
+        return evaluations
+
+    with pytest.raises(QuantV6EvaluationDeadlineExceededError):
+        WatchlistQuantV6PublicationService(
+            factory,
+            clock=lambda: _NOW,
+        ).register_evaluate_publish(
+            plan=_one_member_plan(),
+            evaluation_callback=finish_then_expire,
+            evaluation_deadline=deadline,
+        )
+
+    assert _counts(engine) == (1, 0, 0, 0)
+
+
+def test_generic_callback_cooperatively_observes_cancellation(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+    service = WatchlistQuantV6PublicationService(
+        _factory(engine),
+        clock=lambda: _NOW,
+    )
+    deadline = QuantV6EvaluationDeadline(60)
+    callback_started = threading.Event()
+    cancellation_poll = threading.Event()
+
+    def cooperative_evaluation(
+        _plan: QuantV6RegistrationPlan,
+        checkpoint: Callable[[], None],
+    ) -> tuple[QuantV6CandidateEvaluation, ...]:
+        callback_started.set()
+        while True:
+            checkpoint()
+            cancellation_poll.wait(0.01)
+
+    def invoke() -> QuantV6PublicationReceipt:
+        return service.register_evaluate_publish(
+            plan=_one_member_plan(),
+            evaluation_callback=cooperative_evaluation,
+            evaluation_deadline=deadline,
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(invoke)
+        assert callback_started.wait(2)
+        assert _counts(engine) == (1, 0, 0, 0)
+        deadline.cancel()
+        with pytest.raises(QuantV6EvaluationCancelledError):
+            result.result(timeout=2)
+
+    assert _counts(engine) == (1, 0, 0, 0)
+
+
 def test_atomic_publication_is_complete_p0_and_idempotent(tmp_path) -> None:
     engine = _engine(tmp_path)
     service = WatchlistQuantV6PublicationService(
@@ -385,11 +460,15 @@ def test_atomic_publication_is_complete_p0_and_idempotent(tmp_path) -> None:
 
     first = service.register_evaluate_publish(
         plan=plan,
-        evaluation_callback=lambda _plan: _missing_evaluations(),
+        evaluation_callback=(
+            lambda _plan, _checkpoint: _missing_evaluations()
+        ),
     )
     second = service.register_evaluate_publish(
         plan=plan,
-        evaluation_callback=lambda _plan: _missing_evaluations(),
+        evaluation_callback=(
+            lambda _plan, _checkpoint: _missing_evaluations()
+        ),
     )
 
     assert first.created is True
@@ -503,6 +582,60 @@ def test_provider_repeat_replays_persisted_publication_without_quote_io(
     )
     assert len(outcome["accepted_bar_starts_sha256"]) == 64
     assert len(outcome["scheduled_grid_present_starts_sha256"]) == 64
+
+
+def test_provider_fast_path_deadline_during_replay_is_read_only(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+    service = WatchlistQuantV6PublicationService(
+        _factory(engine),
+        clock=lambda: _NOW,
+    )
+    plan = _one_member_plan()
+    service.register_provider_evaluate_publish(
+        plan=plan,
+        provider=_Provider(),
+    )
+    before = _counts(engine)
+    provider = _Provider()
+    deadline = QuantV6EvaluationDeadline(60)
+    replay_query_seen = threading.Event()
+
+    def expire_after_binding_query(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        normalized = statement.lower()
+        if (
+            "select" in normalized
+            and "from watchlist_quant_v6_publication_artifacts" in normalized
+        ):
+            replay_query_seen.set()
+            deadline.expire()
+
+    event.listen(engine, "after_cursor_execute", expire_after_binding_query)
+    try:
+        with pytest.raises(QuantV6EvaluationDeadlineExceededError):
+            service.register_provider_evaluate_publish(
+                plan=plan,
+                provider=provider,
+                evaluation_deadline=deadline,
+            )
+    finally:
+        event.remove(
+            engine,
+            "after_cursor_execute",
+            expire_after_binding_query,
+        )
+
+    assert replay_query_seen.is_set() is True
+    assert provider.calls == 0
+    assert _counts(engine) == before
 
 
 def test_provider_fast_path_hard_fails_tampered_publication_before_io(
@@ -1081,6 +1214,130 @@ def test_binding_insert_failure_rolls_back_header_and_new_artifacts(
         event.remove(engine, "before_cursor_execute", _fail_binding_insert)
 
     assert _counts(engine) == (1, 0, 0, 0)
+
+
+@pytest.mark.parametrize("expire_after_flush", [1, 2, 3])
+def test_deadline_between_publication_flushes_rolls_back_everything(
+    tmp_path,
+    expire_after_flush: int,
+) -> None:
+    engine = _engine(tmp_path)
+    plan = _one_member_plan()
+    normal_factory = _factory(engine)
+    WatchlistQuantV6PublicationService(
+        normal_factory,
+        clock=lambda: _NOW,
+    ).register_plan(plan)
+    deadline = QuantV6EvaluationDeadline(60)
+    flushes = 0
+
+    class _ExpiringSession(Session):
+        def flush(self, objects: Sequence[Any] | None = None) -> None:
+            nonlocal flushes
+            super().flush(objects)
+            flushes += 1
+            if flushes == expire_after_flush:
+                deadline.expire()
+
+    def expiring_factory() -> Session:
+        return _ExpiringSession(
+            bind=engine,
+            autoflush=False,
+            expire_on_commit=False,
+        )
+
+    service = WatchlistQuantV6PublicationService(
+        expiring_factory,
+        clock=lambda: _NOW,
+    )
+
+    with pytest.raises(QuantV6EvaluationDeadlineExceededError):
+        service.publish_registration(
+            plan=plan,
+            evaluations=_missing_evaluations(),
+            evaluation_deadline=deadline,
+        )
+
+    assert flushes == expire_after_flush
+    assert _counts(engine) == (1, 0, 0, 0)
+
+
+def test_deadline_at_final_precommit_checkpoint_rolls_back_everything(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+    factory = _factory(engine)
+    plan = _one_member_plan()
+    service = WatchlistQuantV6PublicationService(
+        factory,
+        clock=lambda: _NOW,
+    )
+    service.register_plan(plan)
+    deadline = QuantV6EvaluationDeadline(60)
+    original_verify = service._verify_complete_publication
+
+    def expire_after_verify(*args: Any, **kwargs: Any) -> Any:
+        receipt = original_verify(*args, **kwargs)
+        deadline.expire()
+        return receipt
+
+    monkeypatch.setattr(
+        service,
+        "_verify_complete_publication",
+        expire_after_verify,
+    )
+
+    with pytest.raises(QuantV6EvaluationDeadlineExceededError):
+        service.publish_registration(
+            plan=plan,
+            evaluations=_missing_evaluations(),
+            evaluation_deadline=deadline,
+        )
+
+    assert _counts(engine) == (1, 0, 0, 0)
+
+
+def test_successful_atomic_commit_wins_over_post_commit_deadline(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+    plan = _one_member_plan()
+    normal_factory = _factory(engine)
+    WatchlistQuantV6PublicationService(
+        normal_factory,
+        clock=lambda: _NOW,
+    ).register_plan(plan)
+    deadline = QuantV6EvaluationDeadline(60)
+    commits = 0
+
+    class _CompletingSession(Session):
+        def commit(self) -> None:
+            nonlocal commits
+            commits += 1
+            deadline.expire()
+            super().commit()
+
+    def completing_factory() -> Session:
+        return _CompletingSession(
+            bind=engine,
+            autoflush=False,
+            expire_on_commit=False,
+        )
+
+    receipt = WatchlistQuantV6PublicationService(
+        completing_factory,
+        clock=lambda: _NOW,
+    ).publish_registration(
+        plan=plan,
+        evaluations=_missing_evaluations(),
+        evaluation_deadline=deadline,
+    )
+
+    assert commits == 1
+    assert receipt.created is True
+    assert deadline.is_stopped() is True
+    assert _counts(engine) == (1, 1, 1, 1)
 
 
 def test_complete_publication_batches_artifact_queries_before_short_write(

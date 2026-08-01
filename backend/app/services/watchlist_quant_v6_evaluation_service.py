@@ -16,6 +16,7 @@ from typing import Protocol
 
 import app.domain.universe_selection.catalog as catalog_module
 import app.domain.universe_selection.membership_history as membership_module
+import app.services.watchlist_quant_v6_deadline as deadline_module
 import app.services.watchlist_quant_v6_historical_provider as provider_module
 from app.domain.universe_selection import (
     CATALOG_SOURCE_VERSION,
@@ -61,6 +62,9 @@ from app.services.watchlist_quant_v6_historical_provider import (
     quant_v6_historical_provider_contract,
     quant_v6_historical_provider_digest_sha256,
 )
+from app.services.watchlist_quant_v6_deadline import (
+    QuantV6EvaluationDeadline,
+)
 
 
 QUANT_V6_REGISTRATION_SCHEMA_VERSION = 1
@@ -69,7 +73,7 @@ QUANT_V6_SELECTION_RULE_VERSION = (
     "rotation-research-catalog-active-at-first-target-v1"
 )
 QUANT_V6_COHORT_SOURCE = "ROTATION_RESEARCH_CATALOG_PIT"
-QUANT_V6_HISTORICAL_EVALUATOR_MANIFEST_VERSION = 1
+QUANT_V6_HISTORICAL_EVALUATOR_MANIFEST_VERSION = 2
 QUANT_V6_BINDING_CONTRACT = "watchlist-quant-v6-artifact-binding-v1"
 QUANT_V6_DATA_SETTLEMENT_DELAY = timedelta(minutes=15)
 
@@ -84,6 +88,7 @@ _ROLE_RANK: Mapping[str, int] = MappingProxyType({
 _SOURCE_KEYS = (
     "app.domain.universe_selection.catalog",
     "app.domain.universe_selection.membership_history",
+    "app.services.watchlist_quant_v6_deadline",
     "app.services.watchlist_quant_v6_evaluation_service",
     "app.services.watchlist_quant_v6_historical_provider",
 )
@@ -222,6 +227,7 @@ def quant_v6_historical_evaluator_manifest() -> dict[str, object]:
         "app.domain.universe_selection.catalog": catalog_module,
         "app.domain.universe_selection.membership_history": membership_module,
         "app.services.watchlist_quant_v6_evaluation_service": sys.modules[__name__],
+        "app.services.watchlist_quant_v6_deadline": deadline_module,
         "app.services.watchlist_quant_v6_historical_provider": provider_module,
     }
     if tuple(sorted(modules)) != _SOURCE_KEYS:
@@ -758,7 +764,10 @@ def evaluate_quant_v6_candidate(
     registration: QuantV6RegistrationPlan,
     member: QuantV6CohortMember,
     provider: QuantV6HistoricalProvider,
+    evaluation_deadline: QuantV6EvaluationDeadline | None = None,
 ) -> QuantV6CandidateEvaluation:
+    if evaluation_deadline is not None:
+        evaluation_deadline.checkpoint()
     validate_quant_v6_registration_plan(registration)
     if type(member) is not QuantV6CohortMember:
         raise QuantV6HistoricalEvaluationError(
@@ -790,14 +799,19 @@ def evaluate_quant_v6_candidate(
         start_at=first_grid[0],
         end_at=last_grid[-1] + timedelta(minutes=5),
     )
-    complete_by_date = {
-        session_date: _complete_session_bars(
+    if evaluation_deadline is not None:
+        evaluation_deadline.checkpoint()
+    complete_by_date: dict[date, tuple[QuantV6Bar, ...] | None] = {}
+    for session_date in all_dates:
+        if evaluation_deadline is not None:
+            evaluation_deadline.checkpoint()
+        complete_by_date[session_date] = _complete_session_bars(
             fetched.bars,
             market=registration.market,
             session_date=session_date,
         )
-        for session_date in all_dates
-    }
+    if evaluation_deadline is not None:
+        evaluation_deadline.checkpoint()
     leaves: list[QuantV6SessionLeaf] = []
     session_artifacts: list[tuple[int, date, EncodedQuantV6Artifact]] = []
     event_artifacts: list[tuple[int, date, EncodedQuantV6Artifact]] = []
@@ -805,6 +819,8 @@ def evaluate_quant_v6_candidate(
     for target_ordinal, target_date in enumerate(
         registration.target_session_dates
     ):
+        if evaluation_deadline is not None:
+            evaluation_deadline.checkpoint()
         prior_dates = quant_v6_previous_trading_session_dates(
             registration.market,
             target_date,
@@ -827,24 +843,31 @@ def evaluate_quant_v6_candidate(
         exact_target_bars = tuple(target_bars or ())
         exact_training_bars = tuple(training_bars)
         try:
-            training_sessions = tuple(
-                QuantV6TrainingSession(
+            training_session_values: list[QuantV6TrainingSession] = []
+            for value, bars in zip(
+                prior_dates,
+                exact_training_bars,
+                strict=True,
+            ):
+                if evaluation_deadline is not None:
+                    evaluation_deadline.checkpoint()
+                if bars is None:
+                    continue
+                training_session_values.append(QuantV6TrainingSession(
                     session_date=value,
                     bars=bars,
-                )
-                for value, bars in zip(
-                    prior_dates,
-                    exact_training_bars,
-                    strict=True,
-                )
-                if bars is not None
-            )
+                ))
+            training_sessions = tuple(training_session_values)
+            if evaluation_deadline is not None:
+                evaluation_deadline.checkpoint()
             threshold = build_quant_v6_threshold_evidence(
                 symbol=member.symbol,
                 market=member.market,
                 target_session_date=target_date,
                 training_sessions=training_sessions,
             )
+            if evaluation_deadline is not None:
+                evaluation_deadline.checkpoint()
             events = build_bar_next_open_stressed_session_events(
                 symbol=member.symbol,
                 market=member.market,
@@ -853,6 +876,8 @@ def evaluate_quant_v6_candidate(
                 threshold_evidence=threshold,
                 fee_rate=quant_v6_fee_rate(member.market),
             )
+            if evaluation_deadline is not None:
+                evaluation_deadline.checkpoint()
             leaf = QuantV6SessionLeaf(
                 session_date=target_date,
                 status=SESSION_COVERED,
@@ -875,9 +900,16 @@ def evaluate_quant_v6_candidate(
             leaf.encoded_replay_input(
                 symbol=member.symbol,
                 market=member.market,
+                checkpoint=(
+                    evaluation_deadline.checkpoint
+                    if evaluation_deadline is not None
+                    else None
+                ),
             ),
         ))
         for event in events:
+            if evaluation_deadline is not None:
+                evaluation_deadline.checkpoint()
             event_artifacts.append((
                 event_ordinal,
                 target_date,
@@ -889,8 +921,19 @@ def evaluate_quant_v6_candidate(
             symbol=member.symbol,
             market=member.market,
             leaves=leaves,
+            checkpoint=(
+                evaluation_deadline.checkpoint
+                if evaluation_deadline is not None
+                else None
+            ),
         )
-        assessment_artifact = assessment.encoded_artifact()
+        assessment_artifact = assessment.encoded_artifact(
+            checkpoint=(
+                evaluation_deadline.checkpoint
+                if evaluation_deadline is not None
+                else None
+            )
+        )
     except QuantV6AssessmentError as exc:
         raise QuantV6HistoricalEvaluationError(
             "candidate assessment failed canonical replay"
@@ -905,28 +948,28 @@ def evaluate_quant_v6_candidate(
             artifact=assessment_artifact,
         )
     ]
-    bindings.extend(
-        _binding(
+    for ordinal, session_date, artifact in session_artifacts:
+        if evaluation_deadline is not None:
+            evaluation_deadline.checkpoint()
+        bindings.append(_binding(
             registration_identity_sha256=registration.identity_sha256,
             member=member,
             role=SESSION_INPUT_ROLE,
             artifact_ordinal=ordinal,
             session_date=session_date,
             artifact=artifact,
-        )
-        for ordinal, session_date, artifact in session_artifacts
-    )
-    bindings.extend(
-        _binding(
+        ))
+    for ordinal, session_date, artifact in event_artifacts:
+        if evaluation_deadline is not None:
+            evaluation_deadline.checkpoint()
+        bindings.append(_binding(
             registration_identity_sha256=registration.identity_sha256,
             member=member,
             role=EVENT_ROLE,
             artifact_ordinal=ordinal,
             session_date=session_date,
             artifact=artifact,
-        )
-        for ordinal, session_date, artifact in event_artifacts
-    )
+        ))
     ordered_bindings = tuple(sorted(
         bindings,
         key=lambda item: (
@@ -934,6 +977,8 @@ def evaluate_quant_v6_candidate(
             item.artifact_ordinal,
         ),
     ))
+    if evaluation_deadline is not None:
+        evaluation_deadline.checkpoint()
     return QuantV6CandidateEvaluation(
         member=member,
         recommended_action=assessment.recommended_action,
@@ -955,16 +1000,22 @@ def evaluate_quant_v6_registration(
     *,
     registration: QuantV6RegistrationPlan,
     provider: QuantV6HistoricalProvider,
+    evaluation_deadline: QuantV6EvaluationDeadline | None = None,
 ) -> tuple[QuantV6CandidateEvaluation, ...]:
     """Evaluate every frozen member; any provider failure aborts the cohort."""
-    return tuple(
-        evaluate_quant_v6_candidate(
+    evaluations: list[QuantV6CandidateEvaluation] = []
+    for member in registration.members:
+        if evaluation_deadline is not None:
+            evaluation_deadline.checkpoint()
+        evaluations.append(evaluate_quant_v6_candidate(
             registration=registration,
             member=member,
             provider=provider,
-        )
-        for member in registration.members
-    )
+            evaluation_deadline=evaluation_deadline,
+        ))
+        if evaluation_deadline is not None:
+            evaluation_deadline.checkpoint()
+    return tuple(evaluations)
 
 
 def quant_v6_binding_manifest(

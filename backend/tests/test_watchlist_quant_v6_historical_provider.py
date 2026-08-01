@@ -26,6 +26,10 @@ from app.domain.watchlist_quant_v6 import (
     QUANT_V6_ACQUISITION_SPEC_DIGEST,
     canonical_quant_v6_json,
 )
+from app.services.watchlist_quant_v6_deadline import (
+    QuantV6EvaluationDeadline,
+    QuantV6EvaluationDeadlineExceededError,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -78,6 +82,8 @@ def _module(pages: list[list[_Candle]], *, no_adjust: bool = True):
         def __init__(self, _config: object) -> None:
             self.calls: list[tuple[Any, ...]] = []
             self.closed = False
+            self.close_calls = 0
+            self.closed_event = threading.Event()
             QuoteContext.instances.append(self)
 
         def history_candlesticks_by_offset(self, *args: Any):
@@ -85,7 +91,9 @@ def _module(pages: list[list[_Candle]], *, no_adjust: bool = True):
             return pages.pop(0) if pages else []
 
         def close(self) -> None:
+            self.close_calls += 1
             self.closed = True
+            self.closed_event.set()
 
     class TradeContext:
         def __init__(self, _config: object) -> None:
@@ -312,7 +320,10 @@ def test_provider_hard_times_out_a_hanging_sdk_page(
     started = threading.Event()
     release = threading.Event()
     finished = threading.Event()
+    deferred_close_started = threading.Event()
+    release_deferred_close = threading.Event()
     module, quote_context_type = _module([])
+    normal_close = quote_context_type.close
 
     def hanging_reader(self: object, *args: object) -> list[_Candle]:
         del self, args
@@ -323,11 +334,17 @@ def test_provider_hard_times_out_a_hanging_sdk_page(
         finally:
             finished.set()
 
+    def blocking_close(self: Any) -> None:
+        deferred_close_started.set()
+        assert release_deferred_close.wait(2)
+        normal_close(self)
+
     monkeypatch.setattr(
         quote_context_type,
         "history_candlesticks_by_offset",
         hanging_reader,
     )
+    monkeypatch.setattr(quote_context_type, "close", blocking_close)
     monkeypatch.setattr(
         provider_module,
         "QUANT_V6_HISTORICAL_PAGE_TIMEOUT_MILLISECONDS",
@@ -357,12 +374,161 @@ def test_provider_hard_times_out_a_hanging_sdk_page(
                 end_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
             )
         provider.close()
-        assert quote_context_type.instances[0].closed is False
+        context = quote_context_type.instances[0]
+        assert context.closed is False
+        assert context.close_calls == 0
     finally:
         release.set()
         assert finished.wait(1)
+        context = quote_context_type.instances[0]
+        try:
+            assert deferred_close_started.wait(1)
+            slot_was_available = provider_module._SDK_CALL_SLOT.acquire(
+                blocking=False
+            )
+            if slot_was_available:
+                provider_module._SDK_CALL_SLOT.release()
+            assert slot_was_available is False
+        finally:
+            release_deferred_close.set()
+        assert context.closed_event.wait(1)
+        assert context.closed is True
+        assert context.close_calls == 1
         assert provider_module._SDK_CALL_SLOT.acquire(timeout=1)
         provider_module._SDK_CALL_SLOT.release()
+        provider.close()
+        assert context.close_calls == 1
+
+
+def test_provider_total_deadline_is_shorter_than_page_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    module, quote_context_type = _module([])
+
+    def hanging_reader(self: object, *args: object) -> list[_Candle]:
+        del self, args
+        started.set()
+        try:
+            release.wait(2)
+            return []
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(
+        quote_context_type,
+        "history_candlesticks_by_offset",
+        hanging_reader,
+    )
+    monkeypatch.setattr(
+        provider_module,
+        "QUANT_V6_HISTORICAL_PAGE_TIMEOUT_MILLISECONDS",
+        2_000,
+    )
+    deadline = QuantV6EvaluationDeadline(0.05)
+    provider = QuantV6HistoricalBarProvider(
+        module_loader=lambda: module,
+        evaluation_deadline=deadline,
+    )
+    began_at = time.monotonic()
+    try:
+        with pytest.raises(QuantV6EvaluationDeadlineExceededError):
+            provider.fetch_five_minute_no_adjust(
+                "AAPL.US",
+                start_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+                end_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+            )
+        assert started.is_set()
+        assert time.monotonic() - began_at < 0.75
+        provider.close()
+        context = quote_context_type.instances[0]
+        assert context.closed is False
+        assert context.close_calls == 0
+    finally:
+        release.set()
+        assert finished.wait(1)
+        context = quote_context_type.instances[0]
+        assert context.closed_event.wait(1)
+        assert context.closed is True
+        assert context.close_calls == 1
+        assert provider_module._SDK_CALL_SLOT.acquire(timeout=1)
+        provider_module._SDK_CALL_SLOT.release()
+        provider.close()
+        assert context.close_calls == 1
+
+
+def test_provider_retry_wait_does_not_exceed_total_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module, quote_context_type = _module([])
+    attempts = 0
+
+    def transient_failure(self: object, *args: object) -> list[_Candle]:
+        nonlocal attempts
+        del self, args
+        attempts += 1
+        raise ConnectionError("transient quote failure")
+
+    monkeypatch.setattr(
+        quote_context_type,
+        "history_candlesticks_by_offset",
+        transient_failure,
+    )
+    monkeypatch.setattr(
+        provider_module,
+        "QUANT_V6_HISTORICAL_RETRY_MAX",
+        1,
+    )
+    monkeypatch.setattr(
+        provider_module,
+        "QUANT_V6_HISTORICAL_RETRY_BASE_MILLISECONDS",
+        1_000,
+    )
+    deadline = QuantV6EvaluationDeadline(0.05)
+    provider = QuantV6HistoricalBarProvider(
+        module_loader=lambda: module,
+        sleep=lambda _delay: pytest.fail("deadline path used raw sleep"),
+        evaluation_deadline=deadline,
+    )
+    began_at = time.monotonic()
+
+    with pytest.raises(QuantV6EvaluationDeadlineExceededError):
+        provider.fetch_five_minute_no_adjust(
+            "AAPL.US",
+            start_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+            end_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+        )
+
+    assert attempts == 1
+    assert time.monotonic() - began_at < 0.75
+    provider.close()
+
+
+def test_provider_idle_cleanup_closes_after_deadline_expires() -> None:
+    module, quote_context_type = _module([])
+    deadline = QuantV6EvaluationDeadline(30)
+    provider = QuantV6HistoricalBarProvider(
+        module_loader=lambda: module,
+        evaluation_deadline=deadline,
+    )
+
+    result = provider.fetch_five_minute_no_adjust(
+        "AAPL.US",
+        start_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+        end_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
+    )
+    context = quote_context_type.instances[0]
+    assert result.pages == 1
+    assert context.closed is False
+    assert provider_module._SDK_CALL_SLOT.acquire(timeout=1)
+    provider_module._SDK_CALL_SLOT.release()
+
+    deadline.expire()
+    provider.close()
+
+    assert context.closed is True
 
 
 def test_provider_hard_times_out_hanging_context_creation(
@@ -371,15 +537,32 @@ def test_provider_hard_times_out_hanging_context_creation(
     started = threading.Event()
     release = threading.Event()
     finished = threading.Event()
+    closed = threading.Event()
+    deferred_close_started = threading.Event()
+    release_deferred_close = threading.Event()
+    close_observed_while_creating: list[bool] = []
     module, _quote_context_type = _module([])
 
     class HangingQuoteContext:
+        instances: list[HangingQuoteContext] = []
+
         def __init__(self, _config: object) -> None:
+            self.close_calls = 0
+            HangingQuoteContext.instances.append(self)
             started.set()
             try:
                 release.wait(2)
             finally:
                 finished.set()
+
+        def close(self) -> None:
+            close_observed_while_creating.append(not finished.is_set())
+            deferred_close_started.set()
+            try:
+                assert release_deferred_close.wait(2)
+            finally:
+                self.close_calls += 1
+                closed.set()
 
     monkeypatch.setattr(module, "QuoteContext", HangingQuoteContext)
     monkeypatch.setattr(
@@ -399,11 +582,31 @@ def test_provider_hard_times_out_hanging_context_creation(
                 end_at=datetime(2026, 1, 3, tzinfo=timezone.utc),
             )
         assert started.is_set()
+        provider.close()
+        context = HangingQuoteContext.instances[0]
+        assert closed.is_set() is False
+        assert context.close_calls == 0
     finally:
         release.set()
         assert finished.wait(1)
+        try:
+            assert deferred_close_started.wait(1)
+            slot_was_available = provider_module._SDK_CALL_SLOT.acquire(
+                blocking=False
+            )
+            if slot_was_available:
+                provider_module._SDK_CALL_SLOT.release()
+            assert slot_was_available is False
+        finally:
+            release_deferred_close.set()
+        assert closed.wait(1)
+        context = HangingQuoteContext.instances[0]
+        assert close_observed_while_creating == [False]
+        assert context.close_calls == 1
         assert provider_module._SDK_CALL_SLOT.acquire(timeout=1)
         provider_module._SDK_CALL_SLOT.release()
+        provider.close()
+        assert context.close_calls == 1
 
 
 def test_provider_cancels_a_hanging_sdk_page_before_timeout(
@@ -449,10 +652,18 @@ def test_provider_cancels_a_hanging_sdk_page_before_timeout(
             )
         assert time.monotonic() - began_at < 1
         provider.close()
-        assert quote_context_type.instances[0].closed is False
+        context = quote_context_type.instances[0]
+        assert context.closed is False
+        assert context.close_calls == 0
     finally:
         release.set()
         assert finished.wait(1)
+        context = quote_context_type.instances[0]
+        assert context.closed_event.wait(1)
+        assert context.closed is True
+        assert context.close_calls == 1
         assert provider_module._SDK_CALL_SLOT.acquire(timeout=1)
         provider_module._SDK_CALL_SLOT.release()
+        provider.close()
+        assert context.close_calls == 1
         canceller.join(1)

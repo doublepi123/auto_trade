@@ -17,6 +17,11 @@ from app.models import Base
 from app.services import watchlist_quant_v6_evaluation_service
 from app.services import watchlist_quant_v6_historical_provider
 from app.services import watchlist_quant_v6_publication_service
+from app.services.watchlist_quant_v6_deadline import (
+    QuantV6EvaluationCancelledError,
+    QuantV6EvaluationDeadline,
+    QuantV6EvaluationDeadlineExceededError,
+)
 from app.services.watchlist_quant_v6_historical_provider import (
     QuantV6HistoricalBarFetch,
 )
@@ -78,7 +83,8 @@ def test_quant_v6_tick_orchestrates_once_and_closes_provider(
     plan = SimpleNamespace(members=(object(), object()))
     provider = SimpleNamespace(closed=False)
     timestamps: list[object] = []
-    calls: list[tuple[object, object]] = []
+    provider_deadlines: list[object] = []
+    calls: list[tuple[object, object, object]] = []
 
     def close_provider() -> None:
         provider.closed = True
@@ -94,8 +100,9 @@ def test_quant_v6_tick_orchestrates_once_and_closes_provider(
             *,
             plan: object,
             provider: object,
+            evaluation_deadline: object,
         ) -> object:
-            calls.append((plan, provider))
+            calls.append((plan, provider, evaluation_deadline))
             return SimpleNamespace(
                 publication_id=7,
                 registration_id=3,
@@ -108,6 +115,10 @@ def test_quant_v6_tick_orchestrates_once_and_closes_provider(
         # Retain the exact clock value to prove the cron freezes one plan.
         timestamps.append(observed_at)
         return plan
+
+    def provider_factory(*, evaluation_deadline: object) -> object:
+        provider_deadlines.append(evaluation_deadline)
+        return provider
 
     monkeypatch.setattr(
         main_module.settings,
@@ -122,7 +133,7 @@ def test_quant_v6_tick_orchestrates_once_and_closes_provider(
     monkeypatch.setattr(
         watchlist_quant_v6_historical_provider,
         "QuantV6HistoricalBarProvider",
-        lambda **_kwargs: provider,
+        provider_factory,
     )
     monkeypatch.setattr(
         watchlist_quant_v6_publication_service,
@@ -130,12 +141,14 @@ def test_quant_v6_tick_orchestrates_once_and_closes_provider(
         FakePublicationService,
     )
 
-    main_module._watchlist_quant_v6_evaluation_tick_sync()
+    deadline = QuantV6EvaluationDeadline(30)
+    main_module._watchlist_quant_v6_evaluation_tick_sync(deadline)
 
     assert len(timestamps) == 1
     timestamp = timestamps[0]
     assert getattr(timestamp, "tzinfo", None) is not None
-    assert calls == [(plan, provider)]
+    assert provider_deadlines == [deadline]
+    assert calls == [(plan, provider, deadline)]
     assert provider.closed is True
 
 
@@ -292,10 +305,15 @@ async def test_quant_v6_worker_is_joined_during_cancel(
 ) -> None:
     started = threading.Event()
     release = threading.Event()
+    deadlines: list[QuantV6EvaluationDeadline] = []
 
-    def blocking_tick() -> None:
+    def blocking_tick(
+        evaluation_deadline: QuantV6EvaluationDeadline,
+    ) -> None:
+        deadlines.append(evaluation_deadline)
         started.set()
         assert release.wait(2)
+        evaluation_deadline.checkpoint()
 
     monkeypatch.setattr(
         main_module.settings,
@@ -313,13 +331,274 @@ async def test_quant_v6_worker_is_joined_during_cancel(
     assert await asyncio.to_thread(started.wait, 2)
 
     task.cancel()
-    await asyncio.sleep(0)
+    assert await asyncio.to_thread(
+        deadlines[0].cancel_event.wait,
+        2,
+    )
     assert task.done() is False
-    assert main_module._watchlist_quant_v6_evaluation_stop_event.is_set()
+    with pytest.raises(QuantV6EvaluationCancelledError):
+        deadlines[0].checkpoint()
 
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+@pytest.mark.asyncio
+async def test_quant_v6_worker_join_resists_repeated_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    deadlines: list[QuantV6EvaluationDeadline] = []
+
+    def blocking_tick(
+        evaluation_deadline: QuantV6EvaluationDeadline,
+    ) -> None:
+        deadlines.append(evaluation_deadline)
+        started.set()
+        try:
+            assert release.wait(2)
+            evaluation_deadline.checkpoint()
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_watchlist_quant_v6_evaluation_tick_sync",
+        blocking_tick,
+    )
+    task = asyncio.create_task(
+        main_module._run_watchlist_quant_v6_evaluation_tick()
+    )
+    assert await asyncio.to_thread(started.wait, 2)
+
+    assert task.cancel() is True
+    assert await asyncio.to_thread(
+        deadlines[0].cancel_event.wait,
+        2,
+    )
+    await asyncio.sleep(0)
+    assert task.cancel() is True
+    await asyncio.sleep(0)
+    assert task.done() is False
+    assert finished.is_set() is False
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_quant_v6_outer_timeout_expires_and_joins_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    expired = threading.Event()
+    release = threading.Event()
+    observed_errors: list[Exception] = []
+
+    def blocking_tick(
+        evaluation_deadline: QuantV6EvaluationDeadline,
+    ) -> None:
+        started.set()
+        assert evaluation_deadline.cancel_event.wait(2)
+        try:
+            evaluation_deadline.checkpoint()
+        except Exception as exc:
+            observed_errors.append(exc)
+            expired.set()
+        assert release.wait(2)
+        raise observed_errors[0]
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_timeout_seconds",
+        0.05,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_watchlist_quant_v6_evaluation_tick_sync",
+        blocking_tick,
+    )
+
+    task = asyncio.create_task(
+        main_module._run_watchlist_quant_v6_evaluation_tick()
+    )
+    assert await asyncio.to_thread(started.wait, 2)
+    assert await asyncio.to_thread(expired.wait, 2)
+    assert isinstance(
+        observed_errors[0],
+        QuantV6EvaluationDeadlineExceededError,
+    )
+    assert task.done() is False
+
+    release.set()
+    with pytest.raises(QuantV6EvaluationDeadlineExceededError):
+        await task
+
+
+@pytest.mark.asyncio
+async def test_quant_v6_outer_timeout_accepts_started_atomic_completion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    atomic_completion_started = threading.Event()
+    release = threading.Event()
+    receipt = object()
+
+    def atomic_tick(
+        evaluation_deadline: QuantV6EvaluationDeadline,
+    ) -> object:
+        started.set()
+        assert evaluation_deadline.cancel_event.wait(2)
+        atomic_completion_started.set()
+        assert release.wait(2)
+        return receipt
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_timeout_seconds",
+        0.05,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_watchlist_quant_v6_evaluation_tick_sync",
+        atomic_tick,
+    )
+
+    task = asyncio.create_task(
+        main_module._run_watchlist_quant_v6_evaluation_tick()
+    )
+    assert await asyncio.to_thread(started.wait, 2)
+    assert await asyncio.to_thread(atomic_completion_started.wait, 2)
+    assert task.done() is False
+
+    release.set()
+    assert await task is receipt
+
+
+@pytest.mark.asyncio
+async def test_quant_v6_cancel_after_timeout_still_joins_atomic_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    atomic_completion_started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def atomic_tick(
+        evaluation_deadline: QuantV6EvaluationDeadline,
+    ) -> object:
+        started.set()
+        assert evaluation_deadline.cancel_event.wait(2)
+        atomic_completion_started.set()
+        assert release.wait(2)
+        finished.set()
+        return object()
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_timeout_seconds",
+        0.05,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_watchlist_quant_v6_evaluation_tick_sync",
+        atomic_tick,
+    )
+
+    task = asyncio.create_task(
+        main_module._run_watchlist_quant_v6_evaluation_tick()
+    )
+    assert await asyncio.to_thread(started.wait, 2)
+    assert await asyncio.to_thread(atomic_completion_started.wait, 2)
+
+    task.cancel()
+    await asyncio.sleep(0)
+    assert task.done() is False
+    assert finished.is_set() is False
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set() is True
+
+
+@pytest.mark.asyncio
+async def test_quant_v6_repeated_cancel_after_timeout_joins_atomic_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    atomic_completion_started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def atomic_tick(
+        evaluation_deadline: QuantV6EvaluationDeadline,
+    ) -> object:
+        started.set()
+        assert evaluation_deadline.cancel_event.wait(2)
+        atomic_completion_started.set()
+        assert release.wait(2)
+        finished.set()
+        return object()
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_timeout_seconds",
+        0.05,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_watchlist_quant_v6_evaluation_tick_sync",
+        atomic_tick,
+    )
+
+    task = asyncio.create_task(
+        main_module._run_watchlist_quant_v6_evaluation_tick()
+    )
+    assert await asyncio.to_thread(started.wait, 2)
+    assert await asyncio.to_thread(atomic_completion_started.wait, 2)
+
+    assert task.cancel() is True
+    await asyncio.sleep(0)
+    assert task.cancel() is True
+    await asyncio.sleep(0)
+    assert task.done() is False
+    assert finished.is_set() is False
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set() is True
 
 
 @pytest.mark.asyncio

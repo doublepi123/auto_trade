@@ -20,6 +20,10 @@ from app.domain.watchlist_quant_v6 import (
     QuantV6Bar,
     QuantV6SemanticError,
 )
+from app.services.watchlist_quant_v6_deadline import (
+    QuantV6EvaluationDeadline,
+    QuantV6EvaluationStoppedError,
+)
 
 
 logger = logging.getLogger("auto_trade.watchlist_quant_v6_historical_provider")
@@ -252,10 +256,16 @@ class QuantV6HistoricalBarProvider:
         module_loader: Callable[[], Any] = _load_openapi,
         sleep: Callable[[float], None] = time.sleep,
         cancel_event: threading.Event | None = None,
+        evaluation_deadline: QuantV6EvaluationDeadline | None = None,
     ) -> None:
+        if cancel_event is not None and evaluation_deadline is not None:
+            raise ValueError(
+                "cancel_event and evaluation_deadline are mutually exclusive"
+            )
         self._module_loader = module_loader
         self._sleep = sleep
         self._cancel_event = cancel_event
+        self._evaluation_deadline = evaluation_deadline
         self._lock = threading.Lock()
         self._module: Any = None
         self._quote_context: Any = None
@@ -263,15 +273,45 @@ class QuantV6HistoricalBarProvider:
 
     def _cancelled(self) -> bool:
         return (
-            self._cancel_event is not None
-            and self._cancel_event.is_set()
+            (
+                self._evaluation_deadline is not None
+                and self._evaluation_deadline.is_stopped()
+            )
+            or (
+                self._cancel_event is not None
+                and self._cancel_event.is_set()
+            )
         )
 
     def _raise_if_cancelled(self) -> None:
+        if self._evaluation_deadline is not None:
+            self._evaluation_deadline.checkpoint()
         if self._cancelled():
             raise QuantV6HistoricalProviderError(
                 "quote-only historical acquisition was cancelled"
             )
+
+    def _remaining_call_seconds(self, call_deadline: float) -> float:
+        self._raise_if_cancelled()
+        remaining = call_deadline - time.monotonic()
+        if self._evaluation_deadline is not None:
+            remaining = min(
+                remaining,
+                self._evaluation_deadline.remaining_seconds(),
+            )
+        return remaining
+
+    def _wait_before_retry(self, delay_seconds: float) -> None:
+        if self._evaluation_deadline is not None:
+            self._evaluation_deadline.wait(delay_seconds)
+            return
+        if self._cancel_event is not None:
+            if self._cancel_event.wait(delay_seconds):
+                raise QuantV6HistoricalProviderError(
+                    "quote-only historical acquisition was cancelled"
+                )
+            return
+        self._sleep(delay_seconds)
 
     def _bounded_call(
         self,
@@ -279,19 +319,53 @@ class QuantV6HistoricalBarProvider:
         *,
         timeout_seconds: float,
         label: str,
+        honor_evaluation_stop: bool = True,
+        abandoned_cleanup: Callable[[object | None], None] | None = None,
     ) -> object:
         results: list[object] = []
         errors: list[Exception] = []
+        state_lock = threading.Lock()
+        completed = False
+        abandoned = False
+
+        def abandon_if_running() -> bool:
+            nonlocal abandoned
+            with state_lock:
+                if completed:
+                    return False
+                abandoned = True
+                return True
 
         def invoke() -> None:
+            nonlocal completed
+            result: object | None = None
             try:
-                results.append(call())
+                result = call()
+                results.append(result)
             except Exception as exc:
                 errors.append(exc)
             finally:
-                _SDK_CALL_SLOT.release()
+                with state_lock:
+                    completed = True
+                    should_cleanup = abandoned
+                try:
+                    if should_cleanup and abandoned_cleanup is not None:
+                        abandoned_cleanup(result)
+                except Exception as exc:
+                    logger.warning(
+                        "quote-only historical %s deferred cleanup failed: %s",
+                        label,
+                        type(exc).__name__,
+                    )
+                finally:
+                    # Keep the singleton SDK slot until an abandoned call has
+                    # really stopped and its context cleanup has completed.
+                    # This prevents another provider from entering the SDK
+                    # while ``close()`` is still draining the prior context.
+                    _SDK_CALL_SLOT.release()
 
-        self._raise_if_cancelled()
+        if honor_evaluation_stop:
+            self._raise_if_cancelled()
         if not _SDK_CALL_SLOT.acquire(blocking=False):
             raise QuantV6HistoricalProviderError(
                 "a previous quote-only historical SDK call is still running"
@@ -308,17 +382,28 @@ class QuantV6HistoricalBarProvider:
             raise
         deadline = time.monotonic() + timeout_seconds
         while worker.is_alive():
-            if self._cancelled():
-                self._abandoned_context = True
-                raise QuantV6HistoricalProviderError(
-                    "quote-only historical acquisition was cancelled"
-                )
-            remaining = deadline - time.monotonic()
+            if honor_evaluation_stop:
+                try:
+                    remaining = self._remaining_call_seconds(deadline)
+                except (
+                    QuantV6EvaluationStoppedError,
+                    QuantV6HistoricalProviderError,
+                ):
+                    if abandon_if_running():
+                        self._abandoned_context = True
+                        raise
+                    worker.join()
+                    break
+            else:
+                remaining = deadline - time.monotonic()
             if remaining <= 0:
-                self._abandoned_context = True
-                raise QuantV6HistoricalProviderError(
-                    f"quote-only historical {label} timed out"
-                )
+                if abandon_if_running():
+                    self._abandoned_context = True
+                    raise QuantV6HistoricalProviderError(
+                        f"quote-only historical {label} timed out"
+                    )
+                worker.join()
+                break
             worker.join(min(0.1, remaining))
         if errors:
             raise errors[0]
@@ -327,6 +412,35 @@ class QuantV6HistoricalBarProvider:
                 f"quote-only historical {label} returned no result"
             )
         return results[0]
+
+    @staticmethod
+    def _close_abandoned_context(
+        quote_context: object,
+        *,
+        label: str,
+    ) -> None:
+        close = getattr(quote_context, "close", None)
+        if not callable(close):
+            return
+        try:
+            close()
+        except Exception as exc:
+            logger.warning(
+                "quote-only historical %s context deferred close failed: %s",
+                label,
+                type(exc).__name__,
+            )
+
+    def _close_abandoned_created_context(
+        self,
+        created: object | None,
+    ) -> None:
+        if type(created) is not tuple or len(created) != 2:
+            return
+        self._close_abandoned_context(
+            created[1],
+            label="context creation",
+        )
 
     def _context(self) -> tuple[Any, Any]:
         if self._quote_context is None:
@@ -354,6 +468,7 @@ class QuantV6HistoricalBarProvider:
                     QUANT_V6_HISTORICAL_PAGE_TIMEOUT_MILLISECONDS / 1_000
                 ),
                 label="context creation",
+                abandoned_cleanup=self._close_abandoned_created_context,
             )
             if type(created) is not tuple or len(created) != 2:
                 raise QuantV6HistoricalProviderError(
@@ -404,9 +519,16 @@ class QuantV6HistoricalBarProvider:
                         QUANT_V6_HISTORICAL_PAGE_TIMEOUT_MILLISECONDS / 1_000
                     ),
                     label="page read",
+                    abandoned_cleanup=lambda _result: self._close_abandoned_context(
+                        quote_context,
+                        label="page read",
+                    ),
                 )
                 return _response_items(response)
-            except QuantV6HistoricalProviderError:
+            except (
+                QuantV6EvaluationStoppedError,
+                QuantV6HistoricalProviderError,
+            ):
                 raise
             except Exception as exc:
                 if not self._retryable(module, exc) or attempt >= retry_limit:
@@ -416,13 +538,7 @@ class QuantV6HistoricalBarProvider:
                 delay = (
                     QUANT_V6_HISTORICAL_RETRY_BASE_MILLISECONDS / 1_000
                 ) * (2**attempt)
-                if self._cancel_event is not None:
-                    if self._cancel_event.wait(delay):
-                        raise QuantV6HistoricalProviderError(
-                            "quote-only historical acquisition was cancelled"
-                        ) from exc
-                else:
-                    self._sleep(delay)
+                self._wait_before_retry(delay)
         raise QuantV6HistoricalProviderError("historical retry state is invalid")
 
     def fetch_five_minute_no_adjust(
@@ -561,7 +677,7 @@ class QuantV6HistoricalBarProvider:
             self._quote_context = None
             self._module = None
         close = getattr(quote_context, "close", None)
-        if self._abandoned_context or self._cancelled():
+        if self._abandoned_context:
             if quote_context is not None:
                 logger.warning(
                     "quote-only historical context abandoned after "
@@ -576,6 +692,7 @@ class QuantV6HistoricalBarProvider:
                         QUANT_V6_HISTORICAL_PAGE_TIMEOUT_MILLISECONDS / 1_000
                     ),
                     label="context close",
+                    honor_evaluation_stop=False,
                 )
             except Exception as exc:
                 logger.warning(

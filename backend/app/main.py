@@ -8,7 +8,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, AsyncGenerator, cast
+from typing import TYPE_CHECKING, Any, AsyncGenerator, cast
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -122,6 +122,11 @@ from app.services.cron_health_service import get_cron_health_service
 from app.services.trade_event_service import record_trade_event
 from app import __version__ as APP_VERSION
 
+if TYPE_CHECKING:
+    from app.services.watchlist_quant_v6_deadline import (
+        QuantV6EvaluationDeadline,
+    )
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("auto_trade.main")
 _last_llm_trigger_price: float = 0.0
@@ -139,7 +144,6 @@ _watchlist_quant_v6_evaluation_lock = asyncio.Lock()
 _llm_globals_lock = threading.Lock()
 _watchlist_quant_sync_lock = threading.Lock()
 _watchlist_quant_v6_evaluation_sync_lock = threading.Lock()
-_watchlist_quant_v6_evaluation_stop_event = threading.Event()
 _WATCHLIST_QUANT_POLL_SECONDS = 60
 _WATCHLIST_QUANT_V6_INITIAL_DELAY_SECONDS = 120
 _OPENING_MOMENTUM_POLL_SECONDS = 15
@@ -1339,10 +1343,15 @@ async def _watchlist_quant_cron() -> None:
         await asyncio.sleep(_WATCHLIST_QUANT_POLL_SECONDS)
 
 
-def _watchlist_quant_v6_evaluation_tick_sync() -> None:
+def _watchlist_quant_v6_evaluation_tick_sync(
+    evaluation_deadline: QuantV6EvaluationDeadline | None = None,
+) -> object | None:
     """Publish one quote-only historical cohort without execution authority."""
     if not settings.watchlist_quant_v6_evaluation_enabled:
-        return
+        return None
+    from app.services.watchlist_quant_v6_deadline import (
+        QuantV6EvaluationDeadline,
+    )
     from app.services.watchlist_quant_v6_evaluation_service import (
         build_latest_quant_v6_registration_plan,
     )
@@ -1353,17 +1362,26 @@ def _watchlist_quant_v6_evaluation_tick_sync() -> None:
         WatchlistQuantV6PublicationService,
     )
 
-    with _watchlist_quant_v6_evaluation_sync_lock:
+    deadline = evaluation_deadline or QuantV6EvaluationDeadline(
+        settings.watchlist_quant_v6_evaluation_timeout_seconds
+    )
+    while not _watchlist_quant_v6_evaluation_sync_lock.acquire(
+        timeout=min(0.1, deadline.remaining_seconds())
+    ):
+        pass
+    try:
         # Re-check after waiting for another direct/manual tick. Keeping all
         # imports and resource construction below the enable gate makes the
         # default-disabled path side-effect free.
         if not settings.watchlist_quant_v6_evaluation_enabled:
-            return
+            return None
+        deadline.checkpoint()
         plan = build_latest_quant_v6_registration_plan(
             observed_at=datetime.now(timezone.utc),
         )
+        deadline.checkpoint()
         provider = QuantV6HistoricalBarProvider(
-            cancel_event=_watchlist_quant_v6_evaluation_stop_event,
+            evaluation_deadline=deadline,
         )
         try:
             receipt = WatchlistQuantV6PublicationService(
@@ -1371,6 +1389,7 @@ def _watchlist_quant_v6_evaluation_tick_sync() -> None:
             ).register_provider_evaluate_publish(
                 plan=plan,
                 provider=provider,
+                evaluation_deadline=deadline,
             )
             logger.info(
                 "quant-v6 historical publication id=%d registration=%d "
@@ -1382,26 +1401,81 @@ def _watchlist_quant_v6_evaluation_tick_sync() -> None:
                 receipt.created,
                 receipt.manifest_sha256,
             )
+            return receipt
         finally:
             provider.close()
+    finally:
+        _watchlist_quant_v6_evaluation_sync_lock.release()
 
 
-async def _run_watchlist_quant_v6_evaluation_tick() -> None:
-    """Run one historical tick and join its worker during cancellation."""
+async def _join_quant_v6_worker_cancellation_resistant(
+    worker: asyncio.Task[object | None],
+) -> object | None:
+    """Join a shielded worker despite repeated caller cancellation."""
+    while True:
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            if worker.done():
+                return worker.result()
+
+
+async def _run_watchlist_quant_v6_evaluation_tick() -> object | None:
+    """Run one bounded historical tick and always join its worker."""
     if not settings.watchlist_quant_v6_evaluation_enabled:
-        return
-    _watchlist_quant_v6_evaluation_stop_event.clear()
+        return None
+    from app.services.watchlist_quant_v6_deadline import (
+        QuantV6EvaluationDeadline,
+        QuantV6EvaluationStoppedError,
+    )
+
+    deadline = QuantV6EvaluationDeadline(
+        settings.watchlist_quant_v6_evaluation_timeout_seconds
+    )
     worker = asyncio.create_task(
-        asyncio.to_thread(_watchlist_quant_v6_evaluation_tick_sync)
+        asyncio.to_thread(
+            _watchlist_quant_v6_evaluation_tick_sync,
+            deadline,
+        )
     )
     try:
-        await asyncio.shield(worker)
+        return await asyncio.wait_for(
+            asyncio.shield(worker),
+            timeout=deadline.remaining_seconds(),
+        )
+    except TimeoutError:
+        # If the timer wins before the pre-commit checkpoint, the worker rolls
+        # back. If an atomic commit already started, its successful receipt wins.
+        deadline.expire()
+        try:
+            result = await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            # Shutdown can race the post-timeout join. Keep the thread task
+            # shielded until quote/SQLite cleanup finishes, then propagate the
+            # application's cancellation instead of abandoning the worker.
+            deadline.cancel()
+            try:
+                await _join_quant_v6_worker_cancellation_resistant(worker)
+            except QuantV6EvaluationStoppedError:
+                pass
+            except Exception:
+                logger.exception(
+                    "quant-v6 historical evaluation failed during shutdown"
+                )
+            raise
+        logger.warning(
+            "quant-v6 deadline elapsed during atomic completion; "
+            "accepted the committed result"
+        )
+        return result
     except asyncio.CancelledError:
         # Cancelling a to_thread waiter cannot stop quote/SQLite work. Join it
         # so the provider and all publication sessions close before teardown.
-        _watchlist_quant_v6_evaluation_stop_event.set()
+        deadline.cancel()
         try:
-            await worker
+            await _join_quant_v6_worker_cancellation_resistant(worker)
+        except QuantV6EvaluationStoppedError:
+            pass
         except Exception:
             logger.exception(
                 "quant-v6 historical evaluation failed during shutdown"
@@ -1414,9 +1488,11 @@ async def _watchlist_quant_v6_evaluation_cron() -> None:
     if not settings.watchlist_quant_v6_evaluation_enabled:
         return
     logger.info(
-        "quant-v6 historical evaluation enabled: interval=%dm retry=%dm",
+        "quant-v6 historical evaluation enabled: interval=%dm retry=%dm "
+        "deadline=%ds",
         settings.watchlist_quant_v6_evaluation_interval_minutes,
         settings.watchlist_quant_v6_evaluation_retry_interval_minutes,
+        settings.watchlist_quant_v6_evaluation_timeout_seconds,
     )
     await asyncio.sleep(_WATCHLIST_QUANT_V6_INITIAL_DELAY_SECONDS)
     while True:

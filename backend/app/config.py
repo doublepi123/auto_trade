@@ -477,6 +477,20 @@ class Settings(BaseSettings):
             "Bounded retry interval after a historical quant-v6 tick fails."
         ),
     )
+    watchlist_quant_v6_evaluation_timeout_seconds: int = Field(
+        default=1_800,
+        ge=60,
+        le=3_600,
+        validation_alias=(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_TIMEOUT_SECONDS"
+        ),
+        description=(
+            "End-to-end cooperative deadline for one historical "
+            "quant-v6 acquisition, evaluation, and publication tick. This "
+            "does not alter domain semantics or artifact payloads; its "
+            "control source is bound by historical evaluator manifest v2."
+        ),
+    )
     watchlist_quant_v6_provider_page_timeout_seconds: float = Field(
         default=30.0,
         ge=5.0,

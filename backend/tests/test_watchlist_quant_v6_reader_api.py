@@ -43,6 +43,9 @@ from app.models import (
     WatchlistQuantV6Publication,
     WatchlistQuantV6PublicationArtifact,
 )
+from app.services import (
+    watchlist_quant_v6_evaluation_service as evaluation_service_module,
+)
 from app.services.watchlist_quant_v6_evaluation_service import (
     QuantV6HistoricalProvider,
     QuantV6RegistrationPlan,
@@ -65,6 +68,16 @@ from app.services.watchlist_quant_v6_reader_service import (
 
 _OBSERVED_AT = datetime(2026, 7, 31, 23, 0, tzinfo=timezone.utc)
 _PUBLISHED_AT = datetime(2026, 8, 1, 1, 0, tzinfo=timezone.utc)
+_HISTORICAL_SOURCE_KEYS_V1 = {
+    "app.domain.universe_selection.catalog",
+    "app.domain.universe_selection.membership_history",
+    "app.services.watchlist_quant_v6_evaluation_service",
+    "app.services.watchlist_quant_v6_historical_provider",
+}
+_HISTORICAL_SOURCE_KEYS_V2 = {
+    *_HISTORICAL_SOURCE_KEYS_V1,
+    "app.services.watchlist_quant_v6_deadline",
+}
 
 
 class _Provider(QuantV6HistoricalProvider):
@@ -311,6 +324,49 @@ def _assert_select_only(statements: list[str]) -> None:
     )
 
 
+def _historical_evaluator_manifest_for_reader_test(
+    *,
+    manifest_version: int,
+    source_keys: set[str],
+) -> dict[str, object]:
+    current = evaluation_service_module.quant_v6_historical_evaluator_manifest()
+    current_sources = current["source_sha256"]
+    assert isinstance(current_sources, dict)
+    source_sha256 = {
+        key: current_sources.get(key, "f" * 64)
+        for key in source_keys
+    }
+    return {
+        **current,
+        "manifest_version": manifest_version,
+        "source_sha256": source_sha256,
+    }
+
+
+def _pin_historical_evaluator_manifest(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    manifest_version: int,
+    source_keys: set[str],
+) -> dict[str, object]:
+    manifest = _historical_evaluator_manifest_for_reader_test(
+        manifest_version=manifest_version,
+        source_keys=source_keys,
+    )
+    digest = quant_v6_payload_sha256(manifest)
+    monkeypatch.setattr(
+        evaluation_service_module,
+        "quant_v6_historical_evaluator_manifest",
+        lambda: manifest,
+    )
+    monkeypatch.setattr(
+        evaluation_service_module,
+        "quant_v6_historical_evaluator_digest_sha256",
+        lambda: digest,
+    )
+    return manifest
+
+
 def _binding_manifest_payload(
     binding: WatchlistQuantV6PublicationArtifact,
 ) -> dict[str, object]:
@@ -383,6 +439,12 @@ def test_all_reader_endpoints_are_persisted_only_and_bounded(
     environment_factory: _EnvironmentFactory,
 ) -> None:
     environment = environment_factory.build()
+    registration_payload = json.loads(environment.plan.registration_json)
+    historical_sources = registration_payload["evaluator_manifest"][
+        "source_sha256"
+    ]
+    assert registration_payload["evaluator_manifest"]["manifest_version"] == 2
+    assert set(historical_sources) == _HISTORICAL_SOURCE_KEYS_V2
     publication_id = _publication_id(environment)
     environment.provider.fail_if_called = True
     provider_calls = environment.provider.calls
@@ -494,6 +556,63 @@ def test_all_reader_endpoints_are_persisted_only_and_bounded(
         event.remove(environment.engine, "before_cursor_execute", _capture)
 
     assert environment.provider.calls == provider_calls
+
+
+def test_reader_accepts_legacy_v1_historical_evaluator_closure(
+    environment_factory: _EnvironmentFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _pin_historical_evaluator_manifest(
+        monkeypatch,
+        manifest_version=1,
+        source_keys=_HISTORICAL_SOURCE_KEYS_V1,
+    )
+    environment = environment_factory.build(member_count=1)
+    registration_payload = json.loads(environment.plan.registration_json)
+    evaluator_manifest = registration_payload["evaluator_manifest"]
+    assert evaluator_manifest["manifest_version"] == 1
+    assert set(evaluator_manifest["source_sha256"]) == (
+        _HISTORICAL_SOURCE_KEYS_V1
+    )
+
+    response = environment.client.get(
+        f"/api/watchlist/quant-v6/publications/{_publication_id(environment)}"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["validation"]["registration_identity_verified"] is True
+
+
+@pytest.mark.parametrize(
+    ("manifest_version", "source_keys"),
+    (
+        (1, _HISTORICAL_SOURCE_KEYS_V2),
+        (2, _HISTORICAL_SOURCE_KEYS_V1),
+        (2, {*_HISTORICAL_SOURCE_KEYS_V2, "app.services.unexpected"}),
+    ),
+    ids=("v1-new-key-superset", "v2-missing-deadline", "v2-extra-key"),
+)
+def test_reader_rejects_historical_evaluator_version_closure_mismatch(
+    environment_factory: _EnvironmentFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    manifest_version: int,
+    source_keys: set[str],
+) -> None:
+    _pin_historical_evaluator_manifest(
+        monkeypatch,
+        manifest_version=manifest_version,
+        source_keys=source_keys,
+    )
+    environment = environment_factory.build(member_count=1)
+
+    response = environment.client.get(
+        f"/api/watchlist/quant-v6/publications/{_publication_id(environment)}"
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "persisted quant-v6 evidence failed integrity validation"
+    }
 
 
 def test_registration_only_is_hidden_and_router_requires_api_key(

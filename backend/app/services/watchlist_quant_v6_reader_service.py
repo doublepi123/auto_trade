@@ -258,12 +258,19 @@ _MEMBER_ACQUISITION_KEYS = frozenset({
     "scheduled_grid_present_starts_sha256",
     "symbol",
 })
-_HISTORICAL_EVALUATOR_SOURCE_KEYS = frozenset({
+_HISTORICAL_EVALUATOR_SOURCE_KEYS_V1 = frozenset({
     "app.domain.universe_selection.catalog",
     "app.domain.universe_selection.membership_history",
     "app.services.watchlist_quant_v6_evaluation_service",
     "app.services.watchlist_quant_v6_historical_provider",
 })
+_HISTORICAL_EVALUATOR_SOURCE_KEYS_BY_VERSION = {
+    1: _HISTORICAL_EVALUATOR_SOURCE_KEYS_V1,
+    2: frozenset({
+        *_HISTORICAL_EVALUATOR_SOURCE_KEYS_V1,
+        "app.services.watchlist_quant_v6_deadline",
+    }),
+}
 _DOMAIN_EVALUATOR_SOURCE_KEYS = frozenset({
     "app.core.holiday_calendar",
     "app.core.market_calendar",
@@ -1024,6 +1031,11 @@ def _validate_registration(
         domain_evaluator_manifest.get("manifest_version"),
         label="registration domain evaluator manifest_version",
     )
+    expected_historical_source_digests = (
+        _HISTORICAL_EVALUATOR_SOURCE_KEYS_BY_VERSION.get(
+            evaluator_manifest_version
+        )
+    )
     if (
         quant_v6_payload_sha256(acquisition) != row.acquisition_spec_sha256
         or quant_v6_payload_sha256(evaluator_manifest)
@@ -1041,7 +1053,7 @@ def _validate_registration(
         != provider_contract_digest
         or provider_contract.get("acquisition_spec_sha256")
         != QUANT_V6_ACQUISITION_SPEC_DIGEST
-        or evaluator_manifest_version != 1
+        or expected_historical_source_digests is None
         or evaluator_manifest.get("provider_contract_digest_sha256")
         != provider_contract_digest
         or set(resource_digests) != {_MEMBERSHIP_RESOURCE_KEY}
@@ -1056,7 +1068,7 @@ def _validate_registration(
         != row.semantic_digest_sha256
         or set(domain_source_digests) != _DOMAIN_EVALUATOR_SOURCE_KEYS
         or set(historical_source_digests)
-        != _HISTORICAL_EVALUATOR_SOURCE_KEYS
+        != expected_historical_source_digests
     ):
         raise _integrity("persisted registration nested digest failed replay")
     return payload
