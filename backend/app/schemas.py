@@ -3884,3 +3884,22 @@ class SymbolAttributionResponse(BaseModel):
     rows: list[SymbolAttributionRow]
     total_realized_pnl: float
     statistics_quality: StatisticsQuality
+
+
+# ---------------------------------------------------------------------------
+# Scheduled report preview / status (read-only; no notifier/audit/throttle side effects)
+# ---------------------------------------------------------------------------
+
+
+class ReportSchedulePreviewResponse(BaseModel):
+    """Preview of the scheduled daily report without dispatching it.
+
+    ``symbol`` is the effective symbol actually used (override or configured
+    fallback). ``target_date`` is the YYYY-MM-DD the report was built for.
+    ``title``/``content`` are exactly what ``build_summary`` produced.
+    """
+
+    symbol: str
+    target_date: str
+    title: str
+    content: str

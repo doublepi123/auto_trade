@@ -13,7 +13,7 @@ from app.core.audit import AuditLogger
 from app.database import get_db
 from app.models import StrategyConfig
 from app.runner import get_runner
-from app.schemas import ReportResponse
+from app.schemas import ReportResponse, ReportSchedulePreviewResponse
 from app.services.report_schedule_service import ReportScheduleService
 from app.services.report_service import ReportService
 
@@ -35,7 +35,7 @@ def run_scheduled_report_now(
     """
     actor_hash, source_ip = extract_actor(request)
     cfg = db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
-    symbol = ((getattr(cfg, "report_schedule_symbol", "") if cfg else "") or (cfg.symbol if cfg else "") or "").strip().upper()
+    symbol = ReportScheduleService.resolve_effective_symbol(cfg)
     title, content = ReportScheduleService(db).build_summary(symbol or "")
     runner = get_runner()
     notifier = getattr(runner, "notifier", None)
@@ -59,6 +59,41 @@ def run_scheduled_report_now(
     )
     return {"sent": sent, "symbol": symbol, "title": title, "error": error}
 
+
+
+@router.get("/schedule/preview", response_model=ReportSchedulePreviewResponse)
+def preview_scheduled_report(
+    symbol: str | None = Query(
+        None,
+        description="Optional symbol override, e.g. AAPL.US. Defaults to the configured effective symbol.",
+    ),
+    date: str | None = Query(
+        None,
+        description="Optional target date (YYYY-MM-DD). Defaults to UTC today.",
+    ),
+    db: Session = Depends(get_db),
+) -> ReportSchedulePreviewResponse:
+    """Preview the scheduled daily report without dispatching it.
+
+    Read-only: does not call the runner/notifier, write audit rows, or mutate
+    the process-local report throttle. Returns the exact title/content that
+    ``ReportScheduleService.build_summary`` would produce for the effective
+    symbol and target date.
+    """
+    svc = ReportScheduleService(db)
+    try:
+        eff_symbol, target_date, title, content = svc.preview(
+            symbol_override=symbol,
+            target_date=date,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return ReportSchedulePreviewResponse(
+        symbol=eff_symbol,
+        target_date=target_date,
+        title=title,
+        content=content,
+    )
 
 
 @router.get("/daily", response_model=ReportResponse)
