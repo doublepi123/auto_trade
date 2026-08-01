@@ -52,7 +52,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from typing import Any, Literal
 
-from sqlalchemy import select
+from sqlalchemy import ColumnElement, func, select
 from sqlalchemy.orm import Session
 
 from app.models import AuditLog, TradeEvent
@@ -184,8 +184,17 @@ class InterventionEvidenceService:
         Raises ``ValueError`` on an inverted date range. ``limit`` is bounded
         to ``[1, 1000]``. Pairing is computed over the full authoritative
         population BEFORE date filters / limit; date filtering and the
-        response limit are applied afterward so cross-date pairs stay intact
-        and the summary describes the full filtered population.
+        response limit are applied afterward so cross-date pairs stay intact.
+
+        Metadata contract:
+        * ``total`` is the EXACT filtered population (a SQL count, independent
+          of the bounded scan).
+        * ``scanned`` is the bounded scan population used for pairing.
+        * ``returned`` is the number of rows in ``items`` (after the limit).
+        * If either source's global pairing context is scan-truncated,
+          ``pairing_complete=False`` / ``scan_truncated=True``, every duration
+          is suppressed, and every context-dependent manual transition state
+          is reported as ``UNKNOWN`` (not OPEN/PAIRED/UNMATCHED_CLOSE).
         """
         capped_limit = max(1, min(int(limit), _MAX_RESPONSE_ROWS))
         # Validate the response date range up front (also used to filter the
@@ -194,21 +203,34 @@ class InterventionEvidenceService:
         _validate_range(from_date, to_date)
 
         # --- Collect the full authoritative + automatic populations (global) ---
+        # Both sources use SQL COUNT for population detection and a bounded
+        # ``LIMIT cap + 1`` row query; no source is loaded unbounded merely to
+        # detect truncation.
         audit_all, audit_truncated = self._collect_audit_global()
-        auto_all = self._collect_auto_global()
+        auto_all, auto_truncated = self._collect_auto_global()
 
-        scan_truncated = audit_truncated
+        scan_truncated = audit_truncated or auto_truncated
         pairing_complete = not scan_truncated
+        scanned_population = len(audit_all) + len(auto_all)
 
         # --- Pair the authoritative audit stream globally ---
-        paired_audit = self._pair_audit_stream(audit_all) if audit_all else []
-
-        # Automatic evidence never pairs with the manual audit stream (no
-        # durable correlation key). It is always reported as unpaired/unknown.
-        auto_rows = [self._auto_unmatched(t) for t in auto_all]
+        if pairing_complete:
+            paired_audit = (
+                self._pair_audit_stream(audit_all) if audit_all else []
+            )
+            # Automatic evidence never pairs with the manual audit stream (no
+            # durable correlation key). It is always reported as unpaired.
+            auto_rows = [self._auto_unmatched(t) for t in auto_all]
+            all_rows = paired_audit + auto_rows
+        else:
+            # Scan truncated: complete pairing context could not be guaranteed.
+            # Every context-dependent manual transition state becomes UNKNOWN
+            # (omitted history could change OPEN/PAIRED/UNMATCHED_CLOSE
+            # claims). Automatic uncorrelated evidence remains unknown too.
+            all_rows = [self._unknown_row(t) for t in audit_all]
+            all_rows.extend(self._unknown_row(t) for t in auto_all)
 
         # --- Merge and order all rows chronologically ---
-        all_rows = paired_audit + auto_rows
         all_rows.sort(
             key=lambda r: (
                 _to_utc(r.timestamp).timestamp(),
@@ -226,22 +248,31 @@ class InterventionEvidenceService:
             and (to_dt is None or _to_utc(r.timestamp) <= to_dt)
         ]
 
-        # If the scan was truncated, complete pairing context could not be
-        # guaranteed: suppress ALL durations truthfully.
-        if scan_truncated:
-            filtered = [self._suppress_duration(r) for r in filtered]
+        # Exact filtered population via SQL count, independent of the scan cap.
+        exact_total = self._exact_filtered_total(
+            from_dt=from_dt, to_dt=to_dt
+        )
 
-        total = len(filtered)
-        summary = self._summarize(filtered)
+        # The summary describes the scanned population when classification is
+        # incomplete, never claiming unscanned classification totals.
+        summary = self._summarize(
+            filtered,
+            scanned_population=scanned_population,
+            exact_total=exact_total,
+            classification_complete=pairing_complete,
+        )
 
         # --- Apply response limit LAST ---
-        truncated = len(filtered) > capped_limit
+        response_truncated = len(filtered) > capped_limit
         items = filtered[:capped_limit]
+        truncated = response_truncated or scan_truncated
 
         return InterventionEvidenceResponse(
             items=items,
             summary=summary,
-            total=total,
+            total=exact_total,
+            scanned=scanned_population,
+            returned=len(items),
             truncated=truncated,
             pairing_complete=pairing_complete,
             scan_truncated=scan_truncated,
@@ -259,23 +290,30 @@ class InterventionEvidenceService:
     def _collect_audit_global(
         self,
     ) -> tuple[list[_Transition], bool]:
-        """Collect ALL successful authoritative audit control transitions.
+        """Collect successful authoritative audit control transitions (bounded).
 
-        Returns the transitions and whether the hard scan cap was exceeded.
-        Only ``result = 'SUCCESS'`` rows are transition proof.
+        Uses SQL COUNT for population detection and a bounded
+        ``LIMIT cap + 1`` row query. Returns the transitions and whether the
+        hard scan cap was exceeded. Only ``result = 'SUCCESS'`` rows are
+        transition proof.
         """
-        count_stmt = (
-            select(AuditLog.id)
-            .where(AuditLog.action.in_(tuple(_AUDIT_TRANSITIONS)))
-            .where(AuditLog.result == "SUCCESS")
+        base_filter = (
+            AuditLog.action.in_(tuple(_AUDIT_TRANSITIONS)),
+            AuditLog.result == "SUCCESS",
         )
-        population = int(self._db.execute(count_stmt).all().__len__())
+        population = int(
+            self._db.scalar(
+                select(func.count())
+                .select_from(AuditLog)
+                .where(*base_filter)
+            )
+            or 0
+        )
         truncated = population > _MAX_SCAN_TRANSITIONS
 
         stmt = (
             select(AuditLog)
-            .where(AuditLog.action.in_(tuple(_AUDIT_TRANSITIONS)))
-            .where(AuditLog.result == "SUCCESS")
+            .where(*base_filter)
             .order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
             .limit(_MAX_SCAN_TRANSITIONS + 1)
         )
@@ -301,16 +339,33 @@ class InterventionEvidenceService:
             )
         return out, truncated
 
-    def _collect_auto_global(self) -> list[_Transition]:
-        """Collect automatic TradeEvent transitions (transition-specific only).
+    def _collect_auto_global(
+        self,
+    ) -> tuple[list[_Transition], bool]:
+        """Collect automatic TradeEvent transitions (bounded).
 
-        Included only when the writer reports success (``RISK_AUTO_RESUMED``
-        with a success status). These never pair with the manual audit stream.
+        Uses SQL COUNT for population detection and a bounded
+        ``LIMIT cap + 1`` row query. Included only when the writer reports
+        success. These never pair with the manual audit stream.
         """
+        base_filter = TradeEvent.event_type.in_(
+            tuple(_TRADE_AUTO_TRANSITIONS)
+        )
+        population = int(
+            self._db.scalar(
+                select(func.count())
+                .select_from(TradeEvent)
+                .where(base_filter)
+            )
+            or 0
+        )
+        truncated = population > _MAX_SCAN_TRANSITIONS
+
         stmt = (
             select(TradeEvent)
-            .where(TradeEvent.event_type.in_(tuple(_TRADE_AUTO_TRANSITIONS)))
+            .where(base_filter)
             .order_by(TradeEvent.created_at.asc(), TradeEvent.id.asc())
+            .limit(_MAX_SCAN_TRANSITIONS + 1)
         )
         rows = list(self._db.scalars(stmt))
         out: list[_Transition] = []
@@ -336,7 +391,54 @@ class InterventionEvidenceService:
                     actor_hash=None,
                 )
             )
-        return out
+        return out, truncated
+
+    def _exact_filtered_total(
+        self,
+        *,
+        from_dt: datetime | None,
+        to_dt: datetime | None,
+    ) -> int:
+        """Exact filtered population via SQL COUNT, independent of the scan cap.
+
+        Counts the audit + automatic evidence rows matching the date filter
+        (the same rows that survive pairing + date filtering). This is the
+        truthful ``total`` even when the bounded scan omitted rows.
+        """
+        audit_filter: list[ColumnElement[bool]] = [
+            AuditLog.action.in_(tuple(_AUDIT_TRANSITIONS)),
+            AuditLog.result == "SUCCESS",
+        ]
+        if from_dt is not None:
+            audit_filter.append(AuditLog.created_at >= from_dt)
+        if to_dt is not None:
+            audit_filter.append(AuditLog.created_at <= to_dt)
+        audit_count = int(
+            self._db.scalar(
+                select(func.count())
+                .select_from(AuditLog)
+                .where(*audit_filter)
+            )
+            or 0
+        )
+
+        auto_filter: list[ColumnElement[bool]] = [
+            TradeEvent.event_type.in_(tuple(_TRADE_AUTO_TRANSITIONS)),
+            TradeEvent.status.in_(tuple(_TRADE_AUTO_SUCCESS_STATUS)),
+        ]
+        if from_dt is not None:
+            auto_filter.append(TradeEvent.created_at >= from_dt)
+        if to_dt is not None:
+            auto_filter.append(TradeEvent.created_at <= to_dt)
+        auto_count = int(
+            self._db.scalar(
+                select(func.count())
+                .select_from(TradeEvent)
+                .where(*auto_filter)
+            )
+            or 0
+        )
+        return audit_count + auto_count
 
     # ------------------------------------------------------------------
     # Pairing (authoritative audit stream only)
@@ -476,20 +578,27 @@ class InterventionEvidenceService:
         )
 
     @staticmethod
-    def _suppress_duration(
-        r: InterventionEvidenceRow,
-    ) -> InterventionEvidenceRow:
-        if r.duration_seconds is None and r.pairing_status != "PAIRED":
-            return r
-        # Pairing context is incomplete: demote any paired row to ambiguous and
-        # drop its duration so no unsupported duration is reported.
-        return r.model_copy(
-            update={
-                "pairing_status": "AMBIGUOUS",
-                "paired_source": None,
-                "paired_source_id": None,
-                "duration_seconds": None,
-            }
+    def _unknown_row(t: _Transition) -> InterventionEvidenceRow:
+        """A row whose classification is unknown due to incomplete scan context.
+
+        Used when the global pairing context could not be fully scanned: no
+        context-dependent claim (OPEN / PAIRED / UNMATCHED_CLOSE) is preserved
+        because omitted history could change it.
+        """
+        return InterventionEvidenceRow(
+            source=t.source,
+            source_id=t.source_id,
+            timestamp=t.timestamp,
+            family=t.family,
+            kind=t.kind,
+            direction=t.direction,
+            reason=t.reason_code,
+            action=t.action,
+            actor_hash=t.actor_hash,
+            pairing_status="UNKNOWN",
+            paired_source=None,
+            paired_source_id=None,
+            duration_seconds=None,
         )
 
     # ------------------------------------------------------------------
@@ -498,6 +607,10 @@ class InterventionEvidenceService:
     @staticmethod
     def _summarize(
         rows: list[InterventionEvidenceRow],
+        *,
+        scanned_population: int,
+        exact_total: int,
+        classification_complete: bool,
     ) -> InterventionEvidenceSummary:
         paired_count = sum(1 for r in rows if r.pairing_status == "PAIRED")
         open_count = sum(1 for r in rows if r.pairing_status == "OPEN")
@@ -505,6 +618,7 @@ class InterventionEvidenceService:
             1 for r in rows if r.pairing_status == "UNMATCHED_CLOSE"
         )
         ambiguous_count = sum(1 for r in rows if r.pairing_status == "AMBIGUOUS")
+        unknown_count = sum(1 for r in rows if r.pairing_status == "UNKNOWN")
         # Only explicit, unambiguous close rows carry a duration; sum those.
         paired_duration = sum(
             r.duration_seconds or 0.0
@@ -512,11 +626,14 @@ class InterventionEvidenceService:
             if r.pairing_status == "PAIRED" and r.direction == "close"
         )
         return InterventionEvidenceSummary(
-            total_evidence=len(rows),
+            total_evidence=exact_total,
+            scanned_evidence=scanned_population,
+            classification_complete=classification_complete,
             paired_count=paired_count,
             open_count=open_count,
             unmatched_close_count=unmatched_close_count,
             ambiguous_count=ambiguous_count,
+            unknown_count=unknown_count,
             paired_duration_seconds=paired_duration,
         )
 

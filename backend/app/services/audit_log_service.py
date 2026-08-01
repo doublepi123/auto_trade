@@ -199,33 +199,36 @@ class AuditLogService:
     ) -> AuditLogStatsResponse:
         """Execute all aggregates inside one SQLite read snapshot.
 
-        Opens a dedicated short-lived connection off the caller's engine,
-        issues ``BEGIN`` (a read snapshot in SQLite WAL), runs every aggregate
-        against that one snapshot, then releases it. The caller's request
-        Session is untouched (no commit/rollback/mutation).
+        ALWAYS obtains a separate connection from the bind's Engine. If
+        ``Session.get_bind()`` returns a SQLAlchemy ``Connection`` (e.g. a
+        session bound directly to a connection inside an active transaction),
+        uses its ``.engine`` to open a new ``engine.connect()``; the caller
+        Connection is never passed into snapshot code. Only the owned
+        connection/transaction is begun/rolled back/closed — the caller
+        Session/Connection is never altered.
         """
         bind = self._db.get_bind()
         if isinstance(bind, Engine):
-            with bind.connect() as connection:
-                return self._run_snapshot_on_connection(
-                    connection=connection,
-                    action=action,
-                    severity=severity,
-                    from_dt=from_dt,
-                    to_dt=to_dt,
-                    from_date=from_date,
-                    to_date=to_date,
-                )
-        # bind is already a Connection (e.g. inside an existing transaction).
-        return self._run_snapshot_on_connection(
-            connection=bind,
-            action=action,
-            severity=severity,
-            from_dt=from_dt,
-            to_dt=to_dt,
-            from_date=from_date,
-            to_date=to_date,
-        )
+            snapshot_engine = bind
+        elif isinstance(bind, Connection):
+            # Session bound directly to a Connection: derive its engine and
+            # open a fresh connection so we never touch the caller's
+            # transaction.
+            snapshot_engine = bind.engine
+        else:  # pragma: no cover - defensive fallback
+            raise RuntimeError(
+                "unsupported session bind for audit stats snapshot"
+            )
+        with snapshot_engine.connect() as connection:
+            return self._run_snapshot_on_connection(
+                connection=connection,
+                action=action,
+                severity=severity,
+                from_dt=from_dt,
+                to_dt=to_dt,
+                from_date=from_date,
+                to_date=to_date,
+            )
 
     def _run_snapshot_on_connection(
         self,
@@ -267,6 +270,14 @@ class AuditLogService:
                 )
                 or 0
             )
+
+            # Extension point: a test can monkeypatch this no-op method to
+            # commit a writer on a separate connection AFTER the read snapshot
+            # is established (by the total query above) but BEFORE the
+            # categorical/actor/day queries below, proving all subsequent
+            # queries observe the same snapshot. This is a narrow, naturally
+            # factored hook — not a broad production-only test path.
+            self._after_total_query()
 
             action_rows = self._sql_categorical(
                 connection=connection,
@@ -342,6 +353,17 @@ class AuditLogService:
                 to_date=to_date,
             ),
         )
+
+    def _after_total_query(self) -> None:
+        """No-op extension point between the total query and categorical queries.
+
+        The read snapshot is established by the total query above; this hook
+        runs before the categorical/actor/day queries. A test monkeypatches it
+        to commit a writer on a separate connection, proving all subsequent
+        queries observe the same snapshot. This is a narrow, naturally
+        factored hook — not a broad production-only test path.
+        """
+        return None
 
     @staticmethod
     def _overflow(

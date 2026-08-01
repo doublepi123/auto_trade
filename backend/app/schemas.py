@@ -2449,9 +2449,12 @@ class InterventionEvidenceRow(BaseModel):
     body. ``actor_hash`` is pseudonymous only.
 
     ``pairing_status`` is one of ``PAIRED`` / ``OPEN`` / ``UNMATCHED_CLOSE`` /
-    ``AMBIGUOUS``. ``duration_seconds`` is reported ONLY for an explicit,
-    unambiguous open→close pair under the conservative pairing rule; it is
-    ``None`` for every other status.
+    ``AMBIGUOUS`` / ``UNKNOWN``. ``UNKNOWN`` is used when the global pairing
+    context could not be fully scanned (scan cap exceeded): no
+    context-dependent claim (OPEN / PAIRED / UNMATCHED_CLOSE) is preserved
+    because omitted history could change it. ``duration_seconds`` is reported
+    ONLY for an explicit, unambiguous open→close pair under the conservative
+    pairing rule; it is ``None`` for every other status.
     """
 
     source: Literal["audit", "trade_auto"]
@@ -2463,7 +2466,9 @@ class InterventionEvidenceRow(BaseModel):
     reason: str = ""
     action: str = ""
     actor_hash: str | None = None
-    pairing_status: Literal["PAIRED", "OPEN", "UNMATCHED_CLOSE", "AMBIGUOUS"]
+    pairing_status: Literal[
+        "PAIRED", "OPEN", "UNMATCHED_CLOSE", "AMBIGUOUS", "UNKNOWN"
+    ]
     paired_source: Literal["audit", "trade_auto"] | None = None
     paired_source_id: int | None = None
     duration_seconds: float | None = None
@@ -2475,34 +2480,52 @@ class InterventionEvidenceSummary(BaseModel):
     ``paired_duration_seconds`` sums ONLY explicit, unambiguous open→close
     pairs from the authoritative audit stream. ``open_count`` /
     ``unmatched_close_count`` / ``ambiguous_count`` count evidence rows whose
-    duration is unknown. There is deliberately no synthetic total: ambiguous or
-    open evidence must not be presented as realized downtime.
+    duration is known-unknown. ``unknown_count`` counts rows whose
+    classification is itself unknown because the global pairing context could
+    not be fully scanned.
 
-    Counts describe the FULL filtered population before the response limit is
-    applied, so callers can tell that rows were omitted.
+    When ``classification_complete`` is False, the per-status counts describe
+    only the SCANNED population (not the full filtered population), so callers
+    cannot mistake a partial classification for a complete one. In that case
+    ``scanned_evidence`` is the bounded scan population and
+    ``total_evidence`` is the exact filtered population (independent of the
+    scan cap).
     """
 
     total_evidence: int = Field(ge=0)
+    scanned_evidence: int = Field(ge=0)
+    classification_complete: bool = True
     paired_count: int = Field(ge=0)
     open_count: int = Field(ge=0)
     unmatched_close_count: int = Field(ge=0)
     ambiguous_count: int = Field(ge=0)
+    unknown_count: int = Field(ge=0)
     paired_duration_seconds: float = Field(ge=0)
 
 
 class InterventionEvidenceResponse(BaseModel):
     """Read-only runtime intervention evidence timeline response.
 
-    ``total`` is the full filtered population size (before the response
-    limit). ``truncated`` is True when the response limit omitted rows.
-    ``pairing_complete`` is False when the hard scan cap was exceeded; in that
-    case ``scan_truncated`` is True and ALL durations are suppressed because
-    complete pairing context could not be guaranteed.
+    Metadata contract:
+    * ``total`` — the EXACT filtered population matching the requested date
+      filters (a SQL count, independent of the bounded scan).
+    * ``scanned`` — the bounded scan population actually used for pairing
+      (<= the scan cap).
+    * ``returned`` — the number of rows in ``items`` (after the response limit).
+    * ``truncated`` — True when rows were omitted by the response limit OR by
+      a scan cap.
+    * ``pairing_complete`` — False when a scan cap was exceeded; in that case
+      ``scan_truncated`` is True, ALL durations are suppressed, and every
+      context-dependent manual transition state is reported as ``UNKNOWN``
+      (not OPEN/PAIRED/UNMATCHED_CLOSE) because omitted history could change
+      it. Automatic uncorrelated evidence remains unknown.
     """
 
     items: list[InterventionEvidenceRow] = Field(default_factory=list)
     summary: InterventionEvidenceSummary
     total: int = Field(ge=0)
+    scanned: int = Field(ge=0)
+    returned: int = Field(ge=0)
     truncated: bool = False
     pairing_complete: bool = True
     scan_truncated: bool = False

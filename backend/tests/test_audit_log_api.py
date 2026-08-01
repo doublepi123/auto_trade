@@ -10,7 +10,7 @@ os.environ["AUTO_TRADE_DATABASE_URL"] = (
 )
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -548,3 +548,221 @@ class TestAuditLogStatsSnapshotConservation:
         assert len(db.dirty) == dirty_before
         assert len(db.deleted) == deleted_before
         db.close()
+
+
+class TestAuditLogStatsCallerConnectionSafety:
+    """``stats()`` must never touch the caller's connection/transaction.
+
+    Finding 2: when ``Session.get_bind()`` returns a SQLAlchemy ``Connection``
+    (a session bound directly to a connection inside an active transaction),
+    ``stats()`` must derive the engine and open its OWN connection; it must
+    never begin/commit/rollback or otherwise alter the caller Connection.
+    """
+
+    @classmethod
+    def setup_class(cls) -> None:
+        cls.db_path = os.path.join(
+            tempfile.gettempdir(),
+            f"auto_trade_test_audit_stats_conn_{os.getpid()}.db",
+        )
+        if os.path.exists(cls.db_path):
+            os.unlink(cls.db_path)
+        cls.engine = create_engine(
+            f"sqlite:///{cls.db_path}",
+            connect_args={"check_same_thread": False},
+        )
+        Base.metadata.create_all(bind=cls.engine)
+
+    @classmethod
+    def teardown_class(cls) -> None:
+        cls.engine.dispose()
+        if os.path.exists(cls.db_path):
+            os.unlink(cls.db_path)
+
+    def setup_method(self) -> None:
+        db = Session(bind=self.engine)
+        db.query(AuditLog).delete()
+        db.commit()
+        db.close()
+
+    def test_stats_never_alters_caller_connection_transaction(self) -> None:
+        # Open a caller connection and begin an explicit transaction.
+        caller_connection = self.engine.connect()
+        caller_trans = caller_connection.begin()
+        try:
+            # Bind a session directly to the caller connection and stage an
+            # uncommitted sentinel row.
+            db = Session(bind=caller_connection)
+            db.add(
+                AuditLog(
+                    action="SENTINEL",
+                    severity="INFO",
+                    actor_hash="sentinel_actor",
+                    source_ip="",
+                    request_summary="{}",
+                    result="SUCCESS",
+                )
+            )
+            db.flush()  # stage within the caller transaction, do not commit
+
+            # The caller transaction must still be active after stats().
+            stats = AuditLogService(db).stats()
+            # stats() opens its own connection off the engine, so it does NOT
+            # see the uncommitted sentinel (correct committed-row semantics).
+            assert stats.total == 0
+
+            # The caller transaction is still active and the sentinel is still
+            # present/rollback-able exactly as before.
+            assert caller_trans.is_active
+            assert len(db.new) == 0  # flushed, not committed
+            # The sentinel is visible inside the caller transaction.
+            in_tx = db.query(AuditLog).filter(
+                AuditLog.action == "SENTINEL"
+            ).count()
+            assert in_tx == 1
+
+            # Rolling back the caller transaction removes the sentinel.
+            db.close()
+            caller_trans.rollback()
+            after_rollback = Session(bind=self.engine)
+            assert (
+                after_rollback.query(AuditLog)
+                .filter(AuditLog.action == "SENTINEL")
+                .count()
+                == 0
+            )
+            after_rollback.close()
+        finally:
+            caller_connection.close()
+
+
+class TestAuditLogStatsInFlightSnapshot:
+    """A real in-flight concurrent snapshot test (finding 3).
+
+    A second connection commits audit rows AFTER the stats total query
+    establishes the read snapshot but BEFORE categorical/actor/day queries
+    complete in the SAME ``stats()`` call. The response must conserve the
+    original snapshot total across action/severity/actor/day/overflow despite
+    the writer commit, while a subsequent independent stats call sees the new
+    rows.
+    """
+
+    @classmethod
+    def setup_class(cls) -> None:
+        cls.db_path = os.path.join(
+            tempfile.gettempdir(),
+            f"auto_trade_test_audit_stats_inflight_{os.getpid()}.db",
+        )
+        if os.path.exists(cls.db_path):
+            os.unlink(cls.db_path)
+        # Production-equivalent WAL/busy pragmas via the connect event.
+        cls.engine = create_engine(
+            f"sqlite:///{cls.db_path}",
+            connect_args={"check_same_thread": False},
+        )
+
+        @event.listens_for(cls.engine, "connect")
+        def _set_pragmas(dbapi_connection, _record):  # noqa: ANN001
+            cursor = dbapi_connection.cursor()
+            try:
+                cursor.execute("PRAGMA journal_mode=WAL")
+                cursor.execute("PRAGMA synchronous=NORMAL")
+                cursor.execute("PRAGMA busy_timeout=5000")
+            finally:
+                cursor.close()
+
+        Base.metadata.create_all(bind=cls.engine)
+
+    @classmethod
+    def teardown_class(cls) -> None:
+        cls.engine.dispose()
+        if os.path.exists(cls.db_path):
+            os.unlink(cls.db_path)
+
+    def setup_method(self) -> None:
+        db = Session(bind=self.engine)
+        db.query(AuditLog).delete()
+        db.commit()
+        db.close()
+
+    def _seed(self, count: int) -> None:
+        db = Session(bind=self.engine)
+        for i in range(count):
+            db.add(
+                AuditLog(
+                    action=f"SEED_{i:02d}",
+                    severity="INFO",
+                    actor_hash="seed_actor",
+                    source_ip="",
+                    request_summary="{}",
+                    result="SUCCESS",
+                )
+            )
+        db.commit()
+        db.close()
+
+    def test_in_flight_writer_commit_does_not_split_snapshot(self) -> None:
+        # Seed 10 rows on the committed state.
+        self._seed(10)
+
+        reader = Session(bind=self.engine)
+        service = AuditLogService(reader)
+
+        # Coordinate deterministically: the writer commits AFTER the total
+        # query establishes the snapshot but BEFORE categorical queries run,
+        # by monkeypatching the naturally factored _after_total_query hook.
+        writer = Session(bind=self.engine)
+        writer_committed = []
+
+        def _commit_writer_during_snapshot() -> None:
+            for i in range(5):
+                writer.add(
+                    AuditLog(
+                        action="CONCURRENT",
+                        severity="WARNING",
+                        actor_hash="concurrent_actor",
+                        source_ip="",
+                        request_summary="{}",
+                        result="SUCCESS",
+                    )
+                )
+            writer.commit()
+            writer_committed.append(True)
+
+        service._after_total_query = _commit_writer_during_snapshot  # type: ignore[method-assign]
+
+        try:
+            stats = service.stats()
+            # The snapshot was established before the writer committed, so the
+            # response conserves the original 10-row state across every
+            # aggregate despite the in-flight commit.
+            assert stats.total == 10
+            assert writer_committed == [True]  # writer did commit mid-call
+            # Conservation holds against the snapshot total.
+            assert (
+                sum(b.count for b in stats.by_action)
+                + stats.action_other_total
+                == stats.total
+            )
+            assert (
+                sum(b.count for b in stats.by_severity)
+                + stats.severity_other_total
+                == stats.total
+            )
+            assert (
+                sum(b.count for b in stats.by_actor)
+                + stats.actor_other_total
+                == stats.total
+            )
+            assert sum(b.count for b in stats.by_day) == stats.total
+            # The concurrent rows are NOT visible in this snapshot.
+            assert all(b.key != "CONCURRENT" for b in stats.by_action)
+            assert all(b.actor_hash != "concurrent_actor" for b in stats.by_actor)
+
+            # A subsequent independent stats call sees the new committed rows.
+            stats_after = AuditLogService(reader).stats()
+            assert stats_after.total == 15
+            assert any(b.key == "CONCURRENT" for b in stats_after.by_action)
+        finally:
+            writer.close()
+            reader.close()

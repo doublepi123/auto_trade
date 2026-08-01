@@ -497,6 +497,100 @@ class TestInterventionEvidenceScanCap(_Base):
         assert resp.summary.paired_count == 0
         assert resp.summary.paired_duration_seconds == 0.0
         assert all(r.duration_seconds is None for r in resp.items)
+        # Context-dependent manual states are UNKNOWN, not OPEN/PAIRED.
+        assert all(r.pairing_status == "UNKNOWN" for r in resp.items)
+        # Summary counts describe the scanned population (not the
+        # response-limited items).
+        assert resp.summary.unknown_count == resp.scanned
+        assert resp.summary.open_count == 0
+        assert resp.summary.classification_complete is False
+        # Exact total is truthful (independent of the scan cap).
+        assert resp.total == _MAX_SCAN_TRANSITIONS + 5
+        # Scanned population is bounded (cap + 1 rows fetched to detect cap).
+        assert resp.scanned == _MAX_SCAN_TRANSITIONS + 1
+        assert resp.truncated is True
+
+    def test_scan_cap_open_at_cap_plus_1_close_at_cap_plus_2_no_open_claim(
+        self,
+        monkeypatch,
+    ) -> None:
+        # Small cap via monkeypatch: open at cap+1, close at cap+2. The open
+        # must NOT be claimed as OPEN (omitted history could change it); it is
+        # UNKNOWN with no duration. Exact total is truthful.
+        import app.services.intervention_evidence_service as svc_mod
+
+        cap = 3
+        monkeypatch.setattr(svc_mod, "_MAX_SCAN_TRANSITIONS", cap)
+        open_id = self._audit(
+            "PAUSE",
+            datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc),
+        )
+        # Fill the first scan slots so the real open/close fall beyond.
+        for i in range(cap):
+            self._audit(
+                "PAUSE",
+                datetime(2026, 6, 14, i, 0, 0, tzinfo=timezone.utc),
+            )
+        close_id = self._audit(
+            "RESUME",
+            datetime(2026, 6, 14, 13, 0, 0, tzinfo=timezone.utc),
+        )
+        resp = self._build()
+        assert resp.scan_truncated is True
+        assert resp.pairing_complete is False
+        by_id = {r.source_id: r for r in resp.items}
+        # No row claims OPEN or PAIRED; all are UNKNOWN with no duration.
+        assert all(r.pairing_status == "UNKNOWN" for r in resp.items)
+        assert all(r.duration_seconds is None for r in resp.items)
+        if open_id in by_id:
+            assert by_id[open_id].pairing_status == "UNKNOWN"
+        if close_id in by_id:
+            assert by_id[close_id].pairing_status == "UNKNOWN"
+        assert resp.summary.paired_duration_seconds == 0.0
+        # Exact total counts all 5 audit rows truthfully.
+        assert resp.total == 5
+        # Scanned population is bounded (cap + 1 rows fetched to detect cap).
+        assert resp.scanned == cap + 1
+        assert resp.truncated is True
+
+    def test_scan_cap_metadata_truthful_when_complete(self) -> None:
+        # Under the cap: pairing complete, scanned == total, not truncated.
+        self._audit("PAUSE", datetime(2026, 6, 14, 10, 0, 0, tzinfo=timezone.utc))
+        self._audit("RESUME", datetime(2026, 6, 14, 10, 10, 0, tzinfo=timezone.utc))
+        resp = self._build()
+        assert resp.pairing_complete is True
+        assert resp.scan_truncated is False
+        assert resp.total == 2
+        assert resp.scanned == 2
+        assert resp.returned == 2
+        assert resp.truncated is False
+        assert resp.summary.classification_complete is True
+        assert resp.summary.scanned_evidence == 2
+
+    def test_automatic_source_scan_cap_bounded(self, monkeypatch) -> None:
+        # Prove the automatic source is also bounded: exceed its cap and verify
+        # no unbounded .all()/ID materialization behavior — the scan population
+        # is capped and durations/classifications are suppressed.
+        import app.services.intervention_evidence_service as svc_mod
+
+        cap = 2
+        monkeypatch.setattr(svc_mod, "_MAX_SCAN_TRANSITIONS", cap)
+        for i in range(5):
+            self._trade(
+                "RISK_AUTO_RESUMED",
+                datetime(2026, 6, 14, i, 0, 0, tzinfo=timezone.utc),
+                status="RUNNING",
+            )
+        resp = self._build()
+        assert resp.scan_truncated is True
+        assert resp.pairing_complete is False
+        # Scanned automatic rows are bounded (cap + 1 fetched to detect cap).
+        assert resp.scanned == cap + 1
+        # Exact total is truthful (all 5 automatic rows).
+        assert resp.total == 5
+        assert resp.truncated is True
+        assert all(r.pairing_status == "UNKNOWN" for r in resp.items)
+        assert all(r.duration_seconds is None for r in resp.items)
 
 
 class TestInterventionEvidenceRuntimeState(_Base):
