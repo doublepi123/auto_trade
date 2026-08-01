@@ -47,6 +47,154 @@
           <el-input-number v-model="slippagePct" :precision="3" :step="0.1" :min="0" data-testid="exp-slippage" />
         </el-form-item>
 
+        <el-divider content-position="left">执行与退出（基准参数）</el-divider>
+
+        <el-alert
+          class="execution-fidelity-notice"
+          title="OHLC K 线近似，非实盘等价：时段按 K 线观测时间判断，日损/时间/EOD 强制退出按收盘价近似，止损与目标价按 OHLC 触及近似；新鲜阈值穿越仅作保守近似，且不包含历史 BBO、部分成交、拒单或动态全买力回放。"
+          type="info"
+          show-icon
+          :closable="false"
+          data-testid="exp-fidelity-notice"
+        />
+
+        <el-row :gutter="12">
+          <el-col :span="12">
+            <el-form-item label="市场 (market)">
+              <el-select v-model="market" data-testid="exp-market">
+                <el-option label="美股 (US)" value="US" />
+                <el-option label="港股 (HK)" value="HK" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="交易时段">
+              <el-select v-model="tradingSessionMode" data-testid="exp-session-mode">
+                <el-option label="任意时段（兼容模式）" value="ANY" />
+                <el-option label="仅常规交易时段" value="RTH_ONLY" />
+              </el-select>
+            </el-form-item>
+          </el-col>
+        </el-row>
+
+        <el-row :gutter="12">
+          <el-col :span="12">
+            <el-form-item label="止损 %">
+              <el-input-number
+                v-model="stopLossPct"
+                :precision="2"
+                :step="0.5"
+                :min="0"
+                :max="100"
+                data-testid="exp-stop-loss"
+              />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="移动止损 %">
+              <el-input-number
+                v-model="trailingStopPct"
+                :precision="2"
+                :step="0.5"
+                :min="0"
+                :max="100"
+                data-testid="exp-trailing-stop"
+              />
+            </el-form-item>
+          </el-col>
+        </el-row>
+
+        <el-row :gutter="12">
+          <el-col :span="12">
+            <el-form-item label="最长持仓（分钟）">
+              <el-input-number
+                v-model="maxHoldingMinutes"
+                :precision="0"
+                :step="15"
+                :min="0"
+                :max="10080"
+                data-testid="exp-max-holding"
+              />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="开盘预热（分钟）">
+              <el-input-number
+                v-model="openingWarmupMinutes"
+                :precision="0"
+                :step="5"
+                :min="0"
+                :max="390"
+                data-testid="exp-opening-warmup"
+              />
+            </el-form-item>
+          </el-col>
+        </el-row>
+
+        <el-row :gutter="12">
+          <el-col :span="12">
+            <el-form-item label="入场截止（分钟）">
+              <el-input-number
+                v-model="entryCutoffMinutes"
+                :precision="0"
+                :step="5"
+                :min="0"
+                :max="180"
+                data-testid="exp-entry-cutoff"
+              />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="收盘平仓（分钟）">
+              <el-input-number
+                v-model="flattenMinutes"
+                :precision="0"
+                :step="5"
+                :min="0"
+                :max="180"
+                data-testid="exp-flatten"
+              />
+            </el-form-item>
+          </el-col>
+        </el-row>
+
+        <el-row :gutter="12">
+          <el-col :span="12">
+            <el-form-item label="每日最多入场">
+              <el-input-number
+                v-model="maxEntriesPerSymbolPerDay"
+                :precision="0"
+                :step="1"
+                :min="0"
+                :max="1000"
+                data-testid="exp-daily-entry-cap"
+              />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="新鲜阈值穿越">
+              <el-switch v-model="entryCrossingRequired" data-testid="exp-fresh-crossing" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+
+        <el-alert
+          v-if="sessionWindowError"
+          :title="sessionWindowError"
+          type="warning"
+          show-icon
+          :closable="false"
+          data-testid="exp-window-error"
+        />
+        <el-alert
+          v-if="symbolMarketError"
+          :title="symbolMarketError"
+          type="warning"
+          show-icon
+          :closable="false"
+          data-testid="exp-symbol-market-error"
+        />
+
         <el-divider content-position="left">参数网格</el-divider>
 
         <el-row :gutter="12">
@@ -61,6 +209,21 @@
             </el-form-item>
           </el-col>
         </el-row>
+
+        <el-form-item label="max_holding 候选">
+          <div>
+            <el-checkbox-group v-model="maxHoldingGrid" data-testid="exp-grid-max-holding">
+              <el-checkbox-button
+                v-for="minutes in MAX_HOLDING_GRID_OPTIONS"
+                :key="minutes"
+                :value="minutes"
+              >
+                {{ minutes }} 分钟
+              </el-checkbox-button>
+            </el-checkbox-group>
+            <div class="field-help">可多选 15 / 30 / 45 / 60 分钟；未选时使用上方基准值。</div>
+          </div>
+        </el-form-item>
 
         <el-divider content-position="left">价格数据 (CSV)</el-divider>
 
@@ -78,7 +241,7 @@
           <el-button
             type="primary"
             :loading="running"
-            :disabled="running"
+            :disabled="running || runBlockingError.length > 0"
             @click="handleRun"
             data-testid="exp-run-btn"
           >
@@ -321,6 +484,18 @@ const sellHighGrid = ref('')
 const quantity = ref(10)
 const feeRate = ref(0.0005)
 const slippagePct = ref(0)
+const market = ref<'US' | 'HK'>('US')
+const tradingSessionMode = ref<'ANY' | 'RTH_ONLY'>('ANY')
+const stopLossPct = ref(0)
+const trailingStopPct = ref(0)
+const maxHoldingMinutes = ref(0)
+const entryCutoffMinutes = ref(0)
+const flattenMinutes = ref(0)
+const openingWarmupMinutes = ref(0)
+const entryCrossingRequired = ref(false)
+const maxEntriesPerSymbolPerDay = ref(0)
+const MAX_HOLDING_GRID_OPTIONS = [15, 30, 45, 60] as const
+const maxHoldingGrid = ref<number[]>([])
 const csvText = ref('')
 
 const running = ref(false)
@@ -346,6 +521,35 @@ const filteredRuns = computed(() => {
   return runs.value.filter((r) => r.status === statusFilter.value)
 })
 
+const sessionWindowError = computed(() => {
+  if (
+    entryCutoffMinutes.value > 0
+    && flattenMinutes.value > 0
+    && flattenMinutes.value > entryCutoffMinutes.value
+  ) {
+    return '收盘前平仓窗口不能早于入场截止窗口'
+  }
+  return ''
+})
+
+const normalizedExperimentSymbol = computed(() => (
+  symbol.value.trim().toUpperCase() || 'AAPL.US'
+))
+
+const symbolMarketError = computed(() => {
+  const suffix = normalizedExperimentSymbol.value.endsWith('.HK')
+    ? 'HK'
+    : normalizedExperimentSymbol.value.endsWith('.US')
+      ? 'US'
+      : null
+  if (suffix !== null && suffix !== market.value) {
+    return `股票代码 ${normalizedExperimentSymbol.value} 与所选市场 ${market.value} 不一致`
+  }
+  return ''
+})
+
+const runBlockingError = computed(() => sessionWindowError.value || symbolMarketError.value)
+
 // ── Helpers ──
 
 function parseCsvValues(raw: string): number[] {
@@ -359,7 +563,9 @@ function parseCsvValues(raw: string): number[] {
 
 function buildBaseParams(): BacktestParams {
   return {
-    symbol: symbol.value.trim().toUpperCase() || 'AAPL.US',
+    symbol: normalizedExperimentSymbol.value,
+    market: market.value,
+    trading_session_mode: tradingSessionMode.value,
     buy_low: buyLow.value,
     sell_high: sellHigh.value,
     short_selling: false,
@@ -371,7 +577,14 @@ function buildBaseParams(): BacktestParams {
     fee_rate: feeRate.value,
     fixed_fee: 0,
     slippage_pct: slippagePct.value,
-    stop_loss_pct: 0,
+    stop_loss_pct: stopLossPct.value,
+    trailing_stop_pct: trailingStopPct.value,
+    max_holding_minutes: maxHoldingMinutes.value,
+    entry_cutoff_minutes_before_close: entryCutoffMinutes.value,
+    flatten_minutes_before_close: flattenMinutes.value,
+    opening_warmup_minutes: openingWarmupMinutes.value,
+    entry_crossing_required: entryCrossingRequired.value,
+    max_entries_per_symbol_per_day: maxEntriesPerSymbolPerDay.value,
   }
 }
 
@@ -386,6 +599,12 @@ function buildParameterGrid(): StrategyExperimentGrid {
   const sellHighs = parseCsvValues(sellHighGrid.value)
   if (sellHighs.length > 0) {
     grid.sell_high = { values: sellHighs } satisfies StrategyExperimentGridItem
+  }
+
+  if (maxHoldingGrid.value.length > 0) {
+    grid.max_holding_minutes = {
+      values: [...maxHoldingGrid.value].sort((a, b) => a - b),
+    } satisfies StrategyExperimentGridItem
   }
 
   grid.quantity = { value: quantity.value } satisfies StrategyExperimentGridItem
@@ -418,6 +637,10 @@ function errorDetail(e: unknown): string {
 // ── Actions ──
 
 async function handleRun() {
+  if (runBlockingError.value) {
+    ElMessage.warning(runBlockingError.value)
+    return
+  }
   if (!csvText.value.trim()) {
     ElMessage.warning('请填入价格数据 CSV')
     return
@@ -624,6 +847,17 @@ function onExportCurrentPage() {
 <style scoped>
 .experiments-page h2 {
   margin-bottom: 16px;
+}
+
+.execution-fidelity-notice {
+  margin-bottom: 18px;
+}
+
+.field-help {
+  margin-top: 6px;
+  color: #909399;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .sort-controls {

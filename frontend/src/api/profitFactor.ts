@@ -1,9 +1,13 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
+
+export type ProfitFactorState = 'FINITE' | 'INFINITE' | 'UNDEFINED'
 
 export interface PfSegment {
   segment: string
   trade_count: number
   profit_factor: number | null
+  profit_factor_state: ProfitFactorState
   net_pnl: number
   win_rate: number
 }
@@ -14,6 +18,7 @@ export interface ProfitFactorResult {
   sample_size: number
   overall: {
     profit_factor: number | null
+    profit_factor_state: ProfitFactorState
     gross_profit: number
     gross_loss: number
     net_pnl: number
@@ -24,6 +29,7 @@ export interface ProfitFactorResult {
     top3_wins_share: number
     top3_losses_share: number
   }
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

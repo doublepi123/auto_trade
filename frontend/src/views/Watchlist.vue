@@ -779,12 +779,29 @@
                   <strong data-testid="rotation-training-winner">
                     {{ rotationVariantLabel(universeRotationEvaluation.selected_variant) }}
                   </strong>
+                  <el-tag
+                    :type="universeRotationEvaluation.selected_variant_validation_passed ? 'success' : 'danger'"
+                    size="small"
+                    effect="plain"
+                    data-testid="rotation-training-winner-gate"
+                  >
+                    {{ universeRotationEvaluation.selected_variant_validation_passed ? '通过双门槛' : '未通过双门槛' }}
+                  </el-tag>
                 </span>
                 <span>
                   稳健挑战者
                   <strong data-testid="rotation-validated-challenger">
                     {{ rotationVariantLabel(universeRotationEvaluation.validated_challenger_variant) }}
                   </strong>
+                  <el-tag
+                    v-if="universeRotationEvaluation.validated_challenger_variant"
+                    type="success"
+                    size="small"
+                    effect="plain"
+                    data-testid="rotation-validated-challenger-gate"
+                  >
+                    通过双门槛
+                  </el-tag>
                 </span>
               </div>
             </div>
@@ -1316,7 +1333,35 @@
                         >
                           Shadow
                         </el-tag>
+                        <el-tag
+                          v-if="row.diversified_observation_selected"
+                          type="success"
+                          size="small"
+                          effect="plain"
+                          data-testid="promotion-diversified-badge"
+                        >
+                          分散 #{{ row.diversified_observation_rank }}
+                        </el-tag>
+                        <el-tag
+                          v-if="row.growth_satellite_selected"
+                          type="danger"
+                          size="small"
+                          effect="plain"
+                          data-testid="promotion-growth-satellite-badge"
+                        >
+                          成长 #{{ row.growth_satellite_rank }}
+                        </el-tag>
+                        <el-tag
+                          v-for="membership in row.memberships"
+                          :key="membership"
+                          type="info"
+                          size="small"
+                          effect="plain"
+                        >
+                          {{ promotionMembershipLabel(membership) }}
+                        </el-tag>
                       </div>
+                      <small class="promotion-secondary">{{ row.sector }}</small>
                     </div>
                   </template>
                 </el-table-column>
@@ -1340,8 +1385,20 @@
                         <strong>{{ promotionQuantScoreLabel(row) }}</strong>
                         <span>{{ promotionQuantOutcomeLabel(row) }}</span>
                       </div>
+                      <small class="promotion-secondary">
+                        成本 {{ promotionCostLabel(row.estimated_round_trip_cost_bps) }}
+                      </small>
                       <el-tag
-                        v-if="promotionQuantState(row) === 'ERROR'"
+                        v-if="promotionQuantState(row) === 'WARMUP'"
+                        type="info"
+                        size="small"
+                        effect="plain"
+                        data-testid="promotion-quant-warmup"
+                      >
+                        数据积累中
+                      </el-tag>
+                      <el-tag
+                        v-else-if="promotionQuantState(row) === 'ERROR'"
                         type="warning"
                         size="small"
                         effect="plain"
@@ -1440,6 +1497,31 @@
                   <div class="promotion-mobile-tags">
                     <el-tag v-if="row.is_trading_target" type="danger" size="small">当前实盘</el-tag>
                     <el-tag
+                      v-if="row.diversified_observation_selected"
+                      type="success"
+                      size="small"
+                      effect="plain"
+                    >
+                      分散 #{{ row.diversified_observation_rank }}
+                    </el-tag>
+                    <el-tag
+                      v-if="row.growth_satellite_selected"
+                      type="danger"
+                      size="small"
+                      effect="plain"
+                    >
+                      成长 #{{ row.growth_satellite_rank }}
+                    </el-tag>
+                    <el-tag
+                      v-for="membership in row.memberships"
+                      :key="membership"
+                      type="info"
+                      size="small"
+                      effect="plain"
+                    >
+                      {{ promotionMembershipLabel(membership) }}
+                    </el-tag>
+                    <el-tag
                       v-if="row.universe_role === 'EXPLORATION'"
                       type="info"
                       size="small"
@@ -1464,7 +1546,15 @@
                       · {{ promotionQuantOutcomeLabel(row) }}
                     </strong>
                     <el-tag
-                      v-if="promotionQuantState(row) === 'ERROR'"
+                      v-if="promotionQuantState(row) === 'WARMUP'"
+                      type="info"
+                      size="small"
+                      effect="plain"
+                    >
+                      数据积累中
+                    </el-tag>
+                    <el-tag
+                      v-else-if="promotionQuantState(row) === 'ERROR'"
                       type="warning"
                       size="small"
                       effect="plain"
@@ -1480,6 +1570,8 @@
                       已过期
                     </el-tag>
                   </div>
+                  <div><span>行业 / 风险组</span><strong>{{ row.sector }} / {{ row.risk_group }}</strong></div>
+                  <div><span>估算往返成本</span><strong>{{ promotionCostLabel(row.estimated_round_trip_cost_bps) }}</strong></div>
                   <div><span>证据进度</span><strong>{{ row.included_pairs }}/{{ row.minimum_mature_pairs }}</strong></div>
                   <div><span>距复核/成熟</span><strong>{{ row.remaining_ready_pairs }}/{{ row.remaining_mature_pairs }}</strong></div>
                   <div><span>候选净 PnL</span><strong :class="pnlClass(row.candidate_metrics.net_pnl)">{{ formatSignedPnl(row.candidate_metrics.net_pnl) }}</strong></div>
@@ -2231,6 +2323,18 @@ function promotionSourceLabel(row: UniversePromotionReadinessItem): string {
   return '池外实盘'
 }
 
+function promotionMembershipLabel(
+  membership: UniversePromotionReadinessItem['memberships'][number],
+): string {
+  return membership === 'NASDAQ_100' ? '纳指100' : '道指'
+}
+
+function promotionCostLabel(value: number | null): string {
+  return value === null || !Number.isFinite(value)
+    ? '-'
+    : `${value.toFixed(1)} bp`
+}
+
 function promotionProgressPercent(includedPairs: number, minimumMaturePairs: number): number {
   if (!Number.isFinite(minimumMaturePairs) || minimumMaturePairs <= 0) return 0
   return Math.min(100, Math.max(0, (includedPairs / minimumMaturePairs) * 100))
@@ -2268,15 +2372,16 @@ function promotionQuantActionLabel(action: string): string {
 
 function promotionQuantState(
   row: UniversePromotionReadinessItem,
-): 'MISSING' | 'ERROR' | 'STALE' | 'FRESH' {
+): 'MISSING' | 'WARMUP' | 'ERROR' | 'STALE' | 'FRESH' {
   if (!row.quant_source || row.quant_score === null) return 'MISSING'
+  if (row.quant_source.startsWith('quant_warmup')) return 'WARMUP'
   if (row.quant_source.startsWith('quant_error')) return 'ERROR'
   return row.quant_fresh ? 'FRESH' : 'STALE'
 }
 
 function promotionQuantScoreLabel(row: UniversePromotionReadinessItem): string {
   const state = promotionQuantState(row)
-  return state === 'MISSING' || state === 'ERROR'
+  return state === 'MISSING' || state === 'WARMUP' || state === 'ERROR'
     ? '-'
     : formatScore(row.quant_score)
 }
@@ -2284,6 +2389,9 @@ function promotionQuantScoreLabel(row: UniversePromotionReadinessItem): string {
 function promotionQuantOutcomeLabel(row: UniversePromotionReadinessItem): string {
   const state = promotionQuantState(row)
   if (state === 'MISSING') return '未评分'
+  if (state === 'WARMUP') {
+    return `数据积累中 · ${formatSignedScore(row.quant_adjustment)}`
+  }
   if (state === 'ERROR') {
     return `数据异常 · ${formatSignedScore(row.quant_adjustment)}`
   }
@@ -2302,7 +2410,8 @@ function promotionQuantTitle(row: UniversePromotionReadinessItem): string {
     ? formatDateTime(row.quant_expires_at)
     : '-'
   const adjustment = formatSignedScore(row.quant_adjustment)
-  return `来源 ${row.quant_source || '-'} · 置信度 ${confidence} · 融合权重 ${weight} · 融合调整 ${adjustment} · 过期 ${expiresAt}`
+  const cost = promotionCostLabel(row.estimated_round_trip_cost_bps)
+  return `来源 ${row.quant_source || '-'} · 成本 ${cost} · 置信度 ${confidence} · 融合权重 ${weight} · 融合调整 ${adjustment} · 过期 ${expiresAt}`
 }
 
 const promotionBlockerLabels: Record<string, string> = {
@@ -2319,6 +2428,7 @@ const promotionBlockerLabels: Record<string, string> = {
   FORWARD_EVALUATION_FAILED: '前向评估失败',
   QUANT_ACTION_NOT_CANDIDATE: '量化适配未达到优选',
   QUANT_SCORE_DATA_ERROR: '量化评分数据异常',
+  QUANT_SCORE_WARMING_UP: '量化历史样本积累中',
   QUANT_SCORE_MISSING: '缺少当前代量化评分',
   QUANT_SCORE_STALE: '当前代量化评分已过期',
   REGISTRATION_BOUNDARY_INVALID: '注册纳入边界无效',

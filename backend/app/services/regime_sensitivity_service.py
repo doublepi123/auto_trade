@@ -1,7 +1,8 @@
 """Regime sensitivity analysis service.
 
-Splits trades into high/low volatility regimes (based on rolling PnL
-standard deviation) and compares performance across regimes.  Read-only.
+Splits trades into high/low prior-outcome variability states using the rolling
+standard deviation of PnL already closed before each entry, then compares
+subsequent outcomes. This is not a market-volatility signal. Read-only.
 
 Inspired by VectorBT's regime analytics and QuantStats' conditional
 performance tearsheet.
@@ -9,19 +10,24 @@ performance tearsheet.
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta, timezone
+from statistics import median
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import OrderRecord
+from app.services.analytics_trade_sample_service import (
+    analytics_response,
+    load_analytics_trade_sample,
+    mixed_currency_error,
+)
 
 __all__ = ["RegimeSensitivityService"]
 
+_REGIME_BASIS = "PRIOR_CLOSED_TRADE_PNL_VOLATILITY"
+
 
 class RegimeSensitivityService:
-    """Performance comparison across volatility regimes."""
+    """Compare outcomes across prior closed-trade PnL variability states."""
 
     def __init__(self, db: Session) -> None:
         self._db = db
@@ -32,47 +38,126 @@ class RegimeSensitivityService:
         lookback_days: int = 180,
         window: int = 20,
     ) -> dict[str, Any]:
-        pnls = self._fetch_pnls(symbol, lookback_days)
-        if len(pnls) < window * 2:
-            return {
-                "symbol": symbol or "ALL",
+        normalized_symbol = (
+            symbol.strip().upper() if symbol and symbol.strip() else None
+        )
+        sample = load_analytics_trade_sample(
+            self._db,
+            symbol=normalized_symbol,
+            lookback_days=lookback_days,
+        )
+        trades = sorted(
+            sample.trades,
+            key=lambda trade: (
+                trade.entry_at,
+                trade.entry_order_id,
+                trade.exit_at,
+                trade.exit_order_id,
+            ),
+        )
+        currency_error = mixed_currency_error(
+            sample,
+            symbol=normalized_symbol,
+            lookback_days=lookback_days,
+            payload={
+                "symbol": normalized_symbol or "ALL",
                 "lookback_days": lookback_days,
-                "sample_size": len(pnls),
-                "error": f"Need at least {window * 2} trades.",
-            }
+                "sample_size": len(trades),
+                "window": window,
+                "regime_basis": _REGIME_BASIS,
+            },
+        )
+        if currency_error is not None:
+            return currency_error
+        if len(trades) < window * 2:
+            return analytics_response(
+                sample,
+                {
+                    "symbol": normalized_symbol or "ALL",
+                    "lookback_days": lookback_days,
+                    "sample_size": len(trades),
+                    "window": window,
+                    "regime_basis": _REGIME_BASIS,
+                    "error": f"Need at least {window * 2} trades.",
+                },
+            )
 
-        # compute rolling volatility
-        vols: list[float] = []
-        for i in range(len(pnls)):
-            if i < window - 1:
-                vols.append(0.0)
-                continue
-            w = pnls[i - window + 1 : i + 1]
-            mean = sum(w) / window
-            var = sum((p - mean) ** 2 for p in w) / window
-            vols.append(math.sqrt(var))
-
-        # split into regimes by median volatility
-        active_vols = [v for v in vols if v > 0]
-        if not active_vols:
-            return {
-                "symbol": symbol or "ALL",
-                "lookback_days": lookback_days,
-                "sample_size": len(pnls),
-                "error": "No volatility variation detected.",
-            }
-
-        median_vol = sorted(active_vols)[len(active_vols) // 2]
-
+        # The current outcome must not choose its own regime. For each entry,
+        # volatility uses only outcomes that closed strictly before entry; its
+        # high/low threshold is the expanding median of earlier volatility
+        # estimates, also known before entry.
+        closed = sorted(
+            trades,
+            key=lambda trade: (trade.exit_at, trade.exit_order_id),
+        )
+        known_pnls: list[float] = []
+        historical_vols: list[float] = []
         low_vol_pnls: list[float] = []
         high_vol_pnls: list[float] = []
-        for i, (pnl, vol) in enumerate(zip(pnls, vols)):
-            if i < window - 1:
+        closed_index = 0
+        for trade in trades:
+            while (
+                closed_index < len(closed)
+                and closed[closed_index].exit_at < trade.entry_at
+            ):
+                known_pnls.append(closed[closed_index].net_pnl)
+                closed_index += 1
+            if len(known_pnls) < window:
                 continue
-            if vol <= median_vol:
-                low_vol_pnls.append(pnl)
+            prior_window = known_pnls[-window:]
+            prior_mean = sum(prior_window) / window
+            prior_variance = sum(
+                (pnl - prior_mean) ** 2 for pnl in prior_window
+            ) / window
+            volatility = math.sqrt(prior_variance)
+            if not historical_vols:
+                historical_vols.append(volatility)
+                continue
+            threshold = median(historical_vols)
+            if volatility <= threshold:
+                low_vol_pnls.append(trade.net_pnl)
             else:
-                high_vol_pnls.append(pnl)
+                high_vol_pnls.append(trade.net_pnl)
+            historical_vols.append(volatility)
+
+        if (
+            len(historical_vols) < 2
+            or math.isclose(
+                min(historical_vols),
+                max(historical_vols),
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+        ):
+            return analytics_response(
+                sample,
+                {
+                    "symbol": normalized_symbol or "ALL",
+                    "lookback_days": lookback_days,
+                    "sample_size": len(trades),
+                    "window": window,
+                    "regime_basis": _REGIME_BASIS,
+                    "error": "No causal volatility variation detected.",
+                },
+            )
+        classified_count = len(low_vol_pnls) + len(high_vol_pnls)
+        if not low_vol_pnls or not high_vol_pnls:
+            return analytics_response(
+                sample,
+                {
+                    "symbol": normalized_symbol or "ALL",
+                    "lookback_days": lookback_days,
+                    "sample_size": len(trades),
+                    "window": window,
+                    "regime_basis": _REGIME_BASIS,
+                    "classified_trades": classified_count,
+                    "error": (
+                        "Need causally classifiable trades in both prior-PnL "
+                        "variability states."
+                    ),
+                },
+            )
+        median_vol = median(historical_vols)
 
         def _regime_stats(pnls_list: list[float], label: str) -> dict[str, Any]:
             if not pnls_list:
@@ -99,33 +184,41 @@ class RegimeSensitivityService:
         # regime sensitivity: difference in Sharpe
         sensitivity = high_stats["sharpe"] - low_stats["sharpe"]
 
-        return {
-            "symbol": symbol or "ALL",
-            "lookback_days": lookback_days,
-            "sample_size": len(pnls),
-            "window": window,
-            "median_volatility": round(median_vol, 4),
-            "regimes": [low_stats, high_stats],
-            "sensitivity": round(sensitivity, 4),
-            "interpretation": _interpret(sensitivity, low_stats, high_stats),
-        }
-
-    def _fetch_pnls(self, symbol: str | None, days: int) -> list[float]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        stmt = select(OrderRecord.net_pnl).where(
-            OrderRecord.net_pnl.is_not(None),
-            OrderRecord.filled_at >= cutoff,
+        return analytics_response(
+            sample,
+            {
+                "symbol": normalized_symbol or "ALL",
+                "lookback_days": lookback_days,
+                "sample_size": len(trades),
+                "classified_trades": classified_count,
+                "window": window,
+                "regime_basis": _REGIME_BASIS,
+                "median_volatility": round(median_vol, 4),
+                "regimes": [low_stats, high_stats],
+                "sensitivity": round(sensitivity, 4),
+                "interpretation": _interpret(
+                    sensitivity,
+                    low_stats,
+                    high_stats,
+                ),
+            },
         )
-        if symbol:
-            stmt = stmt.where(OrderRecord.symbol == symbol)
-        stmt = stmt.order_by(OrderRecord.filled_at.asc())
-        rows = self._db.scalars(stmt).all()
-        return [float(r) for r in rows if r is not None]
 
 
 def _interpret(sens: float, low: dict, high: dict) -> str:
     if sens > 0.5:
-        return "Strategy performs better in high-volatility regimes — thrives on turbulence."
+        return (
+            "Strategy outcomes have higher Sharpe after periods of high "
+            "closed-trade PnL variability. This is not a market-volatility "
+            "signal."
+        )
     if sens < -0.5:
-        return "Strategy performs better in low-volatility regimes — sensitive to turbulence. Consider reducing size in volatile periods."
-    return "Strategy performance is relatively stable across volatility regimes."
+        return (
+            "Strategy outcomes have higher Sharpe after periods of low "
+            "closed-trade PnL variability. This is not a market-volatility "
+            "signal."
+        )
+    return (
+        "Strategy outcomes are relatively stable across prior closed-trade "
+        "PnL variability states."
+    )

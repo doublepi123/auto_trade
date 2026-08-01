@@ -63,11 +63,12 @@ _PROFIT_LOCK_SPECS = (
     _ProfitLockSpec("strategy-v2-profit-lock-a60-f40-v1", 0.60, 0.40),
 )
 _TIME_EXIT_SPECS = (
+    _TimeExitSpec("strategy-v2-time-stop-m10-v2", 10),
     _TimeExitSpec("strategy-v2-time-stop-m15-v2", 15),
     _TimeExitSpec("strategy-v2-time-stop-m30-v2", 30),
     _TimeExitSpec("strategy-v2-time-stop-m45-v2", 45),
 )
-_CURRENT_ALGORITHM_VERSIONS = tuple(
+STRATEGY_V2_EXIT_ALGORITHM_VERSIONS = tuple(
     spec.algorithm_version for spec in (*_PROFIT_LOCK_SPECS, *_TIME_EXIT_SPECS)
 )
 _EVALUATOR_VERSION = "strategy-v2-profit-lock-forward-evaluator-v2"
@@ -302,7 +303,7 @@ class StrategyV2ExitChallengerService:
         ).filter(
             StrategyV2ExitChallengerRegistration.symbol == symbol,
             StrategyV2ExitChallengerRegistration.algorithm_version.in_(
-                _CURRENT_ALGORITHM_VERSIONS
+                STRATEGY_V2_EXIT_ALGORITHM_VERSIONS
             ),
         ).order_by(
             StrategyV2ExitChallengerRegistration.registered_at.asc(),
@@ -350,7 +351,7 @@ class StrategyV2ExitChallengerService:
             StrategyV2ExitChallengerRegistration.source_config_version
             == baseline.config_version,
             StrategyV2ExitChallengerRegistration.algorithm_version.in_(
-                _CURRENT_ALGORITHM_VERSIONS
+                STRATEGY_V2_EXIT_ALGORITHM_VERSIONS
             ),
         ).all()
         for registration in registrations:
@@ -478,6 +479,120 @@ class StrategyV2ExitChallengerService:
             row.paired_at = paired_at
             self.db.add(row)
 
+    @staticmethod
+    def _paired_evidence(
+        rows: list[StrategyV2ExitChallengerTrade],
+    ) -> tuple[
+        list[StrategyV2ExitChallengerTrade],
+        list[float],
+        list[float],
+        list[float],
+        list[float],
+        list[float],
+        bool,
+    ]:
+        paired: list[StrategyV2ExitChallengerTrade] = []
+        baseline_values: list[float] = []
+        challenger_values: list[float] = []
+        deltas: list[float] = []
+        baseline_holding_minutes: list[float] = []
+        challenger_holding_minutes: list[float] = []
+        evidence_data_valid = True
+        for row in rows:
+            complete_pnl = (
+                row.baseline_net_pnl is not None
+                and row.challenger_net_pnl is not None
+                and row.net_pnl_delta is not None
+            )
+            has_pair_marker = (
+                row.baseline_net_pnl is not None
+                or row.net_pnl_delta is not None
+                or row.baseline_exit_at is not None
+                or row.paired_at is not None
+            )
+            if not complete_pnl:
+                if has_pair_marker:
+                    evidence_data_valid = False
+                continue
+            assert row.baseline_net_pnl is not None
+            assert row.challenger_net_pnl is not None
+            assert row.net_pnl_delta is not None
+            if (
+                row.baseline_exit_at is None
+                or row.challenger_exit_at is None
+                or row.paired_at is None
+            ):
+                evidence_data_valid = False
+                continue
+            try:
+                baseline_net_pnl = float(row.baseline_net_pnl)
+                challenger_net_pnl = float(row.challenger_net_pnl)
+                net_pnl_delta = float(row.net_pnl_delta)
+                entry_at = _as_utc(row.entry_at)
+                baseline_exit_at = _as_utc(row.baseline_exit_at)
+                challenger_exit_at = _as_utc(row.challenger_exit_at)
+                paired_at = _as_utc(row.paired_at)
+            except (
+                AttributeError,
+                TypeError,
+                ValueError,
+                OverflowError,
+            ):
+                evidence_data_valid = False
+                continue
+            if (
+                not math.isfinite(baseline_net_pnl)
+                or not math.isfinite(challenger_net_pnl)
+                or not math.isfinite(net_pnl_delta)
+                or not math.isclose(
+                    net_pnl_delta,
+                    challenger_net_pnl - baseline_net_pnl,
+                    rel_tol=1e-9,
+                    abs_tol=1e-9,
+                )
+                or baseline_exit_at < entry_at
+                or challenger_exit_at < entry_at
+                or paired_at < baseline_exit_at
+                or paired_at < challenger_exit_at
+            ):
+                evidence_data_valid = False
+                continue
+            paired.append(row)
+            baseline_values.append(baseline_net_pnl)
+            challenger_values.append(challenger_net_pnl)
+            deltas.append(net_pnl_delta)
+            baseline_holding_minutes.append(
+                (baseline_exit_at - entry_at).total_seconds() / 60.0
+            )
+            challenger_holding_minutes.append(
+                (challenger_exit_at - entry_at).total_seconds() / 60.0
+            )
+        if not (
+            len(baseline_values)
+            == len(challenger_values)
+            == len(deltas)
+            == len(baseline_holding_minutes)
+            == len(challenger_holding_minutes)
+            == len(paired)
+        ):
+            evidence_data_valid = False
+        if not evidence_data_valid:
+            paired = []
+            baseline_values = []
+            challenger_values = []
+            deltas = []
+            baseline_holding_minutes = []
+            challenger_holding_minutes = []
+        return (
+            paired,
+            baseline_values,
+            challenger_values,
+            deltas,
+            baseline_holding_minutes,
+            challenger_holding_minutes,
+            evidence_data_valid,
+        )
+
     def _variant_report(
         self,
         registration: StrategyV2ExitChallengerRegistration,
@@ -495,28 +610,32 @@ class StrategyV2ExitChallengerService:
             StrategyV2ExitChallengerTrade.baseline_exit_at.asc(),
             StrategyV2ExitChallengerTrade.id.asc(),
         ).all()
-        paired = [
-            row
-            for row in rows
-            if (
-                row.baseline_net_pnl is not None
-                and row.challenger_net_pnl is not None
-                and row.net_pnl_delta is not None
-            )
-        ]
-        baseline_values = [float(row.baseline_net_pnl or 0.0) for row in paired]
-        challenger_values = [
-            float(row.challenger_net_pnl or 0.0)
-            for row in paired
-        ]
-        deltas = [float(row.net_pnl_delta or 0.0) for row in paired]
+        (
+            paired,
+            baseline_values,
+            challenger_values,
+            deltas,
+            baseline_holding_minutes,
+            challenger_holding_minutes,
+            evidence_data_valid,
+        ) = self._paired_evidence(rows)
+        baseline_mean_holding = (
+            sum(baseline_holding_minutes) / len(paired)
+            if evidence_data_valid and paired
+            else 0.0
+        )
+        challenger_mean_holding = (
+            sum(challenger_holding_minutes) / len(paired)
+            if evidence_data_valid and paired
+            else 0.0
+        )
         profit_lock_exits = sum(
             row.challenger_exit_reason == "PROFIT_LOCK"
-            for row in rows
+            for row in paired
         )
         time_stop_exits = sum(
             row.challenger_exit_reason == "TIME_STOP"
-            for row in rows
+            for row in paired
         )
         baseline_net = sum(baseline_values)
         challenger_net = sum(challenger_values)
@@ -524,6 +643,8 @@ class StrategyV2ExitChallengerService:
         baseline_drawdown = _max_drawdown(baseline_values)
         challenger_drawdown = _max_drawdown(challenger_values)
         blockers: list[str] = []
+        if not evidence_data_valid:
+            blockers.append("EVIDENCE_DATA_INVALID")
         if len(paired) < _MIN_READY_PAIRS:
             blockers.append("MIN_PAIRED_TRADES")
         if (
@@ -575,18 +696,27 @@ class StrategyV2ExitChallengerService:
             ),
             baseline_win_rate=(
                 sum(value > 0 for value in baseline_values) / len(paired)
-                if paired
+                if evidence_data_valid and paired
                 else 0.0
             ),
             challenger_win_rate=(
                 sum(value > 0 for value in challenger_values) / len(paired)
-                if paired
+                if evidence_data_valid and paired
                 else 0.0
             ),
             baseline_net_pnl=baseline_net,
             challenger_net_pnl=challenger_net,
             net_pnl_delta=net_delta,
-            mean_net_pnl_delta=(net_delta / len(paired) if paired else 0.0),
+            mean_net_pnl_delta=(
+                net_delta / len(paired)
+                if evidence_data_valid and paired
+                else 0.0
+            ),
+            baseline_mean_holding_minutes=baseline_mean_holding,
+            challenger_mean_holding_minutes=challenger_mean_holding,
+            mean_holding_minutes_saved=(
+                baseline_mean_holding - challenger_mean_holding
+            ),
             baseline_max_drawdown=baseline_drawdown,
             challenger_max_drawdown=challenger_drawdown,
             promotion_ready=not blockers,

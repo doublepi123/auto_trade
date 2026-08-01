@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { getScratchAnalysisSummary, type ScratchAnalysisResult } from '../api/scratchAnalysis'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 
 const loading = ref(false)
 const result = ref<ScratchAnalysisResult | null>(null)
@@ -42,6 +43,7 @@ function min(v: number | null): string {
     </el-card>
 
     <template v-if="result">
+      <StatisticsQualityAlert :quality="result.statistics_quality" style="margin-top: 16px" />
       <el-alert v-if="result.error" :title="result.error" type="warning" :closable="false" style="margin-top: 16px" />
 
       <template v-else>

@@ -915,7 +915,10 @@ def _strategy_v2_shadow_tick_sync() -> None:
         StrategyV2ShadowConfig,
         StrategyV2ShadowTrade,
     )
-    from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
+    from app.services.strategy_v2_shadow_service import (
+        FORWARD_CANDIDATE_VERSIONS,
+        StrategyV2ShadowService,
+    )
     from app.services.strategy_v2_portfolio_service import (
         StrategyV2PortfolioService,
     )
@@ -1010,14 +1013,21 @@ def _strategy_v2_shadow_tick_sync() -> None:
                     "for symbol=%s",
                     symbol,
                 )
-            try:
-                shadow.collect_forward_validation(symbol=symbol, market=market)
-            except Exception:
-                db.rollback()
-                logger.exception(
-                    "Strategy v2 forward validation failed for symbol=%s",
-                    symbol,
-                )
+            for candidate_version in FORWARD_CANDIDATE_VERSIONS:
+                try:
+                    shadow.collect_forward_validation(
+                        symbol=symbol,
+                        market=market,
+                        candidate_algorithm_version=candidate_version,
+                    )
+                except Exception:
+                    db.rollback()
+                    logger.exception(
+                        "Strategy v2 forward validation failed for "
+                        "symbol=%s candidate=%s",
+                        symbol,
+                        candidate_version,
+                    )
         if portfolio is not None:
             try:
                 portfolio.advance(now=datetime.now(timezone.utc))

@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface DistributionPercentiles {
   p5: number
@@ -12,6 +13,7 @@ export interface DistributionShapeResult {
   symbol: string
   lookback_days: number
   sample_size: number
+  analysis_status?: 'READY' | 'DEGENERATE' | 'INSUFFICIENT_SAMPLE'
   mean: number
   std: number
   skewness: number
@@ -23,6 +25,7 @@ export interface DistributionShapeResult {
   percentiles: DistributionPercentiles
   iqr: number
   interpretation: string
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

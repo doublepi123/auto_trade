@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -7,6 +8,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
+import app.services.strategy_v2_exit_challenger_service as exit_challenger_module
 from app.domain.strategy_v2 import StrategyBar
 from app.models import (
     Base,
@@ -166,7 +168,7 @@ class TestStrategyV2ExitChallengerService:
                 key=lambda row: int(row.max_holding_minutes or 0),
             )
 
-            assert len(rows) == 7
+            assert len(rows) == 8
             assert [row.locked_profit_pct for row in profit_lock_rows] == [
                 0.10,
                 0.20,
@@ -178,6 +180,7 @@ class TestStrategyV2ExitChallengerService:
                 0.60,
             }
             assert [row.max_holding_minutes for row in time_stop_rows] == [
+                10,
                 15,
                 30,
                 45,
@@ -251,7 +254,7 @@ class TestStrategyV2ExitChallengerService:
             )
 
             rows = db.query(StrategyV2ExitChallengerTrade).all()
-            assert len(rows) == 7
+            assert len(rows) == 8
             assert {row.status for row in rows} == {"CLOSED"}
             assert {
                 row.challenger_exit_reason for row in rows
@@ -370,7 +373,7 @@ class TestStrategyV2ExitChallengerService:
             )
 
             rows = db.query(StrategyV2ExitChallengerTrade).all()
-            assert len(rows) == 7
+            assert len(rows) == 8
             assert {
                 row.challenger_exit_reason for row in rows
             } == {"BASELINE_MAX_HOLD"}
@@ -409,8 +412,13 @@ class TestStrategyV2ExitChallengerService:
                 )
                 .all()
             )
-            assert len(time_rows) == 3
-            assert all(row.status == "OPEN" for row in time_rows)
+            assert len(time_rows) == 4
+            assert time_rows[0].status == "CLOSED"
+            assert time_rows[0].challenger_exit_reason == "TIME_STOP"
+            assert time_rows[0].challenger_exit_price == pytest.approx(
+                100.1 * 0.9998
+            )
+            assert all(row.status == "OPEN" for row in time_rows[1:])
 
             service.advance_bar(
                 symbol="AAPL.US",
@@ -419,12 +427,12 @@ class TestStrategyV2ExitChallengerService:
             )
             for row in time_rows:
                 db.refresh(row)
-            assert time_rows[0].status == "CLOSED"
-            assert time_rows[0].challenger_exit_reason == "TIME_STOP"
-            assert time_rows[0].challenger_exit_price == pytest.approx(
+            assert time_rows[1].status == "CLOSED"
+            assert time_rows[1].challenger_exit_reason == "TIME_STOP"
+            assert time_rows[1].challenger_exit_price == pytest.approx(
                 99.8 * 0.9998
             )
-            assert all(row.status == "OPEN" for row in time_rows[1:])
+            assert all(row.status == "OPEN" for row in time_rows[2:])
 
             service.advance_bar(
                 symbol="AAPL.US",
@@ -464,8 +472,109 @@ class TestStrategyV2ExitChallengerService:
             assert variant.paired_trades == 1
             assert variant.time_stop_exits == 1
             assert variant.profit_lock_exits == 0
+            assert variant.baseline_mean_holding_minutes == pytest.approx(60)
+            assert variant.challenger_mean_holding_minutes == pytest.approx(15)
+            assert variant.mean_holding_minutes_saved == pytest.approx(45)
             assert "MIN_TIME_STOP_EXITS" in variant.blockers
             assert "MIN_PROFIT_LOCK_EXITS" not in variant.blockers
+
+    def test_report_blocks_invalid_paired_pnl_and_holding_evidence(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(exit_challenger_module, "_MIN_READY_PAIRS", 1)
+        monkeypatch.setattr(exit_challenger_module, "_MIN_MATURE_PAIRS", 1)
+        monkeypatch.setattr(exit_challenger_module, "_MIN_TIME_STOP_EXITS", 1)
+        with self._db() as db:
+            service = StrategyV2ExitChallengerService(db)
+            self._register(service)
+            baseline = self._baseline_entry(db)
+            service.advance_bar(
+                symbol="AAPL.US",
+                bar=_bar(15, open_price=100.3, high=100.5, low=100.2),
+                observed_at=_ELIGIBLE_ENTRY + timedelta(
+                    minutes=16,
+                    seconds=5,
+                ),
+            )
+            baseline_exit_at = _ELIGIBLE_ENTRY + timedelta(minutes=60)
+            self._close_baseline(
+                db,
+                baseline,
+                exit_at=baseline_exit_at,
+                exit_price=99.4,
+                reason="MAX_HOLD",
+            )
+            service.advance_bar(
+                symbol="AAPL.US",
+                bar=_bar(60, open_price=99.4, high=99.5, low=99.3),
+                observed_at=baseline_exit_at + timedelta(
+                    minutes=1,
+                    seconds=5,
+                ),
+            )
+
+            registration = db.query(
+                StrategyV2ExitChallengerRegistration
+            ).filter(
+                StrategyV2ExitChallengerRegistration.algorithm_version
+                == "strategy-v2-time-stop-m15-v2"
+            ).one()
+            row = db.query(StrategyV2ExitChallengerTrade).filter(
+                StrategyV2ExitChallengerTrade.registration_id
+                == registration.id
+            ).one()
+            valid = service._variant_report(registration)
+            assert valid.promotion_ready is True
+            assert valid.blockers == []
+
+            original_baseline_net_pnl = row.baseline_net_pnl
+            row.baseline_net_pnl = math.inf
+            with db.no_autoflush:
+                invalid_pnl = service._variant_report(registration)
+            assert "EVIDENCE_DATA_INVALID" in invalid_pnl.blockers
+            assert invalid_pnl.promotion_ready is False
+            assert invalid_pnl.paired_trades == 0
+            assert invalid_pnl.status == "COLLECTING"
+            assert invalid_pnl.time_stop_exits == 0
+            assert invalid_pnl.baseline_net_pnl == 0.0
+            assert invalid_pnl.challenger_net_pnl == 0.0
+            assert invalid_pnl.net_pnl_delta == 0.0
+            assert invalid_pnl.baseline_mean_holding_minutes == 0.0
+            assert invalid_pnl.challenger_mean_holding_minutes == 0.0
+            row.baseline_net_pnl = original_baseline_net_pnl
+
+            original_challenger_exit_at = row.challenger_exit_at
+            row.challenger_exit_at = row.entry_at - timedelta(minutes=1)
+            with db.no_autoflush:
+                reversed_holding = service._variant_report(registration)
+            assert "EVIDENCE_DATA_INVALID" in reversed_holding.blockers
+            assert reversed_holding.promotion_ready is False
+            assert reversed_holding.paired_trades == 0
+            assert reversed_holding.status == "COLLECTING"
+            assert reversed_holding.time_stop_exits == 0
+            assert reversed_holding.baseline_net_pnl == 0.0
+            assert reversed_holding.challenger_net_pnl == 0.0
+            assert reversed_holding.net_pnl_delta == 0.0
+            assert reversed_holding.baseline_mean_holding_minutes == 0.0
+            assert reversed_holding.challenger_mean_holding_minutes == 0.0
+            row.challenger_exit_at = original_challenger_exit_at
+
+            original_baseline_exit_at = row.baseline_exit_at
+            row.baseline_exit_at = None
+            with db.no_autoflush:
+                incomplete_holding = service._variant_report(registration)
+            assert "EVIDENCE_DATA_INVALID" in incomplete_holding.blockers
+            assert incomplete_holding.promotion_ready is False
+            assert incomplete_holding.paired_trades == 0
+            assert incomplete_holding.status == "COLLECTING"
+            assert incomplete_holding.time_stop_exits == 0
+            assert incomplete_holding.baseline_net_pnl == 0.0
+            assert incomplete_holding.challenger_net_pnl == 0.0
+            assert incomplete_holding.net_pnl_delta == 0.0
+            assert incomplete_holding.baseline_mean_holding_minutes == 0.0
+            assert incomplete_holding.challenger_mean_holding_minutes == 0.0
+            row.baseline_exit_at = original_baseline_exit_at
 
     def test_eod_flatten_at_deadline_precedes_time_stop(self) -> None:
         with self._db() as db:
@@ -493,7 +602,7 @@ class TestStrategyV2ExitChallengerService:
             )
 
             rows = db.query(StrategyV2ExitChallengerTrade).all()
-            assert len(rows) == 7
-            assert {
-                row.challenger_exit_reason for row in rows
-            } == {"BASELINE_EOD_FLATTEN"}
+            assert len(rows) == 8
+            reasons = [row.challenger_exit_reason for row in rows]
+            assert reasons.count("TIME_STOP") == 1
+            assert reasons.count("BASELINE_EOD_FLATTEN") == 7

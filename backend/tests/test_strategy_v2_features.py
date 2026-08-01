@@ -8,12 +8,15 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app.domain.strategy_v2.features import (
+    BOUNDARY_NEUTRAL_PREWARM_ALGORITHM_VERSION,
+    BoundaryNeutralCausalTrendPrewarmFeatureEngine,
     CausalTrendPrewarmFeatureEngine,
     SessionFeatureEngine,
     StrategyBar,
     StrategyV2FeatureConfig,
     aggregate_complete_five_minute_bars,
     annualized_realized_vol,
+    boundary_neutral_wilder_adx,
     leave_one_out_zscore,
     session_vwap,
     wilder_adx,
@@ -175,6 +178,42 @@ def test_wilder_adx_has_standard_seed_and_warmup() -> None:
     assert wilder_adx(bars, period=14) == pytest.approx(100.0)
 
 
+def test_boundary_neutral_wilder_adx_changes_only_the_named_boundary() -> None:
+    assert BOUNDARY_NEUTRAL_PREWARM_ALGORITHM_VERSION == (
+        "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+    )
+    bars = [
+        StrategyBar(
+            timestamp=_at_open() + timedelta(minutes=5 * index),
+            open=open_price,
+            high=high,
+            low=low,
+            close=close,
+            volume=100,
+            symbol="NVDA.US",
+            duration_minutes=5,
+        )
+        for index, (open_price, high, low, close) in enumerate((
+            (10.0, 11.0, 9.0, 10.0),
+            (11.0, 12.0, 10.0, 11.0),
+            (6.0, 7.0, 5.0, 6.0),
+            (4.0, 6.0, 3.0, 4.0),
+        ))
+    ]
+
+    assert wilder_adx(bars, period=2) == pytest.approx(73.33333333333333)
+    assert boundary_neutral_wilder_adx(
+        bars,
+        boundary_at=bars[2].timestamp,
+        period=2,
+    ) == pytest.approx(80.0)
+    assert boundary_neutral_wilder_adx(
+        bars,
+        boundary_at=bars[-1].end_at,
+        period=2,
+    ) == pytest.approx(wilder_adx(bars, period=2))
+
+
 def test_feature_engine_requires_settlement_grace_and_one_symbol() -> None:
     engine = SessionFeatureEngine(StrategyV2FeatureConfig(settlement_grace_seconds=5))
     bar = _bar(0)
@@ -320,6 +359,165 @@ def test_causal_trend_prewarm_excludes_overnight_return_but_keeps_adx_gap() -> N
         period=config.adx_period,
     )
     assert snapshot.adx_5m == pytest.approx(expected_adx)
+
+
+def test_boundary_neutral_prewarm_ignores_positive_and_negative_overnight_gap() -> None:
+    config = StrategyV2FeatureConfig(settlement_grace_seconds=0)
+    seed = _session_bars(7)
+    positive_gap = _session_bars(8, price_shift=25.0)
+    negative_gap = _session_bars(8, price_shift=-20.0)
+    positive_v1 = CausalTrendPrewarmFeatureEngine(config, seed)
+    negative_v1 = CausalTrendPrewarmFeatureEngine(config, seed)
+    positive_neutral = BoundaryNeutralCausalTrendPrewarmFeatureEngine(
+        config,
+        seed,
+    )
+    negative_neutral = BoundaryNeutralCausalTrendPrewarmFeatureEngine(
+        config,
+        seed,
+    )
+
+    v1_pairs: list[tuple[float, float]] = []
+    neutral_pairs: list[tuple[float, float]] = []
+    positive_snapshot = None
+    negative_snapshot = None
+    for positive_bar, negative_bar in zip(
+        positive_gap[:90],
+        negative_gap[:90],
+    ):
+        positive_v1_snapshot = positive_v1.on_bar(
+            positive_bar,
+            observed_at=positive_bar.end_at,
+        )
+        negative_v1_snapshot = negative_v1.on_bar(
+            negative_bar,
+            observed_at=negative_bar.end_at,
+        )
+        positive_snapshot = positive_neutral.on_bar(
+            positive_bar,
+            observed_at=positive_bar.end_at,
+        )
+        negative_snapshot = negative_neutral.on_bar(
+            negative_bar,
+            observed_at=negative_bar.end_at,
+        )
+        assert positive_v1_snapshot is not None
+        assert negative_v1_snapshot is not None
+        assert positive_snapshot is not None
+        assert negative_snapshot is not None
+        if (
+            positive_v1_snapshot.adx_5m is not None
+            and negative_v1_snapshot.adx_5m is not None
+            and positive_snapshot.adx_5m is not None
+            and negative_snapshot.adx_5m is not None
+        ):
+            v1_pairs.append((
+                positive_v1_snapshot.adx_5m,
+                negative_v1_snapshot.adx_5m,
+            ))
+            neutral_pairs.append((
+                positive_snapshot.adx_5m,
+                negative_snapshot.adx_5m,
+            ))
+
+    assert any(left != pytest.approx(right) for left, right in v1_pairs[5:])
+    assert all(left == pytest.approx(right) for left, right in neutral_pairs)
+    assert positive_snapshot is not None
+    assert negative_snapshot is not None
+    seed_5m = aggregate_complete_five_minute_bars(seed, market="US")
+    positive_5m = aggregate_complete_five_minute_bars(
+        positive_gap[:90],
+        market="US",
+    )
+    negative_5m = aggregate_complete_five_minute_bars(
+        negative_gap[:90],
+        market="US",
+    )
+    assert positive_snapshot.adx_5m == pytest.approx(
+        boundary_neutral_wilder_adx(
+            [*seed_5m, *positive_5m],
+            boundary_at=positive_5m[0].timestamp,
+            period=config.adx_period,
+        )
+    )
+    assert negative_snapshot.adx_5m == pytest.approx(
+        boundary_neutral_wilder_adx(
+            [*seed_5m, *negative_5m],
+            boundary_at=negative_5m[0].timestamp,
+            period=config.adx_period,
+        )
+    )
+
+
+def test_boundary_neutral_prewarm_is_prefix_invariant() -> None:
+    config = StrategyV2FeatureConfig(settlement_grace_seconds=0)
+    seed = _session_bars(7)
+    unchanged = _session_bars(8, price_shift=2.0)
+    changed = [
+        bar
+        if index < 90
+        else _bar(
+            index,
+            price=bar.close + 10.0,
+            volume=bar.volume,
+            day=8,
+        )
+        for index, bar in enumerate(unchanged)
+    ]
+    first = BoundaryNeutralCausalTrendPrewarmFeatureEngine(config, seed)
+    second = BoundaryNeutralCausalTrendPrewarmFeatureEngine(config, seed)
+
+    for left_bar, right_bar in zip(unchanged[:90], changed[:90]):
+        left = first.on_bar(left_bar, observed_at=left_bar.end_at)
+        right = second.on_bar(right_bar, observed_at=right_bar.end_at)
+        assert left == right
+
+    left_future = first.on_bar(unchanged[90], observed_at=unchanged[90].end_at)
+    right_future = second.on_bar(changed[90], observed_at=changed[90].end_at)
+    assert left_future is not None
+    assert right_future is not None
+    assert left_future.bar.close != right_future.bar.close
+
+
+def test_boundary_neutral_prewarm_preserves_v1_session_local_features() -> None:
+    config = StrategyV2FeatureConfig(settlement_grace_seconds=0)
+    seed = _session_bars(7)
+    target = _session_bars(8, price_shift=25.0)
+    current = CausalTrendPrewarmFeatureEngine(config, seed)
+    neutral = BoundaryNeutralCausalTrendPrewarmFeatureEngine(config, seed)
+    local_fields = (
+        "session_day",
+        "bar_index",
+        "bar_timestamp_5m",
+        "session_vwap_1m",
+        "residual_1m",
+        "residual_mean_1m",
+        "residual_sigma_1m",
+        "zscore_1m",
+        "session_vwap_5m",
+        "residual_5m",
+        "residual_mean_5m",
+        "residual_sigma_5m",
+        "zscore_5m",
+        "realized_vol_1m",
+        "ready",
+        "gate_reasons",
+    )
+    adx_changed = False
+    for bar in target[:145]:
+        current_snapshot = current.on_bar(bar, observed_at=bar.end_at)
+        neutral_snapshot = neutral.on_bar(bar, observed_at=bar.end_at)
+        assert current_snapshot is not None
+        assert neutral_snapshot is not None
+        for field in local_fields:
+            assert getattr(neutral_snapshot, field) == getattr(
+                current_snapshot,
+                field,
+            )
+        adx_changed = adx_changed or (
+            neutral_snapshot.adx_5m != pytest.approx(current_snapshot.adx_5m)
+        )
+    assert adx_changed
 
 
 def test_causal_trend_prewarm_retains_valid_returns_across_hk_lunch() -> None:

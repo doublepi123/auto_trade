@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface EdgeFactor {
   score: number
@@ -25,6 +26,7 @@ export interface EdgeQualityResult {
     max_drawdown: number
   }
   recommendation: string
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface PeriodPnl {
   period: string
@@ -24,6 +25,7 @@ export interface ReturnCalendarResult {
     best_month: PeriodPnl | null
     worst_month: PeriodPnl | null
   }
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

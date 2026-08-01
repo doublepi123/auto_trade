@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface DailyPnlPoint {
   date: string
@@ -22,6 +23,7 @@ export interface DailyConsistencyResult {
   best_day: DailyPnlPoint
   worst_day: DailyPnlPoint
   daily: DailyPnlPoint[]
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

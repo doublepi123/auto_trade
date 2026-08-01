@@ -25,7 +25,9 @@ from app.models import (
     StrategyV2ExitChallengerRegistration,
     StrategyV2ExitChallengerTrade,
     StrategyV2ForwardEvidence,
+    StrategyV2ForwardEvidenceArtifact,
     StrategyV2ForwardRegistration,
+    StrategyV2ForwardReplayArtifact,
     StrategyV2PortfolioObservation,
     StrategyV2PortfolioRegistration,
     StrategyV2ShadowConfig,
@@ -104,6 +106,8 @@ class TestStrategyV2ShadowApi:
                 StrategyV2PortfolioRegistration,
                 StrategyV2ExitChallengerTrade,
                 StrategyV2ExitChallengerRegistration,
+                StrategyV2ForwardEvidenceArtifact,
+                StrategyV2ForwardReplayArtifact,
                 StrategyV2ForwardEvidence,
                 StrategyV2ForwardRegistration,
                 StrategyV2ShadowDecision,
@@ -158,7 +162,7 @@ class TestStrategyV2ShadowApi:
         assert body["order_submission_allowed"] is False
         assert body["automatic_promotion_allowed"] is False
         assert body["historical_backfill_allowed"] is False
-        assert len(body["variants"]) == 7
+        assert len(body["variants"]) == 8
         assert {
             item["locked_profit_pct"]
             for item in body["variants"]
@@ -168,7 +172,7 @@ class TestStrategyV2ShadowApi:
             item["max_holding_minutes"]
             for item in body["variants"]
             if item["policy_type"] == "TIME_STOP"
-        } == {15, 30, 45}
+        } == {10, 15, 30, 45}
         assert all(item["status"] == "COLLECTING" for item in body["variants"])
 
     def test_bracket_challenger_report_is_forward_only_shadow_evidence(
@@ -240,10 +244,17 @@ class TestStrategyV2ShadowApi:
         assert body["automatic_promotion_allowed"] is False
         assert body["historical_backfill_allowed"] is False
         assert body["evaluation_scope"] == "FORWARD_LIVE_BASELINE"
-        assert len(body["variants"]) == 6
+        assert len(body["variants"]) == 11
         assert {
-            item["locked_profit_pct"] for item in body["variants"]
+            item["locked_profit_pct"]
+            for item in body["variants"]
+            if item["policy_type"] == "PROFIT_LOCK"
         } == {0.1, 0.2, 0.3, 0.4, 0.5, 0.6}
+        assert {
+            item["max_holding_minutes"]
+            for item in body["variants"]
+            if item["policy_type"] == "TIME_STOP"
+        } == {10, 15, 30, 45}
         assert all(item["status"] == "COLLECTING" for item in body["variants"])
 
     def test_portfolio_routing_report_is_forward_only_and_read_only(
@@ -763,6 +774,57 @@ class TestStrategyV2ShadowApi:
         )
         assert missing.status_code == 400
 
+    def test_boundary_neutral_diagnostic_api_is_retrospective_only(self) -> None:
+        config = self.client.get(
+            "/api/strategy-shadow/config",
+            params={"symbol": "AAPL.US"},
+        ).json()
+        with self.session_factory() as db:
+            before = (
+                self._shadow_counts(db),
+                db.query(StrategyV2ForwardRegistration).count(),
+                db.query(StrategyV2ForwardEvidence).count(),
+            )
+
+        response = self.client.post(
+            "/api/strategy-shadow/prewarm-boundary-neutral",
+            json={
+                "symbol": "aapl.us",
+                "config_version": config["config_version"],
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["persisted"] is False
+        assert body["mode"] == "SHADOW"
+        assert body["evaluation_scope"] == "RETROSPECTIVE_DIAGNOSTIC_ONLY"
+        assert body["order_submission_allowed"] is False
+        assert body["automatic_promotion_allowed"] is False
+        assert body["retrospective_results_forward_eligible"] is False
+        assert body[
+            "forward_evidence_requires_registration_before_target_open"
+        ] is True
+        assert body["status"] == "INSUFFICIENT_EVIDENCE"
+        assert body["blockers"] == ["MIN_CAUSAL_PAIRS"]
+        assert body["variants"] == []
+        assert body["candidate_spec"]["algorithm_version"] == (
+            "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+        )
+        assert body["candidate_spec"]["boundary_rule"] == (
+            "SEED_TARGET_FIRST_5M_DM_ZERO_TR_TARGET_RANGE"
+        )
+        assert body["candidate_spec"][
+            "retrospective_results_forward_eligible"
+        ] is False
+        with self.session_factory() as db:
+            after = (
+                self._shadow_counts(db),
+                db.query(StrategyV2ForwardRegistration).count(),
+                db.query(StrategyV2ForwardEvidence).count(),
+            )
+        assert after == before
+
     def test_forward_validation_registration_and_read_only_empty_envelope(self) -> None:
         empty = self.client.get(
             "/api/strategy-shadow/forward-validation",
@@ -839,6 +901,86 @@ class TestStrategyV2ShadowApi:
             assert (
                 db.query(StrategyV2ForwardRegistration).count(),
                 db.query(StrategyV2ForwardEvidence).count(),
+            ) == before
+
+        neutral = self.client.post(
+            "/api/strategy-shadow/forward-validation/register",
+            json={
+                "symbol": "AAPL.US",
+                "source_config_version": source_version,
+                "candidate_algorithm_version": (
+                    "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+                ),
+                "confirm_forward_only": True,
+                "confirm_no_automatic_promotion": True,
+            },
+        )
+        assert neutral.status_code == 200
+        neutral_body = neutral.json()
+        assert neutral_body["status"] == "FROZEN"
+        assert neutral_body["registration"]["candidate_algorithm_version"] == (
+            "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+        )
+        assert neutral_body["registration"]["evaluator_digest"] != (
+            body["registration"]["evaluator_digest"]
+        )
+        fetched_neutral = self.client.get(
+            "/api/strategy-shadow/forward-validation",
+            params={
+                "symbol": "AAPL.US",
+                "candidate_algorithm_version": (
+                    "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+                ),
+            },
+        )
+        assert fetched_neutral.status_code == 200
+        assert fetched_neutral.json()["registration"] == (
+            neutral_body["registration"]
+        )
+        with self.session_factory() as db:
+            assert db.query(StrategyV2ForwardRegistration).count() == 2
+
+    def test_frozen_disproof_assessment_has_no_caller_authority_or_writes(
+        self,
+    ) -> None:
+        rejected = self.client.get(
+            "/api/strategy-shadow/frozen-disproof-assessment",
+            params={"as_of": "2027-08-03"},
+        )
+        assert rejected.status_code == 400
+
+        with self.session_factory() as db:
+            before = (
+                db.query(StrategyV2ForwardRegistration).count(),
+                db.query(StrategyV2ForwardEvidence).count(),
+                db.query(StrategyV2ForwardEvidenceArtifact).count(),
+                db.query(StrategyV2ForwardReplayArtifact).count(),
+            )
+
+        response = self.client.get(
+            "/api/strategy-shadow/frozen-disproof-assessment"
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["caller_authority_accepted"] is False
+        assert body["producer_cutoff"]["caller_cutoff_accepted"] is False
+        assert body["assessment_window"]["expected_session_count"] == 252
+        assert len(body["symbols"]) == 6
+        assert sum(len(item["leaves"]) for item in body["symbols"]) == 1_512
+        assert body["promotion_eligible"] is False
+        assert body["order_submission_allowed"] is False
+        assert body["automatic_promotion_allowed"] is False
+        assert "QUANT_CANDIDATE_VETO_NOT_VERIFIED" in body[
+            "promotion_blockers"
+        ]
+        assert "MANUAL_PROMOTION_REQUIRED" in body["promotion_blockers"]
+        with self.session_factory() as db:
+            assert (
+                db.query(StrategyV2ForwardRegistration).count(),
+                db.query(StrategyV2ForwardEvidence).count(),
+                db.query(StrategyV2ForwardEvidenceArtifact).count(),
+                db.query(StrategyV2ForwardReplayArtifact).count(),
             ) == before
 
     def test_versions_and_evaluation_preserve_old_config_evidence(self) -> None:

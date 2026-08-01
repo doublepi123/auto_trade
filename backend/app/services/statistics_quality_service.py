@@ -62,6 +62,9 @@ _ISSUE_REASONS = {
     PnlReplayIssueCode.UNVERIFIED_COST_BASIS: (
         "authoritative cost basis cannot be verified against local inventory"
     ),
+    PnlReplayIssueCode.INVALID_FILL_EVIDENCE: (
+        "claimed fill has malformed, non-finite, or non-causal execution evidence"
+    ),
 }
 
 

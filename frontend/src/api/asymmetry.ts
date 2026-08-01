@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface SideStats {
   label: string
@@ -6,8 +7,12 @@ export interface SideStats {
   total: number
   avg: number
   median: number
+  /** Conventional signed numeric extrema. */
   max: number
   min: number
+  /** Signed values selected by absolute magnitude. */
+  largest_magnitude: number
+  smallest_magnitude: number
   top3_share: number
 }
 
@@ -29,6 +34,7 @@ export interface AsymmetryResult {
     after_big_loss_count: number
   }
   assessment: string
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

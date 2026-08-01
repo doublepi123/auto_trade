@@ -10,6 +10,9 @@ from app.core.market_calendar import get_session
 
 
 _ONE_MINUTE_PERIODS_PER_YEAR = 252 * 390
+BOUNDARY_NEUTRAL_PREWARM_ALGORITHM_VERSION = (
+    "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+)
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -177,12 +180,12 @@ def annualized_realized_vol(
     return stdev(returns) * math.sqrt(periods_per_year)
 
 
-def wilder_adx(
+def _wilder_adx(
     bars: Sequence[StrategyBar],
     *,
     period: int = 14,
+    neutral_boundary_at: datetime | None = None,
 ) -> float | None:
-    """Classic Wilder ADX; unavailable until ``2 * period`` bars."""
     if period < 2:
         raise ValueError("period must be at least 2")
     if len(bars) < 2 * period:
@@ -194,6 +197,12 @@ def wilder_adx(
     for index in range(1, len(values)):
         current = values[index]
         previous = values[index - 1]
+        if (
+            neutral_boundary_at is not None
+            and current.timestamp == neutral_boundary_at
+        ):
+            true_ranges[index] = current.high - current.low
+            continue
         move_up = current.high - previous.high
         move_down = previous.low - current.low
         plus_dm[index] = move_up if move_up > move_down and move_up > 0 else 0.0
@@ -232,6 +241,34 @@ def wilder_adx(
     for value in dx_values[period:]:
         adx = (adx * (period - 1) + value) / period
     return max(0.0, min(100.0, adx))
+
+
+def wilder_adx(
+    bars: Sequence[StrategyBar],
+    *,
+    period: int = 14,
+) -> float | None:
+    """Classic Wilder ADX; unavailable until ``2 * period`` bars."""
+    return _wilder_adx(bars, period=period)
+
+
+def boundary_neutral_wilder_adx(
+    bars: Sequence[StrategyBar],
+    *,
+    boundary_at: datetime,
+    period: int = 14,
+) -> float | None:
+    """Wilder ADX with one explicit session boundary excluded from DM/TR.
+
+    The boundary bar still contributes its own intrabar range to smoothed TR,
+    but its move relative to the prior session contributes neither ``+DM`` nor
+    ``-DM``. All other bars use the unchanged classic Wilder calculation.
+    """
+    return _wilder_adx(
+        bars,
+        period=period,
+        neutral_boundary_at=_as_utc(boundary_at),
+    )
 
 
 def _bucket_start(bar: StrategyBar, market: str) -> datetime:
@@ -573,10 +610,7 @@ class CausalTrendPrewarmFeatureEngine(SessionFeatureEngine):
             return snapshot
 
         self._record_trend_bar(bar)
-        adx_5m = wilder_adx(
-            self._trend_bars_5m,
-            period=self.config.adx_period,
-        )
+        adx_5m = self._trend_adx()
         realized_vol = self._trend_realized_vol()
         reasons = [
             reason
@@ -596,6 +630,12 @@ class CausalTrendPrewarmFeatureEngine(SessionFeatureEngine):
         )
         self._last_snapshot = result
         return result
+
+    def _trend_adx(self) -> float | None:
+        return wilder_adx(
+            self._trend_bars_5m,
+            period=self.config.adx_period,
+        )
 
     def _validated_seed(
         self,
@@ -684,4 +724,33 @@ class CausalTrendPrewarmFeatureEngine(SessionFeatureEngine):
         sample = self._trend_returns_1m[-window:]
         return stdev(sample) * math.sqrt(
             int(self.config.realized_vol_periods_per_year or 0)
+        )
+
+
+class BoundaryNeutralCausalTrendPrewarmFeatureEngine(
+    CausalTrendPrewarmFeatureEngine
+):
+    """Research-only prewarm that neutralizes the seed/target ADX boundary.
+
+    The current ``CausalTrendPrewarmFeatureEngine`` remains unchanged. This
+    challenger differs only when the first completed target-session five-minute
+    bar follows the seed: that boundary contributes zero directional movement
+    and the target bar's own range to true range.
+    """
+
+    def _trend_adx(self) -> float | None:
+        first_target = next(
+            (
+                bar
+                for bar in self._trend_bars_5m
+                if bar.timestamp > self._seed_last_at
+            ),
+            None,
+        )
+        if first_target is None:
+            return super()._trend_adx()
+        return boundary_neutral_wilder_adx(
+            self._trend_bars_5m,
+            boundary_at=first_target.timestamp,
+            period=self.config.adx_period,
         )

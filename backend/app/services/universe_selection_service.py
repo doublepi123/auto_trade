@@ -132,7 +132,7 @@ def _research_candlesticks(
     return broker.get_candlesticks(symbol, period, count)
 
 
-def _historical_membership_end(
+def historical_membership_end(
     candidate: IndexCandidate,
 ) -> date | None:
     intervals = tuple(
@@ -154,30 +154,52 @@ def _historical_membership_end(
     )
 
 
-def _historical_research_candlesticks(
+def historical_research_before(
+    candidate: IndexCandidate,
+) -> datetime | None:
+    membership_end = historical_membership_end(candidate)
+    if membership_end is None:
+        return None
+    return datetime.combine(
+        membership_end,
+        datetime.min.time(),
+        tzinfo=timezone.utc,
+    ) + timedelta(hours=12)
+
+
+def research_candidate_uses_recent_candlesticks(
+    candidate: IndexCandidate,
+) -> bool:
+    return INDEX_MEMBERSHIP_HISTORY.is_active(
+        candidate,
+        INDEX_MEMBERSHIP_HISTORY.catalog_snapshot_date,
+    )
+
+
+def historical_research_candlesticks(
     broker: UniverseMarketDataProvider,
     candidate: IndexCandidate,
     *,
     count: int,
 ) -> list[BrokerCandle] | None:
-    membership_end = _historical_membership_end(candidate)
+    membership_end = historical_membership_end(candidate)
+    boundary = historical_research_before(candidate)
     history_reader = getattr(
         broker,
         "get_forward_adjusted_history_candlesticks_before",
         None,
     )
-    if membership_end is None or not callable(history_reader):
+    if (
+        membership_end is None
+        or boundary is None
+        or not callable(history_reader)
+    ):
         return None
     cache_key = (candidate.symbol, count, membership_end)
     with _HISTORICAL_RESEARCH_BARS_CACHE_LOCK:
         cached = _HISTORICAL_RESEARCH_BARS_CACHE.get(cache_key)
     if cached is not None:
         return list(cached)
-    boundary = datetime.combine(
-        membership_end,
-        datetime.min.time(),
-        tzinfo=timezone.utc,
-    ) + timedelta(hours=12)
     bars = cast(
         list[BrokerCandle],
         history_reader(
@@ -187,8 +209,9 @@ def _historical_research_candlesticks(
             boundary,
         ),
     )
-    with _HISTORICAL_RESEARCH_BARS_CACHE_LOCK:
-        _HISTORICAL_RESEARCH_BARS_CACHE[cache_key] = tuple(bars)
+    if bars:
+        with _HISTORICAL_RESEARCH_BARS_CACHE_LOCK:
+            _HISTORICAL_RESEARCH_BARS_CACHE[cache_key] = tuple(bars)
     return bars
 
 
@@ -1468,7 +1491,7 @@ class UniverseSelectionService:
             data_errors: list[str] = []
             try:
                 raw_bars = (
-                    _historical_research_candlesticks(
+                    historical_research_candlesticks(
                         self.broker,
                         candidate,
                         count=daily_bar_count,
@@ -1476,12 +1499,24 @@ class UniverseSelectionService:
                     if candidate.symbol not in self._live_symbols
                     else None
                 )
-                if raw_bars is None:
+                if (
+                    raw_bars is None
+                    and (
+                        candidate.symbol in self._live_symbols
+                        or research_candidate_uses_recent_candlesticks(
+                            candidate
+                        )
+                    )
+                ):
                     raw_bars = _research_candlesticks(
                         self.broker,
                         candidate.symbol,
                         "DAY",
                         daily_bar_count,
+                    )
+                if raw_bars is None:
+                    raise RuntimeError(
+                        "historical research cursor unavailable"
                     )
                 bars = completed_daily_bars(
                     raw_bars,

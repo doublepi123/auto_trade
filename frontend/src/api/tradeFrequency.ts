@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface DailyDistribution {
   trades_per_day: number
@@ -15,11 +16,13 @@ export interface TradeFrequencyResult {
   max_day_date: string
   avg_interval_seconds: number
   min_interval_seconds: number
+  interval_pair_count: number
   rapid_fire_count: number
   rapid_fire_pct: number
   daily_distribution: DailyDistribution[]
   overtrading_flag: boolean
   assessment: string
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

@@ -609,9 +609,10 @@ def evaluate_opening_policy_horizons(
     if baseline_by_date is None:
         raise ValueError("baseline holding horizon is missing")
 
-    paired_dates = tuple(sorted(set.intersection(
-        *(set(values) for values in sessions_by_horizon.values())
-    )))
+    paired_date_set: set[date] = set(baseline_by_date)
+    for sessions in sessions_by_horizon.values():
+        paired_date_set.intersection_update(sessions)
+    paired_dates = tuple(sorted(paired_date_set))
     if len(paired_dates) < 2:
         raise ValueError("at least two paired horizon sessions are required")
 

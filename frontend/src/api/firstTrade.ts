@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface FirstTradeBucket {
   trades: number
@@ -16,7 +17,14 @@ export interface FirstTradeResult {
   first_trade: FirstTradeBucket
   rest_of_day: FirstTradeBucket
   tone_match_pct: number | null
-  tone_days: number
+  tone_match_count: number
+  tone_sample_days: number
+  tone_min_sample_days: number
+  tone_sample_sufficient: boolean
+  currency: string | null
+  currencies: string[]
+  totals_comparable: boolean
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

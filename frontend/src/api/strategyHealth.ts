@@ -34,6 +34,42 @@ export interface TrendRow {
   shadow_trades: number
 }
 
+export type ObservationHealthStatus = 'HEALTHY' | 'WARNING' | 'DEGRADED' | 'DISABLED'
+
+export interface ObservationHealthComponent {
+  name:
+    | 'UNIVERSE_SELECTION'
+    | 'ROTATION_FORWARD_PRECOMMITMENT'
+    | 'WATCHLIST_QUANT'
+    | 'DIVERSIFIED_PRIORITY_OBSERVATION'
+    | 'GROWTH_SATELLITE_OBSERVATION'
+    | 'LIVE_INTERVAL_ALIGNMENT'
+    | 'LIVE_EXIT_CHALLENGER'
+    | 'STRATEGY_V2_EXIT_CHALLENGER'
+    | 'STRATEGY_V2_FORWARD'
+    | 'PORTFOLIO_ROUTING'
+    | 'OPENING_MOMENTUM_SHADOW'
+    | 'OPENING_MOMENTUM_EXECUTION'
+  status: ObservationHealthStatus
+  latest_at: string | null
+  age_seconds: number | null
+  latest_session_date: string | null
+  expected_session_date: string | null
+  observed_count: number
+  expected_count: number
+  coverage_ratio: number | null
+  blockers: string[]
+}
+
+export interface ObservationHealthReport {
+  generated_at: string
+  status: Exclude<ObservationHealthStatus, 'DISABLED'>
+  order_submission_allowed: false
+  automatic_promotion_allowed: false
+  components: ObservationHealthComponent[]
+  blockers: string[]
+}
+
 export async function getHealthReport(symbol?: string): Promise<HealthReport> {
   const params: Record<string, string> = {}
   if (symbol) params.symbol = symbol
@@ -43,5 +79,10 @@ export async function getHealthReport(symbol?: string): Promise<HealthReport> {
 
 export async function getPerformanceTrend(params: { symbol?: string; weeks?: number } = {}): Promise<TrendRow[]> {
   const resp = await api.get('/api/strategy-health/trend', { params })
+  return resp.data
+}
+
+export async function getObservationHealth(): Promise<ObservationHealthReport> {
+  const resp = await api.get('/api/universe/observation-health')
   return resp.data
 }

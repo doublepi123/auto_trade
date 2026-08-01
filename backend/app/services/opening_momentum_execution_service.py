@@ -619,7 +619,6 @@ class OpeningMomentumExecutionService:
                 row.updated_at = now
             elif (
                 row.status == "SUBMITTING"
-                and not row.entry_order_id
                 and now
                 > _as_utc(row.entry_deadline_at) + timedelta(seconds=60)
             ):

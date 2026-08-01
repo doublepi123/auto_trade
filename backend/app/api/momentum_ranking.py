@@ -1,4 +1,4 @@
-"""Symbol momentum ranking API (GET /api/momentum-ranking/*).
+"""Symbol net-return momentum ranking API (GET /api/momentum-ranking/*).
 
 Read-only cross-sectional momentum ranking.  Never writes.
 """
@@ -26,5 +26,5 @@ def rank_momentum(
     min_trades: int = Query(default=3, ge=1, le=50),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Rank symbols by PnL momentum slope."""
+    """Rank symbols by cumulative per-trade net-return slope."""
     return MomentumRankingService(db).rank(lookback_days=lookback_days, min_trades=min_trades)

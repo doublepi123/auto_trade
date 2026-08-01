@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { getRobustness, type RobustnessResult } from '../api/robustness'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 
 const loading = ref(false)
 const result = ref<RobustnessResult | null>(null)
@@ -55,6 +56,7 @@ const factorLabels: Record<string, string> = {
     </el-card>
 
     <template v-if="result">
+      <StatisticsQualityAlert :quality="result.statistics_quality" style="margin-top: 16px" />
       <el-alert v-if="result.error" :title="result.error" type="warning" :closable="false" style="margin-top: 16px" />
 
       <template v-else>

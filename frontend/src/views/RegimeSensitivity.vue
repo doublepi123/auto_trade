@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { getRegimeSensitivity, type RegimeSensitivityResult } from '../api/regimeSensitivity'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 
 const loading = ref(false)
 const result = ref<RegimeSensitivityResult | null>(null)
@@ -28,8 +29,8 @@ function pnlColor(v: number): string {
 
 <template>
   <div class="page-container">
-    <h2>波动率体制敏感性</h2>
-    <p class="page-desc">将交易按滚动波动分为高/低体制，对比绩效差异（灵感来自 VectorBT / QuantStats）</p>
+    <h2>策略历史结果波动状态敏感性</h2>
+    <p class="page-desc">仅用入场前已平仓交易的 PnL 波动划分高/低状态；这是策略结果状态，不是市场波动率信号</p>
 
     <el-card class="control-card">
       <el-form inline>
@@ -49,6 +50,7 @@ function pnlColor(v: number): string {
     </el-card>
 
     <template v-if="result">
+      <StatisticsQualityAlert :quality="result.statistics_quality" style="margin-top: 16px" />
       <el-alert v-if="result.error" :title="result.error" type="warning" :closable="false" style="margin-top: 16px" />
 
       <template v-else>
@@ -62,7 +64,7 @@ function pnlColor(v: number): string {
           </el-col>
           <el-col :span="8">
             <el-card shadow="hover">
-              <el-statistic title="中位波动率" :value="result.median_volatility" :precision="4" />
+              <el-statistic title="历史 PnL 中位波动" :value="result.median_volatility" :precision="4" />
             </el-card>
           </el-col>
           <el-col :span="8">
@@ -75,7 +77,7 @@ function pnlColor(v: number): string {
         <el-row :gutter="16" style="margin-top: 16px">
           <el-col v-for="regime in result.regimes" :key="regime.regime" :span="12">
             <el-card>
-              <template #header>{{ regime.regime === 'low_volatility' ? '低波动体制' : '高波动体制' }}</template>
+              <template #header>{{ regime.regime === 'low_volatility' ? '此前 PnL 低波动状态' : '此前 PnL 高波动状态' }}</template>
               <el-descriptions :column="2" border size="small">
                 <el-descriptions-item label="交易数">{{ regime.trade_count }}</el-descriptions-item>
                 <el-descriptions-item label="胜率">{{ (regime.win_rate * 100).toFixed(1) }}%</el-descriptions-item>

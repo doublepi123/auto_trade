@@ -489,6 +489,8 @@ export interface LLMUsageSummary {
 
 export interface BacktestParams {
   symbol: string
+  market: 'US' | 'HK'
+  trading_session_mode: 'ANY' | 'RTH_ONLY'
   buy_low: number
   sell_high: number
   short_selling: boolean
@@ -503,6 +505,12 @@ export interface BacktestParams {
   slippage_pct: number
   stop_loss_pct: number
   trailing_stop_pct?: number
+  max_holding_minutes: number
+  entry_cutoff_minutes_before_close: number
+  flatten_minutes_before_close: number
+  opening_warmup_minutes: number
+  entry_crossing_required: boolean
+  max_entries_per_symbol_per_day: number
 }
 
 export interface BacktestRunRequest {
@@ -1612,11 +1620,18 @@ export type UniversePromotionRole =
 
 export interface UniversePromotionReadinessItem {
   symbol: string
+  memberships: Array<'NASDAQ_100' | 'DJIA'>
+  sector: string
+  risk_group: string
   universe_role: UniversePromotionRole
   rank: number | null
   selection_score: number
   priority_rank: number
   priority_score: number
+  diversified_observation_selected: boolean
+  diversified_observation_rank: number | null
+  growth_satellite_selected: boolean
+  growth_satellite_rank: number | null
   quant_weight: number
   quant_adjustment: number
   quant_score: number | null
@@ -1625,6 +1640,7 @@ export interface UniversePromotionReadinessItem {
   quant_source: string
   quant_fresh: boolean
   quant_expires_at: string | null
+  estimated_round_trip_cost_bps: number | null
   is_trading_target: boolean
   shadow_enabled: boolean
   forward_status: UniversePromotionForwardStatus
@@ -1646,6 +1662,8 @@ export interface UniversePromotionReadinessResponse {
   as_of_date: string
   generated_at: string
   priority_algorithm_version: string
+  diversified_observation_limit: 8
+  growth_satellite_limit: 4
   items: UniversePromotionReadinessItem[]
 }
 
@@ -2373,6 +2391,9 @@ export interface StrategyShadowExitChallengerVariant {
   challenger_net_pnl: number
   net_pnl_delta: number
   mean_net_pnl_delta: number
+  baseline_mean_holding_minutes: number
+  challenger_mean_holding_minutes: number
+  mean_holding_minutes_saved: number
   baseline_max_drawdown: number
   challenger_max_drawdown: number
   minimum_ready_pairs: 20
@@ -2397,8 +2418,10 @@ export interface LiveExitChallengerVariant {
   registration_id: number
   algorithm_version: string
   evaluator_digest: string
+  policy_type: 'PROFIT_LOCK' | 'TIME_STOP'
   activation_pct: number
   locked_profit_pct: number
+  max_holding_minutes: number | null
   slippage_bps: number
   registered_at: string
   eligible_after: string
@@ -2408,6 +2431,7 @@ export interface LiveExitChallengerVariant {
   open_trades: number
   awaiting_baseline_trades: number
   profit_lock_exits: number
+  time_stop_exits: number
   improved_trades: number
   worsened_trades: number
   unchanged_trades: number
@@ -2417,11 +2441,15 @@ export interface LiveExitChallengerVariant {
   challenger_net_pnl: number
   net_pnl_delta: number
   mean_net_pnl_delta: number
+  baseline_mean_holding_minutes: number
+  challenger_mean_holding_minutes: number
+  mean_holding_minutes_saved: number
   baseline_max_drawdown: number
   challenger_max_drawdown: number
   minimum_ready_pairs: 20
   minimum_mature_pairs: 50
   minimum_profit_lock_exits: 5
+  minimum_time_stop_exits: 5
   promotion_ready: boolean
   blockers: string[]
 }

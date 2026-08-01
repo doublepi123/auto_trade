@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface RegimeStats {
   regime: string
@@ -13,11 +14,17 @@ export interface RegimeSensitivityResult {
   symbol: string
   lookback_days: number
   sample_size: number
+  classified_trades: number
   window: number
+  regime_basis: 'PRIOR_CLOSED_TRADE_PNL_VOLATILITY'
   median_volatility: number
   regimes: RegimeStats[]
   sensitivity: number
   interpretation: string
+  currency: string | null
+  currencies: string[]
+  totals_comparable: boolean
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

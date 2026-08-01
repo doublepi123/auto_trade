@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface LossCauseRow {
   exit_cause: string
@@ -26,6 +27,7 @@ export interface LossContainmentResult {
   tail_breach_pct: number
   by_exit_cause: LossCauseRow[]
   histogram: LossBucket[]
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

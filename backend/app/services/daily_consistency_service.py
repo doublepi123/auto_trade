@@ -10,13 +10,16 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import OrderRecord
+from app.services.analytics_trade_sample_service import (
+    analytics_response,
+    load_analytics_trade_sample,
+    mixed_currency_error,
+    trade_local_day,
+)
 
 __all__ = ["DailyConsistencyService"]
 
@@ -28,13 +31,34 @@ class DailyConsistencyService:
         self._db = db
 
     def summary(self, days: int = 90) -> dict[str, Any]:
-        daily = self._fetch(days)
-        if len(daily) < 5:
-            return {
+        sample = load_analytics_trade_sample(
+            self._db,
+            lookback_days=days,
+            include_excursions=False,
+        )
+        mixed_error = mixed_currency_error(
+            sample,
+            payload={
                 "days": days,
-                "trading_days": len(daily),
-                "error": "Need at least 5 trading days.",
-            }
+                "trading_days": 0,
+            },
+        )
+        if mixed_error is not None:
+            return mixed_error
+        by_day: dict[str, float] = defaultdict(float)
+        for trade in sample.trades:
+            day = trade_local_day(trade.symbol, trade.exit_at).isoformat()
+            by_day[day] += trade.net_pnl
+        daily = sorted(by_day.items())
+        if len(daily) < 5:
+            return analytics_response(
+                sample,
+                {
+                    "days": days,
+                    "trading_days": len(daily),
+                    "error": "Need at least 5 trading days.",
+                },
+            )
 
         values = [pnl for _, pnl in daily]
         n = len(values)
@@ -83,34 +107,24 @@ class DailyConsistencyService:
 
         series = [{"date": d, "pnl": round(p, 2)} for d, p in daily]
 
-        return {
-            "days": days,
-            "trading_days": n,
-            "total_pnl": round(total, 2),
-            "green_days": green,
-            "red_days": red,
-            "green_day_pct": round(green / n, 4),
-            "avg_daily_pnl": round(mean, 2),
-            "daily_std": round(std, 2),
-            "daily_sharpe": round(daily_sharpe, 2) if daily_sharpe is not None else None,
-            "longest_green_streak": longest_green,
-            "longest_red_streak": longest_red,
-            "current_streak": current_streak,
-            "top5_day_profit_share": round(top5_share, 4) if top5_share is not None else None,
-            "best_day": {"date": best[0], "pnl": round(best[1], 2)},
-            "worst_day": {"date": worst[0], "pnl": round(worst[1], 2)},
-            "daily": series,
-        }
-
-    def _fetch(self, days: int) -> list[tuple[str, float]]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        stmt = (
-            select(OrderRecord.filled_at, OrderRecord.net_pnl)
-            .where(OrderRecord.net_pnl.is_not(None), OrderRecord.filled_at >= cutoff)
-            .order_by(OrderRecord.filled_at.asc())
+        return analytics_response(
+            sample,
+            {
+                "days": days,
+                "trading_days": n,
+                "total_pnl": round(total, 2),
+                "green_days": green,
+                "red_days": red,
+                "green_day_pct": round(green / n, 4),
+                "avg_daily_pnl": round(mean, 2),
+                "daily_std": round(std, 2),
+                "daily_sharpe": round(daily_sharpe, 2) if daily_sharpe is not None else None,
+                "longest_green_streak": longest_green,
+                "longest_red_streak": longest_red,
+                "current_streak": current_streak,
+                "top5_day_profit_share": round(top5_share, 4) if top5_share is not None else None,
+                "best_day": {"date": best[0], "pnl": round(best[1], 2)},
+                "worst_day": {"date": worst[0], "pnl": round(worst[1], 2)},
+                "daily": series,
+            },
         )
-        by_day: dict[str, float] = defaultdict(float)
-        for filled_at, pnl in self._db.execute(stmt).all():
-            if filled_at is not None and pnl is not None:
-                by_day[filled_at.date().isoformat()] += float(pnl)
-        return sorted(by_day.items())

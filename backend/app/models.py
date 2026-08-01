@@ -5,12 +5,14 @@ from typing import Optional
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     Float,
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -216,6 +218,103 @@ class StrategyV2ForwardEvidence(Base):
     candidate_result_sha256: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     evidence_digest_sha256: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, nullable=False)
+
+
+class StrategyV2ForwardReplayArtifact(Base):
+    """Immutable, content-addressed replay bytes for forward evidence."""
+
+    __tablename__ = "strategy_v2_forward_replay_artifacts"
+    __table_args__ = (
+        CheckConstraint(
+            "length(digest_sha256) = 64 "
+            "AND digest_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_strategy_v2_forward_replay_artifact_digest",
+        ),
+        CheckConstraint(
+            "schema_version = 1",
+            name="ck_strategy_v2_forward_replay_artifact_schema",
+        ),
+        CheckConstraint(
+            "kind = 'STRATEGY_V2_FORWARD_REPLAY'",
+            name="ck_strategy_v2_forward_replay_artifact_kind",
+        ),
+        CheckConstraint(
+            "codec = 'zlib'",
+            name="ck_strategy_v2_forward_replay_artifact_codec",
+        ),
+        CheckConstraint(
+            "raw_size > 0 AND raw_size <= 8388608",
+            name="ck_strategy_v2_forward_replay_artifact_raw_size",
+        ),
+        CheckConstraint(
+            "compressed_size > 0 AND compressed_size <= 2097152",
+            name="ck_strategy_v2_forward_replay_artifact_compressed_size",
+        ),
+        CheckConstraint(
+            "length(payload) = compressed_size",
+            name="ck_strategy_v2_forward_replay_artifact_payload_size",
+        ),
+    )
+
+    digest_sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(40), nullable=False)
+    codec: Mapped[str] = mapped_column(String(16), nullable=False)
+    raw_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    compressed_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        _TZDateTime,
+        default=_utcnow,
+        nullable=False,
+    )
+
+
+class StrategyV2ForwardEvidenceArtifact(Base):
+    """Immutable role binding from one evidence row to replay bytes."""
+
+    __tablename__ = "strategy_v2_forward_evidence_artifacts"
+    __table_args__ = (
+        CheckConstraint(
+            "role = 'REPLAY_BUNDLE'",
+            name="ck_strategy_v2_forward_evidence_artifact_role",
+        ),
+        CheckConstraint(
+            "length(artifact_sha256) = 64 "
+            "AND artifact_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_strategy_v2_forward_evidence_artifact_digest",
+        ),
+        CheckConstraint(
+            "length(binding_sha256) = 64 "
+            "AND binding_sha256 NOT GLOB '*[^0-9a-f]*'",
+            name="ck_strategy_v2_forward_evidence_artifact_binding",
+        ),
+        Index(
+            "ix_strategy_v2_forward_evidence_artifact_digest",
+            "artifact_sha256",
+        ),
+    )
+
+    evidence_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("strategy_v2_forward_evidence.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    role: Mapped[str] = mapped_column(String(32), primary_key=True)
+    artifact_sha256: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey(
+            "strategy_v2_forward_replay_artifacts.digest_sha256",
+            ondelete="RESTRICT",
+        ),
+        nullable=False,
+    )
+    binding_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        _TZDateTime,
+        default=_utcnow,
+        nullable=False,
+    )
 
 
 class StrategyV2ExitChallengerRegistration(Base):
@@ -611,8 +710,17 @@ class LiveExitChallengerRegistration(Base):
     symbol: Mapped[str] = mapped_column(String(50), nullable=False)
     market: Mapped[str] = mapped_column(String(10), nullable=False)
     algorithm_version: Mapped[str] = mapped_column(String(100), nullable=False)
+    policy_type: Mapped[str] = mapped_column(
+        String(24),
+        default="PROFIT_LOCK",
+        nullable=False,
+    )
     activation_pct: Mapped[float] = mapped_column(Float, nullable=False)
     locked_profit_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    max_holding_minutes: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+    )
     slippage_bps: Mapped[float] = mapped_column(Float, nullable=False)
     evaluator_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     registered_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)

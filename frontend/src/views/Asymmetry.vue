@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { getAsymmetry, type AsymmetryResult } from '../api/asymmetry'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 
 const loading = ref(false)
 const result = ref<AsymmetryResult | null>(null)
@@ -40,6 +41,7 @@ async function run() {
     </el-card>
 
     <template v-if="result">
+      <StatisticsQualityAlert :quality="result.statistics_quality" />
       <el-alert v-if="result.error" :title="result.error" type="warning" :closable="false" style="margin-top: 16px" />
 
       <template v-else>
@@ -48,7 +50,16 @@ async function run() {
         <el-row :gutter="16" style="margin-top: 16px">
           <el-col :span="6">
             <el-card shadow="hover">
-              <el-statistic title="不对称比" :value="result.asymmetry_ratio ?? 0" :precision="2" />
+              <el-statistic
+                v-if="result.asymmetry_ratio !== null"
+                title="不对称比"
+                :value="result.asymmetry_ratio"
+                :precision="2"
+              />
+              <div v-else class="undefined-stat">
+                <span class="undefined-label">不对称比</span>
+                <span class="undefined-value">未定义</span>
+              </div>
             </el-card>
           </el-col>
           <el-col :span="6">
@@ -77,7 +88,7 @@ async function run() {
                 <el-descriptions-item label="总额">{{ result.win_stats.total }}</el-descriptions-item>
                 <el-descriptions-item label="平均">{{ result.win_stats.avg }}</el-descriptions-item>
                 <el-descriptions-item label="中位">{{ result.win_stats.median }}</el-descriptions-item>
-                <el-descriptions-item label="最大">{{ result.win_stats.max }}</el-descriptions-item>
+                <el-descriptions-item label="最大盈利">{{ result.win_stats.largest_magnitude }}</el-descriptions-item>
                 <el-descriptions-item label="Top3 占比">{{ (result.win_stats.top3_share * 100).toFixed(1) }}%</el-descriptions-item>
               </el-descriptions>
             </el-card>
@@ -90,7 +101,7 @@ async function run() {
                 <el-descriptions-item label="总额">{{ result.loss_stats.total }}</el-descriptions-item>
                 <el-descriptions-item label="平均">{{ result.loss_stats.avg }}</el-descriptions-item>
                 <el-descriptions-item label="中位">{{ result.loss_stats.median }}</el-descriptions-item>
-                <el-descriptions-item label="最大">{{ result.loss_stats.min }}</el-descriptions-item>
+                <el-descriptions-item label="最大亏损（净 PnL）">{{ result.loss_stats.largest_magnitude }}</el-descriptions-item>
                 <el-descriptions-item label="Top3 占比">{{ (result.loss_stats.top3_share * 100).toFixed(1) }}%</el-descriptions-item>
               </el-descriptions>
             </el-card>
@@ -115,4 +126,7 @@ async function run() {
 .page-container { padding: 20px; }
 .page-desc { color: #909399; margin-bottom: 16px; }
 .control-card { margin-bottom: 8px; }
+.undefined-stat { display: flex; min-height: 58px; flex-direction: column; align-items: center; justify-content: center; }
+.undefined-label { color: #909399; font-size: 13px; }
+.undefined-value { margin-top: 8px; color: #909399; font-size: 20px; font-weight: 600; }
 </style>

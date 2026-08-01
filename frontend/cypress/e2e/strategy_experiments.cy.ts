@@ -23,6 +23,121 @@ describe('Strategy Experiments', () => {
     })
   })
 
+  it('submits execution controls and the selected holding-horizon grid', () => {
+    cy.intercept('POST', '/api/strategy-experiments', {
+      statusCode: 200,
+      body: {
+        id: 1,
+        name: 'HK execution controls',
+        symbol: '0700.HK',
+        base_params_json: '{}',
+        parameter_grid_json: '{}',
+        status: 'PENDING',
+        estimated_runs: 4,
+        completed_runs: 0,
+        failed_runs: 0,
+        error: '',
+        created_at: '2026-08-01T00:00:00Z',
+        completed_at: null,
+      },
+    }).as('createConfiguredExp')
+    cy.intercept('POST', '/api/strategy-experiments/1/run', {
+      statusCode: 200,
+      body: {
+        id: 1,
+        name: 'HK execution controls',
+        symbol: '0700.HK',
+        status: 'COMPLETED',
+        estimated_runs: 4,
+        completed_runs: 4,
+        failed_runs: 0,
+        created_at: '2026-08-01T00:00:00Z',
+      },
+    }).as('runConfiguredExp')
+    cy.intercept('GET', '/api/strategy-experiments/1/runs*', {
+      body: { items: [], total: 0, page: 1, page_size: 20 },
+    }).as('listConfiguredRuns')
+
+    cy.get('[data-testid="exp-name"]').type('HK execution controls')
+    cy.get('[data-testid="exp-symbol"]').type('0700.HK')
+    cy.get('[data-testid="exp-market"]').click()
+    cy.get('.el-select__popper:visible').contains('.el-select-dropdown__item', '港股 (HK)').click()
+    cy.get('[data-testid="exp-session-mode"]').click()
+    cy.get('.el-select__popper:visible').contains('.el-select-dropdown__item', '仅常规交易时段').click()
+
+    cy.get('[data-testid="exp-stop-loss"] input').clear().type('1').blur()
+    cy.get('[data-testid="exp-trailing-stop"] input').clear().type('2').blur()
+    cy.get('[data-testid="exp-max-holding"] input').clear().type('60').blur()
+    cy.get('[data-testid="exp-opening-warmup"] input').clear().type('90').blur()
+    cy.get('[data-testid="exp-entry-cutoff"] input').clear().type('45').blur()
+    cy.get('[data-testid="exp-flatten"] input').clear().type('15').blur()
+    cy.get('[data-testid="exp-daily-entry-cap"] input').clear().type('1').blur()
+    cy.get('[data-testid="exp-fresh-crossing"]').click()
+
+    for (const minutes of [15, 30, 45, 60]) {
+      cy.get('[data-testid="exp-grid-max-holding"]').contains(`${minutes} 分钟`).click()
+    }
+
+    cy.get('[data-testid="exp-csv"]').type(
+      'timestamp,open,high,low,close,volume\n' +
+      '2026-05-01T09:30:00+08:00,380,381,379,380.5,1000',
+    )
+    cy.get('[data-testid="exp-run-btn"]').click()
+
+    cy.wait('@createConfiguredExp').its('request.body').then((body) => {
+      expect(body.base_params).to.include({
+        market: 'HK',
+        trading_session_mode: 'RTH_ONLY',
+        stop_loss_pct: 1,
+        trailing_stop_pct: 2,
+        max_holding_minutes: 60,
+        opening_warmup_minutes: 90,
+        entry_cutoff_minutes_before_close: 45,
+        flatten_minutes_before_close: 15,
+        max_entries_per_symbol_per_day: 1,
+        entry_crossing_required: true,
+      })
+      expect(body.parameter_grid.max_holding_minutes.values).to.deep.equal([15, 30, 45, 60])
+    })
+    cy.wait('@runConfiguredExp')
+    cy.wait('@listConfiguredRuns')
+  })
+
+  it('blocks an exit window earlier than the entry cutoff window', () => {
+    let createCalled = false
+    cy.intercept('POST', '/api/strategy-experiments', (req) => {
+      createCalled = true
+      req.reply({ statusCode: 201, body: { id: 1 } })
+    })
+
+    cy.get('[data-testid="exp-entry-cutoff"] input').clear().type('15').blur()
+    cy.get('[data-testid="exp-flatten"] input').clear().type('45').blur()
+
+    cy.get('[data-testid="exp-window-error"]')
+      .should('contain', '收盘前平仓窗口不能早于入场截止窗口')
+    cy.get('[data-testid="exp-run-btn"]').should('be.disabled')
+    cy.wrap(null).then(() => {
+      expect(createCalled).to.be.false
+    })
+  })
+
+  it('blocks a symbol whose suffix does not match the selected market', () => {
+    let createCalled = false
+    cy.intercept('POST', '/api/strategy-experiments', (req) => {
+      createCalled = true
+      req.reply({ statusCode: 201, body: { id: 1 } })
+    })
+
+    cy.get('[data-testid="exp-symbol"]').type('0700.HK')
+
+    cy.get('[data-testid="exp-symbol-market-error"]')
+      .should('contain', '股票代码 0700.HK 与所选市场 US 不一致')
+    cy.get('[data-testid="exp-run-btn"]').should('be.disabled')
+    cy.wrap(null).then(() => {
+      expect(createCalled).to.be.false
+    })
+  })
+
   it('runs experiment and displays leaderboard with sorted metrics', () => {
     // Fill form
     cy.get('[data-testid="exp-name"]').type('Test AAPL Grid')

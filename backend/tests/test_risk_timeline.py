@@ -18,7 +18,7 @@ from app.models import Base, TradeEvent
 from app.services.risk_timeline_service import RiskTimelineService
 
 
-_NOW = datetime(2026, 7, 30, 14, 31, tzinfo=timezone.utc)
+_NOW = datetime.now(timezone.utc)
 
 
 def _now_utc() -> datetime:

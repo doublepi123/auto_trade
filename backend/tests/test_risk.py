@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import threading
 
 import pytest
@@ -20,9 +20,19 @@ class TestRiskConfig:
         config = RiskConfig(max_daily_loss=None)  # type: ignore[arg-type]
         assert config.max_daily_loss is None
 
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_max_daily_loss_raises(self, value: float) -> None:
+        with pytest.raises(ValueError, match="max_daily_loss must be finite"):
+            RiskConfig(max_daily_loss=value)
+
     def test_negative_max_drawdown_amount_raises(self) -> None:
         with pytest.raises(ValueError, match="max_drawdown_amount must be non-negative"):
             RiskConfig(max_drawdown_amount=-1.0)
+
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_non_finite_max_drawdown_amount_raises(self, value: float) -> None:
+        with pytest.raises(ValueError, match="max_drawdown_amount must be finite"):
+            RiskConfig(max_drawdown_amount=value)
 
 
 class TestRiskController:
@@ -37,6 +47,48 @@ class TestRiskController:
         result = ctrl.check()
         assert result.approved is False
         assert "paused" in result.reason.lower()
+
+    def test_atomic_daily_loss_snapshot_rolls_over_without_clearing_pause(
+        self,
+    ) -> None:
+        current_day = [date(2026, 7, 31)]
+        ctrl = RiskController(trade_day_provider=lambda: current_day[0])
+        ctrl.daily_pnl = -100.0
+        ctrl.consecutive_losses = 2
+        ctrl.pause("manual overnight hold", auto_resumable=False)
+        current_day[0] = date(2026, 8, 1)
+
+        result, snapshot = ctrl.check_with_daily_loss_snapshot()
+
+        assert result.approved is False
+        assert snapshot.trade_day == date(2026, 8, 1)
+        assert snapshot.realized_pnl == 0.0
+        assert snapshot.paused is True
+        assert ctrl.daily_pnl == 0.0
+        assert ctrl.consecutive_losses == 0
+        assert ctrl.paused is True
+        assert ctrl.pause_reason == "manual overnight hold"
+        assert ctrl.pause_auto_resumable is False
+
+    @pytest.mark.parametrize(
+        ("field", "message"),
+        [
+            ("max_daily_loss", "max_daily_loss must be finite"),
+            ("max_drawdown_amount", "max_drawdown_amount must be finite"),
+        ],
+    )
+    @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+    def test_check_rejects_non_finite_runtime_limits(
+        self,
+        field: str,
+        message: str,
+        value: float,
+    ) -> None:
+        ctrl = RiskController()
+        setattr(ctrl.config, field, value)
+
+        with pytest.raises(ValueError, match=message):
+            ctrl.check()
 
     def test_resume_after_pause(self) -> None:
         ctrl = RiskController()

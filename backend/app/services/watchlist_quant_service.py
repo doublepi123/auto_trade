@@ -34,9 +34,14 @@ logger = logging.getLogger("auto_trade.watchlist_quant_service")
 
 QUANT_SCORE_SOURCE = "quant_v5"
 QUANT_ERROR_SOURCE = "quant_error_v5"
+QUANT_WARMUP_SOURCE = "quant_warmup_v5"
 CURRENT_QUANT_SOURCES = (
     QUANT_SCORE_SOURCE,
     QUANT_ERROR_SOURCE,
+)
+CURRENT_QUANT_SNAPSHOT_SOURCES = (
+    *CURRENT_QUANT_SOURCES,
+    QUANT_WARMUP_SOURCE,
 )
 _MIN_DAILY_BARS = 60
 _MIN_INTRADAY_BARS = 300
@@ -69,6 +74,22 @@ _DATA_QUALITY_BLOCKERS = frozenset(
         "MISSING_BBO",
     }
 )
+_WARMUP_DATA_QUALITY_BLOCKERS = frozenset(
+    {
+        "INSUFFICIENT_DAILY_DATA",
+        "INSUFFICIENT_INTRADAY_DATA",
+        "INSUFFICIENT_REVERSAL_SAMPLES",
+    }
+)
+
+
+def _quant_source_for_blockers(blockers: Sequence[str]) -> str:
+    data_quality_blockers = _DATA_QUALITY_BLOCKERS.intersection(blockers)
+    if not data_quality_blockers:
+        return QUANT_SCORE_SOURCE
+    if data_quality_blockers <= _WARMUP_DATA_QUALITY_BLOCKERS:
+        return QUANT_WARMUP_SOURCE
+    return QUANT_ERROR_SOURCE
 
 
 class QuantScoringOutsideRTHError(RuntimeError):
@@ -96,7 +117,9 @@ def list_latest_current_quant_scores(
             )
             .label("generation_rank"),
         )
-        .where(WatchlistScore.source.in_(CURRENT_QUANT_SOURCES))
+        .where(
+            WatchlistScore.source.in_(CURRENT_QUANT_SNAPSHOT_SOURCES)
+        )
         .subquery()
     )
     return (
@@ -1194,6 +1217,7 @@ class WatchlistQuantService:
                 has_data_quality_blocker = bool(
                     _DATA_QUALITY_BLOCKERS.intersection(metrics.blockers)
                 )
+                quant_source = _quant_source_for_blockers(metrics.blockers)
                 row = score_service.record_score(
                     symbol=item.symbol,
                     market=item.market,
@@ -1210,9 +1234,7 @@ class WatchlistQuantService:
                         else result.recommended_action
                     ),
                     source=(
-                        QUANT_ERROR_SOURCE
-                        if has_data_quality_blocker
-                        else QUANT_SCORE_SOURCE
+                        quant_source
                     ),
                     estimated_round_trip_cost_bps=(
                         result.estimated_round_trip_cost_bps

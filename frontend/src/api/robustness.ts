@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface RobustnessFactor {
   score: number
@@ -10,6 +11,7 @@ export interface RobustnessResult {
   symbol: string
   lookback_days: number
   sample_size: number
+  total_pnl: number
   composite_score: number
   grade: string
   factors: {
@@ -20,6 +22,10 @@ export interface RobustnessResult {
   }
   quarter_pnls: number[]
   recommendation: string
+  currency: string | null
+  currencies: string[]
+  totals_comparable: boolean
+  statistics_quality: StatisticsQuality
   error?: string
 }
 

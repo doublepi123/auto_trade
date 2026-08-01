@@ -1,23 +1,27 @@
-"""R-multiple distribution service.
+"""Post-hoc realized-loss multiple distribution service.
 
-Normalizes each closed trade's net PnL by the system's average loss
-(one "R" of risk) and reports the resulting distribution: histogram
-buckets, expectancy in R, and tail shares.  Read-only.
+Normalizes each closed trade's net PnL by the sample's mean realized loss and
+reports the resulting distribution. This is a retrospective proxy, not the
+initial risk frozen at entry. Read-only.
 
 Inspired by Edgewonk's R-multiple journaling and QuantStats' risk-normalized
 return distribution.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import OrderRecord
+from app.services.analytics_trade_sample_service import (
+    analytics_response,
+    load_analytics_trade_sample,
+    mixed_currency_error,
+)
 
 __all__ = ["RMultiplesService"]
+
+_RISK_UNIT_METHOD = "MEAN_REALIZED_LOSS_PROXY"
 
 _BUCKETS: list[tuple[str, float, float]] = [
     ("<-3R", float("-inf"), -3.0),
@@ -34,28 +38,55 @@ _BUCKETS: list[tuple[str, float, float]] = [
 
 
 class RMultiplesService:
-    """Risk-normalized (R-multiple) trade outcome distribution."""
+    """Trade outcomes normalized by a mean realized-loss proxy."""
 
     def __init__(self, db: Session) -> None:
         self._db = db
 
     def distribution(self, days: int = 90) -> dict[str, Any]:
-        rows = self._fetch(days)
-        if len(rows) < 5:
-            return {
-                "days": days,
-                "sample_size": len(rows),
-                "error": "Need at least 5 closed trades.",
-            }
-
-        pnls = [float(r[0]) for r in rows]
-        losses = [p for p in pnls if p < 0]
-        if not losses:
-            return {
+        sample = load_analytics_trade_sample(
+            self._db,
+            lookback_days=days,
+        )
+        pnls = [trade.net_pnl for trade in sample.trades]
+        currency_error = mixed_currency_error(
+            sample,
+            payload={
                 "days": days,
                 "sample_size": len(pnls),
-                "error": "No losing trades in window; cannot derive 1R risk unit.",
-            }
+                "risk_unit_method": _RISK_UNIT_METHOD,
+                "true_initial_risk_available": False,
+            },
+        )
+        if currency_error is not None:
+            return currency_error
+        if len(pnls) < 5:
+            return analytics_response(
+                sample,
+                {
+                    "days": days,
+                    "sample_size": len(pnls),
+                    "risk_unit_method": _RISK_UNIT_METHOD,
+                    "true_initial_risk_available": False,
+                    "error": "Need at least 5 closed trades.",
+                },
+            )
+
+        losses = [p for p in pnls if p < 0]
+        if not losses:
+            return analytics_response(
+                sample,
+                {
+                    "days": days,
+                    "sample_size": len(pnls),
+                    "risk_unit_method": _RISK_UNIT_METHOD,
+                    "true_initial_risk_available": False,
+                    "error": (
+                        "No losing trades in window; cannot derive 1R risk "
+                        "unit."
+                    ),
+                },
+            )
 
         risk_unit = sum(-p for p in losses) / len(losses)
         multiples = [p / risk_unit for p in pnls]
@@ -81,23 +112,19 @@ class RMultiplesService:
             for i, (label, _lo, _hi) in enumerate(_BUCKETS)
         ]
 
-        return {
-            "days": days,
-            "sample_size": n,
-            "risk_unit": round(risk_unit, 2),
-            "expectancy_r": round(expectancy_r, 4),
-            "pct_ge_1r": round(big_win, 4),
-            "pct_le_minus_1r": round(big_loss, 4),
-            "min_r": round(min(multiples), 2),
-            "max_r": round(max(multiples), 2),
-            "histogram": histogram,
-        }
-
-    def _fetch(self, days: int) -> list[tuple[float]]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        stmt = (
-            select(OrderRecord.net_pnl)
-            .where(OrderRecord.net_pnl.is_not(None), OrderRecord.filled_at >= cutoff)
-            .order_by(OrderRecord.filled_at.asc())
+        return analytics_response(
+            sample,
+            {
+                "days": days,
+                "sample_size": n,
+                "risk_unit_method": _RISK_UNIT_METHOD,
+                "true_initial_risk_available": False,
+                "risk_unit": round(risk_unit, 2),
+                "expectancy_r": round(expectancy_r, 4),
+                "pct_ge_1r": round(big_win, 4),
+                "pct_le_minus_1r": round(big_loss, 4),
+                "min_r": round(min(multiples), 2),
+                "max_r": round(max(multiples), 2),
+                "histogram": histogram,
+            },
         )
-        return [(float(r[0]),) for r in self._db.execute(stmt).all() if r[0] is not None]

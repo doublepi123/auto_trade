@@ -8,13 +8,16 @@ Inspired by QuantStats' Pareto-style profit concentration reports.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import math
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import OrderRecord
+from app.services.analytics_trade_sample_service import (
+    analytics_response,
+    load_analytics_trade_sample,
+    mixed_currency_error,
+)
 
 __all__ = ["ProfitConcentrationService"]
 
@@ -28,13 +31,26 @@ class ProfitConcentrationService:
         self._db = db
 
     def summary(self, days: int = 90) -> dict[str, Any]:
-        rows = self._fetch(days)
+        sample = load_analytics_trade_sample(
+            self._db,
+            lookback_days=days,
+        )
+        rows = [trade.net_pnl for trade in sample.trades]
+        currency_error = mixed_currency_error(
+            sample,
+            payload={"days": days, "sample_size": len(rows)},
+        )
+        if currency_error is not None:
+            return currency_error
         if len(rows) < 5:
-            return {
-                "days": days,
-                "sample_size": len(rows),
-                "error": "Need at least 5 closed trades.",
-            }
+            return analytics_response(
+                sample,
+                {
+                    "days": days,
+                    "sample_size": len(rows),
+                    "error": "Need at least 5 closed trades.",
+                },
+            )
 
         wins = sorted((p for p in rows if p > 0), reverse=True)
         losses = [p for p in rows if p < 0]
@@ -42,16 +58,19 @@ class ProfitConcentrationService:
         total_loss = sum(losses)
 
         if not wins or total_win <= 0:
-            return {
-                "days": days,
-                "sample_size": len(rows),
-                "error": "No winning trades in window.",
-            }
+            return analytics_response(
+                sample,
+                {
+                    "days": days,
+                    "sample_size": len(rows),
+                    "error": "No winning trades in window.",
+                },
+            )
 
         n_wins = len(wins)
         pareto: list[dict[str, float]] = []
         for level in _LEVELS:
-            k = max(1, round(n_wins * level))
+            k = max(1, math.ceil(n_wins * level))
             share = sum(wins[:k]) / total_win
             pareto.append(
                 {
@@ -66,28 +85,22 @@ class ProfitConcentrationService:
         top_trade = wins[0]
         top5 = sum(wins[: min(5, n_wins)])
 
-        return {
-            "days": days,
-            "sample_size": len(rows),
-            "winning_trades": n_wins,
-            "losing_trades": len(losses),
-            "gross_profit": round(total_win, 2),
-            "gross_loss": round(total_loss, 2),
-            "top_trade_pnl": round(top_trade, 2),
-            "top_trade_share": round(top_trade / total_win, 4),
-            "top5_share": round(top5 / total_win, 4),
-            "gini_winners": round(gini, 4),
-            "pareto_curve": pareto,
-        }
-
-    def _fetch(self, days: int) -> list[float]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        stmt = (
-            select(OrderRecord.net_pnl)
-            .where(OrderRecord.net_pnl.is_not(None), OrderRecord.filled_at >= cutoff)
-            .order_by(OrderRecord.filled_at.asc())
+        return analytics_response(
+            sample,
+            {
+                "days": days,
+                "sample_size": len(rows),
+                "winning_trades": n_wins,
+                "losing_trades": len(losses),
+                "gross_profit": round(total_win, 2),
+                "gross_loss": round(total_loss, 2),
+                "top_trade_pnl": round(top_trade, 2),
+                "top_trade_share": round(top_trade / total_win, 4),
+                "top5_share": round(top5 / total_win, 4),
+                "gini_winners": round(gini, 4),
+                "pareto_curve": pareto,
+            },
         )
-        return [float(r[0]) for r in self._db.execute(stmt).all() if r[0] is not None]
 
 
 def _gini(sorted_desc: list[float]) -> float:

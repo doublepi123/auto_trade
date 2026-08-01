@@ -601,6 +601,37 @@ def test_submission_exception_is_fail_closed_and_not_retried(
         Base.metadata.drop_all(bind=engine)
 
 
+def test_stale_submitting_with_unresolved_order_id_becomes_uncertain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_execution(monkeypatch)
+    engine, db = _database()
+    runner = _FakeRunner([])
+    try:
+        service = OpeningMomentumExecutionService(db, None, runner)
+        row = service._record_signal(_signal(service), armed_at=_ENTRY_DUE)
+        row.status = "SUBMITTING"
+        row.reason = "ENTRY_SUBMITTING"
+        row.requested_at = _ENTRY_DUE
+        row.entry_order_id = "broker-order-not-in-local-ledger"
+        db.commit()
+        deadline = row.entry_deadline_at.replace(tzinfo=timezone.utc)
+
+        status = service.tick(now=deadline + timedelta(seconds=61))
+
+        assert status.state == "UNCERTAIN"
+        assert status.latest is not None
+        assert status.latest.id == row.id
+        assert status.latest.entry_order_id == (
+            "broker-order-not-in-local-ledger"
+        )
+        assert status.latest.reason == "SUBMISSION_RESULT_UNAVAILABLE"
+        assert runner.calls == []
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
 def test_reconcile_links_entry_and_exit_by_execution_provenance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

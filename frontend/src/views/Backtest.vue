@@ -24,6 +24,18 @@
             <el-input v-model="form.symbol" placeholder="AAPL.US" />
           </el-form-item>
           <div class="form-grid">
+            <el-form-item label="市场">
+              <el-select v-model="form.market">
+                <el-option label="美股 (US)" value="US" />
+                <el-option label="港股 (HK)" value="HK" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="交易时段">
+              <el-select v-model="form.trading_session_mode">
+                <el-option label="任意时段（兼容模式）" value="ANY" />
+                <el-option label="仅常规交易时段" value="RTH_ONLY" />
+              </el-select>
+            </el-form-item>
             <el-form-item label="买入价下限">
               <el-input-number v-model="form.buy_low" :precision="2" :step="0.01" :min="0.01" />
             </el-form-item>
@@ -45,8 +57,32 @@
             <el-form-item label="移动止损 %">
               <el-input-number v-model="form.trailing_stop_pct" :precision="2" :step="0.5" :min="0" :max="100" data-testid="trailing-stop-pct" />
             </el-form-item>
-            <el-form-item label="单日最大亏损">
-              <el-input-number v-model="form.max_daily_loss" :precision="2" :step="100" :min="1" />
+            <el-form-item label="最长持仓（分钟）">
+              <el-input-number v-model="form.max_holding_minutes" :precision="0" :step="15" :min="0" :max="10080" />
+            </el-form-item>
+            <el-form-item label="入场截止（分钟）">
+              <el-input-number v-model="form.entry_cutoff_minutes_before_close" :precision="0" :step="5" :min="0" :max="180" />
+            </el-form-item>
+            <el-form-item label="收盘平仓（分钟）">
+              <el-input-number v-model="form.flatten_minutes_before_close" :precision="0" :step="5" :min="0" :max="180" />
+            </el-form-item>
+            <el-form-item label="开盘预热（分钟）">
+              <el-input-number v-model="form.opening_warmup_minutes" :precision="0" :step="5" :min="0" :max="390" />
+            </el-form-item>
+            <el-form-item label="每日最多入场">
+              <el-input-number v-model="form.max_entries_per_symbol_per_day" :precision="0" :step="1" :min="0" :max="1000" />
+            </el-form-item>
+            <el-form-item label="新鲜阈值穿越">
+              <el-switch v-model="form.entry_crossing_required" />
+            </el-form-item>
+            <el-form-item label="单日最大亏损（0=关闭）">
+              <el-input-number
+                v-model="form.max_daily_loss"
+                :precision="2"
+                :step="100"
+                :min="0"
+                data-testid="max-daily-loss"
+              />
             </el-form-item>
             <el-form-item label="最大回撤额度">
               <el-input-number v-model="form.max_drawdown_amount" :precision="2" :step="100" :min="0" data-testid="max-drawdown-amount" />
@@ -67,6 +103,20 @@
               <el-switch v-model="form.short_selling" />
             </el-form-item>
           </div>
+          <el-alert
+            v-if="sessionWindowError"
+            :title="sessionWindowError"
+            type="warning"
+            show-icon
+            :closable="false"
+          />
+          <el-alert
+            v-if="showFidelityNotice"
+            title="OHLC 近似（非实盘等价）：时段与强制退出按观测时间及 K 线收盘价处理；新鲜阈值穿越按单根 K 线开盘价与区间保守判断。建议使用 1 分钟 K 线并把时间戳视为结束时刻；结果不含历史 BBO、部分成交或全买力动态仓位。"
+            type="info"
+            show-icon
+            :closable="false"
+          />
         </el-form>
       </div>
 
@@ -616,7 +666,7 @@
 import { computed, onMounted, ref, type CSSProperties } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BacktestChart from '../components/BacktestChart.vue'
-import { getStrategy, runBacktest, exportBacktestResult, runBacktestSweep, runWalkForward, runStressTest, saveBacktestRun, listBacktestRuns, compareBacktestRuns, deleteBacktestRun, getBrokerCandles } from '../api'
+import { getDiagnostics, getStrategy, runBacktest, exportBacktestResult, runBacktestSweep, runWalkForward, runStressTest, saveBacktestRun, listBacktestRuns, compareBacktestRuns, deleteBacktestRun, getBrokerCandles } from '../api'
 import type {
   BacktestMetrics,
   BacktestParams,
@@ -637,6 +687,8 @@ import { downloadCsv } from '../utils/csv'
 
 const defaultParams: BacktestParams = {
   symbol: '',
+  market: 'US',
+  trading_session_mode: 'ANY',
   buy_low: 100,
   sell_high: 200,
   short_selling: false,
@@ -651,6 +703,12 @@ const defaultParams: BacktestParams = {
   slippage_pct: 0,
   stop_loss_pct: 0,
   trailing_stop_pct: 0,
+  max_holding_minutes: 0,
+  entry_cutoff_minutes_before_close: 0,
+  flatten_minutes_before_close: 0,
+  opening_warmup_minutes: 0,
+  entry_crossing_required: false,
+  max_entries_per_symbol_per_day: 0,
 }
 
 // Snapshot used by loadCurrentStrategy() to detect whether the user has
@@ -673,12 +731,34 @@ const running = ref(false)
 const error = ref('')
 const fileInput = ref<HTMLInputElement | null>(null)
 
+const sessionWindowError = computed(() => {
+  if (
+    form.value.entry_cutoff_minutes_before_close > 0
+    && form.value.flatten_minutes_before_close > 0
+    && form.value.flatten_minutes_before_close > form.value.entry_cutoff_minutes_before_close
+  ) {
+    return '收盘前平仓窗口不能早于入场截止窗口'
+  }
+  return ''
+})
+
+const showFidelityNotice = computed(() => (
+  form.value.trading_session_mode === 'RTH_ONLY'
+  || form.value.opening_warmup_minutes > 0
+  || form.value.entry_crossing_required
+  || form.value.max_entries_per_symbol_per_day > 0
+  || form.value.max_holding_minutes > 0
+  || form.value.entry_cutoff_minutes_before_close > 0
+  || form.value.flatten_minutes_before_close > 0
+))
+
 const canRun = computed(() => (
   csvText.value.trim().length > 0
   && form.value.buy_low > 0
   && form.value.sell_high > form.value.buy_low
   && form.value.quantity > 0
   && form.value.initial_cash > 0
+  && !sessionWindowError.value
 ))
 
 async function loadCurrentStrategy() {
@@ -686,12 +766,22 @@ async function loadCurrentStrategy() {
   const baseline = initialForm
   const isDirty = (
     form.value.symbol !== baseline.symbol
+    || form.value.market !== baseline.market
+    || form.value.trading_session_mode !== baseline.trading_session_mode
     || form.value.buy_low !== baseline.buy_low
     || form.value.sell_high !== baseline.sell_high
     || form.value.short_selling !== baseline.short_selling
     || form.value.min_profit_amount !== baseline.min_profit_amount
     || form.value.max_daily_loss !== baseline.max_daily_loss
+    || form.value.max_drawdown_amount !== baseline.max_drawdown_amount
     || form.value.max_consecutive_losses !== baseline.max_consecutive_losses
+    || form.value.stop_loss_pct !== baseline.stop_loss_pct
+    || form.value.max_holding_minutes !== baseline.max_holding_minutes
+    || form.value.entry_cutoff_minutes_before_close !== baseline.entry_cutoff_minutes_before_close
+    || form.value.flatten_minutes_before_close !== baseline.flatten_minutes_before_close
+    || form.value.opening_warmup_minutes !== baseline.opening_warmup_minutes
+    || form.value.entry_crossing_required !== baseline.entry_crossing_required
+    || form.value.max_entries_per_symbol_per_day !== baseline.max_entries_per_symbol_per_day
   )
   if (isDirty) {
     try {
@@ -705,29 +795,61 @@ async function loadCurrentStrategy() {
     }
   }
   try {
-    const strategy = await getStrategy()
+    const [strategyResult, diagnosticsResult] = await Promise.allSettled([
+      getStrategy(),
+      getDiagnostics(),
+    ])
+    if (strategyResult.status !== 'fulfilled') throw strategyResult.reason
+    const strategy = strategyResult.value
+    const liveSafety = diagnosticsResult.status === 'fulfilled'
+      ? diagnosticsResult.value.live_safety
+      : null
     form.value = {
       ...form.value,
       symbol: strategy.symbol,
+      market: strategy.market,
+      trading_session_mode: strategy.trading_session_mode,
       buy_low: strategy.buy_low > 0 ? strategy.buy_low : form.value.buy_low,
       sell_high: strategy.sell_high > strategy.buy_low ? strategy.sell_high : form.value.sell_high,
       short_selling: strategy.short_selling,
       min_profit_amount: strategy.min_profit_amount,
       max_daily_loss: strategy.max_daily_loss,
+      max_drawdown_amount: strategy.max_drawdown_amount ?? 0,
       max_consecutive_losses: strategy.max_consecutive_losses,
+      stop_loss_pct: liveSafety?.stop_loss_pct ?? strategy.stop_loss_pct,
+      max_holding_minutes: liveSafety?.max_holding_minutes ?? strategy.max_holding_minutes,
+      entry_cutoff_minutes_before_close: liveSafety?.entry_cutoff_minutes_before_close ?? strategy.entry_cutoff_minutes_before_close,
+      flatten_minutes_before_close: liveSafety?.flatten_minutes_before_close ?? strategy.flatten_minutes_before_close,
+      opening_warmup_minutes: liveSafety?.opening_warmup_minutes ?? form.value.opening_warmup_minutes,
+      entry_crossing_required: liveSafety?.live_entry_crossing_required ?? form.value.entry_crossing_required,
+      max_entries_per_symbol_per_day: liveSafety?.live_max_entries_per_symbol_per_day ?? form.value.max_entries_per_symbol_per_day,
     }
     // Refresh the baseline so the next "sync" doesn't re-flag the values
     // we just pulled from the live strategy. Without this, the second
     // click of the button always asks "覆盖并同步" even when nothing has
     // actually changed.
     initialForm.symbol = form.value.symbol
+    initialForm.market = form.value.market
+    initialForm.trading_session_mode = form.value.trading_session_mode
     initialForm.buy_low = form.value.buy_low
     initialForm.sell_high = form.value.sell_high
     initialForm.short_selling = form.value.short_selling
     initialForm.min_profit_amount = form.value.min_profit_amount
     initialForm.max_daily_loss = form.value.max_daily_loss
+    initialForm.max_drawdown_amount = form.value.max_drawdown_amount
     initialForm.max_consecutive_losses = form.value.max_consecutive_losses
-    ElMessage.success('已同步当前策略')
+    initialForm.stop_loss_pct = form.value.stop_loss_pct
+    initialForm.max_holding_minutes = form.value.max_holding_minutes
+    initialForm.entry_cutoff_minutes_before_close = form.value.entry_cutoff_minutes_before_close
+    initialForm.flatten_minutes_before_close = form.value.flatten_minutes_before_close
+    initialForm.opening_warmup_minutes = form.value.opening_warmup_minutes
+    initialForm.entry_crossing_required = form.value.entry_crossing_required
+    initialForm.max_entries_per_symbol_per_day = form.value.max_entries_per_symbol_per_day
+    if (liveSafety) {
+      ElMessage.success('已同步当前策略与部署门控')
+    } else {
+      ElMessage.warning('已同步当前策略；部署门控读取失败，相关字段保持不变')
+    }
   } catch {
     ElMessage.error('同步失败')
   }
@@ -851,6 +973,7 @@ const sweepTopRows = computed(() =>
 
 const canSweep = computed(() => (
   csvText.value.trim().length > 0
+  && !sessionWindowError.value
   && sweepForm.value.buyLowRange.step > 0
   && sweepForm.value.sellHighRange.step > 0
   && sweepForm.value.buyLowRange.end >= sweepForm.value.buyLowRange.start
@@ -990,6 +1113,7 @@ const wfError = ref('')
 
 const canWalkForward = computed(() => (
   csvText.value.trim().length > 0
+  && !sessionWindowError.value
   && wfForm.value.trainSize >= 2
   && wfForm.value.testSize >= 1
 ))
@@ -1053,7 +1177,11 @@ const stressResult = ref<StressTestResult | null>(null)
 const stressRunning = ref(false)
 const stressError = ref('')
 
-const canStress = computed(() => csvText.value.trim().length > 0 && stressForm.value.scenarios >= 1)
+const canStress = computed(() => (
+  csvText.value.trim().length > 0
+  && !sessionWindowError.value
+  && stressForm.value.scenarios >= 1
+))
 
 async function handleRunStress() {
   if (!canStress.value) return

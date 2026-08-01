@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { getTradeFrequency, type TradeFrequencyResult } from '../api/tradeFrequency'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 
 const loading = ref(false)
 const result = ref<TradeFrequencyResult | null>(null)
@@ -19,7 +20,8 @@ async function run() {
   }
 }
 
-function fmtInterval(s: number): string {
+function fmtInterval(s: number, pairCount: number): string {
+  if (pairCount === 0) return '不可用'
   if (s < 60) return `${s.toFixed(0)}s`
   if (s < 3600) return `${(s / 60).toFixed(1)}m`
   return `${(s / 3600).toFixed(1)}h`
@@ -29,7 +31,7 @@ function fmtInterval(s: number): string {
 <template>
   <div class="page-container">
     <h2>交易频率分析</h2>
-    <p class="page-desc">检测过度交易模式：日均频率、间隔分布、连续快速下单（灵感来自 Freqtrade / Edgewonk）</p>
+    <p class="page-desc">检测过度交易模式；间隔仅比较同一标的、同一市场本地交易日内的相邻平仓</p>
 
     <el-card class="control-card">
       <el-form inline>
@@ -46,6 +48,7 @@ function fmtInterval(s: number): string {
     </el-card>
 
     <template v-if="result">
+      <StatisticsQualityAlert :quality="result.statistics_quality" />
       <el-alert v-if="result.error" :title="result.error" type="warning" :closable="false" style="margin-top: 16px" />
 
       <template v-else>
@@ -87,9 +90,10 @@ function fmtInterval(s: number): string {
         <el-card style="margin-top: 16px">
           <template #header>间隔与频率详情</template>
           <el-descriptions :column="3" border size="small">
-            <el-descriptions-item label="平均间隔">{{ fmtInterval(result.avg_interval_seconds) }}</el-descriptions-item>
-            <el-descriptions-item label="最短间隔">{{ fmtInterval(result.min_interval_seconds) }}</el-descriptions-item>
-            <el-descriptions-item label="快速连发占比">{{ (result.rapid_fire_pct * 100).toFixed(1) }}%</el-descriptions-item>
+            <el-descriptions-item label="同标的日内平均间隔">{{ fmtInterval(result.avg_interval_seconds, result.interval_pair_count) }}</el-descriptions-item>
+            <el-descriptions-item label="同标的日内最短间隔">{{ fmtInterval(result.min_interval_seconds, result.interval_pair_count) }}</el-descriptions-item>
+            <el-descriptions-item label="有效间隔对">{{ result.interval_pair_count }}</el-descriptions-item>
+            <el-descriptions-item label="快速连发占比">{{ result.interval_pair_count > 0 ? `${(result.rapid_fire_pct * 100).toFixed(1)}%` : '不可用' }}</el-descriptions-item>
             <el-descriptions-item label="最密集日期">{{ result.max_day_date }}</el-descriptions-item>
             <el-descriptions-item label="过度交易标记">
               <el-tag :type="result.overtrading_flag ? 'danger' : 'success'" size="small">

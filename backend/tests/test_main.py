@@ -490,7 +490,17 @@ def test_strategy_v2_shadow_tick_is_isolated_from_execution(monkeypatch) -> None
         {"symbol": "MSFT.US", "market": "US"},
         {"symbol": "NVDA.US", "market": "US"},
     ]
-    assert collections == calls
+    assert collections == [
+        {
+            **call,
+            "candidate_algorithm_version": candidate,
+        }
+        for call in calls
+        for candidate in (
+            "strategy-v2-causal-trend-prewarm-v1",
+            "strategy-v2-causal-trend-prewarm-boundary-neutral-v1",
+        )
+    ]
     assert registrations == [
         ("0700.HK", False),
         ("MSFT.US", False),

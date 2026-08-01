@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { getReentryAnalysisSummary, type ReentryAnalysisResult, type ReentryBucket } from '../api/reentryAnalysis'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 
 const loading = ref(false)
 const result = ref<ReentryAnalysisResult | null>(null)
@@ -32,7 +33,7 @@ function pnlColor(v: number | null): string {
 <template>
   <div class="page-container">
     <h2>再入场行为</h2>
-    <p class="page-desc">同标的前一笔盈利 / 亏损后，下一笔交易的条件表现，检测「报复性交易」倾向（灵感来自 Freqtrade 序列分析）</p>
+    <p class="page-desc">按独立入场订单合并分批退出，仅在前一仓位已平仓后才认定同标的再入场，检测条件表现差异</p>
 
     <el-card class="control-card">
       <el-form inline>
@@ -46,9 +47,17 @@ function pnlColor(v: number | null): string {
     </el-card>
 
     <template v-if="result">
+      <StatisticsQualityAlert :quality="result.statistics_quality" style="margin-top: 16px" />
       <el-alert v-if="result.error" :title="result.error" type="warning" :closable="false" style="margin-top: 16px" />
 
       <template v-else>
+        <el-alert
+          v-if="result.overlapping_entry.trades > 0"
+          :title="`${result.overlapping_entry.trades} 个重叠入场未计作再入场`"
+          type="warning"
+          :closable="false"
+          style="margin-top: 16px"
+        />
         <el-row :gutter="16" style="margin-top: 16px">
           <el-col :span="6">
             <el-card shadow="hover">

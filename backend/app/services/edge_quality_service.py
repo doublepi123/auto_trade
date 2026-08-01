@@ -9,13 +9,15 @@ Inspired by Edgewonk's edge-score and QuantStats' strategy quality metrics.
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import OrderRecord
+from app.services.analytics_trade_sample_service import (
+    analytics_response,
+    load_analytics_trade_sample,
+    mixed_currency_error,
+)
 
 __all__ = ["EdgeQualityService"]
 
@@ -29,14 +31,27 @@ class EdgeQualityService:
     def score(
         self, symbol: str | None = None, lookback_days: int = 180
     ) -> dict[str, Any]:
-        pnls = self._fetch_pnls(symbol, lookback_days)
+        sample = load_analytics_trade_sample(
+            self._db,
+            symbol=symbol,
+            lookback_days=lookback_days,
+            include_excursions=False,
+        )
+        mixed_error = mixed_currency_error(
+            sample,
+            symbol=symbol,
+            lookback_days=lookback_days,
+        )
+        if mixed_error is not None:
+            return mixed_error
+        pnls = [trade.net_pnl for trade in sample.trades]
         if len(pnls) < 10:
-            return {
+            return analytics_response(sample, {
                 "symbol": symbol or "ALL",
                 "lookback_days": lookback_days,
                 "sample_size": len(pnls),
                 "error": "Need at least 10 closed trades.",
-            }
+            })
 
         n = len(pnls)
         wins = [p for p in pnls if p > 0]
@@ -53,7 +68,7 @@ class EdgeQualityService:
         window = min(20, n // 2)
         if window >= 5:
             rolling_wrs = []
-            for i in range(window, n):
+            for i in range(window, n + 1):
                 w = pnls[i - window : i]
                 rolling_wrs.append(sum(1 for p in w if p > 0) / window)
             wr_std = _std(rolling_wrs)
@@ -77,9 +92,12 @@ class EdgeQualityService:
         sample_score = min(n / 100.0, 1.0) * 25
 
         composite = expectancy_score + consistency_score + dd_score + sample_score
+        if expectancy <= 0:
+            # Stable losses and a large sample are not evidence of an edge.
+            composite = min(composite, 34.99)
         grade = _grade(composite)
 
-        return {
+        return analytics_response(sample, {
             "symbol": symbol or "ALL",
             "lookback_days": lookback_days,
             "sample_size": n,
@@ -98,19 +116,7 @@ class EdgeQualityService:
                 "max_drawdown": round(max_dd, 2),
             },
             "recommendation": _recommend(grade, composite),
-        }
-
-    def _fetch_pnls(self, symbol: str | None, days: int) -> list[float]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        stmt = select(OrderRecord.net_pnl).where(
-            OrderRecord.net_pnl.is_not(None),
-            OrderRecord.filled_at >= cutoff,
-        )
-        if symbol:
-            stmt = stmt.where(OrderRecord.symbol == symbol)
-        stmt = stmt.order_by(OrderRecord.filled_at.asc())
-        rows = self._db.scalars(stmt).all()
-        return [float(r) for r in rows if r is not None]
+        })
 
 
 def _std(vals: list[float]) -> float:

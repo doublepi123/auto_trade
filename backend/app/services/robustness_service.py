@@ -9,14 +9,15 @@ robustness testing.
 """
 from __future__ import annotations
 
-import math
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import OrderRecord
+from app.services.analytics_trade_sample_service import (
+    analytics_response,
+    load_analytics_trade_sample,
+    mixed_currency_error,
+)
 
 __all__ = ["RobustnessService"]
 
@@ -30,19 +31,36 @@ class RobustnessService:
     def score(
         self, symbol: str | None = None, lookback_days: int = 365
     ) -> dict[str, Any]:
-        pnls = self._fetch_pnls(symbol, lookback_days)
+        normalized_symbol = (
+            symbol.strip().upper() if symbol and symbol.strip() else None
+        )
+        sample = load_analytics_trade_sample(
+            self._db,
+            symbol=normalized_symbol,
+            lookback_days=lookback_days,
+        )
+        pnls = [trade.net_pnl for trade in sample.trades]
+        currency_error = mixed_currency_error(
+            sample,
+            symbol=normalized_symbol,
+            lookback_days=lookback_days,
+        )
+        if currency_error is not None:
+            return currency_error
         if len(pnls) < 20:
-            return {
-                "symbol": symbol or "ALL",
-                "lookback_days": lookback_days,
-                "sample_size": len(pnls),
-                "error": "Need at least 20 closed trades.",
-            }
+            return analytics_response(
+                sample,
+                {
+                    "symbol": normalized_symbol or "ALL",
+                    "lookback_days": lookback_days,
+                    "sample_size": len(pnls),
+                    "error": "Need at least 20 closed trades.",
+                },
+            )
 
         n = len(pnls)
         total_pnl = sum(pnls)
         wins = [p for p in pnls if p > 0]
-        losses = [p for p in pnls if p < 0]
 
         # Factor 1: Sub-period stability (split into 4 quarters)
         q = n // 4
@@ -56,7 +74,13 @@ class RobustnessService:
         sorted_wins = sorted(wins, reverse=True)
         top3_wins = sum(sorted_wins[:3]) if len(sorted_wins) >= 3 else sum(sorted_wins)
         pnl_without_top3 = total_pnl - top3_wins
-        outlier_score = 30.0 if pnl_without_top3 > 0 else (15.0 if pnl_without_top3 > -top3_wins * 0.5 else 0.0)
+        outlier_score = (
+            30.0
+            if pnl_without_top3 > 0
+            else 15.0
+            if pnl_without_top3 > -top3_wins * 0.5
+            else 0.0
+        )
 
         # Factor 3: Win-rate consistency across halves
         first_half = pnls[: n // 2]
@@ -69,36 +93,60 @@ class RobustnessService:
         # Factor 4: Sample adequacy (max 20 pts)
         sample_score = min(n / 200.0, 1.0) * 20
 
-        composite = stability_score + outlier_score + consistency_score + sample_score
-        grade = _grade(composite)
-
-        return {
-            "symbol": symbol or "ALL",
-            "lookback_days": lookback_days,
-            "sample_size": n,
-            "composite_score": round(composite, 2),
-            "grade": grade,
-            "factors": {
-                "sub_period_stability": {"score": round(stability_score, 2), "max": 30, "detail": f"{positive_quarters}/4 quarters positive"},
-                "outlier_independence": {"score": round(outlier_score, 2), "max": 30, "detail": f"PnL w/o top3 wins: {pnl_without_top3:.2f}"},
-                "wr_consistency": {"score": round(consistency_score, 2), "max": 20, "detail": f"WR diff: {wr_diff:.3f} ({wr1:.3f} vs {wr2:.3f})"},
-                "sample_adequacy": {"score": round(sample_score, 2), "max": 20, "detail": f"n={n}"},
-            },
-            "quarter_pnls": [round(qp, 2) for qp in quarter_pnls],
-            "recommendation": _recommend(grade),
-        }
-
-    def _fetch_pnls(self, symbol: str | None, days: int) -> list[float]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        stmt = select(OrderRecord.net_pnl).where(
-            OrderRecord.net_pnl.is_not(None),
-            OrderRecord.filled_at >= cutoff,
+        composite = (
+            stability_score
+            + outlier_score
+            + consistency_score
+            + sample_score
         )
-        if symbol:
-            stmt = stmt.where(OrderRecord.symbol == symbol)
-        stmt = stmt.order_by(OrderRecord.filled_at.asc())
-        rows = self._db.scalars(stmt).all()
-        return [float(r) for r in rows if r is not None]
+        # Stability of a losing process is not evidence of a durable edge.
+        # Fail closed instead of awarding B/C/D solely for consistency/sample.
+        if total_pnl <= 0:
+            composite = min(composite, 29.99)
+            grade = "F"
+        else:
+            grade = _grade(composite)
+
+        return analytics_response(
+            sample,
+            {
+                "symbol": normalized_symbol or "ALL",
+                "lookback_days": lookback_days,
+                "sample_size": n,
+                "total_pnl": round(total_pnl, 2),
+                "composite_score": round(composite, 2),
+                "grade": grade,
+                "factors": {
+                    "sub_period_stability": {
+                        "score": round(stability_score, 2),
+                        "max": 30,
+                        "detail": f"{positive_quarters}/4 quarters positive",
+                    },
+                    "outlier_independence": {
+                        "score": round(outlier_score, 2),
+                        "max": 30,
+                        "detail": (
+                            f"PnL w/o top3 wins: {pnl_without_top3:.2f}"
+                        ),
+                    },
+                    "wr_consistency": {
+                        "score": round(consistency_score, 2),
+                        "max": 20,
+                        "detail": (
+                            f"WR diff: {wr_diff:.3f} "
+                            f"({wr1:.3f} vs {wr2:.3f})"
+                        ),
+                    },
+                    "sample_adequacy": {
+                        "score": round(sample_score, 2),
+                        "max": 20,
+                        "detail": f"n={n}",
+                    },
+                },
+                "quarter_pnls": [round(qp, 2) for qp in quarter_pnls],
+                "recommendation": _recommend(grade, total_pnl=total_pnl),
+            },
+        )
 
 
 def _grade(score: float) -> str:
@@ -113,7 +161,12 @@ def _grade(score: float) -> str:
     return "F"
 
 
-def _recommend(grade: str) -> str:
+def _recommend(grade: str, *, total_pnl: float) -> str:
+    if total_pnl <= 0:
+        return (
+            "Not robust — aggregate net PnL is non-positive, so consistency "
+            "cannot be treated as a reliable strategy edge."
+        )
     if grade == "A":
         return "Highly robust — edge persists across sub-periods and is not outlier-dependent."
     if grade == "B":

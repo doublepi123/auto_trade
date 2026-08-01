@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import date, datetime
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -994,13 +996,112 @@ class StrategyV2WarmupDiagnostic(BaseModel):
     variants: list[StrategyV2WarmupVariant] = Field(default_factory=list)
 
 
+class StrategyV2BoundaryNeutralDiagnosticRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    config_version: Optional[str] = Field(default=None, max_length=64)
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_boundary_neutral_symbol(cls, value: str) -> str:
+        return _normalize_symbol(value)
+
+
+class StrategyV2BoundaryNeutralCandidateSpec(BaseModel):
+    schema_version: Literal[1] = 1
+    algorithm_version: Literal[
+        "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+    ] = "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+    legacy_algorithm_version: Literal[
+        "strategy-v2-causal-trend-prewarm-v1"
+    ] = "strategy-v2-causal-trend-prewarm-v1"
+    evaluation_scope: Literal["RETROSPECTIVE_DIAGNOSTIC_ONLY"] = (
+        "RETROSPECTIVE_DIAGNOSTIC_ONLY"
+    )
+    boundary_rule: Literal[
+        "SEED_TARGET_FIRST_5M_DM_ZERO_TR_TARGET_RANGE"
+    ] = "SEED_TARGET_FIRST_5M_DM_ZERO_TR_TARGET_RANGE"
+    warmup_scope: Literal["ADX_VOL_ONLY"] = "ADX_VOL_ONLY"
+    target_sample: Literal["SAME_PERSISTED_TARGET_BARS"] = (
+        "SAME_PERSISTED_TARGET_BARS"
+    )
+    observation_schedule: Literal["SAME_PERSISTED_OBSERVED_AT"] = (
+        "SAME_PERSISTED_OBSERVED_AT"
+    )
+    fee_slippage: Literal["SAME_FROZEN_SOURCE_CONFIG"] = (
+        "SAME_FROZEN_SOURCE_CONFIG"
+    )
+    retrospective_results_forward_eligible: Literal[False] = False
+    forward_evidence_requires_registration_before_target_open: Literal[True] = (
+        True
+    )
+    order_submission_allowed: Literal[False] = False
+    automatic_promotion_allowed: Literal[False] = False
+
+
+class StrategyV2BoundaryNeutralVariant(BaseModel):
+    label: Literal[
+        "SESSION_LOCAL_BASELINE",
+        "LEGACY_CAUSAL_TREND_PREWARM_V1",
+        "BOUNDARY_NEUTRAL_CAUSAL_TREND_PREWARM_V1",
+    ]
+    algorithm_version: str
+    warmup_scope: Literal["NONE", "ADX_VOL_ONLY"]
+    source_config_version: str
+    metrics: StrategyV2ShadowMetrics = Field(
+        default_factory=StrategyV2ShadowMetrics
+    )
+    daily: list[StrategyV2WarmupDaily] = Field(default_factory=list)
+
+
+class StrategyV2BoundaryNeutralDiagnosticResponse(BaseModel):
+    persisted: Literal[False] = False
+    mode: Literal["SHADOW"] = "SHADOW"
+    evaluation_scope: Literal["RETROSPECTIVE_DIAGNOSTIC_ONLY"] = (
+        "RETROSPECTIVE_DIAGNOSTIC_ONLY"
+    )
+    order_submission_allowed: Literal[False] = False
+    automatic_promotion_allowed: Literal[False] = False
+    retrospective_results_forward_eligible: Literal[False] = False
+    forward_evidence_requires_registration_before_target_open: Literal[True] = (
+        True
+    )
+    symbol: str
+    source_config_version: str
+    candidate_spec: StrategyV2BoundaryNeutralCandidateSpec = Field(
+        default_factory=StrategyV2BoundaryNeutralCandidateSpec
+    )
+    candidate_spec_sha256: str = Field(min_length=64, max_length=64)
+    status: Literal[
+        "INSUFFICIENT_EVIDENCE",
+        "READY_FOR_REVIEW",
+        "BLOCKED",
+    ]
+    minimum_causal_pairs: int = 5
+    observed_causal_pairs: int = 0
+    evaluated_causal_pairs: int = 0
+    blockers: list[str] = Field(default_factory=list)
+    baseline_replay_match: Optional[bool] = None
+    same_target_bars: Literal[True] = True
+    same_observation_schedule: Literal[True] = True
+    same_fee_slippage: Literal[True] = True
+    causal_history_only: Literal[True] = True
+    vwap_zscore_session_local: Literal[True] = True
+    retrospective_target_sessions: list[date] = Field(default_factory=list)
+    variants: list[StrategyV2BoundaryNeutralVariant] = Field(
+        default_factory=list
+    )
+
+
 class StrategyV2ForwardRegistrationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     symbol: str
     source_config_version: str = Field(min_length=64, max_length=64)
     candidate_algorithm_version: Literal[
-        "strategy-v2-causal-trend-prewarm-v1"
+        "strategy-v2-causal-trend-prewarm-v1",
+        "strategy-v2-causal-trend-prewarm-boundary-neutral-v1",
     ] = "strategy-v2-causal-trend-prewarm-v1"
     confirm_forward_only: Literal[True]
     confirm_no_automatic_promotion: Literal[True]
@@ -1025,7 +1126,8 @@ class StrategyV2ForwardRegistrationResponse(BaseModel):
     market: Literal["US", "HK"]
     market_timezone: str
     candidate_algorithm_version: Literal[
-        "strategy-v2-causal-trend-prewarm-v1"
+        "strategy-v2-causal-trend-prewarm-v1",
+        "strategy-v2-causal-trend-prewarm-boundary-neutral-v1",
     ]
     source_config_version: str
     evaluator_digest: str
@@ -1091,6 +1193,462 @@ class StrategyV2ForwardValidationResponse(BaseModel):
     daily: list[StrategyV2ForwardDailyEvidence] = Field(default_factory=list)
 
 
+TrustedFrozenSha256 = Annotated[
+    str,
+    Field(pattern=r"^[0-9a-f]{64}$"),
+]
+
+
+class TrustedFrozenTradeSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    closed_trades: int = Field(ge=0)
+    gross_pnl_decimal: str
+    gross_pnl_float_hex: str
+    fees_decimal: str
+    fees_float_hex: str
+    net_pnl_decimal: str
+    net_pnl_float_hex: str
+    closed_trade_entry_notional_decimal: str
+    net_return_bps: float | None = None
+    return_preimage_complete: bool
+    ordered_trade_preimage_sha256: TrustedFrozenSha256
+
+
+class TrustedFrozenDailyLeaf(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    symbol: str
+    role: str
+    config_hash: TrustedFrozenSha256
+    session_date: str
+    disposition: Literal[
+        "PENDING",
+        "MISSING",
+        "INCLUDED",
+        "EXCLUDED_NON_STRUCTURAL",
+        "EXCLUDED_STRUCTURAL",
+        "INVALID",
+    ]
+    exclusion_reason: str
+    structural_failure: bool
+    row_present_after_cutoff: bool
+    evidence_id: int | None = None
+    evidence_digest_sha256: TrustedFrozenSha256 | None = None
+    baseline_result_sha256: TrustedFrozenSha256 | None = None
+    candidate_result_sha256: TrustedFrozenSha256 | None = None
+    artifact_digest_sha256: TrustedFrozenSha256 | None = None
+    artifact_binding_sha256: TrustedFrozenSha256 | None = None
+    daily_binding_sha256: TrustedFrozenSha256 | None = None
+    baseline: TrustedFrozenTradeSummary | None = None
+    candidate: TrustedFrozenTradeSummary | None = None
+    blockers: list[str]
+    leaf_digest_sha256: TrustedFrozenSha256
+
+
+class TrustedFrozenSymbolReport(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    symbol: str
+    role: str
+    reason: str
+    config_hash: TrustedFrozenSha256
+    registration_id: int | None = None
+    candidate_algorithm_version: Literal[
+        "strategy-v2-causal-trend-prewarm-v1"
+    ] | None = None
+    evaluator_digest: Literal[
+        "e5ae9ea3e68dcc47d5131c21d8ba223824aecabf59da1f4b592df72cb9aa0294"
+    ] | None = None
+    registered_at: str | None = None
+    eligible_after: str | None = None
+    registration_blockers: list[str]
+    pre_window_rows_excluded: int = Field(ge=0)
+    post_window_rows_excluded: int = Field(ge=0)
+    expected_session_count: Literal[252]
+    evidence_root_sha256: TrustedFrozenSha256
+    leaves: list[TrustedFrozenDailyLeaf] = Field(
+        min_length=252,
+        max_length=252,
+    )
+
+
+class TrustedFrozenCandidateReport(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    symbol: str
+    role: str
+    reason: str
+    config_hash: TrustedFrozenSha256
+    status: Literal[
+        "INSUFFICIENT_EVIDENCE",
+        "READY_FOR_MANUAL_DISPROOF_REVIEW",
+    ]
+    evidence_review_ready: bool
+    promotion_eligible: Literal[False]
+    promotion_blockers: list[str]
+    expected_session_count: Literal[252]
+    candidate_included_sessions: int = Field(ge=0, le=252)
+    nvda_included_sessions: int = Field(ge=0, le=252)
+    paired_included_sessions: int = Field(ge=0, le=252)
+    candidate_expected_session_coverage_ratio: float = Field(ge=0, le=1)
+    nvda_expected_session_coverage_ratio: float = Field(ge=0, le=1)
+    paired_expected_session_coverage_ratio: float = Field(ge=0, le=1)
+    candidate_closed_trades: int = Field(ge=0)
+    remaining_candidate_closed_trades: int = Field(ge=0)
+    within_symbol_baseline: TrustedFrozenTradeSummary
+    within_symbol_candidate: TrustedFrozenTradeSummary
+    candidate_same_window: TrustedFrozenTradeSummary
+    nvda_same_window_control: TrustedFrozenTradeSummary
+    evidence_blockers: list[str]
+
+    @model_validator(mode="after")
+    def validate_candidate_readiness(self) -> "TrustedFrozenCandidateReport":
+        ready_status = self.status == "READY_FOR_MANUAL_DISPROOF_REVIEW"
+        if ready_status is not self.evidence_review_ready:
+            raise ValueError("candidate status and readiness are inconsistent")
+        required = {
+            "QUANT_CANDIDATE_VETO_NOT_VERIFIED",
+            "MANUAL_PROMOTION_REQUIRED",
+        }
+        if not required.issubset(self.promotion_blockers):
+            raise ValueError("candidate permanent promotion blockers are missing")
+        if self.evidence_review_ready:
+            if self.evidence_blockers or "EVIDENCE_REVIEW_NOT_READY" in self.promotion_blockers:
+                raise ValueError("ready candidate carries evidence blockers")
+        elif "EVIDENCE_REVIEW_NOT_READY" not in self.promotion_blockers:
+            raise ValueError("unready candidate lacks its promotion blocker")
+        return self
+
+
+class TrustedFrozenProducerCutoff(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    authority: Literal["SERVER_CLOCK_AND_STATIC_NYSE_CALENDAR"]
+    observed_at: str
+    complete_through: str | None = None
+    cutoff_at: str | None = None
+    finalization_delay_minutes: Literal[15]
+    cutoff_provenance_verified: Literal[True]
+    caller_cutoff_accepted: Literal[False]
+
+
+class TrustedFrozenFreezeIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: Literal["nasdaq-djia-disproof-2026-07-31"]
+    as_of_date: Literal["2026-07-31"]
+    freeze_digest: Literal[
+        "d2005f023cc9e1874609008a55c2b0d21d1d30647175ca607e60225e4f7ea69f"
+    ]
+    candidate_algorithm_version: Literal[
+        "strategy-v2-causal-trend-prewarm-v1"
+    ]
+    evaluator_digest: Literal[
+        "e5ae9ea3e68dcc47d5131c21d8ba223824aecabf59da1f4b592df72cb9aa0294"
+    ]
+    control_symbol: Literal["NVDA.US"]
+
+
+class TrustedFrozenAssessmentWindow(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    market: Literal["US"]
+    first_expected_session_date: Literal["2026-08-03"]
+    last_expected_session_date: Literal["2027-08-03"]
+    expected_session_count: Literal[252]
+    expected_session_dates: list[str] = Field(
+        min_length=252,
+        max_length=252,
+    )
+    expected_session_digest: Literal[
+        "3378303933970bc8dfc2bfb310ef3d98623d7e6a906e004353cc243a159621d0"
+    ]
+    denominator_is_fixed: Literal[True]
+    missing_and_excluded_count_in_denominator: Literal[True]
+
+
+class TrustedFrozenEvidenceThresholds(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    minimum_future_trade_days: Literal[20]
+    minimum_closed_trades_per_candidate: Literal[50]
+    minimum_expected_session_coverage_ratio: float = Field(ge=0.95, le=0.95)
+    full_replay_verified_required: Literal[True]
+    source_trace_archive_promotion_grade: Literal[False]
+    quant_candidate_required_for_promotion: Literal[True]
+    manual_promotion_required: Literal[True]
+    thresholds_tunable: Literal[False]
+
+
+class TrustedFrozenAssessmentReport(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    schema_version: Literal[
+        "strategy-v2-frozen-forward-disproof-trusted-report-v3"
+    ]
+    algorithm_version: Literal[
+        "strategy-v2-frozen-forward-disproof-trusted-algorithm-v3"
+    ]
+    policy_version: Literal[
+        "strategy-v2-frozen-forward-disproof-trusted-assessment-v3"
+    ]
+    status: Literal[
+        "INSUFFICIENT_EVIDENCE",
+        "READY_FOR_MANUAL_DISPROOF_REVIEW",
+    ]
+    generated_at: str
+    authority_mode: Literal["ONLINE_SERVER_DB_DIRECT_READ"]
+    caller_authority_accepted: Literal[False]
+    portable_attestation_verified: Literal[False]
+    research_only: Literal[True]
+    live_equivalent: Literal[False]
+    order_submission_allowed: Literal[False]
+    automatic_promotion_allowed: Literal[False]
+    automatic_disproof_decision_allowed: Literal[False]
+    evidence_review_ready: bool
+    promotion_eligible: Literal[False]
+    promotion_blockers: list[str]
+    producer_cutoff: TrustedFrozenProducerCutoff
+    freeze: TrustedFrozenFreezeIdentity
+    assessment_window: TrustedFrozenAssessmentWindow
+    evidence_thresholds: TrustedFrozenEvidenceThresholds
+    symbols: list[TrustedFrozenSymbolReport] = Field(
+        min_length=6,
+        max_length=6,
+    )
+    candidates: list[TrustedFrozenCandidateReport] = Field(
+        min_length=5,
+        max_length=5,
+    )
+    report_digest_sha256: TrustedFrozenSha256
+
+    @model_validator(mode="after")
+    def validate_frozen_report(self) -> "TrustedFrozenAssessmentReport":
+        from decimal import Decimal, InvalidOperation
+
+        from app.domain.strategy_v2.frozen_disproof_queue import (
+            CONTROL_SYMBOL,
+            FROZEN_QUEUE_ENTRIES,
+        )
+        from app.domain.strategy_v2.trusted_frozen_assessment import (
+            TrustedDailyLeaf as DomainDailyLeaf,
+            TrustedProducerCutoff as DomainProducerCutoff,
+            TrustedSymbolEvidence as DomainSymbolEvidence,
+            TrustedTradeSummary as DomainTradeSummary,
+            build_trusted_assessment_report,
+        )
+
+        expected = {
+            symbol: (role, reason, config_hash)
+            for symbol, role, reason, config_hash in FROZEN_QUEUE_ENTRIES
+        }
+        by_symbol = {item.symbol: item for item in self.symbols}
+        if len(by_symbol) != 6 or set(by_symbol) != set(expected):
+            raise ValueError("trusted report symbol cohort is invalid")
+        expected_dates = self.assessment_window.expected_session_dates
+        dates_digest = hashlib.sha256(
+            "\n".join(expected_dates).encode("ascii")
+        ).hexdigest()
+        if dates_digest != self.assessment_window.expected_session_digest:
+            raise ValueError("trusted report session schedule digest is invalid")
+        for symbol, (role, reason, config_hash) in expected.items():
+            item = by_symbol[symbol]
+            if (
+                item.role != role
+                or item.reason != reason
+                or item.config_hash != config_hash
+                or [leaf.session_date for leaf in item.leaves] != expected_dates
+                or any(
+                    leaf.symbol != symbol
+                    or leaf.role != role
+                    or leaf.config_hash != config_hash
+                    for leaf in item.leaves
+                )
+            ):
+                raise ValueError("trusted report symbol evidence identity is invalid")
+        expected_candidates = set(expected) - {CONTROL_SYMBOL}
+        candidate_symbols = [item.symbol for item in self.candidates]
+        if (
+            candidate_symbols != sorted(expected_candidates)
+            or set(candidate_symbols) != expected_candidates
+        ):
+            raise ValueError("trusted report candidate cohort is invalid")
+        for candidate in self.candidates:
+            role, reason, config_hash = expected[candidate.symbol]
+            symbol_report = by_symbol[candidate.symbol]
+            if (
+                candidate.role != role
+                or candidate.reason != reason
+                or candidate.config_hash != config_hash
+                or candidate.role != symbol_report.role
+                or candidate.reason != symbol_report.reason
+                or candidate.config_hash != symbol_report.config_hash
+            ):
+                raise ValueError(
+                    "trusted report candidate frozen identity is invalid"
+                )
+        all_ready = all(item.evidence_review_ready for item in self.candidates)
+        if (
+            self.evidence_review_ready is not all_ready
+            or (self.status == "READY_FOR_MANUAL_DISPROOF_REVIEW") is not all_ready
+        ):
+            raise ValueError("trusted report status and readiness are inconsistent")
+        required = {
+            "QUANT_CANDIDATE_VETO_NOT_VERIFIED",
+            "MANUAL_PROMOTION_REQUIRED",
+        }
+        if not required.issubset(self.promotion_blockers):
+            raise ValueError("trusted report permanent blockers are missing")
+        if all_ready:
+            if "EVIDENCE_REVIEW_NOT_READY" in self.promotion_blockers:
+                raise ValueError("ready report carries an evidence blocker")
+        elif "EVIDENCE_REVIEW_NOT_READY" not in self.promotion_blockers:
+            raise ValueError("unready report lacks its evidence blocker")
+        model_payload = self.model_dump(mode="python")
+        digest_payload = dict(model_payload)
+        claimed_digest = str(digest_payload.pop("report_digest_sha256"))
+        encoded = json.dumps(
+            digest_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        if hashlib.sha256(encoded).hexdigest() != claimed_digest:
+            raise ValueError("trusted report digest is invalid")
+
+        def domain_summary(
+            item: TrustedFrozenTradeSummary | None,
+        ) -> DomainTradeSummary | None:
+            if item is None:
+                return None
+            return DomainTradeSummary(
+                closed_trades=item.closed_trades,
+                gross_pnl=float.fromhex(item.gross_pnl_float_hex),
+                fees=float.fromhex(item.fees_float_hex),
+                net_pnl=float.fromhex(item.net_pnl_float_hex),
+                entry_notional=Decimal(
+                    item.closed_trade_entry_notional_decimal
+                ),
+                ordered_trade_preimage_sha256=(
+                    item.ordered_trade_preimage_sha256
+                ),
+            )
+
+        try:
+            domain_symbols = tuple(
+                DomainSymbolEvidence(
+                    symbol=item.symbol,
+                    role=item.role,
+                    reason=item.reason,
+                    config_hash=item.config_hash,
+                    registration_id=item.registration_id,
+                    candidate_algorithm_version=(
+                        item.candidate_algorithm_version
+                    ),
+                    evaluator_digest=item.evaluator_digest,
+                    registered_at=(
+                        datetime.fromisoformat(item.registered_at)
+                        if item.registered_at is not None
+                        else None
+                    ),
+                    eligible_after=(
+                        datetime.fromisoformat(item.eligible_after)
+                        if item.eligible_after is not None
+                        else None
+                    ),
+                    registration_blockers=tuple(
+                        item.registration_blockers
+                    ),
+                    pre_window_rows_excluded=(
+                        item.pre_window_rows_excluded
+                    ),
+                    post_window_rows_excluded=(
+                        item.post_window_rows_excluded
+                    ),
+                    leaves=tuple(
+                        DomainDailyLeaf(
+                            symbol=leaf.symbol,
+                            role=leaf.role,
+                            config_hash=leaf.config_hash,
+                            session_date=date.fromisoformat(
+                                leaf.session_date
+                            ),
+                            disposition=leaf.disposition,
+                            exclusion_reason=leaf.exclusion_reason,
+                            structural_failure=leaf.structural_failure,
+                            row_present_after_cutoff=(
+                                leaf.row_present_after_cutoff
+                            ),
+                            evidence_id=leaf.evidence_id,
+                            evidence_digest_sha256=(
+                                leaf.evidence_digest_sha256
+                            ),
+                            baseline_result_sha256=(
+                                leaf.baseline_result_sha256
+                            ),
+                            candidate_result_sha256=(
+                                leaf.candidate_result_sha256
+                            ),
+                            artifact_digest_sha256=(
+                                leaf.artifact_digest_sha256
+                            ),
+                            artifact_binding_sha256=(
+                                leaf.artifact_binding_sha256
+                            ),
+                            daily_binding_sha256=(
+                                leaf.daily_binding_sha256
+                            ),
+                            baseline=domain_summary(leaf.baseline),
+                            candidate=domain_summary(leaf.candidate),
+                            blockers=tuple(leaf.blockers),
+                            leaf_digest_sha256=(
+                                leaf.leaf_digest_sha256
+                            ),
+                        )
+                        for leaf in item.leaves
+                    ),
+                )
+                for item in self.symbols
+            )
+            cutoff = DomainProducerCutoff(
+                observed_at=datetime.fromisoformat(
+                    self.producer_cutoff.observed_at
+                ),
+                complete_through=(
+                    date.fromisoformat(
+                        self.producer_cutoff.complete_through
+                    )
+                    if self.producer_cutoff.complete_through is not None
+                    else None
+                ),
+                cutoff_at=(
+                    datetime.fromisoformat(self.producer_cutoff.cutoff_at)
+                    if self.producer_cutoff.cutoff_at is not None
+                    else None
+                ),
+            )
+            rebuilt = build_trusted_assessment_report(
+                domain_symbols,
+                producer_cutoff=cutoff,
+            )
+        except (
+            InvalidOperation,
+            OverflowError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise ValueError(
+                "trusted report domain attestation is invalid"
+            ) from exc
+        if rebuilt != model_payload:
+            raise ValueError(
+                "trusted report does not match its canonical domain rebuild"
+            )
+        return self
+
+
 class StrategyV2ExitChallengerVariant(BaseModel):
     registration_id: int
     algorithm_version: str
@@ -1118,6 +1676,9 @@ class StrategyV2ExitChallengerVariant(BaseModel):
     challenger_net_pnl: float = 0.0
     net_pnl_delta: float = 0.0
     mean_net_pnl_delta: float = 0.0
+    baseline_mean_holding_minutes: float = 0.0
+    challenger_mean_holding_minutes: float = 0.0
+    mean_holding_minutes_saved: float = 0.0
     baseline_max_drawdown: float = 0.0
     challenger_max_drawdown: float = 0.0
     minimum_ready_pairs: Literal[20] = 20
@@ -1197,8 +1758,10 @@ class LiveExitChallengerVariant(BaseModel):
     registration_id: int
     algorithm_version: str
     evaluator_digest: str
+    policy_type: Literal["PROFIT_LOCK", "TIME_STOP"] = "PROFIT_LOCK"
     activation_pct: float
     locked_profit_pct: float
+    max_holding_minutes: Optional[int] = None
     slippage_bps: float
     registered_at: datetime
     eligible_after: datetime
@@ -1208,6 +1771,7 @@ class LiveExitChallengerVariant(BaseModel):
     open_trades: int = 0
     awaiting_baseline_trades: int = 0
     profit_lock_exits: int = 0
+    time_stop_exits: int = 0
     improved_trades: int = 0
     worsened_trades: int = 0
     unchanged_trades: int = 0
@@ -1217,11 +1781,15 @@ class LiveExitChallengerVariant(BaseModel):
     challenger_net_pnl: float = 0.0
     net_pnl_delta: float = 0.0
     mean_net_pnl_delta: float = 0.0
+    baseline_mean_holding_minutes: float = 0.0
+    challenger_mean_holding_minutes: float = 0.0
+    mean_holding_minutes_saved: float = 0.0
     baseline_max_drawdown: float = 0.0
     challenger_max_drawdown: float = 0.0
     minimum_ready_pairs: Literal[20] = 20
     minimum_mature_pairs: Literal[50] = 50
     minimum_profit_lock_exits: Literal[5] = 5
+    minimum_time_stop_exits: Literal[5] = 5
     promotion_ready: bool = False
     blockers: list[str] = Field(default_factory=list)
 
@@ -1897,11 +2465,16 @@ class BrokerBuyingPowerResponse(BaseModel):
 
 class BacktestParams(BaseModel):
     symbol: str = Field(default="", max_length=50)
+    market: Literal["US", "HK"] = "US"
+    trading_session_mode: Literal["ANY", "RTH_ONLY"] = "ANY"
+    opening_warmup_minutes: int = Field(default=0, ge=0, le=390)
+    entry_crossing_required: bool = False
+    max_entries_per_symbol_per_day: int = Field(default=0, ge=0, le=1_000)
     buy_low: float = Field(gt=0)
     sell_high: float = Field(gt=0)
     short_selling: bool = Field(default=False)
     min_profit_amount: float = Field(default=0.0, ge=0)
-    max_daily_loss: float = Field(default=5000.0, gt=0)
+    max_daily_loss: float = Field(default=5000.0, ge=0, allow_inf_nan=False)
     max_drawdown_amount: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     max_consecutive_losses: int = Field(default=3, ge=1)
     quantity: float = Field(default=1.0, gt=0)
@@ -1911,6 +2484,25 @@ class BacktestParams(BaseModel):
     slippage_pct: float = Field(default=0.0, ge=0, le=5)
     stop_loss_pct: float = Field(default=0.0, ge=0, le=100)
     trailing_stop_pct: float = Field(default=0.0, ge=0, le=100)
+    max_holding_minutes: int = Field(default=0, ge=0, le=10_080)
+    entry_cutoff_minutes_before_close: int = Field(default=0, ge=0, le=180)
+    flatten_minutes_before_close: int = Field(default=0, ge=0, le=180)
+
+    @model_validator(mode="before")
+    @classmethod
+    def infer_legacy_backtest_market(cls, data: Any) -> Any:
+        # ``market`` did not exist in older persisted backtest/experiment JSON.
+        # Preserve those records by inferring the only unambiguous suffixes;
+        # an explicitly supplied mismatch is still rejected below.
+        if not isinstance(data, dict) or "market" in data:
+            return data
+        symbol = str(data.get("symbol") or "").strip().upper()
+        suffix = symbol.rsplit(".", 1)[-1] if "." in symbol else ""
+        if suffix not in {"US", "HK"}:
+            return data
+        normalized = dict(data)
+        normalized["market"] = suffix
+        return normalized
 
     @field_validator("symbol")
     @classmethod
@@ -1927,6 +2519,22 @@ class BacktestParams(BaseModel):
         if buy_low is not None and v <= buy_low:
             raise ValueError("sell_high must be greater than buy_low")
         return v
+
+    @model_validator(mode="after")
+    def validate_backtest_execution_windows(self) -> "BacktestParams":
+        if self.symbol:
+            _validate_symbol_market_pair(self.symbol, self.market)
+        if (
+            self.entry_cutoff_minutes_before_close > 0
+            and self.flatten_minutes_before_close > 0
+            and self.flatten_minutes_before_close
+            > self.entry_cutoff_minutes_before_close
+        ):
+            raise ValueError(
+                "flatten_minutes_before_close must not exceed "
+                "entry_cutoff_minutes_before_close"
+            )
+        return self
 
 
 class BacktestRunRequest(BaseModel):
@@ -2567,7 +3175,11 @@ class StrategyExperimentCreate(BaseModel):
     _ALLOWED_GRID_KEYS: set[str] = {
         "buy_low", "sell_high", "min_profit_amount", "max_daily_loss",
         "max_consecutive_losses", "quantity", "initial_cash", "fee_rate",
-        "fixed_fee", "slippage_pct", "stop_loss_pct",
+        "fixed_fee", "slippage_pct", "stop_loss_pct", "trailing_stop_pct",
+        "opening_warmup_minutes", "entry_crossing_required",
+        "max_entries_per_symbol_per_day",
+        "max_holding_minutes", "entry_cutoff_minutes_before_close",
+        "flatten_minutes_before_close",
     }
 
     @field_validator("symbol")
@@ -3018,6 +3630,45 @@ class UniverseRotationMetrics(BaseModel):
     exclusion_reasons: list[str] = Field(default_factory=list, max_length=50)
 
 
+class UniverseObservationHealthComponent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: Literal[
+        "UNIVERSE_SELECTION",
+        "ROTATION_FORWARD_PRECOMMITMENT",
+        "WATCHLIST_QUANT",
+        "DIVERSIFIED_PRIORITY_OBSERVATION",
+        "GROWTH_SATELLITE_OBSERVATION",
+        "LIVE_INTERVAL_ALIGNMENT",
+        "LIVE_EXIT_CHALLENGER",
+        "STRATEGY_V2_EXIT_CHALLENGER",
+        "STRATEGY_V2_FORWARD",
+        "PORTFOLIO_ROUTING",
+        "OPENING_MOMENTUM_SHADOW",
+        "OPENING_MOMENTUM_EXECUTION",
+    ]
+    status: Literal["HEALTHY", "WARNING", "DEGRADED", "DISABLED"]
+    latest_at: Optional[datetime] = None
+    age_seconds: Optional[float] = Field(default=None, ge=0)
+    latest_session_date: Optional[date] = None
+    expected_session_date: Optional[date] = None
+    observed_count: int = Field(default=0, ge=0)
+    expected_count: int = Field(default=0, ge=0)
+    coverage_ratio: Optional[float] = Field(default=None, ge=0, le=1)
+    blockers: list[str] = Field(default_factory=list)
+
+
+class UniverseObservationHealthResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    generated_at: datetime
+    status: Literal["HEALTHY", "WARNING", "DEGRADED"]
+    order_submission_allowed: Literal[False] = False
+    automatic_promotion_allowed: Literal[False] = False
+    components: list[UniverseObservationHealthComponent]
+    blockers: list[str] = Field(default_factory=list)
+
+
 class UniverseSelectionMetrics(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -3154,6 +3805,12 @@ class UniverseSelectionRunResponse(BaseModel):
 
 class UniversePromotionReadinessItem(BaseModel):
     symbol: str = Field(min_length=1, max_length=50)
+    memberships: list[Literal["NASDAQ_100", "DJIA"]] = Field(
+        default_factory=list,
+        max_length=2,
+    )
+    sector: str = Field(default="", max_length=100)
+    risk_group: str = Field(default="", max_length=100)
     universe_role: Literal[
         "SELECTED",
         "EXPLORATION",
@@ -3170,6 +3827,18 @@ class UniversePromotionReadinessItem(BaseModel):
         ge=0,
         le=100,
         allow_inf_nan=False,
+    )
+    diversified_observation_selected: bool = False
+    diversified_observation_rank: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=8,
+    )
+    growth_satellite_selected: bool = False
+    growth_satellite_rank: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=4,
     )
     quant_weight: float = Field(
         ge=0,
@@ -3199,6 +3868,11 @@ class UniversePromotionReadinessItem(BaseModel):
     quant_source: str = ""
     quant_fresh: bool = False
     quant_expires_at: Optional[datetime] = None
+    estimated_round_trip_cost_bps: Optional[float] = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
     forward_status: Literal[
         "NOT_REGISTERED",
         "FROZEN",
@@ -3231,6 +3905,8 @@ class UniversePromotionReadinessResponse(BaseModel):
     as_of_date: date
     generated_at: datetime
     priority_algorithm_version: str = Field(min_length=1, max_length=100)
+    diversified_observation_limit: Literal[8] = 8
+    growth_satellite_limit: Literal[4] = 4
     items: list[UniversePromotionReadinessItem] = Field(
         default_factory=list,
     )

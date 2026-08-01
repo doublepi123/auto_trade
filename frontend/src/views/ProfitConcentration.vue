@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { getProfitConcentrationSummary, type ProfitConcentrationResult } from '../api/profitConcentration'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 
 const loading = ref(false)
 const result = ref<ProfitConcentrationResult | null>(null)
@@ -48,6 +49,7 @@ const diagPath = 'M0,200 L560,0'
     </el-card>
 
     <template v-if="result">
+      <StatisticsQualityAlert :quality="result.statistics_quality" style="margin-top: 16px" />
       <el-alert v-if="result.error" :title="result.error" type="warning" :closable="false" style="margin-top: 16px" />
 
       <template v-else>

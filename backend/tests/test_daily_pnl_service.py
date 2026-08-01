@@ -5,7 +5,6 @@ from datetime import date, datetime, time, timezone
 from pytest import approx
 import pytest
 from pytest import LogCaptureFixture
-from sqlalchemy import event
 
 from app import database
 from app.models import OrderRecord, RuntimeStateSnapshot
@@ -93,7 +92,7 @@ class TestDailyPnlService:
         assert trip.exit_cause == "TIME_STOP"
         db.close()
 
-    def test_reuses_persisted_excursions_without_snapshot_query(self) -> None:
+    def test_revalidates_persisted_excursions_against_interior_snapshots(self) -> None:
         self._cleanup()
         trade_day = date(2026, 7, 11)
         entry_at = self._dt(trade_day, 10)
@@ -147,36 +146,18 @@ class TestDailyPnlService:
         without_excursions = DailyPnlService(db).pair_round_trips(
             include_excursions=False
         )[0]
-        statements: list[str] = []
+        trip = DailyPnlService(db).pair_round_trips()[0]
 
-        def capture_statement(
-            _connection: object,
-            _cursor: object,
-            statement: str,
-            _parameters: object,
-            _context: object,
-            _executemany: bool,
-        ) -> None:
-            statements.append(statement)
-
-        event.listen(database.engine, "before_cursor_execute", capture_statement)
-        try:
-            trip = DailyPnlService(db).pair_round_trips()[0]
-        finally:
-            event.remove(database.engine, "before_cursor_execute", capture_statement)
-
-        assert trip.mfe_amount == approx(42)
-        assert trip.mae_amount == approx(-7)
-        assert trip.mfe_pct == approx(4.2)
-        assert trip.mae_pct == approx(-0.7)
+        assert trip.mfe_amount == approx(500)
+        assert trip.mae_amount == approx(-500)
+        assert trip.mfe_pct == approx(50)
+        assert trip.mae_pct == approx(-50)
+        assert trip.excursion_source == "SNAPSHOT_OBSERVED"
+        assert trip.excursion_interior_observation_count == 2
         assert without_excursions.mfe_amount is None
         assert without_excursions.mae_amount is None
         assert without_excursions.mfe_pct is None
         assert without_excursions.mae_pct is None
-        assert not any(
-            "runtime_state_snapshots" in statement.lower()
-            for statement in statements
-        )
         db.close()
 
     def test_zero_actual_fee_uses_persisted_estimate_or_fee_schedule_once(
@@ -1788,3 +1769,42 @@ class TestDailyPnlService:
             "round-trip close of" in record.message
             for record in caplog.records
         )
+
+    def test_nan_price_on_claimed_order_record_is_structured_invalid_fill(self) -> None:
+        trade_day = date(2026, 7, 31)
+        order = OrderRecord(
+            id=901,
+            broker_order_id="nan-price-fill",
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=1,
+            price=100,
+            executed_quantity=1,
+            executed_price=float("nan"),
+            status="FILLED",
+            created_at=self._dt(trade_day, 10),
+            filled_at=self._dt(trade_day, 10),
+        )
+
+        class _OrderQuery:
+            def filter(self, *_args: object) -> "_OrderQuery":
+                return self
+
+            def all(self) -> list[OrderRecord]:
+                return [order]
+
+        class _ReplayDb:
+            def query(self, *_args: object) -> _OrderQuery:
+                return _OrderQuery()
+
+        replay = DailyPnlService(_ReplayDb()).pair_round_trips_with_issues(
+            include_excursions=False,
+        )
+
+        assert replay.trades == []
+        assert len(replay.issues) == 1
+        issue = replay.issues[0]
+        assert issue.issue_code is PnlReplayIssueCode.INVALID_FILL_EVIDENCE
+        assert issue.filled_quantity == 1
+        assert issue.matched_quantity == 0
+        assert issue.unmatched_quantity == 1

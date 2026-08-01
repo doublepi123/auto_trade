@@ -1,6 +1,7 @@
-"""Drawdown duration API (GET /api/drawdown-duration/*).
+"""Window-local underwater duration API (GET /api/drawdown-duration/*).
 
-Read-only drawdown episode duration analytics.  Never writes.
+Read-only completed-recovery analytics with boundary and open runs reported
+as censored. The pre-window high-water mark is not available. Never writes.
 """
 from __future__ import annotations
 
@@ -26,5 +27,5 @@ def analyze_duration(
     lookback_days: int = Query(default=365, ge=7, le=3650),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Analyze drawdown episode duration distribution."""
+    """Analyze fully observed window-local recovery durations."""
     return DrawdownDurationService(db).analyze(symbol=symbol, lookback_days=lookback_days)

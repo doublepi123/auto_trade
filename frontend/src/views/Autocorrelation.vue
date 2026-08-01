@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { getAutocorrelation, type AutocorrelationResult } from '../api/autocorrelation'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 
 const loading = ref(false)
 const result = ref<AutocorrelationResult | null>(null)
@@ -39,7 +40,7 @@ function patternType(p: string): 'success' | 'warning' | 'info' | 'danger' {
 <template>
   <div class="page-container">
     <h2>PnL 自相关</h2>
-    <p class="page-desc">检测交易收益序列的动量或均值回归模式（灵感来自 VectorBT / QuantStats）</p>
+    <p class="page-desc">检测交易收益序列的动量或均值回归模式；零方差样本会明确标记为退化，不解释为独立</p>
 
     <el-card class="control-card">
       <el-form inline>
@@ -59,6 +60,7 @@ function patternType(p: string): 'success' | 'warning' | 'info' | 'danger' {
     </el-card>
 
     <template v-if="result">
+      <StatisticsQualityAlert :quality="result.statistics_quality" />
       <el-alert v-if="result.error" :title="result.error" type="warning" :closable="false" style="margin-top: 16px" />
 
       <template v-else>

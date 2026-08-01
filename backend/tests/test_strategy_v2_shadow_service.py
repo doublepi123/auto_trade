@@ -4,22 +4,38 @@ import json
 import math
 import random
 from datetime import date, datetime, timedelta, timezone
+from typing import Any
+
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 import app.services.strategy_v2_shadow_service as shadow_service_module
 from app.core.broker import BrokerCandle
+from app.core.market_calendar import next_session_open
 from app.domain.strategy_v2 import (
+    BoundaryNeutralCausalTrendPrewarmFeatureEngine,
     CausalTrendPrewarmFeatureEngine,
     StrategyBar,
     StrategyV2Action,
     StrategyV2Decision,
+    StrategyV2Engine,
     StrategyV2EngineSnapshot,
     StrategyV2FeatureSnapshot,
     StrategyV2State,
     VirtualPosition,
+)
+from app.domain.strategy_v2.forward_replay_artifact import (
+    FORWARD_REPLAY_ARTIFACT_ROLE,
+    decode_forward_replay_artifact,
+    encode_forward_replay_artifact,
+    forward_replay_artifact_binding_sha256,
+)
+from app.domain.strategy_v2.frozen_disproof_queue import (
+    FROZEN_EVALUATOR_DIGEST,
+    FROZEN_QUEUE_ENTRIES,
 )
 from app.models import (
     Base,
@@ -31,7 +47,9 @@ from app.models import (
     StrategyV2ExitChallengerRegistration,
     StrategyV2ExitChallengerTrade,
     StrategyV2ForwardEvidence,
+    StrategyV2ForwardEvidenceArtifact,
     StrategyV2ForwardRegistration,
+    StrategyV2ForwardReplayArtifact,
     StrategyV2ShadowConfig,
     StrategyV2ShadowDecision,
     StrategyV2ShadowState,
@@ -40,16 +58,21 @@ from app.models import (
 )
 from app.schemas import (
     StrategyV2AdxChallengerRequest,
+    StrategyV2BoundaryNeutralDiagnosticRequest,
     StrategyV2ForwardRegistrationRequest,
+    StrategyV2ForwardValidationResponse,
     StrategyV2ReplayBar,
     StrategyV2ShadowConfigUpdate,
     StrategyV2ShadowMetrics,
     StrategyV2ShadowReplayRequest,
+    StrategyV2ShadowReplayResponse,
 )
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 
 
 _SESSION_OPEN = datetime(2026, 7, 10, 13, 30, tzinfo=timezone.utc)
+_HK_SESSION_OPEN = datetime(2026, 7, 10, 1, 30, tzinfo=timezone.utc)
+_HK_AFTERNOON_OPEN = datetime(2026, 7, 10, 5, 0, tzinfo=timezone.utc)
 
 
 class _FakeCandles:
@@ -60,6 +83,54 @@ class _FakeCandles:
     def get_candlesticks(self, symbol: str, period: str, count: int) -> list[BrokerCandle]:
         self.calls.append((symbol, period, count))
         return list(self.candles)
+
+
+class _LiveExitSpy:
+    def __init__(self) -> None:
+        self.registrations: list[tuple[str, str]] = []
+        self.prepared: list[str] = []
+        self.bars: list[datetime] = []
+        self.synced: list[str] = []
+
+    def ensure_registrations(
+        self,
+        *,
+        symbol: str,
+        market: str,
+        now: datetime,
+    ) -> bool:
+        del now
+        self.registrations.append((symbol, market))
+        return True
+
+    def prepare_open_position(
+        self,
+        *,
+        symbol: str,
+        now: datetime,
+    ) -> bool:
+        del now
+        self.prepared.append(symbol)
+        return False
+
+    def advance_bar(
+        self,
+        *,
+        symbol: str,
+        bar: StrategyBar,
+        observed_at: datetime,
+    ) -> None:
+        del symbol, observed_at
+        self.bars.append(bar.timestamp)
+
+    def sync_baseline_outcomes(
+        self,
+        *,
+        symbol: str,
+        paired_at: datetime,
+    ) -> None:
+        del paired_at
+        self.synced.append(symbol)
 
 
 class _PagedFakeCandles(_FakeCandles):
@@ -188,6 +259,13 @@ def _candles(
     return result
 
 
+def _hk_candles(afternoon_count: int) -> list[BrokerCandle]:
+    return [
+        *_candles(150, start=_HK_SESSION_OPEN),
+        *_candles(afternoon_count, start=_HK_AFTERNOON_OPEN),
+    ]
+
+
 def _closed_trade_candles() -> list[BrokerCandle]:
     rng = random.Random(1)
     displacement = 0.0
@@ -228,6 +306,8 @@ class TestStrategyV2ShadowService:
                 StrategyV2BracketChallengerRegistration,
                 StrategyV2ExitChallengerTrade,
                 StrategyV2ExitChallengerRegistration,
+                StrategyV2ForwardEvidenceArtifact,
+                StrategyV2ForwardReplayArtifact,
                 StrategyV2ForwardEvidence,
                 StrategyV2ForwardRegistration,
                 StrategyV2ShadowDecision,
@@ -257,11 +337,13 @@ class TestStrategyV2ShadowService:
         *,
         activated_at: datetime,
         establish_current_state: bool = True,
+        max_adx: float | None = None,
     ) -> StrategyV2ShadowConfig:
         config = StrategyV2ShadowConfig(
             symbol="AAPL.US",
             enabled=True,
             updated_at=activated_at,
+            **({"max_adx": max_adx} if max_adx is not None else {}),
         )
         db.add(config)
         db.commit()
@@ -380,10 +462,14 @@ class TestStrategyV2ShadowService:
     def _collect_forward_pair(
         self,
         db: Session,
+        *,
+        register_boundary_neutral: bool = False,
+        max_adx: float | None = None,
     ) -> tuple[StrategyV2ShadowService, str, datetime]:
         config = self._enabled_config(
             db,
             activated_at=_SESSION_OPEN - timedelta(days=1),
+            max_adx=max_adx,
         )
         candles = _FakeCandles(_candles(390))
         service = _ScheduledObservationShadowService(db, candles)
@@ -399,6 +485,19 @@ class TestStrategyV2ShadowService:
             self._forward_registration_payload(version),
             now=target_open - timedelta(minutes=1),
         )
+        if register_boundary_neutral:
+            service.register_forward_validation(
+                StrategyV2ForwardRegistrationRequest(
+                    symbol="AAPL.US",
+                    source_config_version=version,
+                    candidate_algorithm_version=(
+                        "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+                    ),
+                    confirm_forward_only=True,
+                    confirm_no_automatic_promotion=True,
+                ),
+                now=target_open - timedelta(minutes=1),
+            )
         candles.candles = _candles(390, start=target_open)
         service.tick(
             "AAPL.US",
@@ -406,6 +505,47 @@ class TestStrategyV2ShadowService:
             now=target_open + timedelta(minutes=390, seconds=10),
         )
         return service, version, target_open
+
+    @staticmethod
+    def _append_complete_forward_session(
+        service: StrategyV2ShadowService,
+        target_open: datetime,
+    ) -> None:
+        provider = service.candle_provider
+        assert isinstance(provider, _FakeCandles)
+        provider.candles = _candles(390, start=target_open)
+        service.tick(
+            "AAPL.US",
+            "US",
+            now=target_open + timedelta(minutes=390, seconds=10),
+        )
+
+    def _collect_forward_horizon(
+        self,
+        service: StrategyV2ShadowService,
+        first_target_open: datetime,
+        *,
+        candidate_algorithm_version: str,
+        sessions: int = 21,
+    ) -> list[StrategyV2ForwardValidationResponse]:
+        responses: list[StrategyV2ForwardValidationResponse] = []
+        target_open = first_target_open
+        for index in range(sessions):
+            if index:
+                target_open = next_session_open(
+                    "US",
+                    target_open + timedelta(minutes=1),
+                )
+                self._append_complete_forward_session(service, target_open)
+            response = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+                candidate_algorithm_version=candidate_algorithm_version,
+            )
+            assert response is not None
+            responses.append(response)
+        return responses
 
     def test_default_config_is_disabled_and_hard_shadow_only(self) -> None:
         with self._db() as db:
@@ -815,6 +955,18 @@ class TestStrategyV2ShadowService:
             trades([0.9] * 50, estimated_fee=0.1, exit_price=101.0),
             {"slippage_bps": 2.0},
         )
+        missing_stress_quality, missing_stress_blockers = (
+            StrategyV2ShadowService._readiness_quality(
+                trades([0.9] * 50, estimated_fee=0.1, exit_price=101.0),
+                {},
+            )
+        )
+        invalid_stress_quality, invalid_stress_blockers = (
+            StrategyV2ShadowService._readiness_quality(
+                trades([0.9] * 50, estimated_fee=0.1, exit_price=101.0),
+                {"slippage_bps": "invalid"},
+            )
+        )
 
         assert "NET_PNL_NON_POSITIVE" in loss_blockers
         assert "MAX_DRAWDOWN_EXCEEDS_NET_PNL" in drawdown_blockers
@@ -826,6 +978,85 @@ class TestStrategyV2ShadowService:
         assert pass_blockers == []
         assert pass_quality is not None
         assert float(pass_quality["cost_stressed_net_pnl"]) > 0
+        assert missing_stress_quality is not None
+        assert missing_stress_quality["cost_stressed_net_pnl"] is None
+        assert missing_stress_blockers == ["COST_STRESS_UNAVAILABLE"]
+        assert invalid_stress_quality is not None
+        assert invalid_stress_quality["cost_stressed_net_pnl"] is None
+        assert invalid_stress_blockers == ["COST_STRESS_UNAVAILABLE"]
+
+    def test_readiness_quality_cost_stress_rejects_invalid_numbers(self) -> None:
+        def trade() -> StrategyV2ShadowTrade:
+            return StrategyV2ShadowTrade(
+                symbol="AAPL.US",
+                config_version="quality-version",
+                status="CLOSED",
+                entry_at=_SESSION_OPEN,
+                exit_at=_SESSION_OPEN + timedelta(minutes=1),
+                entry_price=100.0,
+                exit_price=101.0,
+                quantity=1.0,
+                gross_pnl=1.0,
+                estimated_fees=0.1,
+                net_pnl=0.9,
+                fee_source="ESTIMATED",
+                estimated_fee_rate=0.0005,
+            )
+
+        for invalid_slippage in (math.nan, math.inf, -1.0):
+            quality, blockers = StrategyV2ShadowService._readiness_quality(
+                [trade()],
+                {"slippage_bps": invalid_slippage},
+            )
+            assert quality is not None
+            assert quality["cost_stressed_net_pnl"] is None
+            assert blockers == ["COST_STRESS_UNAVAILABLE"]
+
+        for field, invalid_value in (
+            ("entry_price", math.nan),
+            ("entry_price", 0.0),
+            ("exit_price", math.inf),
+            ("exit_price", -1.0),
+            ("quantity", math.nan),
+            ("quantity", 0.0),
+            ("estimated_fees", math.inf),
+            ("estimated_fees", -0.1),
+        ):
+            invalid_trade = trade()
+            setattr(invalid_trade, field, invalid_value)
+            quality, blockers = StrategyV2ShadowService._readiness_quality(
+                [invalid_trade],
+                {"slippage_bps": 2.0},
+            )
+            assert quality is not None
+            assert quality["cost_stressed_net_pnl"] is None
+            assert blockers == ["COST_STRESS_UNAVAILABLE"]
+
+        for invalid_fee_rate in (math.nan, -0.1):
+            invalid_trade = trade()
+            invalid_trade.estimated_fees = None
+            invalid_trade.estimated_fee_rate = invalid_fee_rate
+            quality, blockers = StrategyV2ShadowService._readiness_quality(
+                [invalid_trade],
+                {"slippage_bps": 2.0},
+            )
+            assert quality is not None
+            assert quality["cost_stressed_net_pnl"] is None
+            assert blockers == ["COST_STRESS_UNAVAILABLE"]
+
+        invalid_net_trade = trade()
+        invalid_net_trade.net_pnl = math.nan
+        quality, blockers = StrategyV2ShadowService._readiness_quality(
+            [invalid_net_trade],
+            {"slippage_bps": 2.0},
+        )
+        assert quality is not None
+        assert quality["quality_data_complete"] is False
+        assert quality["cost_stressed_net_pnl"] is None
+        assert blockers == [
+            "QUALITY_DATA_INCOMPLETE",
+            "COST_STRESS_UNAVAILABLE",
+        ]
 
     def test_config_updates_and_listing_are_scoped_by_symbol(self) -> None:
         with self._db() as db:
@@ -1038,53 +1269,6 @@ class TestStrategyV2ShadowService:
         self,
         monkeypatch,
     ) -> None:
-        class _LiveExitSpy:
-            def __init__(self) -> None:
-                self.registrations: list[tuple[str, str]] = []
-                self.prepared: list[str] = []
-                self.bars: list[datetime] = []
-                self.synced: list[str] = []
-
-            def ensure_registrations(
-                self,
-                *,
-                symbol: str,
-                market: str,
-                now: datetime,
-            ) -> bool:
-                del now
-                self.registrations.append((symbol, market))
-                return True
-
-            def prepare_open_position(
-                self,
-                *,
-                symbol: str,
-                now: datetime,
-            ) -> bool:
-                del now
-                self.prepared.append(symbol)
-                return False
-
-            def advance_bar(
-                self,
-                *,
-                symbol: str,
-                bar: StrategyBar,
-                observed_at: datetime,
-            ) -> None:
-                del symbol, observed_at
-                self.bars.append(bar.timestamp)
-
-            def sync_baseline_outcomes(
-                self,
-                *,
-                symbol: str,
-                paired_at: datetime,
-            ) -> None:
-                del paired_at
-                self.synced.append(symbol)
-
         provider = _FakeCandles(_candles())
         with self._db() as db:
             self._enabled_config(db, activated_at=_SESSION_OPEN)
@@ -1108,6 +1292,48 @@ class TestStrategyV2ShadowService:
             assert spy.bars
             assert spy.bars == sorted(spy.bars)
             assert spy.synced == ["AAPL.US"]
+            assert service._is_primary_live_symbol("AAPL.US") is True
+            assert service._is_primary_live_symbol("MSFT.US") is False
+
+    def test_non_primary_tick_has_no_live_exit_challenger_side_effects(
+        self,
+        monkeypatch,
+    ) -> None:
+        provider = _FakeCandles(_candles())
+        with self._db() as db:
+            config = StrategyV2ShadowConfig(
+                symbol="MSFT.US",
+                enabled=True,
+                updated_at=_SESSION_OPEN,
+            )
+            db.add(config)
+            db.commit()
+            service = StrategyV2ShadowService(db, provider)
+            db.add(StrategyV2ShadowState(
+                symbol=config.symbol,
+                config_version=service._config_version(config),
+                state_json="{}",
+            ))
+            db.commit()
+            spy = _LiveExitSpy()
+            monkeypatch.setattr(
+                shadow_service_module.settings,
+                "live_exit_challenger_enabled",
+                True,
+            )
+            monkeypatch.setattr(service, "live_exit_challengers", spy)
+
+            service.tick(
+                "MSFT.US",
+                "US",
+                now=_SESSION_OPEN + timedelta(minutes=181, seconds=5),
+            )
+
+            assert provider.calls == [("MSFT.US", "MIN_1", 500)]
+            assert spy.registrations == []
+            assert spy.prepared == []
+            assert spy.bars == []
+            assert spy.synced == []
 
     def test_empty_legacy_version_first_tick_only_advances_watermark(self) -> None:
         provider = _FakeCandles(_candles(180))
@@ -1335,6 +1561,145 @@ class TestStrategyV2ShadowService:
             assert state.last_bar_at is not None
             assert state.last_bar_at.replace(tzinfo=timezone.utc) == _SESSION_OPEN + timedelta(minutes=124)
             assert state.last_poll_error == ""
+
+    def test_feature_prewarm_uses_persisted_bars_after_broker_revision(
+        self,
+    ) -> None:
+        original = _candles(122)
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=_SESSION_OPEN,
+            )
+            service = _ScheduledObservationShadowService(db)
+            state = db.query(StrategyV2ShadowState).filter_by(
+                symbol="AAPL.US"
+            ).one()
+            service._evaluate_candles(
+                config=config,
+                state=state,
+                market="US",
+                one_minute=original[:121],
+                observed_at=(
+                    _SESSION_OPEN + timedelta(minutes=121, seconds=10)
+                ),
+            )
+
+            revised = list(original)
+            source = revised[60]
+            revised[60] = BrokerCandle(
+                timestamp=source.timestamp,
+                open=source.open,
+                high=source.high,
+                low=source.low,
+                close=source.close,
+                volume=source.volume * 10,
+            )
+            service._evaluate_candles(
+                config=config,
+                state=state,
+                market="US",
+                one_minute=revised,
+                observed_at=(
+                    _SESSION_OPEN + timedelta(minutes=122, seconds=10)
+                ),
+            )
+
+            latest = db.query(StrategyV2ShadowDecision).filter_by(
+                symbol="AAPL.US",
+                bar_at=_SESSION_OPEN + timedelta(minutes=121),
+            ).one()
+            actual = json.loads(latest.features_json)
+            control = StrategyV2Engine(
+                service._domain_config(config, "US")
+            )
+            expected = None
+            for bar in service._coerce_strategy_bars(
+                original,
+                symbol="AAPL.US",
+            ):
+                expected = control.features.on_bar(
+                    bar,
+                    observed_at=bar.end_at + timedelta(seconds=5),
+                )
+
+            assert expected is not None
+            assert actual["session_vwap_1m"] == expected.session_vwap_1m
+            assert actual["realized_vol_1m"] == expected.realized_vol_1m
+
+    def test_feature_prewarm_uses_persisted_hk_bars_across_lunch(
+        self,
+    ) -> None:
+        original = _hk_candles(2)
+        with self._db() as db:
+            config = StrategyV2ShadowConfig(
+                symbol="0700.HK",
+                enabled=True,
+                updated_at=_HK_SESSION_OPEN,
+            )
+            db.add(config)
+            db.flush()
+            service = _ScheduledObservationShadowService(db)
+            state = StrategyV2ShadowState(
+                symbol=config.symbol,
+                config_version=service._config_version(config),
+                state_json="{}",
+            )
+            db.add(state)
+            db.commit()
+            service._evaluate_candles(
+                config=config,
+                state=state,
+                market="HK",
+                one_minute=original[:151],
+                observed_at=_HK_AFTERNOON_OPEN + timedelta(
+                    minutes=1,
+                    seconds=10,
+                ),
+            )
+
+            revised = list(original)
+            source = revised[60]
+            revised[60] = BrokerCandle(
+                timestamp=source.timestamp,
+                open=source.open,
+                high=source.high,
+                low=source.low,
+                close=source.close,
+                volume=source.volume * 10,
+            )
+            service._evaluate_candles(
+                config=config,
+                state=state,
+                market="HK",
+                one_minute=revised,
+                observed_at=_HK_AFTERNOON_OPEN + timedelta(
+                    minutes=2,
+                    seconds=10,
+                ),
+            )
+
+            latest = db.query(StrategyV2ShadowDecision).filter_by(
+                symbol="0700.HK",
+                bar_at=_HK_AFTERNOON_OPEN + timedelta(minutes=1),
+            ).one()
+            actual = json.loads(latest.features_json)
+            control = StrategyV2Engine(
+                service._domain_config(config, "HK")
+            )
+            expected = None
+            for bar in service._coerce_strategy_bars(
+                original,
+                symbol="0700.HK",
+            ):
+                expected = control.features.on_bar(
+                    bar,
+                    observed_at=bar.end_at + timedelta(seconds=5),
+                )
+
+            assert expected is not None
+            assert actual["session_vwap_1m"] == expected.session_vwap_1m
+            assert actual["realized_vol_1m"] == expected.realized_vol_1m
 
     def test_tick_pages_from_watermark_when_recent_window_moved_past_gap(
         self,
@@ -2446,6 +2811,237 @@ class TestStrategyV2ShadowService:
                 )
             ] == before_decisions
 
+    def test_boundary_neutral_diagnostic_is_read_only_and_keeps_legacy_arm(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service, version, target_open = self._collect_two_complete_sessions(
+                db
+            )
+            state = db.query(StrategyV2ShadowState).filter_by(
+                symbol="AAPL.US"
+            ).one()
+            before_state = (
+                state.config_version,
+                state.phase,
+                state.last_bar_at,
+                state.state_json,
+                state.last_poll_error,
+            )
+            tracked_models = (
+                StrategyV2ShadowConfig,
+                StrategyV2ShadowVersion,
+                StrategyV2ShadowState,
+                StrategyV2ShadowDecision,
+                StrategyV2ShadowTrade,
+                StrategyV2ForwardRegistration,
+                StrategyV2ForwardEvidence,
+            )
+            before_counts = tuple(
+                db.query(model).count() for model in tracked_models
+            )
+            legacy = service.compare_adx_challengers(
+                StrategyV2AdxChallengerRequest(
+                    symbol="AAPL.US",
+                    config_version=version,
+                )
+            ).warmup_diagnostic
+            assert legacy is not None
+
+            response = service.compare_boundary_neutral_prewarm(
+                StrategyV2BoundaryNeutralDiagnosticRequest(
+                    symbol="AAPL.US",
+                    config_version=version,
+                )
+            )
+
+            assert response.persisted is False
+            assert response.mode == "SHADOW"
+            assert response.evaluation_scope == "RETROSPECTIVE_DIAGNOSTIC_ONLY"
+            assert response.order_submission_allowed is False
+            assert response.automatic_promotion_allowed is False
+            assert response.retrospective_results_forward_eligible is False
+            assert (
+                response.forward_evidence_requires_registration_before_target_open
+                is True
+            )
+            assert response.status == "INSUFFICIENT_EVIDENCE"
+            assert response.observed_causal_pairs == 1
+            assert response.evaluated_causal_pairs == 1
+            assert response.blockers == ["MIN_CAUSAL_PAIRS"]
+            assert response.baseline_replay_match is True
+            assert response.same_target_bars is True
+            assert response.same_observation_schedule is True
+            assert response.same_fee_slippage is True
+            assert response.causal_history_only is True
+            assert response.vwap_zscore_session_local is True
+            assert response.retrospective_target_sessions == [
+                target_open.date()
+            ]
+            assert response.candidate_spec.algorithm_version == (
+                "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+            )
+            assert response.candidate_spec.legacy_algorithm_version == (
+                "strategy-v2-causal-trend-prewarm-v1"
+            )
+            assert response.candidate_spec.boundary_rule == (
+                "SEED_TARGET_FIRST_5M_DM_ZERO_TR_TARGET_RANGE"
+            )
+            assert len(response.candidate_spec_sha256) == 64
+            assert [item.label for item in response.variants] == [
+                "SESSION_LOCAL_BASELINE",
+                "LEGACY_CAUSAL_TREND_PREWARM_V1",
+                "BOUNDARY_NEUTRAL_CAUSAL_TREND_PREWARM_V1",
+            ]
+            baseline, legacy_v1, neutral = response.variants
+            assert {item.metrics.bars for item in response.variants} == {390}
+            assert [item.session_date for item in baseline.daily] == [
+                item.session_date for item in legacy_v1.daily
+            ] == [item.session_date for item in neutral.daily]
+            assert baseline.daily[0].first_ready_at == (
+                target_open + timedelta(minutes=139)
+            )
+            assert legacy_v1.daily[0].first_ready_at == (
+                target_open + timedelta(minutes=64)
+            )
+            assert neutral.daily[0].first_ready_at == (
+                target_open + timedelta(minutes=64)
+            )
+            assert len(legacy.variants) == 2
+            assert legacy_v1.metrics == legacy.variants[1].metrics
+            assert legacy_v1.daily == legacy.variants[1].daily
+            assert tuple(
+                db.query(model).count() for model in tracked_models
+            ) == before_counts
+            db.refresh(state)
+            assert (
+                state.config_version,
+                state.phase,
+                state.last_bar_at,
+                state.state_json,
+                state.last_poll_error,
+            ) == before_state
+
+    def test_boundary_neutral_three_arms_share_execution_inputs(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        with self._db() as db:
+            service, version, _target_open = self._collect_two_complete_sessions(
+                db
+            )
+            original_replay = service._replay_payload
+            calls: list[dict[str, Any]] = []
+
+            def replay_spy(
+                payload: StrategyV2ShadowReplayRequest,
+                config: StrategyV2ShadowConfig,
+                **kwargs: Any,
+            ) -> StrategyV2ShadowReplayResponse:
+                schedule = kwargs.get("observation_schedule")
+                assert isinstance(schedule, dict)
+                calls.append({
+                    "bars": [
+                        item.model_dump(mode="json") for item in payload.bars
+                    ],
+                    "schedule": sorted(
+                        (key.isoformat(), value.isoformat())
+                        for key, value in schedule.items()
+                        if key in {bar.timestamp for bar in payload.bars}
+                    ),
+                    "config_identity": id(config),
+                    "fee_rate": service._fee_rate(config, payload.market),
+                    "slippage_bps": config.slippage_bps,
+                    "features": kwargs.get("features"),
+                })
+                return original_replay(payload, config, **kwargs)
+
+            monkeypatch.setattr(service, "_replay_payload", replay_spy)
+            response = service.compare_boundary_neutral_prewarm(
+                StrategyV2BoundaryNeutralDiagnosticRequest(
+                    symbol="AAPL.US",
+                    config_version=version,
+                )
+            )
+
+            assert response.evaluated_causal_pairs == 1
+            assert len(calls) == 4
+            baseline, legacy_v1, neutral = calls[-3:]
+            assert baseline["bars"] == legacy_v1["bars"] == neutral["bars"]
+            assert (
+                baseline["schedule"]
+                == legacy_v1["schedule"]
+                == neutral["schedule"]
+            )
+            assert (
+                baseline["config_identity"]
+                == legacy_v1["config_identity"]
+                == neutral["config_identity"]
+            )
+            assert (
+                baseline["fee_rate"]
+                == legacy_v1["fee_rate"]
+                == neutral["fee_rate"]
+            )
+            assert (
+                baseline["slippage_bps"]
+                == legacy_v1["slippage_bps"]
+                == neutral["slippage_bps"]
+            )
+            assert baseline["features"] is None
+            assert isinstance(
+                legacy_v1["features"],
+                CausalTrendPrewarmFeatureEngine,
+            )
+            assert isinstance(
+                neutral["features"],
+                BoundaryNeutralCausalTrendPrewarmFeatureEngine,
+            )
+
+    def test_july_31_boundary_neutral_result_is_never_forward_evidence(
+        self,
+    ) -> None:
+        seed_open = datetime(2026, 7, 30, 13, 30, tzinfo=timezone.utc)
+        target_open = datetime(2026, 7, 31, 13, 30, tzinfo=timezone.utc)
+        with self._db() as db:
+            config = self._enabled_config(
+                db,
+                activated_at=seed_open - timedelta(days=1),
+            )
+            candles = _FakeCandles(_candles(390, start=seed_open))
+            service = _ScheduledObservationShadowService(db, candles)
+            service.tick(
+                "AAPL.US",
+                "US",
+                now=seed_open + timedelta(minutes=390, seconds=10),
+            )
+            candles.candles = _candles(390, start=target_open)
+            service.tick(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=390, seconds=10),
+            )
+            version = service._config_version(config)
+            service._ensure_version_snapshot(config)
+
+            response = service.compare_boundary_neutral_prewarm(
+                StrategyV2BoundaryNeutralDiagnosticRequest(
+                    symbol="AAPL.US",
+                    config_version=version,
+                )
+            )
+
+            assert response.retrospective_target_sessions == [date(2026, 7, 31)]
+            assert response.evaluation_scope == "RETROSPECTIVE_DIAGNOSTIC_ONLY"
+            assert response.retrospective_results_forward_eligible is False
+            assert response.candidate_spec.retrospective_results_forward_eligible is False
+            assert (
+                response.candidate_spec.forward_evidence_requires_registration_before_target_open
+                is True
+            )
+            assert db.query(StrategyV2ForwardRegistration).count() == 0
+            assert db.query(StrategyV2ForwardEvidence).count() == 0
+
     def test_causal_warmup_does_not_use_a_stale_complete_session(self) -> None:
         with self._db() as db:
             service, version, _target_open = self._collect_two_complete_sessions(
@@ -2999,6 +3595,473 @@ class TestStrategyV2ShadowService:
                 symbol="AAPL.US"
             ).one().state_json == before_state
 
+    def test_forward_artifact_integrity_error_persists_structural_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        with self._db() as db:
+            service, _version, target_open = self._collect_forward_pair(db)
+
+            def fail_artifact_persistence(
+                _evidence: StrategyV2ForwardEvidence,
+                _payload: dict[str, object],
+            ) -> None:
+                raise IntegrityError(
+                    "INSERT replay artifact",
+                    {},
+                    RuntimeError("simulated artifact persistence race"),
+                )
+
+            monkeypatch.setattr(
+                service,
+                "_attach_forward_replay_artifact",
+                fail_artifact_persistence,
+            )
+
+            response = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            )
+
+            assert response is not None
+            assert response.status == "BLOCKED"
+            assert response.excluded_targets == 1
+            assert response.daily[0].disposition == "EXCLUDED"
+            assert response.daily[0].structural_failure is True
+            assert response.daily[0].exclusion_reason == (
+                "REPLAY_ARTIFACT_PERSISTENCE_FAILED"
+            )
+            assert "REPLAY_ARTIFACT_PERSISTENCE_FAILED" in response.blockers
+            assert all(
+                item.exclusion_reason != "FINALIZATION_WINDOW_MISSED"
+                for item in response.daily
+            )
+            assert db.query(StrategyV2ForwardEvidenceArtifact).count() == 0
+
+    def test_forward_artifact_exact_concurrent_duplicate_is_idempotent(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        with self._db() as db:
+            service, _version, target_open = self._collect_forward_pair(db)
+            original_attach = service._attach_forward_replay_artifact
+
+            def persist_concurrent_duplicate(
+                evidence: StrategyV2ForwardEvidence,
+                payload: dict[str, object],
+            ) -> None:
+                values = {
+                    column.name: getattr(evidence, column.name)
+                    for column in StrategyV2ForwardEvidence.__table__.columns
+                    if column.name not in {"id", "created_at"}
+                }
+                expected_id = evidence.id
+                db.rollback()
+                concurrent = StrategyV2ForwardEvidence(**values)
+                db.add(concurrent)
+                db.flush()
+                assert concurrent.id == expected_id
+                original_attach(concurrent, payload)
+                db.commit()
+                raise IntegrityError(
+                    "INSERT replay artifact",
+                    {},
+                    RuntimeError("simulated exact concurrent duplicate"),
+                )
+
+            monkeypatch.setattr(
+                service,
+                "_attach_forward_replay_artifact",
+                persist_concurrent_duplicate,
+            )
+
+            response = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            )
+
+            assert response is not None
+            assert response.status == "COLLECTING"
+            assert response.included_pairs == 1
+            assert response.excluded_targets == 0
+            assert db.query(StrategyV2ForwardEvidence).count() == 1
+            assert db.query(StrategyV2ForwardEvidenceArtifact).count() == 1
+
+    def test_forward_artifact_conflicting_concurrent_duplicate_raises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        with self._db() as db:
+            service, _version, target_open = self._collect_forward_pair(db)
+
+            def persist_concurrent_conflict(
+                evidence: StrategyV2ForwardEvidence,
+                _payload: dict[str, object],
+            ) -> None:
+                registration_id = evidence.registration_id
+                target_day = evidence.target_session_date
+                target_open_at = evidence.target_open_at
+                evaluated_at = evidence.evaluated_at
+                db.rollback()
+                conflicting = StrategyV2ForwardEvidence(
+                    registration_id=registration_id,
+                    target_session_date=target_day,
+                    target_open_at=target_open_at,
+                    evaluated_at=evaluated_at,
+                    disposition="EXCLUDED",
+                    exclusion_reason="REPLAY_ARTIFACT_PERSISTENCE_FAILED",
+                    structural_failure=True,
+                )
+                conflicting.evidence_digest_sha256 = (
+                    service._forward_evidence_digest(conflicting)
+                )
+                db.add(conflicting)
+                db.commit()
+                raise IntegrityError(
+                    "INSERT replay artifact",
+                    {},
+                    RuntimeError("simulated conflicting concurrent duplicate"),
+                )
+
+            monkeypatch.setattr(
+                service,
+                "_attach_forward_replay_artifact",
+                persist_concurrent_conflict,
+            )
+
+            with pytest.raises(
+                RuntimeError,
+                match="conflicting Strategy v2 forward evidence",
+            ):
+                service.collect_forward_validation(
+                    "AAPL.US",
+                    "US",
+                    now=target_open + timedelta(minutes=400, seconds=30),
+                )
+
+            row = db.query(StrategyV2ForwardEvidence).one()
+            assert row.disposition == "EXCLUDED"
+            assert row.exclusion_reason == "REPLAY_ARTIFACT_PERSISTENCE_FAILED"
+            assert db.query(StrategyV2ForwardEvidenceArtifact).count() == 0
+
+    def test_boundary_neutral_forward_is_independent_and_requires_artifact(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service, _version, target_open = self._collect_forward_pair(
+                db,
+                register_boundary_neutral=True,
+            )
+
+            neutral = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+                candidate_algorithm_version=(
+                    "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+                ),
+            )
+
+            assert neutral is not None
+            assert neutral.status == "COLLECTING"
+            assert neutral.included_pairs == 1
+            assert neutral.registration is not None
+            assert neutral.registration.candidate_algorithm_version == (
+                "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+            )
+            assert neutral.registration.evaluator_digest != (
+                service._forward_evaluator_digest()
+            )
+            assert service.get_forward_validation("AAPL.US").status == "FROZEN"
+            evidence = db.query(StrategyV2ForwardEvidence).one()
+            link = db.get(
+                StrategyV2ForwardEvidenceArtifact,
+                (evidence.id, FORWARD_REPLAY_ARTIFACT_ROLE),
+            )
+            assert link is not None
+            artifact = db.get(
+                StrategyV2ForwardReplayArtifact,
+                link.artifact_sha256,
+            )
+            assert artifact is not None
+            decoded = decode_forward_replay_artifact(
+                digest_sha256=artifact.digest_sha256,
+                schema_version=artifact.schema_version,
+                kind=artifact.kind,
+                codec=artifact.codec,
+                raw_size=artifact.raw_size,
+                compressed_size=artifact.compressed_size,
+                payload=artifact.payload,
+            )
+            assert decoded["capture_mode"] == "FULL_REPLAY_VERIFIED"
+            assert len(decoded["seed_bars"]) == 390
+            assert len(decoded["target_bars"]) == 390
+            assert len(decoded["observation_schedule"]) == 390
+
+            db.delete(link)
+            db.commit()
+            blocked = service.get_forward_validation(
+                "AAPL.US",
+                candidate_algorithm_version=(
+                    "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+                ),
+            )
+            assert blocked.status == "BLOCKED"
+            assert blocked.included_pairs == 0
+            assert "REPLAY_ARTIFACT_MISSING_OR_INVALID" in blocked.blockers
+
+    def test_boundary_neutral_missing_link_backfill_blocks_and_keeps_sources(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service, _version, target_open = self._collect_forward_pair(
+                db,
+                register_boundary_neutral=True,
+            )
+            collected = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+                candidate_algorithm_version=(
+                    "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+                ),
+            )
+            assert collected is not None and collected.included_pairs == 1
+            evidence = db.query(StrategyV2ForwardEvidence).one()
+            link = db.get(
+                StrategyV2ForwardEvidenceArtifact,
+                (evidence.id, FORWARD_REPLAY_ARTIFACT_ROLE),
+            )
+            assert link is not None
+            db.delete(link)
+            db.commit()
+            source_count = db.query(StrategyV2ShadowDecision).count()
+            artifact_count = db.query(StrategyV2ForwardReplayArtifact).count()
+
+            backfilled = service.backfill_forward_replay_artifacts(limit=10)
+            pruned = service.prune_expired_wait_decisions(
+                retention_days=45,
+                batch_size=10_000,
+                max_batches=None,
+                now=target_open + timedelta(days=60),
+            )
+
+            assert backfilled.archived == 0
+            assert backfilled.blocked_evidence_ids == (evidence.id,)
+            assert db.get(
+                StrategyV2ForwardEvidenceArtifact,
+                (evidence.id, FORWARD_REPLAY_ARTIFACT_ROLE),
+            ) is None
+            assert db.query(StrategyV2ForwardReplayArtifact).count() == (
+                artifact_count
+            )
+            assert all(
+                decode_forward_replay_artifact(
+                    digest_sha256=artifact.digest_sha256,
+                    schema_version=artifact.schema_version,
+                    kind=artifact.kind,
+                    codec=artifact.codec,
+                    raw_size=artifact.raw_size,
+                    compressed_size=artifact.compressed_size,
+                    payload=artifact.payload,
+                )["capture_mode"] != "SOURCE_TRACE_ARCHIVE"
+                for artifact in db.query(
+                    StrategyV2ForwardReplayArtifact
+                ).all()
+            )
+            assert pruned.deleted == 0
+            assert db.query(StrategyV2ShadowDecision).count() == source_count
+
+    def test_boundary_neutral_full_replay_artifact_allows_source_pruning(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service, _version, target_open = self._collect_forward_pair(
+                db,
+                register_boundary_neutral=True,
+            )
+            collected = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+                candidate_algorithm_version=(
+                    "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+                ),
+            )
+            assert collected is not None and collected.included_pairs == 1
+            evidence = db.query(StrategyV2ForwardEvidence).one()
+            link = db.get(
+                StrategyV2ForwardEvidenceArtifact,
+                (evidence.id, FORWARD_REPLAY_ARTIFACT_ROLE),
+            )
+            assert link is not None
+            artifact_digest = link.artifact_sha256
+
+            pruned = service.prune_expired_wait_decisions(
+                retention_days=45,
+                batch_size=10_000,
+                max_batches=None,
+                now=target_open + timedelta(days=60),
+            )
+
+            assert pruned.deleted > 0
+            assert db.get(
+                StrategyV2ForwardReplayArtifact,
+                artifact_digest,
+            ) is not None
+
+    @pytest.mark.parametrize(
+        "artifact_fault",
+        ["SOURCE_TRACE_ONLY", "MISSING_LINK", "INVALID_BINDING", "CORRUPT_PAYLOAD"],
+    )
+    def test_boundary_neutral_invalid_artifact_keeps_source_sessions(
+        self,
+        artifact_fault: str,
+    ) -> None:
+        with self._db() as db:
+            service, _version, target_open = self._collect_forward_pair(
+                db,
+                register_boundary_neutral=True,
+            )
+            collected = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+                candidate_algorithm_version=(
+                    "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+                ),
+            )
+            assert collected is not None and collected.included_pairs == 1
+            evidence = db.query(StrategyV2ForwardEvidence).one()
+            link = db.get(
+                StrategyV2ForwardEvidenceArtifact,
+                (evidence.id, FORWARD_REPLAY_ARTIFACT_ROLE),
+            )
+            assert link is not None
+            artifact = db.get(
+                StrategyV2ForwardReplayArtifact,
+                link.artifact_sha256,
+            )
+            assert artifact is not None
+
+            if artifact_fault == "SOURCE_TRACE_ONLY":
+                payload = decode_forward_replay_artifact(
+                    digest_sha256=artifact.digest_sha256,
+                    schema_version=artifact.schema_version,
+                    kind=artifact.kind,
+                    codec=artifact.codec,
+                    raw_size=artifact.raw_size,
+                    compressed_size=artifact.compressed_size,
+                    payload=artifact.payload,
+                )
+                payload["capture_mode"] = "SOURCE_TRACE_ARCHIVE"
+                payload["baseline_replay"] = None
+                payload["candidate_replay"] = None
+                encoded = encode_forward_replay_artifact(payload)
+                db.add(StrategyV2ForwardReplayArtifact(
+                    digest_sha256=encoded.digest_sha256,
+                    schema_version=encoded.schema_version,
+                    kind=encoded.kind,
+                    codec=encoded.codec,
+                    raw_size=encoded.raw_size,
+                    compressed_size=encoded.compressed_size,
+                    payload=encoded.payload,
+                ))
+                db.flush()
+                link.artifact_sha256 = encoded.digest_sha256
+                link.binding_sha256 = forward_replay_artifact_binding_sha256(
+                    evidence_id=evidence.id,
+                    evidence_digest_sha256=evidence.evidence_digest_sha256,
+                    artifact_digest_sha256=encoded.digest_sha256,
+                )
+            elif artifact_fault == "MISSING_LINK":
+                db.delete(link)
+            elif artifact_fault == "INVALID_BINDING":
+                link.binding_sha256 = "0" * 64
+            else:
+                artifact.payload = bytes([artifact.payload[0] ^ 0xFF]) + (
+                    artifact.payload[1:]
+                )
+            db.commit()
+            source_count = db.query(StrategyV2ShadowDecision).count()
+
+            pruned = service.prune_expired_wait_decisions(
+                retention_days=45,
+                batch_size=10_000,
+                max_batches=None,
+                now=target_open + timedelta(days=60),
+            )
+
+            assert pruned.deleted == 0
+            assert db.query(StrategyV2ShadowDecision).count() == source_count
+
+    def test_unarchived_forward_sessions_are_prune_protected_then_backfilled(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service, _version, target_open = self._collect_forward_pair(db)
+            assert service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            ) is not None
+            evidence = db.query(StrategyV2ForwardEvidence).one()
+            link = db.get(
+                StrategyV2ForwardEvidenceArtifact,
+                (evidence.id, FORWARD_REPLAY_ARTIFACT_ROLE),
+            )
+            assert link is not None
+            db.delete(link)
+            db.commit()
+            decisions_before = db.query(StrategyV2ShadowDecision).count()
+
+            protected = service.prune_expired_wait_decisions(
+                retention_days=45,
+                batch_size=10_000,
+                max_batches=None,
+                now=target_open + timedelta(days=60),
+            )
+
+            assert protected.deleted == 0
+            assert db.query(StrategyV2ShadowDecision).count() == decisions_before
+            backfilled = service.backfill_forward_replay_artifacts(limit=10)
+            assert backfilled.archived == 1
+            assert backfilled.blocked_evidence_ids == ()
+            archived_link = db.get(
+                StrategyV2ForwardEvidenceArtifact,
+                (evidence.id, FORWARD_REPLAY_ARTIFACT_ROLE),
+            )
+            assert archived_link is not None
+            archived_artifact = db.get(
+                StrategyV2ForwardReplayArtifact,
+                archived_link.artifact_sha256,
+            )
+            assert archived_artifact is not None
+            archived_payload = decode_forward_replay_artifact(
+                digest_sha256=archived_artifact.digest_sha256,
+                schema_version=archived_artifact.schema_version,
+                kind=archived_artifact.kind,
+                codec=archived_artifact.codec,
+                raw_size=archived_artifact.raw_size,
+                compressed_size=archived_artifact.compressed_size,
+                payload=archived_artifact.payload,
+            )
+            assert archived_payload["capture_mode"] == "SOURCE_TRACE_ARCHIVE"
+
+            pruned = service.prune_expired_wait_decisions(
+                retention_days=45,
+                batch_size=10_000,
+                max_batches=None,
+                now=target_open + timedelta(days=60),
+            )
+            assert pruned.deleted > 0
+            assert db.get(
+                StrategyV2ForwardReplayArtifact,
+                archived_artifact.digest_sha256,
+            ) is not None
+
     def test_forward_registration_excludes_the_intraday_registration_session(
         self,
     ) -> None:
@@ -3256,26 +4319,37 @@ class TestStrategyV2ShadowService:
             assert response.daily[0].exclusion_reason == "COLLECTION_DISABLED"
             assert response.daily[0].structural_failure is False
 
-    def test_forward_source_version_drift_is_a_structural_block(self) -> None:
+    def test_forward_superseded_mature_registration_is_not_current(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(shadow_service_module, "_FORWARD_MATURE_PAIRS", 1)
         with self._db() as db:
             service, _version, target_open = self._collect_forward_pair(db)
+            mature = service.collect_forward_validation(
+                "AAPL.US",
+                "US",
+                now=target_open + timedelta(minutes=400, seconds=30),
+            )
+            assert mature is not None
+            assert mature.status == "MATURE_EVIDENCE"
             service.update_config(
                 StrategyV2ShadowConfigUpdate(max_adx=18.0),
                 symbol="AAPL.US",
             )
 
+            stale_view = service.get_forward_validation("AAPL.US")
             response = service.collect_forward_validation(
                 "AAPL.US",
                 "US",
-                now=target_open + timedelta(minutes=400, seconds=30),
+                now=target_open + timedelta(days=2, minutes=400),
             )
 
-            assert response is not None
-            assert response.status == "BLOCKED"
-            assert response.daily[0].exclusion_reason == "SOURCE_VERSION_SUPERSEDED"
-            assert response.daily[0].structural_failure is True
+            assert stale_view.status == "NOT_REGISTERED"
+            assert response is None
+            assert db.query(StrategyV2ForwardEvidence).count() == 1
 
-    def test_forward_source_drift_wins_over_collection_disabled(self) -> None:
+    def test_forward_source_drift_never_falls_back_when_disabled(self) -> None:
         with self._db() as db:
             service, _version, target_open = self._collect_forward_pair(db)
             config = db.query(StrategyV2ShadowConfig).filter_by(
@@ -3291,12 +4365,13 @@ class TestStrategyV2ShadowService:
                 now=target_open + timedelta(minutes=400, seconds=30),
             )
 
-            assert response is not None
-            assert response.status == "BLOCKED"
-            assert response.daily[0].exclusion_reason == "SOURCE_VERSION_SUPERSEDED"
-            assert response.daily[0].structural_failure is True
+            assert service.get_forward_validation(
+                "AAPL.US"
+            ).status == "NOT_REGISTERED"
+            assert response is None
+            assert db.query(StrategyV2ForwardEvidence).count() == 0
 
-    def test_forward_source_drift_wins_over_a_missed_window(self) -> None:
+    def test_forward_source_drift_never_falls_back_after_missed_window(self) -> None:
         with self._db() as db:
             service, _version, target_open = self._collect_forward_pair(db)
             service.update_config(
@@ -3310,11 +4385,141 @@ class TestStrategyV2ShadowService:
                 now=target_open + timedelta(minutes=405),
             )
 
-            assert response is not None
-            assert response.status == "BLOCKED"
-            assert response.excluded_targets == 1
-            assert response.daily[0].exclusion_reason == "SOURCE_VERSION_SUPERSEDED"
-            assert db.query(StrategyV2ForwardEvidence).count() == 1
+            assert service.get_forward_validation(
+                "AAPL.US"
+            ).status == "NOT_REGISTERED"
+            assert response is None
+            assert db.query(StrategyV2ForwardEvidence).count() == 0
+
+    def test_boundary_neutral_mature_registration_appends_day_21(self) -> None:
+        neutral_version = (
+            "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+        )
+        with self._db() as db:
+            service, _version, target_open = self._collect_forward_pair(
+                db,
+                register_boundary_neutral=True,
+            )
+
+            responses = self._collect_forward_horizon(
+                service,
+                target_open,
+                candidate_algorithm_version=neutral_version,
+            )
+
+            assert responses[19].status == "MATURE_EVIDENCE"
+            assert responses[19].included_pairs == 20
+            assert responses[20].status == "MATURE_EVIDENCE"
+            assert responses[20].included_pairs == 21
+            assert db.query(StrategyV2ForwardRegistration).count() == 2
+            neutral_registration = db.query(
+                StrategyV2ForwardRegistration
+            ).filter_by(candidate_algorithm_version=neutral_version).one()
+            assert db.query(StrategyV2ForwardEvidence).filter_by(
+                registration_id=neutral_registration.id,
+            ).count() == 21
+
+    def test_frozen_legacy_mature_registration_appends_day_21(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        legacy_version = "strategy-v2-causal-trend-prewarm-v1"
+        with self._db() as db:
+            service, source_version, target_open = self._collect_forward_pair(db)
+            registration = db.query(StrategyV2ForwardRegistration).one()
+            monkeypatch.setattr(
+                shadow_service_module,
+                "FROZEN_QUEUE_ENTRIES",
+                ((
+                    registration.symbol,
+                    "TEST_CANONICAL",
+                    "collector continuation identity fixture",
+                    source_version,
+                ),),
+            )
+            assert service._forward_collection_continues_after_maturity(
+                registration
+            ) is True
+            assert registration.evaluator_digest == FROZEN_EVALUATOR_DIGEST
+
+            responses = self._collect_forward_horizon(
+                service,
+                target_open,
+                candidate_algorithm_version=legacy_version,
+            )
+
+            assert responses[19].status == "MATURE_EVIDENCE"
+            assert responses[19].included_pairs == 20
+            assert responses[20].status == "MATURE_EVIDENCE"
+            assert responses[20].included_pairs == 21
+            assert db.query(StrategyV2ForwardRegistration).count() == 1
+            assert db.query(StrategyV2ForwardEvidence).filter_by(
+                registration_id=registration.id,
+            ).count() == 21
+
+    def test_mature_collection_uses_exact_frozen_legacy_identity(self) -> None:
+        symbol, _role, _reason, config_version = FROZEN_QUEUE_ENTRIES[0]
+        registration = StrategyV2ForwardRegistration(
+            symbol=symbol,
+            market="US",
+            candidate_algorithm_version=(
+                "strategy-v2-causal-trend-prewarm-v1"
+            ),
+            source_config_version=config_version,
+            evaluator_digest=FROZEN_EVALUATOR_DIGEST,
+        )
+
+        assert StrategyV2ShadowService._forward_collection_continues_after_maturity(
+            registration
+        ) is True
+        registration.source_config_version = "0" * 64
+        assert StrategyV2ShadowService._forward_collection_continues_after_maturity(
+            registration
+        ) is False
+        registration.source_config_version = config_version
+        registration.evaluator_digest = "0" * 64
+        assert StrategyV2ShadowService._forward_collection_continues_after_maturity(
+            registration
+        ) is False
+
+    def test_non_frozen_legacy_mature_registration_stops_before_day_21(
+        self,
+    ) -> None:
+        legacy_version = "strategy-v2-causal-trend-prewarm-v1"
+        frozen_identities = {
+            (symbol, config_version)
+            for symbol, _role, _reason, config_version in FROZEN_QUEUE_ENTRIES
+        }
+        with self._db() as db:
+            service, source_version, target_open = self._collect_forward_pair(
+                db,
+                max_adx=19.0,
+            )
+            registration = db.query(StrategyV2ForwardRegistration).one()
+            assert (registration.symbol, source_version) not in frozen_identities
+            assert registration.evaluator_digest == FROZEN_EVALUATOR_DIGEST
+
+            responses = self._collect_forward_horizon(
+                service,
+                target_open,
+                candidate_algorithm_version=legacy_version,
+            )
+
+            assert responses[19].status == "MATURE_EVIDENCE"
+            assert responses[19].included_pairs == 20
+            assert responses[20].status == "MATURE_EVIDENCE"
+            assert responses[20].included_pairs == 20
+            assert db.query(StrategyV2ForwardRegistration).count() == 1
+            assert db.query(StrategyV2ForwardEvidence).filter_by(
+                registration_id=registration.id,
+            ).count() == 20
+
+    def test_maturity_cannot_satisfy_the_50_trade_review_gate_at_two_entries(
+        self,
+    ) -> None:
+        assert shadow_service_module._FORWARD_MATURE_PAIRS == 20
+        assert 20 * 2 == 40
+        assert 40 < shadow_service_module._MIN_REVIEW_CLOSED_TRADES
 
     def test_forward_mature_registration_stops_appending_targets(
         self,
@@ -3322,7 +4527,18 @@ class TestStrategyV2ShadowService:
     ) -> None:
         monkeypatch.setattr(shadow_service_module, "_FORWARD_MATURE_PAIRS", 1)
         with self._db() as db:
-            service, _version, target_open = self._collect_forward_pair(db)
+            service, version, target_open = self._collect_forward_pair(
+                db,
+                max_adx=19.0,
+            )
+            assert (
+                "AAPL.US",
+                version,
+            ) not in {
+                (symbol, config_version)
+                for symbol, _role, _reason, config_version
+                in FROZEN_QUEUE_ENTRIES
+            }
             response = service.collect_forward_validation(
                 "AAPL.US",
                 "US",

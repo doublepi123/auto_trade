@@ -37,6 +37,21 @@ _NOW = datetime(2026, 7, 23, 15, 0, tzinfo=timezone.utc)
 _US_ONE_SIDE_FEE_RATE = 0.0005
 
 
+def test_quant_source_distinguishes_history_warmup_from_data_error() -> None:
+    assert quant_module._quant_source_for_blockers([]) == "quant_v5"
+    assert quant_module._quant_source_for_blockers([
+        "INSUFFICIENT_DAILY_DATA",
+        "SEVERE_DOWNTREND",
+    ]) == "quant_warmup_v5"
+    assert quant_module._quant_source_for_blockers([
+        "INSUFFICIENT_INTRADAY_DATA",
+        "INSUFFICIENT_REVERSAL_SAMPLES",
+    ]) == "quant_warmup_v5"
+    assert quant_module._quant_source_for_blockers([
+        "MISSING_BBO",
+    ]) == "quant_error_v5"
+
+
 def _db() -> Session:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

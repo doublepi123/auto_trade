@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { getDistributionShape, type DistributionShapeResult } from '../api/distributionShape'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 
 const loading = ref(false)
 const result = ref<DistributionShapeResult | null>(null)
@@ -23,7 +24,7 @@ async function run() {
 <template>
   <div class="page-container">
     <h2>PnL 分布形态</h2>
-    <p class="page-desc">偏度、峰度与正态性检验，刻画收益分布的尾部风险（灵感来自 VectorBT / QuantStats）</p>
+    <p class="page-desc">偏度、峰度与正态性检验；分位数采用 R-7 线性插值，零方差样本标记为退化</p>
 
     <el-card class="control-card">
       <el-form inline>
@@ -40,6 +41,7 @@ async function run() {
     </el-card>
 
     <template v-if="result">
+      <StatisticsQualityAlert :quality="result.statistics_quality" />
       <el-alert v-if="result.error" :title="result.error" type="warning" :closable="false" style="margin-top: 16px" />
 
       <template v-else>

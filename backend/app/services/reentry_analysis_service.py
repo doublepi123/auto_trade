@@ -10,13 +10,18 @@ in trading journals.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import OrderRecord
+from app.services.analytics_trade_sample_service import (
+    analytics_response,
+    load_analytics_trade_sample,
+    mixed_currency_error,
+)
+from app.services.daily_pnl_service import ClosedRoundTrip
 
 __all__ = ["ReentryAnalysisService"]
 
@@ -44,6 +49,16 @@ class _Bucket:
         }
 
 
+@dataclass(frozen=True)
+class _EntryOutcome:
+    symbol: str
+    entry_order_id: int
+    entry_at: datetime
+    exit_at: datetime
+    exit_order_id: int
+    net_pnl: float
+
+
 class ReentryAnalysisService:
     """Conditional outcome analytics for same-symbol re-entries."""
 
@@ -51,36 +66,78 @@ class ReentryAnalysisService:
         self._db = db
 
     def summary(self, days: int = 90) -> dict[str, Any]:
-        rows = self._fetch(days)
+        sample = load_analytics_trade_sample(
+            self._db,
+            lookback_days=days,
+        )
+        rows = _entry_outcomes(sample.trades)
+        currency_error = mixed_currency_error(
+            sample,
+            payload={"days": days, "sample_size": len(rows)},
+        )
+        if currency_error is not None:
+            return currency_error
         if len(rows) < 6:
-            return {
-                "days": days,
-                "sample_size": len(rows),
-                "error": "Need at least 6 closed trades.",
-            }
+            return analytics_response(
+                sample,
+                {
+                    "days": days,
+                    "sample_size": len(rows),
+                    "error": "Need at least 6 independent entries.",
+                },
+            )
 
         after_win = _Bucket()
         after_loss = _Bucket()
         after_scratch = _Bucket()
         first_of_symbol = _Bucket()
+        overlapping_entry = _Bucket()
         by_symbol: dict[str, dict[str, _Bucket]] = defaultdict(
             lambda: {"after_win": _Bucket(), "after_loss": _Bucket()}
         )
 
-        prev_by_symbol: dict[str, float] = {}
-        for symbol, filled_at, pnl in rows:
-            prev = prev_by_symbol.get(symbol)
-            if prev is None:
-                first_of_symbol.add(pnl)
-            elif prev > 0:
-                after_win.add(pnl)
-                by_symbol[symbol]["after_win"].add(pnl)
-            elif prev < 0:
-                after_loss.add(pnl)
-                by_symbol[symbol]["after_loss"].add(pnl)
+        episodes_by_symbol: dict[str, list[_EntryOutcome]] = defaultdict(list)
+        for row in rows:
+            episodes_by_symbol[row.symbol].append(row)
+
+        for row in rows:
+            earlier_entries = [
+                candidate
+                for candidate in episodes_by_symbol[row.symbol]
+                if (
+                    candidate.entry_at,
+                    candidate.entry_order_id,
+                    candidate.exit_order_id,
+                )
+                < (row.entry_at, row.entry_order_id, row.exit_order_id)
+            ]
+            causal_predecessors = [
+                candidate
+                for candidate in earlier_entries
+                if candidate.exit_at <= row.entry_at
+            ]
+            if not causal_predecessors:
+                if earlier_entries:
+                    overlapping_entry.add(row.net_pnl)
+                else:
+                    first_of_symbol.add(row.net_pnl)
+                continue
+            previous = max(
+                causal_predecessors,
+                key=lambda candidate: (
+                    candidate.exit_at,
+                    candidate.exit_order_id,
+                    candidate.entry_order_id,
+                ),
+            )
+            if previous.net_pnl > 0:
+                after_win.add(row.net_pnl)
+                by_symbol[row.symbol]["after_win"].add(row.net_pnl)
+            elif previous.net_pnl < 0:
+                after_loss.add(row.net_pnl)
+                by_symbol[row.symbol]["after_loss"].add(row.net_pnl)
             else:
-                after_scratch.add(pnl)
-            prev_by_symbol[symbol] = pnl
+                after_scratch.add(row.net_pnl)
 
         symbol_rows = [
             {
@@ -90,8 +147,13 @@ class ReentryAnalysisService:
             }
             for sym, buckets in sorted(
                 by_symbol.items(),
-                key=lambda kv: kv[1]["after_win"].n + kv[1]["after_loss"].n,
-                reverse=True,
+                key=lambda item: (
+                    -(
+                        item[1]["after_win"].n
+                        + item[1]["after_loss"].n
+                    ),
+                    item[0],
+                ),
             )
         ]
 
@@ -101,26 +163,52 @@ class ReentryAnalysisService:
             al = after_loss.pnl / after_loss.n
             tilt = round(aw - al, 2)
 
-        return {
-            "days": days,
-            "sample_size": len(rows),
-            "after_win": after_win.as_dict(),
-            "after_loss": after_loss.as_dict(),
-            "after_scratch": after_scratch.as_dict(),
-            "first_of_symbol": first_of_symbol.as_dict(),
-            "tilt_avg_pnl_diff": tilt,
-            "by_symbol": symbol_rows,
-        }
-
-    def _fetch(self, days: int) -> list[tuple[str, datetime, float]]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        stmt = (
-            select(OrderRecord.symbol, OrderRecord.filled_at, OrderRecord.net_pnl)
-            .where(OrderRecord.net_pnl.is_not(None), OrderRecord.filled_at >= cutoff)
-            .order_by(OrderRecord.filled_at.asc())
+        return analytics_response(
+            sample,
+            {
+                "days": days,
+                "sample_size": len(rows),
+                "after_win": after_win.as_dict(),
+                "after_loss": after_loss.as_dict(),
+                "after_scratch": after_scratch.as_dict(),
+                "first_of_symbol": first_of_symbol.as_dict(),
+                "overlapping_entry": overlapping_entry.as_dict(),
+                "tilt_avg_pnl_diff": tilt,
+                "by_symbol": symbol_rows,
+            },
         )
-        return [
-            (r[0], r[1], float(r[2]))
-            for r in self._db.execute(stmt).all()
-            if r[1] is not None and r[2] is not None
-        ]
+
+
+def _entry_outcomes(trades: list[ClosedRoundTrip]) -> list[_EntryOutcome]:
+    grouped: dict[tuple[str, int], list[ClosedRoundTrip]] = defaultdict(list)
+    for trade in trades:
+        # Synthetic external entries use id=0 and cannot safely be merged with
+        # one another. Their exit id provides a stable independent fallback.
+        entry_identity = (
+            trade.entry_order_id
+            if trade.entry_order_id > 0
+            else -trade.exit_order_id
+        )
+        grouped[(trade.symbol, entry_identity)].append(trade)
+
+    outcomes = [
+        _EntryOutcome(
+            symbol=slices[0].symbol,
+            entry_order_id=entry_identity,
+            entry_at=min(item.entry_at for item in slices),
+            exit_at=max(item.exit_at for item in slices),
+            exit_order_id=max(item.exit_order_id for item in slices),
+            net_pnl=sum(item.net_pnl for item in slices),
+        )
+        for (_symbol, entry_identity), slices in grouped.items()
+    ]
+    return sorted(
+        outcomes,
+        key=lambda row: (
+            row.entry_at,
+            row.entry_order_id,
+            row.exit_at,
+            row.exit_order_id,
+            row.symbol,
+        ),
+    )

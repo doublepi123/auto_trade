@@ -1,4 +1,4 @@
-"""Capital efficiency API (GET /api/capital-efficiency/*).
+"""Closed-round-trip capital efficiency API (GET /api/capital-efficiency/*).
 
 Read-only capital utilization analytics.  Never writes.
 """
@@ -27,7 +27,7 @@ def analyze_efficiency(
     capital_base: float = Query(default=10000.0, ge=100, le=10000000),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Compute return-on-capital, turnover, and utilization metrics."""
+    """Compute closed-round-trip return, turnover, and capital-time metrics."""
     return CapitalEfficiencyService(db).analyze(
         symbol=symbol, lookback_days=lookback_days, capital_base=capital_base
     )

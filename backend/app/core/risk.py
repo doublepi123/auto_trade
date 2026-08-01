@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import threading
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -27,16 +28,33 @@ class RiskConfig:
     def __post_init__(self) -> None:
         # ``is not None`` guard is required: runtime_state_service.load() may
         # pass None when the DB column is NULL — this is NOT dead code.
-        if self.max_daily_loss is not None and self.max_daily_loss < 0:
-            raise ValueError("max_daily_loss must be non-negative")
-        if self.max_drawdown_amount is not None and self.max_drawdown_amount < 0:
-            raise ValueError("max_drawdown_amount must be non-negative")
+        if self.max_daily_loss is not None:
+            if not math.isfinite(self.max_daily_loss):
+                raise ValueError("max_daily_loss must be finite")
+            if self.max_daily_loss < 0:
+                raise ValueError("max_daily_loss must be non-negative")
+        if self.max_drawdown_amount is not None:
+            if not math.isfinite(self.max_drawdown_amount):
+                raise ValueError("max_drawdown_amount must be finite")
+            if self.max_drawdown_amount < 0:
+                raise ValueError("max_drawdown_amount must be non-negative")
 
 
 @dataclass
 class RiskResult:
     approved: bool
     reason: str = ""
+
+
+@dataclass(frozen=True)
+class DailyLossSnapshot:
+    """Atomic daily-loss inputs captured after exchange-day rollover."""
+
+    realized_pnl: float
+    max_daily_loss: float
+    trade_day: date
+    paused: bool
+    kill_switch: bool
 
 
 TradeDayProvider = Callable[[], date]
@@ -74,24 +92,51 @@ class RiskController:
             self._today = provider()
 
     def check(self) -> RiskResult:
+        result, _ = self.check_with_daily_loss_snapshot()
+        return result
+
+    def check_with_daily_loss_snapshot(
+        self,
+    ) -> tuple[RiskResult, DailyLossSnapshot]:
+        """Roll the trade day, then atomically return risk and daily-loss state.
+
+        Rollover intentionally precedes pause and kill-switch checks. It resets
+        only day-scoped PnL/loss counters and never clears either safety latch.
+        Quote-driven position reductions can therefore avoid yesterday's PnL
+        without making a paused runner eligible for new entries.
+        """
         with self._lock:
+            self._maybe_rollover_day()
+            max_daily_loss = self._validated_limit(
+                self.config.max_daily_loss,
+                name="max_daily_loss",
+            )
+            snapshot = DailyLossSnapshot(
+                realized_pnl=self.daily_pnl,
+                max_daily_loss=max_daily_loss,
+                trade_day=self._today,
+                paused=self.paused,
+                kill_switch=self.kill_switch,
+            )
             if self.kill_switch:
-                return RiskResult(approved=False, reason="kill switch is active")
+                return (
+                    RiskResult(approved=False, reason="kill switch is active"),
+                    snapshot,
+                )
             if self.paused:
                 reason = "trading is paused"
                 if self._pause_reason:
                     reason = f"{reason}: {self._pause_reason}"
-                return RiskResult(approved=False, reason=reason)
+                return RiskResult(approved=False, reason=reason), snapshot
             if self._entry_reconciliation_count > 0:
-                return RiskResult(
-                    approved=False,
-                    reason="post-fill PnL reconciliation is still in progress",
+                return (
+                    RiskResult(
+                        approved=False,
+                        reason="post-fill PnL reconciliation is still in progress",
+                    ),
+                    snapshot,
                 )
-            # Day rollover is a mutating operation (resets daily_pnl and
-            # consecutive_losses) so it is performed explicitly here rather
-            # than hidden inside the read-only limit check.
-            self._maybe_rollover_day()
-            return self._check_limits()
+            return self._check_limits(), snapshot
 
     def reset_consecutive_losses(self) -> None:
         with self._lock:
@@ -110,9 +155,14 @@ class RiskController:
             self._today = today
 
     def _check_limits(self) -> RiskResult:
-        max_daily_loss = self.config.max_daily_loss or 0.0
-        if max_daily_loss < 0:
-            raise ValueError("max_daily_loss must be non-negative")
+        max_daily_loss = self._validated_limit(
+            self.config.max_daily_loss,
+            name="max_daily_loss",
+        )
+        self._validated_limit(
+            self.config.max_drawdown_amount,
+            name="max_drawdown_amount",
+        )
 
         # max_daily_loss == 0 means "no limit" (disabled); only enforce when > 0.
         # Without this guard, daily_pnl <= -0 is always True when daily_pnl == 0,
@@ -124,6 +174,15 @@ class RiskController:
             return RiskResult(approved=False, reason=f"max consecutive losses reached: {self.consecutive_losses}")
 
         return RiskResult(approved=True)
+
+    @staticmethod
+    def _validated_limit(value: float | None, *, name: str) -> float:
+        limit = float(value or 0.0)
+        if not math.isfinite(limit):
+            raise ValueError(f"{name} must be finite")
+        if limit < 0:
+            raise ValueError(f"{name} must be non-negative")
+        return limit
 
     def record_trade(self, pnl: float) -> None:
         with self._lock:

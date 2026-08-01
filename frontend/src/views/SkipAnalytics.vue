@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { getSkipAnalyticsSummary, type SkipAnalyticsResult } from '../api/skipAnalytics'
+import {
+  getSkipAnalyticsSummary,
+  type EventQuality,
+  type SkipAnalyticsResult,
+} from '../api/skipAnalytics'
 import { skipCategoryLabel } from '../utils/labels'
 
 const loading = ref(false)
@@ -33,6 +37,11 @@ const maxDaily = computed(() => {
 })
 
 const label = skipCategoryLabel
+
+function eventQualityDescription(quality: EventQuality): string {
+  const details = quality.issues.map((issue) => `${issue.code}: ${issue.count}`).join('；')
+  return `共 ${quality.invalid_event_count} 条事件 payload 不完整或无法识别${details ? `（${details}）` : ''}；事件仍计入总数并归入 UNKNOWN/原类别。`
+}
 </script>
 
 <template>
@@ -52,6 +61,17 @@ const label = skipCategoryLabel
     </el-card>
 
     <template v-if="result">
+      <el-alert
+        v-if="result.event_quality.status === 'DEGRADED'"
+        data-testid="event-quality-alert"
+        :data-quality-status="result.event_quality.status"
+        title="跳过事件数据质量降级"
+        :description="eventQualityDescription(result.event_quality)"
+        type="warning"
+        show-icon
+        :closable="false"
+        style="margin-top: 16px"
+      />
       <el-alert v-if="result.error" :title="result.error" type="warning" :closable="false" style="margin-top: 16px" />
 
       <template v-else>

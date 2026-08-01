@@ -1335,6 +1335,12 @@
                       <small v-if="row.open_trades"> · 开 {{ row.open_trades }}</small>
                     </template>
                   </el-table-column>
+                  <el-table-column label="平均持有" width="128">
+                    <template #default="{ row }">
+                      {{ row.baseline_mean_holding_minutes.toFixed(1) }} →
+                      {{ row.challenger_mean_holding_minutes.toFixed(1) }} 分
+                    </template>
+                  </el-table-column>
                   <el-table-column label="胜率" min-width="132">
                     <template #default="{ row }">
                       {{ formatPercent(row.baseline_win_rate) }} →
@@ -1428,11 +1434,18 @@
                   </el-table-column>
                   <el-table-column label="配对 / 触发" width="126">
                     <template #default="{ row }">
-                      {{ row.paired_trades }} / {{ row.profit_lock_exits }}
+                      {{ row.paired_trades }} /
+                      {{ row.profit_lock_exits + row.time_stop_exits }}
                       <small v-if="row.open_trades"> · 开 {{ row.open_trades }}</small>
                       <small v-if="row.awaiting_baseline_trades">
                         · 待 {{ row.awaiting_baseline_trades }}
                       </small>
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="平均持有" width="128">
+                    <template #default="{ row }">
+                      {{ row.baseline_mean_holding_minutes.toFixed(1) }} →
+                      {{ row.challenger_mean_holding_minutes.toFixed(1) }} 分
                     </template>
                   </el-table-column>
                   <el-table-column label="胜率" min-width="132">
@@ -3495,6 +3508,9 @@ function shadowExitStatusMeta(
 function liveExitPolicyLabel(
   variant: LiveExitChallengerVariant,
 ): string {
+  if (variant.policy_type === 'TIME_STOP') {
+    return `${variant.max_holding_minutes ?? 0} 分钟退出`
+  }
   return `+${variant.activation_pct.toFixed(2)}% → +${variant.locked_profit_pct.toFixed(2)}%`
 }
 

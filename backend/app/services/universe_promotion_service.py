@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
+from typing import Literal
 
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.market_calendar import trade_day_for
+from app.domain.universe_selection.catalog import risk_group_for_sector
 from app.models import (
     StrategyConfig,
     StrategyV2ShadowConfig,
@@ -20,6 +23,7 @@ from app.schemas import (
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 from app.services.watchlist_quant_service import (
     QUANT_SCORE_SOURCE,
+    QUANT_WARMUP_SOURCE,
     list_latest_current_quant_scores,
 )
 from app.services.watchlist_score_service import WatchlistScoreService
@@ -34,8 +38,12 @@ from app.services.universe_selection_service import (
 _TERMINAL_RUN_STATUSES = ("COMPLETE", "DEGRADED")
 _REVIEW_READY_STATUSES = {"READY_FOR_REVIEW", "MATURE_EVIDENCE"}
 _PRIORITY_ALGORITHM_VERSION = (
-    "selection-exploration-quant-fail-closed-v5"
+    "selection-exploration-quant-core-satellite-observation-v7"
 )
+_DIVERSIFIED_OBSERVATION_LIMIT = 8
+_GROWTH_SATELLITE_LIMIT = 4
+_GROWTH_SATELLITE_MAX_PER_RISK_GROUP = 2
+_GROWTH_SATELLITE_MAX_COST_BPS = 20.0
 _MAX_QUANT_WEIGHT = 0.35
 _QUANT_NEUTRAL_SCORE = 50.0
 _QUANT_DATA_ERROR_PENALTY = -25.0
@@ -45,6 +53,24 @@ _QUANT_AVOID_PENALTY = -20.0
 _QUANT_WATCH_PENALTY = -10.0
 _MIN_FORWARD_REVIEW_TRADES = 5
 _MIN_FORWARD_MATURE_TRADES = 20
+
+
+def _candidate_memberships(
+    candidate: UniverseSelectionCandidate,
+) -> list[Literal["NASDAQ_100", "DJIA"]]:
+    try:
+        raw = json.loads(candidate.memberships_json)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    memberships: list[Literal["NASDAQ_100", "DJIA"]] = []
+    for membership in raw:
+        if membership == "NASDAQ_100":
+            memberships.append("NASDAQ_100")
+        elif membership == "DJIA":
+            memberships.append("DJIA")
+    return memberships
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -99,6 +125,8 @@ def _promotion_blockers(
         blockers.append("SHADOW_DISABLED")
     if quant is None:
         blockers.append("QUANT_SCORE_MISSING")
+    elif quant.source == QUANT_WARMUP_SOURCE:
+        blockers.append("QUANT_SCORE_WARMING_UP")
     elif quant.source != QUANT_SCORE_SOURCE:
         blockers.append("QUANT_SCORE_DATA_ERROR")
     elif not quant_fresh:
@@ -236,6 +264,9 @@ class UniversePromotionService:
             items.append(
                 UniversePromotionReadinessItem(
                     symbol=candidate.symbol,
+                    memberships=_candidate_memberships(candidate),
+                    sector=candidate.sector,
+                    risk_group=risk_group_for_sector(candidate.sector),
                     universe_role=universe_role,
                     rank=candidate.rank,
                     selection_score=selection_score,
@@ -262,6 +293,11 @@ class UniversePromotionService:
                     ),
                     quant_expires_at=(
                         _as_utc(quant.expires_at)
+                        if quant is not None
+                        else None
+                    ),
+                    estimated_round_trip_cost_bps=(
+                        quant.estimated_round_trip_cost_bps
                         if quant is not None
                         else None
                     ),
@@ -294,11 +330,74 @@ class UniversePromotionService:
             item.model_copy(update={"priority_rank": priority_rank})
             for priority_rank, item in enumerate(items, start=1)
         ]
+        diversified_ranks: dict[str, int] = {}
+        represented_risk_groups: set[str] = set()
+        for item in items:
+            if len(diversified_ranks) >= _DIVERSIFIED_OBSERVATION_LIMIT:
+                break
+            if (
+                not item.shadow_enabled
+                or not item.quant_fresh
+                or item.quant_source != QUANT_SCORE_SOURCE
+                or item.quant_recommended_action.upper()
+                not in {"WATCH", "CANDIDATE"}
+                or not item.risk_group
+                or item.risk_group in represented_risk_groups
+            ):
+                continue
+            represented_risk_groups.add(item.risk_group)
+            diversified_ranks[item.symbol] = len(diversified_ranks) + 1
+        items = [
+            item.model_copy(update={
+                "diversified_observation_selected": (
+                    item.symbol in diversified_ranks
+                ),
+                "diversified_observation_rank": diversified_ranks.get(
+                    item.symbol
+                ),
+            })
+            for item in items
+        ]
+        satellite_ranks: dict[str, int] = {}
+        satellite_risk_group_counts: dict[str, int] = {}
+        for item in items:
+            if len(satellite_ranks) >= _GROWTH_SATELLITE_LIMIT:
+                break
+            cost_bps = item.estimated_round_trip_cost_bps
+            if (
+                item.diversified_observation_selected
+                or item.is_trading_target
+                or not item.memberships
+                or not item.shadow_enabled
+                or not item.quant_fresh
+                or item.quant_source != QUANT_SCORE_SOURCE
+                or item.quant_recommended_action.upper()
+                not in {"WATCH", "CANDIDATE"}
+                or not item.risk_group
+                or cost_bps is None
+                or cost_bps > _GROWTH_SATELLITE_MAX_COST_BPS
+                or satellite_risk_group_counts.get(item.risk_group, 0)
+                >= _GROWTH_SATELLITE_MAX_PER_RISK_GROUP
+            ):
+                continue
+            satellite_risk_group_counts[item.risk_group] = (
+                satellite_risk_group_counts.get(item.risk_group, 0) + 1
+            )
+            satellite_ranks[item.symbol] = len(satellite_ranks) + 1
+        items = [
+            item.model_copy(update={
+                "growth_satellite_selected": item.symbol in satellite_ranks,
+                "growth_satellite_rank": satellite_ranks.get(item.symbol),
+            })
+            for item in items
+        ]
         return UniversePromotionReadinessResponse(
             universe_run_id=run.id,
             as_of_date=run.as_of_date,
             generated_at=self.now,
             priority_algorithm_version=_PRIORITY_ALGORITHM_VERSION,
+            diversified_observation_limit=_DIVERSIFIED_OBSERVATION_LIMIT,
+            growth_satellite_limit=_GROWTH_SATELLITE_LIMIT,
             items=items,
         )
 

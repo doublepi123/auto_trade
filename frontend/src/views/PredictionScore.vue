@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { getPredictionScore, type PredictionScoreResult } from '../api/predictionScore'
+import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 
 const loading = ref(false)
 const result = ref<PredictionScoreResult | null>(null)
@@ -31,7 +32,7 @@ function wrColor(v: number, baseline: number): string {
 <template>
   <div class="page-container">
     <h2>条件胜率评分</h2>
-    <p class="page-desc">按星期、时段、连续状态的条件胜率，识别可观测特征上的优势（灵感来自 Freqtrade / Edgewonk）</p>
+    <p class="page-desc">按入场时可观测的星期、时段和已知连续状态统计条件胜率；仅为回顾性频率，不可直接作为实时交易信号</p>
 
     <el-card class="control-card">
       <el-form inline>
@@ -48,6 +49,7 @@ function wrColor(v: number, baseline: number): string {
     </el-card>
 
     <template v-if="result">
+      <StatisticsQualityAlert :quality="result.statistics_quality" style="margin-top: 16px" />
       <el-alert v-if="result.error" :title="result.error" type="warning" :closable="false" style="margin-top: 16px" />
 
       <template v-else>

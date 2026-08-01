@@ -1,4 +1,5 @@
 import { api } from './client'
+import type { StatisticsQuality } from '../types'
 
 export interface DecayWindow {
   window: number
@@ -23,6 +24,7 @@ export interface DecayDetectionResult {
   decay_signals: number
   verdict: string
   assessment: string
+  statistics_quality: StatisticsQuality
   error?: string
 }
 
