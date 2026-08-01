@@ -25,6 +25,9 @@ from app.schemas import (
 logger = logging.getLogger(__name__)
 
 PRICE_RULES = {"price_above", "price_below"}
+# Rule types that read ``RuntimeState`` instead of live broker quotes. They
+# never trigger a quote fetch — the cron can evaluate them without a broker.
+STATE_RULES = {"daily_loss", "consecutive_losses"}
 
 
 class _NotifierLike(Protocol):
@@ -269,20 +272,29 @@ class AlertRuleService:
     def _current_value(self, rule: AlertRule, quote_map: dict[str, float]) -> float | None:
         if rule.rule_type in PRICE_RULES:
             return quote_map.get(rule.symbol)
-        if rule.rule_type == "daily_loss":
-            state = self._db.scalar(
-                select(RuntimeState)
-                .where(RuntimeState.symbol == rule.symbol)
-                .order_by(RuntimeState.id.desc())
-            )
-            if state is None and not rule.symbol:
-                # Account-wide (symbol-less) rule: fall back to the latest row
-                # regardless of symbol. A symbol-specific rule with no matching
-                # state row returns None (data unavailable) rather than firing on
-                # an unrelated symbol's daily_pnl.
-                state = self._db.scalar(select(RuntimeState).order_by(RuntimeState.id.desc()))
-            return float(state.daily_pnl) if state is not None else None
+        if rule.rule_type in STATE_RULES:
+            state = self._runtime_state_for_rule(rule)
+            if state is None:
+                return None
+            if rule.rule_type == "daily_loss":
+                return float(state.daily_pnl)
+            if rule.rule_type == "consecutive_losses":
+                return float(state.consecutive_losses)
         return None
+
+    def _runtime_state_for_rule(self, rule: AlertRule) -> RuntimeState | None:
+        """Resolve the ``RuntimeState`` row a state-backed rule reads from.
+
+        Symbol-specific rules read only that symbol's row — a missing row
+        returns ``None`` (data unavailable) rather than falling back to an
+        unrelated symbol's state. Symbol-empty (account-wide) rules use the
+        most recently updated row regardless of symbol.
+        """
+        if rule.symbol:
+            return self._db.scalar(
+                select(RuntimeState).where(RuntimeState.symbol == rule.symbol)
+            )
+        return self._db.scalar(select(RuntimeState).order_by(RuntimeState.id.desc()))
 
     @staticmethod
     def _to_out(rule: AlertRule) -> AlertRuleOut:
@@ -308,6 +320,11 @@ def _check(rule: AlertRule, value: float) -> tuple[bool, str]:
     if rule.rule_type == "daily_loss":
         triggered = value <= rule.threshold
         return triggered, f"{rule.symbol} 日内盈亏 {value:.2f} ≤ 阈值 {rule.threshold:.2f}"
+    if rule.rule_type == "consecutive_losses":
+        # threshold is validated as a positive integer at the schema layer;
+        # compare as ints to avoid float drift on a count.
+        triggered = int(value) >= int(rule.threshold)
+        return triggered, f"{rule.symbol} 连续亏损 {int(value)} ≥ 阈值 {int(rule.threshold)}"
     return False, ""
 
 

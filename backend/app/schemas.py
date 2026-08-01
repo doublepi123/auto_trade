@@ -2247,16 +2247,37 @@ class BacktestRunCompare(BaseModel):
 
 
 class AlertRuleCreate(BaseModel):
-    """Create or fully replace an alert rule."""
+    """Create or fully replace an alert rule.
+
+    ``rule_type`` semantics:
+      - ``price_above`` / ``price_below``: live quote vs ``threshold`` (price rules).
+      - ``daily_loss``: active ``RuntimeState.daily_pnl`` <= ``threshold`` (signed P&L).
+      - ``consecutive_losses``: active ``RuntimeState.consecutive_losses`` >=
+        ``threshold``; ``threshold`` must be a positive integer-like value
+        (>= 1) so a zero threshold can never fire on a fresh state row.
+    """
 
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=128)
     symbol: str = Field(default="", max_length=50)
-    rule_type: Literal["price_above", "price_below", "daily_loss"]
+    rule_type: Literal["price_above", "price_below", "daily_loss", "consecutive_losses"]
     threshold: float
     severity: Literal["INFO", "WARNING", "CRITICAL"] = "WARNING"
     enabled: bool = True
     cooldown_seconds: int = Field(default=300, ge=0, le=86400)
+
+    @model_validator(mode="after")
+    def _validate_threshold_for_rule_type(self) -> "AlertRuleCreate":
+        if self.rule_type == "consecutive_losses":
+            # Require a positive integer-like threshold. A loss count is a
+            # non-negative integer; a threshold of 0 would fire on a fresh
+            # (zero-loss) state row, so reject it. Fractional thresholds are
+            # meaningless for a count and are also rejected.
+            if self.threshold < 1 or int(self.threshold) != self.threshold:
+                raise ValueError(
+                    "consecutive_losses threshold must be a positive integer >= 1"
+                )
+        return self
 
 
 class AlertRuleOut(BaseModel):

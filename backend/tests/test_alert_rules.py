@@ -176,6 +176,177 @@ class TestAlertRuleService(_Base):
         assert notifier.calls == []
 
 
+class TestConsecutiveLossesRule(_Base):
+    """consecutive_losses rule: fires when RuntimeState.consecutive_losses
+    >= threshold. No broker quote fetch; symbol isolation; cooldown; no-state."""
+
+    def _make_rule(self, **kw) -> int:
+        svc = AlertRuleService(self._db())
+        out = svc.create(AlertRuleCreate(
+            name=kw.get("name", "streak"),
+            symbol=kw.get("symbol", "AAPL.US"),
+            rule_type="consecutive_losses",
+            threshold=kw.get("threshold", 3),
+            severity="WARNING",
+            enabled=True,
+            cooldown_seconds=kw.get("cooldown_seconds", 300),
+        ))
+        return out.id
+
+    def test_fires_when_consecutive_losses_at_threshold(self) -> None:
+        db = self._db()
+        db.add(RuntimeState(symbol="AAPL.US", consecutive_losses=3))
+        db.commit()
+        db.close()
+        rid = self._make_rule(symbol="AAPL.US", threshold=3)
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
+        assert result.fired == 1
+        assert len(notifier.calls) == 1
+        # firing recorded with the count as trigger_value
+        rows = AlertRuleService(self._db()).history(rid)
+        assert len(rows) == 1
+        assert rows[0].trigger_value == 3.0
+        assert rows[0].threshold == 3.0
+        assert "连续亏损" in rows[0].message
+
+    def test_fires_when_consecutive_losses_exceeds_threshold(self) -> None:
+        db = self._db()
+        db.add(RuntimeState(symbol="AAPL.US", consecutive_losses=5))
+        db.commit()
+        db.close()
+        self._make_rule(symbol="AAPL.US", threshold=3)
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
+        assert result.fired == 1
+
+    def test_does_not_fire_below_threshold(self) -> None:
+        db = self._db()
+        db.add(RuntimeState(symbol="AAPL.US", consecutive_losses=2))
+        db.commit()
+        db.close()
+        self._make_rule(symbol="AAPL.US", threshold=3)
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
+        assert result.fired == 0
+        assert notifier.calls == []
+
+    def test_no_state_row_does_not_fire(self) -> None:
+        # Symbol-specific rule with no matching RuntimeState row -> data
+        # unavailable, never fires (no fallback to an unrelated row).
+        self._make_rule(symbol="AAPL.US", threshold=3)
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
+        assert result.fired == 0
+        assert notifier.calls == []
+
+    def test_symbol_isolation_does_not_use_unrelated_state(self) -> None:
+        # AAPL rule, only TSLA has a state row with a high streak. Must NOT
+        # fall back to TSLA's streak and fire an AAPL-branded alert.
+        db = self._db()
+        db.add(RuntimeState(symbol="TSLA.US", consecutive_losses=10))
+        db.commit()
+        db.close()
+        self._make_rule(symbol="AAPL.US", threshold=3)
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(None, notifier))
+        assert result.fired == 0
+        assert notifier.calls == []
+
+    def test_account_wide_uses_most_recent_state(self) -> None:
+        # Symbol-empty rule uses the most recently updated RuntimeState row.
+        db = self._db()
+        db.add(RuntimeState(symbol="AAPL.US", consecutive_losses=1))
+        db.add(RuntimeState(symbol="TSLA.US", consecutive_losses=4))
+        db.commit()
+        db.close()
+        svc = AlertRuleService(self._db())
+        svc.create(AlertRuleCreate(
+            name="acct streak", symbol="", rule_type="consecutive_losses", threshold=3,
+        ))
+        notifier = FakeNotifier()
+        result = svc.evaluate(FakeRunner(None, notifier))
+        assert result.fired == 1
+
+    def test_cooldown_skips_second_fire(self) -> None:
+        db = self._db()
+        db.add(RuntimeState(symbol="AAPL.US", consecutive_losses=5))
+        db.commit()
+        db.close()
+        self._make_rule(symbol="AAPL.US", threshold=3, cooldown_seconds=300)
+        now = datetime(2026, 6, 16, 12, 0, tzinfo=timezone.utc)
+        notifier = FakeNotifier()
+        svc = AlertRuleService(self._db())
+        r1 = svc.evaluate(FakeRunner(None, notifier), now=now)
+        assert r1.fired == 1
+        # within cooldown
+        r2 = svc.evaluate(FakeRunner(None, notifier), now=now + timedelta(minutes=1))
+        assert r2.fired == 0
+        assert r2.skipped_cooldown == 1
+        # past cooldown
+        r3 = svc.evaluate(FakeRunner(None, notifier), now=now + timedelta(minutes=6))
+        assert r3.fired == 1
+
+    def test_no_broker_quote_fetch_for_state_rule(self) -> None:
+        # A broker that raises if touched proves state rules never fetch quotes.
+        class ExplodingBroker:
+            def get_quotes(self, symbols: list[str]) -> list[FakeQuote]:
+                raise AssertionError("consecutive_losses must not fetch quotes")
+
+        db = self._db()
+        db.add(RuntimeState(symbol="AAPL.US", consecutive_losses=5))
+        db.commit()
+        db.close()
+        self._make_rule(symbol="AAPL.US", threshold=3)
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(ExplodingBroker(), notifier))
+        assert result.fired == 1
+
+
+class TestConsecutiveLossesValidation(_Base):
+    def test_threshold_must_be_positive(self) -> None:
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "streak", "symbol": "AAPL.US", "rule_type": "consecutive_losses",
+            "threshold": 0,
+        })
+        assert resp.status_code == 422
+
+    def test_threshold_must_be_integer_like(self) -> None:
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "streak", "symbol": "AAPL.US", "rule_type": "consecutive_losses",
+            "threshold": 2.5,
+        })
+        assert resp.status_code == 422
+
+    def test_negative_threshold_rejected(self) -> None:
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "streak", "symbol": "AAPL.US", "rule_type": "consecutive_losses",
+            "threshold": -1,
+        })
+        assert resp.status_code == 422
+
+    def test_valid_positive_integer_threshold_accepted(self) -> None:
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "streak", "symbol": "AAPL.US", "rule_type": "consecutive_losses",
+            "threshold": 3, "severity": "WARNING", "enabled": True, "cooldown_seconds": 300,
+        })
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["rule_type"] == "consecutive_losses"
+        assert resp.json()["threshold"] == 3.0
+
+    def test_existing_rule_types_still_validated(self) -> None:
+        # Backward compatibility: a bogus rule type is still rejected.
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "x", "symbol": "AAPL.US", "rule_type": "bogus", "threshold": 1,
+        })
+        assert resp.status_code == 422
+        # And a valid daily_loss rule still works (no threshold constraint).
+        resp = self.client.post("/api/alert-rules", json={
+            "name": "loss", "symbol": "AAPL.US", "rule_type": "daily_loss", "threshold": -500.0,
+        })
+        assert resp.status_code == 200, resp.text
+
+
 class TestAlertRuleAPI(_Base):
     def test_crud_and_evaluate(self) -> None:
         create = self.client.post("/api/alert-rules", json={
