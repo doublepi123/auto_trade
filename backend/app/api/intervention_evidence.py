@@ -16,6 +16,7 @@ from app.api.auth import require_api_key
 from app.database import get_db
 from app.schemas import InterventionEvidenceResponse
 from app.services.intervention_evidence_service import InterventionEvidenceService
+from app.services.snapshot_helper import SnapshotUnavailable
 
 router = APIRouter(
     prefix="/api/intervention-evidence",
@@ -45,3 +46,11 @@ def list_intervention_evidence(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except SnapshotUnavailable:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "intervention evidence snapshot unavailable: caller session "
+                "cannot be given a distinct physical read snapshot"
+            ),
+        )

@@ -934,3 +934,252 @@ class TestAuditLogStatsAPI503:
             engine.dispose()
             if os.path.exists(db_path):
                 os.unlink(db_path)
+
+
+class TestSnapshotHelperPoolRejection:
+    """Finding 1: pool modes that cannot guarantee a distinct physical
+    connection are rejected BEFORE ``engine.connect()`` / any transaction
+    command, even with a FRESH Engine-bound reader Session.
+
+    Under StaticPool / SingletonThreadPool, a second ``engine.connect()``
+    returns the SAME underlying DBAPI connection as an active owner. The helper
+    must reject unconditionally, preserving the owner's uncommitted sentinel
+    and active transaction.
+    """
+
+    def _assert_fresh_reader_rejected_with_active_owner(
+        self,
+        engine,
+        *,
+        pool_name: str,
+    ) -> None:
+        from app.services.snapshot_helper import (
+            SnapshotUnavailable,
+            open_read_snapshot,
+        )
+
+        # An active owner holds the single connection with an uncommitted
+        # sentinel.
+        owner_conn = engine.connect()
+        owner_trans = owner_conn.begin()
+        try:
+            owner_session = Session(bind=owner_conn)
+            owner_session.add(
+                AuditLog(
+                    action="OWNER_SENTINEL",
+                    severity="INFO",
+                    actor_hash="owner",
+                    source_ip="",
+                    request_summary="{}",
+                    result="SUCCESS",
+                )
+            )
+            owner_session.flush()
+
+            # A FRESH Engine-bound reader Session (not connection-bound) with no
+            # active transaction. Under StaticPool/SingletonThreadPool this
+            # would still alias the owner's connection, so it must be rejected.
+            reader = Session(bind=engine)
+            try:
+                with pytest.raises(SnapshotUnavailable) as exc_info:
+                    open_read_snapshot(reader, lambda conn: None)
+                assert pool_name in str(exc_info.value).lower() or (
+                    "pool" in str(exc_info.value).lower()
+                )
+            finally:
+                reader.close()
+
+            # The owner's transaction is still active and the sentinel is still
+            # present/rollback-able exactly as before.
+            assert owner_trans.is_active
+            assert (
+                owner_session.query(AuditLog)
+                .filter(AuditLog.action == "OWNER_SENTINEL")
+                .count()
+                == 1
+            )
+            owner_session.close()
+            owner_trans.rollback()
+        finally:
+            owner_conn.close()
+
+    def test_static_pool_fresh_reader_rejected_with_active_owner(self) -> None:
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        try:
+            Base.metadata.create_all(engine)
+            self._assert_fresh_reader_rejected_with_active_owner(
+                engine, pool_name="staticpool"
+            )
+        finally:
+            engine.dispose()
+
+    def test_singleton_thread_pool_fresh_reader_rejected_with_active_owner(
+        self,
+    ) -> None:
+        from sqlalchemy.pool import SingletonThreadPool
+
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=SingletonThreadPool,
+        )
+        try:
+            Base.metadata.create_all(engine)
+            self._assert_fresh_reader_rejected_with_active_owner(
+                engine, pool_name="singletonthreadpool"
+            )
+        finally:
+            engine.dispose()
+
+    def test_exhausted_queue_pool_rejected_without_blocking(self) -> None:
+        # A single-slot QueuePool (size=1, overflow=0) with the one connection
+        # checked out must be rejected via public pool state without waiting.
+        from sqlalchemy.pool import QueuePool
+
+        from app.services.snapshot_helper import (
+            SnapshotUnavailable,
+            open_read_snapshot,
+        )
+
+        db_path = os.path.join(
+            tempfile.gettempdir(),
+            f"auto_trade_test_snapshot_exhausted_{os.getpid()}.db",
+        )
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+        engine = create_engine(
+            f"sqlite:///{db_path}",
+            connect_args={"check_same_thread": False},
+            poolclass=QueuePool,
+            pool_size=1,
+            max_overflow=0,
+        )
+        try:
+            Base.metadata.create_all(engine)
+            # Check out the single connection.
+            owner_conn = engine.connect()
+            try:
+                reader = Session(bind=engine)
+                with pytest.raises(SnapshotUnavailable) as exc_info:
+                    open_read_snapshot(reader, lambda conn: None)
+                assert "exhausted" in str(exc_info.value).lower()
+                reader.close()
+            finally:
+                owner_conn.close()
+        finally:
+            engine.dispose()
+            if os.path.exists(db_path):
+                os.unlink(db_path)
+
+    def test_begin_failure_raises_and_no_query_proceeds(self, monkeypatch) -> None:
+        # If the explicit BEGIN fails, no query must proceed and the owned
+        # connection must be closed/released.
+        from app.services.snapshot_helper import (
+            SnapshotUnavailable,
+            open_read_snapshot,
+        )
+
+        db_path = os.path.join(
+            tempfile.gettempdir(),
+            f"auto_trade_test_snapshot_begin_fail_{os.getpid()}.db",
+        )
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+        engine = create_engine(
+            f"sqlite:///{db_path}",
+            connect_args={"check_same_thread": False},
+        )
+        try:
+            Base.metadata.create_all(engine)
+            reader = Session(bind=engine)
+            query_ran = []
+
+            def _query(conn):
+                query_ran.append(True)
+                return "result"
+
+            # Monkeypatch the DBAPI connection's execute to fail on BEGIN only.
+            real_connect = engine.connect
+
+            class _BadBeginConnection:
+                def __init__(self, real):
+                    self._real = real
+
+                @property
+                def connection(self):
+                    real_driver = self._real.connection
+
+                    class _Driver:
+                        def execute(self, stmt, *args):
+                            if isinstance(stmt, str) and stmt.upper() == "BEGIN":
+                                raise RuntimeError("injected BEGIN failure")
+                            return real_driver.execute(stmt, *args)
+
+                        def rollback(self):
+                            return real_driver.rollback()
+
+                    return _Driver()
+
+                def close(self):
+                    return self._real.close()
+
+            def _fake_connect():
+                return _BadBeginConnection(real_connect())
+
+            monkeypatch.setattr(engine, "connect", _fake_connect)
+
+            with pytest.raises(SnapshotUnavailable):
+                open_read_snapshot(reader, _query)
+            assert query_ran == []  # no query proceeded
+            reader.close()
+        finally:
+            engine.dispose()
+            if os.path.exists(db_path):
+                os.unlink(db_path)
+
+    def test_normal_pooled_file_sqlite_succeeds_via_helper(self) -> None:
+        # The ordinary production-like path (file SQLite, default QueuePool,
+        # Engine-bound session, no active transaction) must still succeed.
+        from app.services.snapshot_helper import open_read_snapshot
+
+        db_path = os.path.join(
+            tempfile.gettempdir(),
+            f"auto_trade_test_snapshot_normal_{os.getpid()}.db",
+        )
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+        engine = create_engine(
+            f"sqlite:///{db_path}",
+            connect_args={"check_same_thread": False},
+        )
+        try:
+            Base.metadata.create_all(engine)
+            db = Session(bind=engine)
+            db.add(AuditLog(action="OK", severity="INFO", actor_hash="a",
+                            source_ip="", request_summary="{}", result="SUCCESS"))
+            db.commit()
+            db.close()
+
+            reader = Session(bind=engine)
+
+            def _query(conn):
+                from sqlalchemy import func, select
+
+                return int(
+                    conn.scalar(
+                        select(func.count()).select_from(AuditLog)
+                    )
+                    or 0
+                )
+
+            count = open_read_snapshot(reader, _query)
+            reader.close()
+            assert count == 1
+        finally:
+            engine.dispose()
+            if os.path.exists(db_path):
+                os.unlink(db_path)

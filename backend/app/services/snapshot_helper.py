@@ -6,18 +6,26 @@ caller's Session/Connection/transaction. This tiny helper centralizes that
 logic so the two services stay consistent.
 
 Safety contract (fail closed):
-* The caller Session must be bound to an ``Engine`` (the ordinary request path).
-  The helper opens its OWN physical connection off that engine, begins one read
-  snapshot, runs the caller's query function, and releases the connection.
-* If the caller Session is explicitly connection-bound (``Session(bind=Connection(...))``)
-  or already has an active/checked-out transaction, a distinct physical
-  connection CANNOT be guaranteed without aliasing a connection that may be
-  mid-transaction (notably under ``StaticPool`` / ``SingletonThreadPool`` /
-  single-slot pools, where ``engine.connect()`` can return the SAME underlying
-  DBAPI connection). Rather than probe a second connection and risk
-  BEGIN/rollback on an aliased wrapper, the helper rejects up front with
-  ``SnapshotUnavailable`` BEFORE any transaction command. The caller
-  transaction/row state is never altered.
+* The caller Session must be bound to an ``Engine`` (the ordinary request path)
+  whose pool can guarantee a DISTINCT physical connection. The helper opens its
+  OWN physical connection off that engine, begins one read snapshot, runs the
+  caller's query function, and releases the connection.
+* Before calling ``engine.connect()`` or issuing ANY transaction command, the
+  helper rejects pool modes and states that CANNOT guarantee a distinct
+  physical SQLite connection when another owner may be active:
+    - connection-bound sessions (``Session(bind=Connection(...))``);
+    - sessions with an active/checked-out caller transaction;
+    - ``StaticPool`` and ``SingletonThreadPool`` (unconditionally — they can
+      hand out the SAME underlying DBAPI connection to a second caller);
+    - an exhausted single-slot / full ``QueuePool`` (detected via public pool
+      state APIs without a blocking connect).
+  In all these cases the helper raises ``SnapshotUnavailable`` BEFORE any
+  transaction command. The caller transaction/row state is never altered.
+* If opening the owned connection or the explicit ``BEGIN`` fails for any
+  reason, the helper immediately closes/releases ONLY the owned resource and
+  raises ``SnapshotUnavailable``. It never swallows a BEGIN failure and
+  continues queries; it never issues rollback/close against a possibly aliased
+  caller resource.
 * This is SQLite-specific (WAL read snapshot via ``BEGIN``) and is NOT a
   general transaction framework.
 """
@@ -28,53 +36,93 @@ from typing import Callable, TypeVar
 from sqlalchemy import Engine
 from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import QueuePool, SingletonThreadPool, StaticPool
 
 __all__ = ["SnapshotUnavailable", "open_read_snapshot"]
 
 _T = TypeVar("_T")
+
+_UNAVAILABLE_MESSAGE = (
+    "read snapshot unavailable: caller session cannot be guaranteed a "
+    "distinct physical connection"
+)
 
 
 class SnapshotUnavailable(RuntimeError):
     """The caller Session cannot be given a distinct physical read snapshot.
 
     Raised BEFORE any transaction command when the caller Session is
-    connection-bound or already mid-transaction, where opening a second
-    connection could alias the caller's DBAPI connection (StaticPool /
-    SingletonThreadPool / single-slot pools). Map to HTTP 503 at the API edge.
+    connection-bound, already mid-transaction, or backed by a pool mode that
+    cannot guarantee a distinct physical SQLite connection (StaticPool /
+    SingletonThreadPool / exhausted single-slot QueuePool). Map to HTTP 503 at
+    the API edge.
     """
 
 
 def _resolve_engine(session: Session) -> Engine:
-    """Resolve the engine for a snapshot, rejecting unsafe binds up front.
+    """Resolve the engine for a snapshot, rejecting unsafe binds/pools up front.
 
-    Rejects (raising ``SnapshotUnavailable``) when:
-    * the session bind is a ``Connection`` (connection-bound session); or
-    * the session already has an active/checked-out transaction
-      (``session.in_transaction()``), because a second connection off the same
-      engine may alias the caller's connection under single-slot pools.
+    Rejects (raising ``SnapshotUnavailable``) BEFORE any transaction command
+    when a distinct physical connection cannot be guaranteed:
+    * the session bind is a ``Connection`` (connection-bound session);
+    * the session already has an active/checked-out transaction;
+    * the engine's pool is ``StaticPool`` or ``SingletonThreadPool``;
+    * the engine's ``QueuePool`` is exhausted (all slots checked out).
 
     Returns the ``Engine`` for the ordinary request path.
     """
     bind = session.get_bind()
     if isinstance(bind, Connection):
         raise SnapshotUnavailable(
-            "audit snapshot requires an Engine-bound session; "
+            "read snapshot requires an Engine-bound session; "
             "connection-bound sessions cannot be given a distinct physical "
             "read snapshot"
         )
     if not isinstance(bind, Engine):  # pragma: no cover - defensive
         raise SnapshotUnavailable(
-            "audit snapshot requires an Engine-bound session"
+            "read snapshot requires an Engine-bound session"
         )
+
     # An already-active caller transaction means a connection is checked out;
-    # under StaticPool/SingletonThreadPool/single-slot QueuePool a second
-    # engine.connect() can alias it. Reject rather than risk aliasing.
+    # under single-slot pools a second engine.connect() can alias it.
     if session.in_transaction():
         raise SnapshotUnavailable(
-            "audit snapshot requires a session without an active transaction; "
+            "read snapshot requires a session without an active transaction; "
             "an in-flight caller transaction may alias the snapshot connection"
         )
+
+    _reject_unsafe_pool(bind)
     return bind
+
+
+def _reject_unsafe_pool(engine: Engine) -> None:
+    """Reject pool modes that cannot guarantee a distinct physical connection.
+
+    ``StaticPool`` and ``SingletonThreadPool`` are unconditionally rejected:
+    they can hand the SAME underlying DBAPI connection to a second caller,
+    which would alias any active owner. An exhausted ``QueuePool`` (all slots
+    checked out) is rejected via public pool state APIs without a blocking
+    connect.
+    """
+    pool = engine.pool
+    if isinstance(pool, (StaticPool, SingletonThreadPool)):
+        raise SnapshotUnavailable(
+            f"read snapshot requires a multi-connection pool; "
+            f"{type(pool).__name__} may alias the caller connection"
+        )
+    # For a QueuePool, detect exhaustion without a blocking connect. If every
+    # slot (size + overflow) is checked out, a connect would block until the
+    # pool timeout; reject up front instead.
+    if isinstance(pool, QueuePool):
+        try:
+            capacity = int(pool.size())
+            checked_out = int(pool.checkedout())
+        except Exception:  # pragma: no cover - defensive for pool API changes
+            raise SnapshotUnavailable(_UNAVAILABLE_MESSAGE)
+        if checked_out >= capacity:
+            raise SnapshotUnavailable(
+                "read snapshot unavailable: connection pool is exhausted"
+            )
 
 
 def open_read_snapshot(
@@ -89,27 +137,38 @@ def open_read_snapshot(
     caller Session/Connection is never begun/committed/rolled back.
 
     Raises ``SnapshotUnavailable`` (before any transaction command) when a
-    distinct physical connection cannot be guaranteed.
+    distinct physical connection cannot be guaranteed, or if opening the owned
+    connection / explicit BEGIN fails for any reason.
     """
     engine = _resolve_engine(session)
-    with engine.connect() as connection:
+    # Open the owned connection. If this fails for any reason, raise
+    # SnapshotUnavailable immediately — never continue to BEGIN/queries.
+    try:
+        connection = engine.connect()
+    except Exception as exc:
+        raise SnapshotUnavailable(
+            "read snapshot unavailable: could not open an owned connection"
+        ) from exc
+    try:
         driver_connection = connection.connection
         # Establish one explicit read snapshot. In SQLite WAL, BEGIN defers the
         # write lock and fixes the read view; all SELECTs in query_fn observe
         # the same committed state. We never COMMIT, so nothing is mutated.
-        in_transaction = False
+        # If BEGIN fails, do NOT swallow and continue — raise immediately so no
+        # query proceeds without a guaranteed snapshot.
         try:
             driver_connection.execute("BEGIN")
-            in_transaction = True
-        except Exception:
-            # The pooled connection may already report an active transaction
-            # (SQLAlchemy begins lazily); the SELECTs still share one snapshot.
-            in_transaction = False
+        except Exception as exc:
+            raise SnapshotUnavailable(
+                "read snapshot unavailable: could not establish a read snapshot"
+            ) from exc
         try:
             return query_fn(connection)
         finally:
-            if in_transaction:
-                try:
-                    driver_connection.rollback()
-                except Exception:
-                    pass
+            try:
+                driver_connection.rollback()
+            except Exception:
+                pass
+    finally:
+        # Always close ONLY the owned connection; never touch the caller's.
+        connection.close()

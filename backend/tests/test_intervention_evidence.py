@@ -835,3 +835,85 @@ class TestInterventionEvidenceAPI(_Base):
             headers={"X-API-Key": "secret"},
         )
         assert resp.status_code == 200
+
+
+class TestInterventionEvidenceAPI503:
+    """Finding 2: SnapshotUnavailable maps to HTTP 503 through the route.
+
+    Uses a local FastAPI app with a StaticPool engine and a connection-bound
+    session dependency so the snapshot helper rejects before aliasing. The
+    response must be 503 (not 500), and no caller transaction is altered.
+    """
+
+    def test_endpoint_returns_503_for_unavailable_snapshot(self) -> None:
+        from fastapi import FastAPI
+
+        from sqlalchemy.pool import StaticPool
+
+        from app.api.intervention_evidence import router as intervention_router
+        from app.database import get_db
+
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        Base.metadata.create_all(bind=engine)
+        try:
+            local_app = FastAPI()
+            local_app.include_router(intervention_router)
+
+            def override_get_db():
+                # A connection-bound session dependency (the unsafe case).
+                conn = engine.connect()
+                try:
+                    yield Session(bind=conn)
+                finally:
+                    conn.close()
+
+            local_app.dependency_overrides[get_db] = override_get_db
+            client = TestClient(local_app)
+            resp = client.get("/api/intervention-evidence")
+            assert resp.status_code == 503, resp.text
+            assert "snapshot unavailable" in resp.json()["detail"].lower()
+            # No pool/connection internals or exception text leaked.
+            detail = resp.json()["detail"].lower()
+            assert "staticpool" not in detail
+            assert "traceback" not in detail
+            client.close()
+        finally:
+            engine.dispose()
+
+    def test_endpoint_422_preserved_for_invalid_date_range(self) -> None:
+        # The existing 422 mapping for ValueError must be preserved.
+        from fastapi import FastAPI
+
+        from app.api.intervention_evidence import router as intervention_router
+        from app.database import get_db
+
+        engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+        )
+        Base.metadata.create_all(bind=engine)
+        try:
+            local_app = FastAPI()
+            local_app.include_router(intervention_router)
+
+            def override_get_db():
+                db = Session(bind=engine)
+                try:
+                    yield db
+                finally:
+                    db.close()
+
+            local_app.dependency_overrides[get_db] = override_get_db
+            client = TestClient(local_app)
+            resp = client.get(
+                "/api/intervention-evidence",
+                params={"from_date": "2026-06-17", "to_date": "2026-06-16"},
+            )
+            assert resp.status_code == 422
+            client.close()
+        finally:
+            engine.dispose()
