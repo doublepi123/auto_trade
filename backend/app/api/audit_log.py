@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.auth import require_api_key
 from app.database import get_db
-from app.schemas import AuditLogPage
+from app.schemas import AuditLogPage, AuditLogStatsResponse
 from app.services.audit_log_service import AuditLogService
 
 router = APIRouter(
@@ -41,6 +41,34 @@ def list_audit_logs(
             to_date=to_date,
             limit=limit,
             offset=offset,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/stats", response_model=AuditLogStatsResponse)
+def audit_log_stats(
+    action: str | None = Query(default=None, max_length=64, description="Filter by exact action"),
+    severity: str | None = Query(default=None, description="Filter by severity (case-insensitive)"),
+    from_date: date | None = Query(default=None, description="Start date (YYYY-MM-DD)"),
+    to_date: date | None = Query(default=None, description="End date (YYYY-MM-DD)"),
+    db=Depends(get_db),
+) -> AuditLogStatsResponse:
+    """Read-only audit log statistics over the filtered population.
+
+    Reuses the exact ``list_logs`` action/severity/date filter semantics.
+    Returns the filtered population total plus deterministic aggregations by
+    action, severity, pseudonymous actor hash, and UTC day. Categorical buckets
+    are bounded with truthful overflow totals; daily rows are chronological.
+    Never exposes raw API keys, IPs, actor material, payload bodies, or
+    exception text.
+    """
+    try:
+        return AuditLogService(db).stats(
+            action=action,
+            severity=severity,
+            from_date=from_date,
+            to_date=to_date,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

@@ -2389,6 +2389,53 @@ class AuditLogPage(BaseModel):
     offset: int
 
 
+class AuditLogCategoryCount(BaseModel):
+    """One categorical aggregation bucket (action / severity / actor).
+
+    Categorical buckets use an explicit stable order: count desc then key asc.
+    When the actor dimension is bounded, overflow is reported truthfully via
+    ``other_total`` rather than silently dropped.
+    """
+
+    key: str
+    count: int
+
+
+class AuditLogActorCount(BaseModel):
+    """Pseudonymous actor aggregation bucket with truthful truncation."""
+
+    actor_hash: str
+    count: int
+
+
+class AuditLogDayCount(BaseModel):
+    """UTC-day aggregation bucket (chronological order)."""
+
+    day: date
+    count: int
+
+
+class AuditLogStatsResponse(BaseModel):
+    """Read-only statistics over the filtered audit-log population.
+
+    ``total`` is the filtered population count. Categorical buckets are bounded
+    and report overflow via ``*_other_total`` so the sum contract is testable:
+    ``sum(by_action.count) + action_other_total == total`` (and likewise for
+    severity and actor). Daily rows are unbounded and chronological, so their
+    counts always sum exactly to ``total``.
+    """
+
+    total: int = Field(ge=0)
+    by_action: list[AuditLogCategoryCount] = Field(default_factory=list)
+    action_other_total: int = Field(default=0, ge=0)
+    by_severity: list[AuditLogCategoryCount] = Field(default_factory=list)
+    severity_other_total: int = Field(default=0, ge=0)
+    by_actor: list[AuditLogActorCount] = Field(default_factory=list)
+    actor_other_total: int = Field(default=0, ge=0)
+    by_day: list[AuditLogDayCount] = Field(default_factory=list)
+    filters: dict[str, Any] = Field(default_factory=dict)
+
+
 class ControlRequest(BaseModel):
     reason: str = Field(default="manual")
 
