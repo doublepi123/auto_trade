@@ -2439,10 +2439,14 @@ class AuditLogStatsResponse(BaseModel):
 class InterventionEvidenceRow(BaseModel):
     """One normalized, persisted explicit intervention transition.
 
-    Projected only from semantically explicit pause/resume and kill-switch
-    evidence in ``trade_events`` and ``audit_logs``. This is evidence, not a
-    synthesized runtime-state history: gaps are not inferred and ambiguous
-    transitions are reported as such rather than guessed.
+    Projected only from semantically explicit, successful pause/resume and
+    kill-switch evidence. This is evidence, not a synthesized runtime-state
+    history: gaps are not inferred and ambiguous transitions are reported as
+    such rather than guessed.
+
+    ``reason`` is a FIXED reason/category code derived from the whitelisted
+    action/event type — never a free-form event message, payload, or exception
+    body. ``actor_hash`` is pseudonymous only.
 
     ``pairing_status`` is one of ``PAIRED`` / ``OPEN`` / ``UNMATCHED_CLOSE`` /
     ``AMBIGUOUS``. ``duration_seconds`` is reported ONLY for an explicit,
@@ -2450,7 +2454,7 @@ class InterventionEvidenceRow(BaseModel):
     ``None`` for every other status.
     """
 
-    source: Literal["trade", "audit"]
+    source: Literal["audit", "trade_auto"]
     source_id: int
     timestamp: datetime
     family: Literal["pause", "kill_switch"]
@@ -2460,7 +2464,7 @@ class InterventionEvidenceRow(BaseModel):
     action: str = ""
     actor_hash: str | None = None
     pairing_status: Literal["PAIRED", "OPEN", "UNMATCHED_CLOSE", "AMBIGUOUS"]
-    paired_source: Literal["trade", "audit"] | None = None
+    paired_source: Literal["audit", "trade_auto"] | None = None
     paired_source_id: int | None = None
     duration_seconds: float | None = None
 
@@ -2469,10 +2473,13 @@ class InterventionEvidenceSummary(BaseModel):
     """Summary that distinguishes known paired duration from unknown evidence.
 
     ``paired_duration_seconds`` sums ONLY explicit, unambiguous open→close
-    pairs. ``open_count`` / ``unmatched_close_count`` / ``ambiguous_count``
-    count evidence rows whose duration is unknown. There is deliberately no
-    synthetic total: ambiguous or open evidence must not be presented as
-    realized downtime.
+    pairs from the authoritative audit stream. ``open_count`` /
+    ``unmatched_close_count`` / ``ambiguous_count`` count evidence rows whose
+    duration is unknown. There is deliberately no synthetic total: ambiguous or
+    open evidence must not be presented as realized downtime.
+
+    Counts describe the FULL filtered population before the response limit is
+    applied, so callers can tell that rows were omitted.
     """
 
     total_evidence: int = Field(ge=0)
@@ -2484,10 +2491,21 @@ class InterventionEvidenceSummary(BaseModel):
 
 
 class InterventionEvidenceResponse(BaseModel):
-    """Read-only runtime intervention evidence timeline response."""
+    """Read-only runtime intervention evidence timeline response.
+
+    ``total`` is the full filtered population size (before the response
+    limit). ``truncated`` is True when the response limit omitted rows.
+    ``pairing_complete`` is False when the hard scan cap was exceeded; in that
+    case ``scan_truncated`` is True and ALL durations are suppressed because
+    complete pairing context could not be guaranteed.
+    """
 
     items: list[InterventionEvidenceRow] = Field(default_factory=list)
     summary: InterventionEvidenceSummary
+    total: int = Field(ge=0)
+    truncated: bool = False
+    pairing_complete: bool = True
+    scan_truncated: bool = False
     pairing_rule: str
     filters: dict[str, Any] = Field(default_factory=dict)
 
@@ -3987,18 +4005,46 @@ class UniverseSelectionRunResponse(BaseModel):
         return decoded
 
 
+class UniverseSelectionRunSummary(BaseModel):
+    """Honest summary projection of a stored ``UniverseSelectionRun`` row.
+
+    History is a lightweight list view that deliberately does NOT carry the
+    per-run candidate ``items`` of ``UniverseSelectionRunResponse``. Reusing
+    the full-detail response with a fake ``items=[]`` would mislead callers
+    into thinking candidates were loaded; this summary makes the absence
+    explicit. ``/latest`` retains the full-detail response unchanged.
+    """
+
+    id: int = Field(ge=1)
+    as_of_date: date
+    algorithm_version: str = Field(min_length=1, max_length=100)
+    source_version: str = Field(min_length=1, max_length=100)
+    status: str = Field(min_length=1, max_length=20)
+    candidate_count: int = Field(ge=0)
+    evaluable_count: int = Field(ge=0)
+    selected_count: int = Field(ge=0)
+    coverage_ratio: float = Field(ge=0, le=1, allow_inf_nan=False)
+    error: str = ""
+    started_at: datetime
+    completed_at: Optional[datetime] = None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class UniverseSelectionRunPage(BaseModel):
     """Bounded paginated universe-selection run history (read-only).
 
-    Reuses ``UniverseSelectionRunResponse`` semantics. History rows are
-    projected from stored ``UniverseSelectionRun`` rows only and never invoke
-    selection, quote fetches, refresh, or shadow synchronization. Ordering is
-    stable newest-first by the authoritative ``as_of_date`` then ``created_at``
-    then ``id`` (mirroring ``latest_run``), so identical timestamps paginate
+    Page items use the honest ``UniverseSelectionRunSummary`` model (no
+    candidate ``items``). Rows are projected from stored
+    ``UniverseSelectionRun`` rows only and never invoke selection, quote
+    fetches, refresh, or shadow synchronization. Ordering is stable newest-first
+    by the authoritative ``as_of_date`` then ``created_at`` then ``id``
+    (mirroring ``latest_run``), so identical timestamps paginate
     deterministically without duplicates or omissions.
     """
 
-    items: list[UniverseSelectionRunResponse] = Field(default_factory=list)
+    items: list[UniverseSelectionRunSummary] = Field(default_factory=list)
     total: int = Field(ge=0)
     page: int = Field(ge=1)
     page_size: int = Field(ge=1)

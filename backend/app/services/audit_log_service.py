@@ -10,7 +10,8 @@ import json
 from datetime import date, datetime, time, timezone
 from typing import Any
 
-from sqlalchemy import desc, func, select
+from sqlalchemy import Engine, desc, func, select
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
 from app.models import AuditLog
@@ -152,77 +153,187 @@ class AuditLogService:
     ) -> AuditLogStatsResponse:
         """Read-only aggregations over the filtered audit-log population.
 
+        All aggregates (total, categorical, actor, severity, daily) execute
+        inside ONE explicit SQLite read snapshot so a concurrent commit
+        between aggregate queries cannot split the population. The snapshot
+        uses a dedicated short-lived read connection bound to the same engine
+        as the caller's session, preserving existing committed-row semantics.
+        The caller's request Session is never committed/rolled back or
+        otherwise mutated.
+
         Reuses the exact ``list_logs`` filter semantics (action/severity exact
-        upper-cased match, inclusive UTC day boundaries). Returns the filtered
-        population ``total`` plus deterministic aggregations:
+        upper-cased match, inclusive UTC day boundaries). Categorical/actor
+        groups are ordered and limited in SQL (count desc then key asc); each
+        overflow/other total is derived as ``filtered_total - sum(kept)``, so
+        the sum contract holds even with null/unknown buckets. Daily buckets
+        are chronological and bounded by the validated date range.
 
-        * ``by_action`` / ``by_severity`` / ``by_actor`` — categorical, bounded
-          with truthful ``*_other_total`` overflow; ordered count desc then key
-          asc so ties are deterministic.
-        * ``by_day`` — UTC day, unbounded and chronological.
-
-        The sum contract is testable: for each categorical dimension,
-        ``sum(bucket.count) + other_total == total``; daily counts always sum
-        exactly to ``total``. Never exposes raw API keys, IPs, actor material,
-        payload bodies, or exception text — only the pseudonymous ``actor_hash``
-        already persisted on each row.
+        Never exposes raw API keys, IPs, actor material, payload bodies, or
+        exception text — only the pseudonymous ``actor_hash`` already
+        persisted on each row.
         """
         from_dt, to_dt = _validate_date_range(from_date, to_date)
+        normalized_action = action.strip().upper() if action else None
+        normalized_severity = (
+            severity.strip().upper() if severity else None
+        )
 
-        def _filtered(statement):  # noqa: ANN001
-            return _apply_filters(
-                statement,
+        return self._run_snapshot(
+            action=normalized_action,
+            severity=normalized_severity,
+            from_dt=from_dt,
+            to_dt=to_dt,
+            from_date=from_date,
+            to_date=to_date,
+        )
+
+    def _run_snapshot(
+        self,
+        *,
+        action: str | None,
+        severity: str | None,
+        from_dt: datetime | None,
+        to_dt: datetime | None,
+        from_date: date | None,
+        to_date: date | None,
+    ) -> AuditLogStatsResponse:
+        """Execute all aggregates inside one SQLite read snapshot.
+
+        Opens a dedicated short-lived connection off the caller's engine,
+        issues ``BEGIN`` (a read snapshot in SQLite WAL), runs every aggregate
+        against that one snapshot, then releases it. The caller's request
+        Session is untouched (no commit/rollback/mutation).
+        """
+        bind = self._db.get_bind()
+        if isinstance(bind, Engine):
+            with bind.connect() as connection:
+                return self._run_snapshot_on_connection(
+                    connection=connection,
+                    action=action,
+                    severity=severity,
+                    from_dt=from_dt,
+                    to_dt=to_dt,
+                    from_date=from_date,
+                    to_date=to_date,
+                )
+        # bind is already a Connection (e.g. inside an existing transaction).
+        return self._run_snapshot_on_connection(
+            connection=bind,
+            action=action,
+            severity=severity,
+            from_dt=from_dt,
+            to_dt=to_dt,
+            from_date=from_date,
+            to_date=to_date,
+        )
+
+    def _run_snapshot_on_connection(
+        self,
+        *,
+        connection: Connection,
+        action: str | None,
+        severity: str | None,
+        from_dt: datetime | None,
+        to_dt: datetime | None,
+        from_date: date | None,
+        to_date: date | None,
+    ) -> AuditLogStatsResponse:
+        # One explicit read snapshot. In SQLite WAL, BEGIN defers the write
+        # lock and establishes a read snapshot; all SELECTs below observe the
+        # same committed state. We never COMMIT/ROLLBACK this connection, so
+        # nothing is mutated.
+        driver_connection = connection.connection
+        try:
+            driver_connection.rollback()
+        except Exception:
+            pass
+        try:
+            driver_connection.execute("BEGIN")
+        except Exception:
+            # Already in a transaction (e.g. a passed-in connection); the
+            # subsequent SELECTs still share one snapshot.
+            pass
+
+        try:
+            total = int(
+                connection.scalar(
+                    _apply_filters(
+                        select(func.count()).select_from(AuditLog),
+                        action=action,
+                        severity=severity,
+                        from_dt=from_dt,
+                        to_dt=to_dt,
+                    )
+                )
+                or 0
+            )
+
+            action_rows = self._sql_categorical(
+                connection=connection,
+                dimension=AuditLog.action,
+                cap=_MAX_ACTION_BUCKETS,
+                action=action,
+                severity=severity,
+                from_dt=from_dt,
+                to_dt=to_dt,
+                total=total,
+            )
+            by_action = [
+                AuditLogCategoryCount(key=key, count=count)
+                for key, count in action_rows
+            ]
+
+            severity_rows = self._sql_categorical(
+                connection=connection,
+                dimension=AuditLog.severity,
+                cap=_MAX_SEVERITY_BUCKETS,
+                action=action,
+                severity=severity,
+                from_dt=from_dt,
+                to_dt=to_dt,
+                total=total,
+            )
+            by_severity = [
+                AuditLogCategoryCount(key=key, count=count)
+                for key, count in severity_rows
+            ]
+
+            actor_rows = self._sql_categorical(
+                connection=connection,
+                dimension=AuditLog.actor_hash,
+                cap=_MAX_ACTOR_BUCKETS,
+                action=action,
+                severity=severity,
+                from_dt=from_dt,
+                to_dt=to_dt,
+                total=total,
+            )
+            by_actor = [
+                AuditLogActorCount(actor_hash=key, count=count)
+                for key, count in actor_rows
+            ]
+
+            by_day = self._sql_daily(
+                connection=connection,
                 action=action,
                 severity=severity,
                 from_dt=from_dt,
                 to_dt=to_dt,
             )
-
-        total = int(
-            self._db.scalar(_filtered(select(func.count()).select_from(AuditLog)))
-            or 0
-        )
-
-        action_rows, action_other = self._categorical_buckets(
-            dimension=AuditLog.action,
-            cap=_MAX_ACTION_BUCKETS,
-            filtered=_filtered,
-        )
-        by_action = [
-            AuditLogCategoryCount(key=key, count=count)
-            for key, count in action_rows
-        ]
-
-        severity_rows, severity_other = self._categorical_buckets(
-            dimension=AuditLog.severity,
-            cap=_MAX_SEVERITY_BUCKETS,
-            filtered=_filtered,
-        )
-        by_severity = [
-            AuditLogCategoryCount(key=key, count=count)
-            for key, count in severity_rows
-        ]
-
-        actor_rows, actor_other = self._categorical_buckets(
-            dimension=AuditLog.actor_hash,
-            cap=_MAX_ACTOR_BUCKETS,
-            filtered=_filtered,
-        )
-        by_actor = [
-            AuditLogActorCount(actor_hash=key, count=count)
-            for key, count in actor_rows
-        ]
-
-        by_day = self._daily_buckets(filtered=_filtered)
+        finally:
+            try:
+                driver_connection.rollback()
+            except Exception:
+                pass
 
         return AuditLogStatsResponse(
             total=total,
             by_action=by_action,
-            action_other_total=action_other,
+            action_other_total=self._overflow(total, by_action),
             by_severity=by_severity,
-            severity_other_total=severity_other,
+            severity_other_total=self._overflow(total, by_severity),
             by_actor=by_actor,
-            actor_other_total=actor_other,
+            actor_other_total=self._overflow(total, by_actor),
             by_day=by_day,
             filters=self._filters_snapshot(
                 action=action,
@@ -232,45 +343,79 @@ class AuditLogService:
             ),
         )
 
-    def _categorical_buckets(
+    @staticmethod
+    def _overflow(
+        total: int,
+        kept: list[AuditLogCategoryCount] | list[AuditLogActorCount],
+    ) -> int:
+        """Derive overflow as filtered total minus the sum of kept buckets.
+
+        This is truthful by construction: it accounts for null/unknown and
+        truncated buckets alike, so conservation always holds.
+        """
+        kept_sum = sum(int(b.count) for b in kept)
+        return max(0, total - kept_sum)
+
+    def _sql_categorical(
         self,
         *,
+        connection: Connection,
         dimension,
         cap: int,
-        filtered,
-    ) -> tuple[list[tuple[str, int]], int]:
-        """Aggregate by ``dimension`` with count-desc/key-asc ordering.
+        action: str | None,
+        severity: str | None,
+        from_dt: datetime | None,
+        to_dt: datetime | None,
+        total: int,
+    ) -> list[tuple[str, int]]:
+        """Order and limit a categorical aggregation in SQL.
 
-        Returns the top-``cap`` buckets plus the truthful overflow total
-        (``other_total``) so callers can verify the sum contract. ``dimension``
-        is a SQLAlchemy column; ``filtered`` is the shared filter wrapper.
+        Returns the top-``cap`` buckets ordered count desc then key asc. The
+        caller derives the overflow total from ``total - sum(kept)`` so we do
+        not need to materialize all distinct keys merely to truncate.
         """
-        raw = self._db.execute(
-            filtered(
-                select(dimension, func.count()).group_by(dimension)
-            )
-        ).all()
-        # Stable order: count desc then key asc.
-        ordered = sorted(raw, key=lambda row: (-int(row[1] or 0), str(row[0])))
-        kept = ordered[:cap]
-        other_total = sum(int(count or 0) for _, count in ordered[cap:])
-        return [(str(key), int(count or 0)) for key, count in kept], other_total
+        if total == 0:
+            return []
+        stmt = _apply_filters(
+            select(dimension, func.count())
+            .group_by(dimension)
+            .order_by(desc(func.count()), dimension)
+            .limit(cap),
+            action=action,
+            severity=severity,
+            from_dt=from_dt,
+            to_dt=to_dt,
+        )
+        raw = connection.execute(stmt).all()
+        return [(str(key), int(count or 0)) for key, count in raw]
 
-    def _daily_buckets(self, *, filtered) -> list[AuditLogDayCount]:
-        """Aggregate by UTC day, chronological order (unbounded)."""
+    def _sql_daily(
+        self,
+        *,
+        connection: Connection,
+        action: str | None,
+        severity: str | None,
+        from_dt: datetime | None,
+        to_dt: datetime | None,
+    ) -> list[AuditLogDayCount]:
+        """Aggregate by UTC day, chronological order, bounded by date range."""
         day_expression = func.date(AuditLog.created_at)
-        raw = self._db.execute(
-            filtered(
-                select(day_expression, func.count()).group_by(day_expression)
-            )
-        ).all()
-        ordered = sorted(raw, key=lambda row: str(row[0]))
+        stmt = _apply_filters(
+            select(day_expression, func.count())
+            .group_by(day_expression)
+            .order_by(day_expression),
+            action=action,
+            severity=severity,
+            from_dt=from_dt,
+            to_dt=to_dt,
+        )
+        raw = connection.execute(stmt).all()
         return [
             AuditLogDayCount(
                 day=date.fromisoformat(str(row[0])),
                 count=int(row[1] or 0),
             )
-            for row in ordered
+            for row in raw
             if row[0] is not None
         ]
 
@@ -285,9 +430,9 @@ class AuditLogService:
         """Echo the effective filters (normalized exactly as applied)."""
         snapshot: dict[str, Any] = {}
         if action:
-            snapshot["action"] = action.strip().upper()
+            snapshot["action"] = action
         if severity:
-            snapshot["severity"] = severity.strip().upper()
+            snapshot["severity"] = severity
         if from_date is not None:
             snapshot["from_date"] = from_date.isoformat()
         if to_date is not None:

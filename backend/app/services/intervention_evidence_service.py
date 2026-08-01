@@ -1,38 +1,50 @@
 """Read-only runtime intervention evidence timeline.
 
-Projects ONLY persisted, semantically explicit pause/resume and kill-switch
-transitions from ``trade_events`` and ``audit_logs``. This is evidence, not a
-synthesized runtime-state history:
+Projects ONLY persisted, semantically explicit, SUCCESSFUL pause/resume and
+kill-switch transitions. This is evidence, not a synthesized runtime-state
+history.
 
-* Gaps are never inferred from ``RuntimeState`` (the current mutable state is
-  not consulted and is never mutated).
-* Only whitelisted, explicit transition event/action names are projected.
-* A duration is reported ONLY for an explicit, unambiguous open→close pair under
-  the documented conservative pairing rule. Duplicate opens/closes, conflicting
-  transitions, unmatched endpoints, and cross-source duplicates (which have no
-  durable correlation key) remain unknown/ambiguous and never contribute a
-  duration. The summary therefore distinguishes known paired duration from
-  unknown/open/ambiguous evidence rather than presenting a synthetic total.
+Authoritative source selection (finding A):
+* Manual pause/resume and kill-switch transitions use ONE authoritative
+  persisted source: successful ``AuditLog`` control actions
+  (``PAUSE`` / ``RESUME`` / ``KILL_SWITCH`` / ``DISABLE_KILL_SWITCH`` with
+  ``result = 'SUCCESS'``). These are explicit and carry pseudonymous
+  actor/result evidence.
+* Duplicate manual-control ``TradeEvent`` rows (``CONTROL_PAUSE`` etc.) are
+  EXCLUDED from pairing/duration — they duplicate the authoritative audit row
+  without a durable correlation key.
+* ``RISK_PAUSED`` is EXCLUDED: the current writer uses it for generic risk
+  rejections, so it is not transition proof.
+* A ``TradeEvent`` automatic transition is included ONLY when its writer is
+  transition-specific and successful (``RISK_AUTO_RESUMED``). Such automatic
+  evidence NEVER pairs with manual audit controls (no durable correlation key)
+  and therefore remains unpaired/unknown — it never contributes a duration and
+  is never double-counted against the audit stream.
+* ``reason`` is a FIXED reason/category code derived from the whitelisted
+  action/event type. Free-form event messages and payloads are never exposed or
+  truncated as a "safe reason". Actor output is pseudonymous only.
 
-Whitelisted explicit transitions (inspected from the live control paths in
-``app/api/trade.py`` and ``app/runner.py``):
-
-* TradeEvent ``event_type``:
-    - ``CONTROL_PAUSE``            -> pause  open
-    - ``CONTROL_RESUME``           -> pause  close
-    - ``CONTROL_KILL_SWITCH``      -> kill   open
-    - ``CONTROL_DISABLE_KILL_SWITCH`` -> kill close
-    - ``RISK_PAUSED``              -> pause  open  (status ``PAUSED``)
-    - ``RISK_AUTO_RESUMED``        -> pause  close (status ``RUNNING``)
-* AuditLog ``action``:
-    - ``PAUSE``                    -> pause  open
-    - ``RESUME``                   -> pause  close
-    - ``KILL_SWITCH``              -> kill   open
-    - ``DISABLE_KILL_SWITCH``      -> kill   close
-
-Each source is paired independently. Cross-source duplicates have no durable
-correlation key, so they are reported as separate evidence rows and never
-double-count a duration.
+Pairing/range/limit truthfulness (finding B):
+* The authoritative audit transition history is paired BEFORE date filters or
+  the response limit are applied, so cross-date pairs never become synthetic
+  OPEN / UNMATCHED_CLOSE states.
+* The database scan is explicitly bounded by a hard cap. If the cap is
+  exceeded, ``pairing_complete=False`` / ``scan_truncated=True`` are returned
+  and ALL durations are suppressed (never silently partial-pair).
+* Duplicate-open segments are wholly ambiguous: ``OPEN, OPEN, CLOSE`` produces
+  no duration for ANY of those transitions; the ambiguous segment only resets
+  after the close. Conflicting sequences remain unknown rather than repaired
+  heuristically.
+* Date filtering is applied AFTER global/conservative pairing; the response
+  limit is applied LAST. ``total`` / ``truncated`` / pairing-context
+  completeness tell callers whether rows were omitted. The summary describes
+  the full filtered population before the response limit, not only returned
+  rows.
+* Durations are never double-counted across sources: manual durations come
+  only from the authoritative audit stream; uncorrelated automatic evidence
+  remains unpaired/unknown.
+* Stable chronological ordering with source/ID tie-breakers is preserved, and
+  ``RuntimeState`` is never read or mutated.
 """
 from __future__ import annotations
 
@@ -53,55 +65,80 @@ from app.schemas import (
 __all__ = ["InterventionEvidenceService"]
 
 PAIRING_RULE = (
-    "Within each source and intervention family, an OPEN transition pairs with "
-    "the next chronologically following CLOSE transition. A duration is "
-    "reported only for an explicit, unambiguous open->close pair. A second OPEN "
-    "before the CLOSE, a conflicting transition, or a CLOSE without a matching "
-    "OPEN yields AMBIGUOUS / UNMATCHED_CLOSE with no duration. Cross-source "
-    "duplicates have no durable correlation key and are never merged; durations "
-    "are never double-counted across sources."
+    "Manual pause/resume and kill-switch durations come ONLY from the "
+    "authoritative audit stream (successful PAUSE/RESUME/KILL_SWITCH/"
+    "DISABLE_KILL_SWITCH rows). Within each intervention family, an OPEN "
+    "transition pairs with the next chronologically following CLOSE "
+    "transition. A duration is reported only for an explicit, unambiguous "
+    "open->close pair. A duplicate OPEN before the CLOSE makes the whole "
+    "segment (every OPEN and the CLOSE) AMBIGUOUS with no duration; the "
+    "segment only resets after that CLOSE. A CLOSE without a matching OPEN is "
+    "UNMATCHED_CLOSE. Automatic TradeEvent evidence (RISK_AUTO_RESUMED) has no "
+    "durable correlation key to the manual audit stream, so it never pairs "
+    "with audit controls and never contributes a duration. Pairing is computed "
+    "globally before date filters or the response limit are applied; if the "
+    "hard scan cap is exceeded, pairing is incomplete and all durations are "
+    "suppressed."
 )
 
-_MAX_EVIDENCE_ROWS = 1000
+# Hard cap on the number of authoritative audit transitions scanned for
+# pairing. If the filtered population exceeds this, complete pairing context
+# cannot be guaranteed, so we report scan_truncated=True and suppress all
+# durations rather than silently partial-pairing.
+_MAX_SCAN_TRANSITIONS = 5000
+_MAX_RESPONSE_ROWS = 1000
 
 _Direction = Literal["open", "close"]
 _Family = Literal["pause", "kill_switch"]
+_Source = Literal["audit", "trade_auto"]
 
 
 @dataclass(frozen=True)
 class _Transition:
-    source: Literal["trade", "audit"]
+    source: _Source
     source_id: int
     timestamp: datetime
     family: _Family
     kind: str
     direction: _Direction
-    reason: str
     action: str
+    reason_code: str
     actor_hash: str | None
 
 
-# TradeEvent event_type -> (family, direction, kind)
-_TRADE_TRANSITIONS: dict[str, tuple[_Family, _Direction, str]] = {
-    "CONTROL_PAUSE": ("pause", "open", "CONTROL_PAUSE"),
-    "CONTROL_RESUME": ("pause", "close", "CONTROL_RESUME"),
-    "CONTROL_KILL_SWITCH": ("kill_switch", "open", "CONTROL_KILL_SWITCH"),
-    "CONTROL_DISABLE_KILL_SWITCH": (
+# AuditLog action -> (family, direction, kind, fixed reason code).
+# These are the AUTHORITATIVE manual control actions.
+_AUDIT_TRANSITIONS: dict[str, tuple[_Family, _Direction, str, str]] = {
+    "PAUSE": ("pause", "open", "PAUSE", "MANUAL_PAUSE"),
+    "RESUME": ("pause", "close", "RESUME", "MANUAL_RESUME"),
+    "KILL_SWITCH": ("kill_switch", "open", "KILL_SWITCH", "MANUAL_KILL_SWITCH"),
+    "DISABLE_KILL_SWITCH": (
         "kill_switch",
         "close",
-        "CONTROL_DISABLE_KILL_SWITCH",
+        "DISABLE_KILL_SWITCH",
+        "MANUAL_KILL_SWITCH_DISABLE",
     ),
-    "RISK_PAUSED": ("pause", "open", "RISK_PAUSED"),
-    "RISK_AUTO_RESUMED": ("pause", "close", "RISK_AUTO_RESUMED"),
 }
 
-# AuditLog action -> (family, direction, kind)
-_AUDIT_TRANSITIONS: dict[str, tuple[_Family, _Direction, str]] = {
-    "PAUSE": ("pause", "open", "PAUSE"),
-    "RESUME": ("pause", "close", "RESUME"),
-    "KILL_SWITCH": ("kill_switch", "open", "KILL_SWITCH"),
-    "DISABLE_KILL_SWITCH": ("kill_switch", "close", "DISABLE_KILL_SWITCH"),
+# TradeEvent event_type -> (family, direction, kind, fixed reason code).
+# ONLY automatic, transition-specific, successful writers are included.
+# RISK_PAUSED is deliberately excluded (generic risk rejection per writer).
+# Manual CONTROL_* are deliberately excluded (duplicate the authoritative
+# audit stream without a durable correlation key).
+_TRADE_AUTO_TRANSITIONS: dict[str, tuple[_Family, _Direction, str, str]] = {
+    "RISK_AUTO_RESUMED": (
+        "pause",
+        "close",
+        "RISK_AUTO_RESUMED",
+        "AUTOMATIC_RESUME",
+    ),
 }
+
+# A TradeEvent automatic transition is only transition-proof when its writer
+# reports success. The runner writes status="RUNNING" for a verified resume.
+_TRADE_AUTO_SUCCESS_STATUS: frozenset[str] = frozenset(
+    {"RUNNING", "SUCCESS", "OK"}
+)
 
 
 def _to_utc(value: datetime) -> datetime:
@@ -129,14 +166,6 @@ def _validate_range(
     return from_dt, to_dt
 
 
-def _safe_text(value: str | None, limit: int = 200) -> str:
-    if not value:
-        return ""
-    # Bound reason/action text. Never expose exception bodies or payloads —
-    # only the short human-facing reason/message/action already on the row.
-    return value.strip()[:limit]
-
-
 class InterventionEvidenceService:
     """Read-only projection of explicit intervention transitions."""
 
@@ -153,97 +182,110 @@ class InterventionEvidenceService:
         """Return normalized chronological intervention evidence.
 
         Raises ``ValueError`` on an inverted date range. ``limit`` is bounded
-        to ``[1, 1000]``. Stable ordering is timestamp asc, then source asc,
-        then source_id asc, so identical timestamps are deterministic.
+        to ``[1, 1000]``. Pairing is computed over the full authoritative
+        population BEFORE date filters / limit; date filtering and the
+        response limit are applied afterward so cross-date pairs stay intact
+        and the summary describes the full filtered population.
         """
-        capped = max(1, min(int(limit), _MAX_EVIDENCE_ROWS))
-        from_dt, to_dt = _validate_range(from_date, to_date)
+        capped_limit = max(1, min(int(limit), _MAX_RESPONSE_ROWS))
+        # Validate the response date range up front (also used to filter the
+        # final paired rows). The pairing scan itself is global (unfiltered by
+        # these dates) so cross-date pairs are preserved.
+        _validate_range(from_date, to_date)
 
-        transitions = self._collect(from_dt=from_dt, to_dt=to_dt)
-        # Stable chronological order with source/ID tie-breakers.
-        transitions.sort(
-            key=lambda t: (_to_utc(t.timestamp).timestamp(), t.source, t.source_id)
-        )
+        # --- Collect the full authoritative + automatic populations (global) ---
+        audit_all, audit_truncated = self._collect_audit_global()
+        auto_all = self._collect_auto_global()
 
-        rows = self._pair(transitions)
-        # Apply the row cap AFTER pairing so pairing is computed over the full
-        # filtered set; the cap only bounds the response payload.
-        rows = rows[:capped]
+        scan_truncated = audit_truncated
+        pairing_complete = not scan_truncated
 
-        summary = self._summarize(rows)
-        return InterventionEvidenceResponse(
-            items=rows,
-            summary=summary,
-            pairing_rule=PAIRING_RULE,
-            filters=self._filters(from_date=from_date, to_date=to_date, limit=capped),
-        )
+        # --- Pair the authoritative audit stream globally ---
+        paired_audit = self._pair_audit_stream(audit_all) if audit_all else []
 
-    def _collect(
-        self,
-        *,
-        from_dt: datetime | None,
-        to_dt: datetime | None,
-    ) -> list[_Transition]:
-        transitions: list[_Transition] = []
-        transitions.extend(self._collect_trade(from_dt=from_dt, to_dt=to_dt))
-        transitions.extend(self._collect_audit(from_dt=from_dt, to_dt=to_dt))
-        return transitions
+        # Automatic evidence never pairs with the manual audit stream (no
+        # durable correlation key). It is always reported as unpaired/unknown.
+        auto_rows = [self._auto_unmatched(t) for t in auto_all]
 
-    def _collect_trade(
-        self,
-        *,
-        from_dt: datetime | None,
-        to_dt: datetime | None,
-    ) -> list[_Transition]:
-        stmt = select(TradeEvent).where(
-            TradeEvent.event_type.in_(tuple(_TRADE_TRANSITIONS))
-        )
-        if from_dt is not None:
-            stmt = stmt.where(TradeEvent.created_at >= from_dt)
-        if to_dt is not None:
-            stmt = stmt.where(TradeEvent.created_at <= to_dt)
-        rows = self._db.scalars(stmt)
-        out: list[_Transition] = []
-        for row in rows:
-            mapped = _TRADE_TRANSITIONS.get(row.event_type)
-            if mapped is None:
-                continue
-            family, direction, kind = mapped
-            out.append(
-                _Transition(
-                    source="trade",
-                    source_id=int(row.id),
-                    timestamp=_to_utc(row.created_at),
-                    family=family,
-                    kind=kind,
-                    direction=direction,
-                    reason=_safe_text(row.message),
-                    action=row.event_type,
-                    actor_hash=None,
-                )
+        # --- Merge and order all rows chronologically ---
+        all_rows = paired_audit + auto_rows
+        all_rows.sort(
+            key=lambda r: (
+                _to_utc(r.timestamp).timestamp(),
+                r.source,
+                r.source_id,
             )
-        return out
-
-    def _collect_audit(
-        self,
-        *,
-        from_dt: datetime | None,
-        to_dt: datetime | None,
-    ) -> list[_Transition]:
-        stmt = select(AuditLog).where(
-            AuditLog.action.in_(tuple(_AUDIT_TRANSITIONS))
         )
-        if from_dt is not None:
-            stmt = stmt.where(AuditLog.created_at >= from_dt)
-        if to_dt is not None:
-            stmt = stmt.where(AuditLog.created_at <= to_dt)
-        rows = self._db.scalars(stmt)
+
+        # --- Apply date filters AFTER global pairing ---
+        from_dt, to_dt = _validate_range(from_date, to_date)
+        filtered = [
+            r
+            for r in all_rows
+            if (from_dt is None or _to_utc(r.timestamp) >= from_dt)
+            and (to_dt is None or _to_utc(r.timestamp) <= to_dt)
+        ]
+
+        # If the scan was truncated, complete pairing context could not be
+        # guaranteed: suppress ALL durations truthfully.
+        if scan_truncated:
+            filtered = [self._suppress_duration(r) for r in filtered]
+
+        total = len(filtered)
+        summary = self._summarize(filtered)
+
+        # --- Apply response limit LAST ---
+        truncated = len(filtered) > capped_limit
+        items = filtered[:capped_limit]
+
+        return InterventionEvidenceResponse(
+            items=items,
+            summary=summary,
+            total=total,
+            truncated=truncated,
+            pairing_complete=pairing_complete,
+            scan_truncated=scan_truncated,
+            pairing_rule=PAIRING_RULE,
+            filters=self._filters(
+                from_date=from_date,
+                to_date=to_date,
+                limit=capped_limit,
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Collection (global; date filters are applied after pairing)
+    # ------------------------------------------------------------------
+    def _collect_audit_global(
+        self,
+    ) -> tuple[list[_Transition], bool]:
+        """Collect ALL successful authoritative audit control transitions.
+
+        Returns the transitions and whether the hard scan cap was exceeded.
+        Only ``result = 'SUCCESS'`` rows are transition proof.
+        """
+        count_stmt = (
+            select(AuditLog.id)
+            .where(AuditLog.action.in_(tuple(_AUDIT_TRANSITIONS)))
+            .where(AuditLog.result == "SUCCESS")
+        )
+        population = int(self._db.execute(count_stmt).all().__len__())
+        truncated = population > _MAX_SCAN_TRANSITIONS
+
+        stmt = (
+            select(AuditLog)
+            .where(AuditLog.action.in_(tuple(_AUDIT_TRANSITIONS)))
+            .where(AuditLog.result == "SUCCESS")
+            .order_by(AuditLog.created_at.asc(), AuditLog.id.asc())
+            .limit(_MAX_SCAN_TRANSITIONS + 1)
+        )
+        rows = list(self._db.scalars(stmt))
         out: list[_Transition] = []
         for row in rows:
             mapped = _AUDIT_TRANSITIONS.get(row.action)
             if mapped is None:
                 continue
-            family, direction, kind = mapped
+            family, direction, kind, reason_code = mapped
             out.append(
                 _Transition(
                     source="audit",
@@ -252,210 +294,207 @@ class InterventionEvidenceService:
                     family=family,
                     kind=kind,
                     direction=direction,
-                    reason="",
                     action=row.action,
-                    # Pseudonymous actor only; never raw API key/IP material.
+                    reason_code=reason_code,
                     actor_hash=row.actor_hash or None,
                 )
             )
+        return out, truncated
+
+    def _collect_auto_global(self) -> list[_Transition]:
+        """Collect automatic TradeEvent transitions (transition-specific only).
+
+        Included only when the writer reports success (``RISK_AUTO_RESUMED``
+        with a success status). These never pair with the manual audit stream.
+        """
+        stmt = (
+            select(TradeEvent)
+            .where(TradeEvent.event_type.in_(tuple(_TRADE_AUTO_TRANSITIONS)))
+            .order_by(TradeEvent.created_at.asc(), TradeEvent.id.asc())
+        )
+        rows = list(self._db.scalars(stmt))
+        out: list[_Transition] = []
+        for row in rows:
+            mapped = _TRADE_AUTO_TRANSITIONS.get(row.event_type)
+            if mapped is None:
+                continue
+            # Only count a successful automatic transition as evidence.
+            status = (row.status or "").strip().upper()
+            if status not in _TRADE_AUTO_SUCCESS_STATUS:
+                continue
+            family, direction, kind, reason_code = mapped
+            out.append(
+                _Transition(
+                    source="trade_auto",
+                    source_id=int(row.id),
+                    timestamp=_to_utc(row.created_at),
+                    family=family,
+                    kind=kind,
+                    direction=direction,
+                    action=row.event_type,
+                    reason_code=reason_code,
+                    actor_hash=None,
+                )
+            )
         return out
 
-    def _pair(
+    # ------------------------------------------------------------------
+    # Pairing (authoritative audit stream only)
+    # ------------------------------------------------------------------
+    def _pair_audit_stream(
         self,
-        transitions: list[_Transition],
+        stream: list[_Transition],
     ) -> list[InterventionEvidenceRow]:
-        """Conservative within-source, within-family pairing.
+        """Conservative pairing of the authoritative audit stream.
 
-        For each (source, family) stream, walk chronologically and pair an OPEN
-        with the next CLOSE. A second OPEN before the CLOSE marks the first
-        OPEN AMBIGUOUS (and the new OPEN becomes the candidate). A CLOSE with
-        no candidate OPEN is UNMATCHED_CLOSE. A CLOSE that matches a candidate
-        OPEN yields PAIRED for both with a duration. Any OPEN still candidate
-        at end-of-stream is OPEN (no duration).
+        Pairing is within each intervention family (pause / kill_switch).
+        Duplicate-open segments are wholly ambiguous: ``OPEN, OPEN, CLOSE``
+        produces no duration for ANY of those transitions. The ambiguous
+        segment only resets after the close. A close with no candidate open is
+        UNMATCHED_CLOSE. A trailing open with no close is OPEN.
         """
         rows: list[InterventionEvidenceRow] = []
-
-        # Group preserving already-sorted order within each group.
-        streams: dict[tuple[Literal["trade", "audit"], _Family], list[_Transition]] = {}
-        for t in transitions:
-            streams.setdefault((t.source, t.family), []).append(t)
-
-        results_by_key: dict[
-            tuple[Literal["trade", "audit"], _Family],
-            list[tuple[_Transition, InterventionEvidenceRow]],
-        ] = {}
-        for key, stream in streams.items():
-            results_by_key[key] = self._pair_stream(stream)
-
-        # Re-merge across streams into the original global chronological order.
-        indexed: dict[tuple[str, int], InterventionEvidenceRow] = {}
-        for paired_list in results_by_key.values():
-            for transition, row in paired_list:
-                indexed[(transition.source, transition.source_id)] = row
-        for t in transitions:
-            row = indexed.get((t.source, t.source_id))
-            if row is not None:
-                rows.append(row)
-        return rows
-
-    @staticmethod
-    def _pair_stream(
-        stream: list[_Transition],
-    ) -> list[tuple[_Transition, InterventionEvidenceRow]]:
-        """Pair one (source, family) chronological stream conservatively."""
-        out: list[tuple[_Transition, InterventionEvidenceRow]] = []
-        open_candidate: _Transition | None = None
-        ambiguous_opens: list[_Transition] = []
-
-        def flush_open_as_ambiguous(open_t: _Transition) -> None:
-            out.append(
-                (
-                    open_t,
-                    InterventionEvidenceRow(
-                        source=open_t.source,
-                        source_id=open_t.source_id,
-                        timestamp=open_t.timestamp,
-                        family=open_t.family,
-                        kind=open_t.kind,
-                        direction=open_t.direction,
-                        reason=open_t.reason,
-                        action=open_t.action,
-                        actor_hash=open_t.actor_hash,
-                        pairing_status="AMBIGUOUS",
-                        paired_source=None,
-                        paired_source_id=None,
-                        duration_seconds=None,
-                    ),
-                )
-            )
+        # Pending opens per family. When more than one open accumulates before
+        # a close, the whole segment is ambiguous.
+        pending: dict[_Family, list[_Transition]] = {"pause": [], "kill_switch": []}
 
         for t in stream:
+            bucket = pending[t.family]
             if t.direction == "open":
-                if open_candidate is not None:
-                    # Duplicate open before a close -> previous open ambiguous.
-                    ambiguous_opens.append(open_candidate)
-                    flush_open_as_ambiguous(open_candidate)
-                open_candidate = t
+                bucket.append(t)
             else:  # close
-                if open_candidate is None:
-                    # Close with no matching open.
-                    out.append(
-                        (
-                            t,
-                            InterventionEvidenceRow(
-                                source=t.source,
-                                source_id=t.source_id,
-                                timestamp=t.timestamp,
-                                family=t.family,
-                                kind=t.kind,
-                                direction=t.direction,
-                                reason=t.reason,
-                                action=t.action,
-                                actor_hash=t.actor_hash,
-                                pairing_status="UNMATCHED_CLOSE",
-                                paired_source=None,
-                                paired_source_id=None,
-                                duration_seconds=None,
-                            ),
-                        )
-                    )
-                else:
-                    open_t = open_candidate
-                    open_candidate = None
-                    duration = (
-                        _to_utc(t.timestamp).timestamp()
-                        - _to_utc(open_t.timestamp).timestamp()
-                    )
-                    # A non-positive or non-finite duration means the close did
-                    # not strictly follow the open; treat both as ambiguous.
-                    if duration <= 0:
-                        flush_open_as_ambiguous(open_t)
-                        out.append(
-                            (
-                                t,
-                                InterventionEvidenceRow(
-                                    source=t.source,
-                                    source_id=t.source_id,
-                                    timestamp=t.timestamp,
-                                    family=t.family,
-                                    kind=t.kind,
-                                    direction=t.direction,
-                                    reason=t.reason,
-                                    action=t.action,
-                                    actor_hash=t.actor_hash,
-                                    pairing_status="AMBIGUOUS",
-                                    paired_source=None,
-                                    paired_source_id=None,
-                                    duration_seconds=None,
-                                ),
+                if not bucket:
+                    rows.append(self._row(t, "UNMATCHED_CLOSE"))
+                elif len(bucket) == 1:
+                    open_t = bucket[0]
+                    duration = self._duration(open_t, t)
+                    if duration is None or duration <= 0:
+                        # Close did not strictly follow open -> ambiguous.
+                        rows.append(self._row(open_t, "AMBIGUOUS"))
+                        rows.append(self._row(t, "AMBIGUOUS"))
+                    else:
+                        rows.append(
+                            self._paired_row(
+                                open_t, t, duration, open_is_open=True
                             )
                         )
-                        continue
-                    out.append(
-                        (
-                            open_t,
-                            InterventionEvidenceRow(
-                                source=open_t.source,
-                                source_id=open_t.source_id,
-                                timestamp=open_t.timestamp,
-                                family=open_t.family,
-                                kind=open_t.kind,
-                                direction=open_t.direction,
-                                reason=open_t.reason,
-                                action=open_t.action,
-                                actor_hash=open_t.actor_hash,
-                                pairing_status="PAIRED",
-                                paired_source=t.source,
-                                paired_source_id=t.source_id,
-                                duration_seconds=None,
-                            ),
+                        rows.append(
+                            self._paired_row(
+                                t, open_t, duration, open_is_open=False
+                            )
                         )
-                    )
-                    out.append(
-                        (
-                            t,
-                            InterventionEvidenceRow(
-                                source=t.source,
-                                source_id=t.source_id,
-                                timestamp=t.timestamp,
-                                family=t.family,
-                                kind=t.kind,
-                                direction=t.direction,
-                                reason=t.reason,
-                                action=t.action,
-                                actor_hash=t.actor_hash,
-                                pairing_status="PAIRED",
-                                paired_source=open_t.source,
-                                paired_source_id=open_t.source_id,
-                                duration_seconds=duration,
-                            ),
-                        )
-                    )
+                    bucket.clear()
+                else:
+                    # Duplicate-open segment: every pending open AND the close
+                    # are ambiguous; no duration for any of them.
+                    for open_t in bucket:
+                        rows.append(self._row(open_t, "AMBIGUOUS"))
+                    rows.append(self._row(t, "AMBIGUOUS"))
+                    bucket.clear()
 
-        # Trailing open with no close.
-        if open_candidate is not None:
-            out.append(
-                (
-                    open_candidate,
-                    InterventionEvidenceRow(
-                        source=open_candidate.source,
-                        source_id=open_candidate.source_id,
-                        timestamp=open_candidate.timestamp,
-                        family=open_candidate.family,
-                        kind=open_candidate.kind,
-                        direction=open_candidate.direction,
-                        reason=open_candidate.reason,
-                        action=open_candidate.action,
-                        actor_hash=open_candidate.actor_hash,
-                        pairing_status="OPEN",
-                        paired_source=None,
-                        paired_source_id=None,
-                        duration_seconds=None,
-                    ),
-                )
-            )
-        return out
+        # Trailing opens with no close (per family).
+        for family_bucket in pending.values():
+            for idx, open_t in enumerate(family_bucket):
+                if len(family_bucket) > 1:
+                    rows.append(self._row(open_t, "AMBIGUOUS"))
+                else:
+                    rows.append(self._row(open_t, "OPEN"))
+        return rows
 
+    # ------------------------------------------------------------------
+    # Row builders
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _duration(open_t: _Transition, close_t: _Transition) -> float | None:
+        return (
+            _to_utc(close_t.timestamp).timestamp()
+            - _to_utc(open_t.timestamp).timestamp()
+        )
+
+    @staticmethod
+    def _row(t: _Transition, status: str) -> InterventionEvidenceRow:
+        return InterventionEvidenceRow(
+            source=t.source,
+            source_id=t.source_id,
+            timestamp=t.timestamp,
+            family=t.family,
+            kind=t.kind,
+            direction=t.direction,
+            reason=t.reason_code,
+            action=t.action,
+            actor_hash=t.actor_hash,
+            pairing_status=status,  # type: ignore[arg-type]
+            paired_source=None,
+            paired_source_id=None,
+            duration_seconds=None,
+        )
+
+    @staticmethod
+    def _paired_row(
+        t: _Transition,
+        other: _Transition,
+        duration: float,
+        *,
+        open_is_open: bool,
+    ) -> InterventionEvidenceRow:
+        # Duration is attached only to the close row of the pair.
+        return InterventionEvidenceRow(
+            source=t.source,
+            source_id=t.source_id,
+            timestamp=t.timestamp,
+            family=t.family,
+            kind=t.kind,
+            direction=t.direction,
+            reason=t.reason_code,
+            action=t.action,
+            actor_hash=t.actor_hash,
+            pairing_status="PAIRED",
+            paired_source=other.source,
+            paired_source_id=other.source_id,
+            duration_seconds=duration if not open_is_open else None,
+        )
+
+    @staticmethod
+    def _auto_unmatched(t: _Transition) -> InterventionEvidenceRow:
+        # Automatic evidence has no durable correlation key to the manual
+        # audit stream, so it is always unpaired/unknown.
+        status = "UNMATCHED_CLOSE" if t.direction == "close" else "OPEN"
+        return InterventionEvidenceRow(
+            source=t.source,
+            source_id=t.source_id,
+            timestamp=t.timestamp,
+            family=t.family,
+            kind=t.kind,
+            direction=t.direction,
+            reason=t.reason_code,
+            action=t.action,
+            actor_hash=t.actor_hash,
+            pairing_status=status,  # type: ignore[arg-type]
+            paired_source=None,
+            paired_source_id=None,
+            duration_seconds=None,
+        )
+
+    @staticmethod
+    def _suppress_duration(
+        r: InterventionEvidenceRow,
+    ) -> InterventionEvidenceRow:
+        if r.duration_seconds is None and r.pairing_status != "PAIRED":
+            return r
+        # Pairing context is incomplete: demote any paired row to ambiguous and
+        # drop its duration so no unsupported duration is reported.
+        return r.model_copy(
+            update={
+                "pairing_status": "AMBIGUOUS",
+                "paired_source": None,
+                "paired_source_id": None,
+                "duration_seconds": None,
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # Summary / filters
+    # ------------------------------------------------------------------
     @staticmethod
     def _summarize(
         rows: list[InterventionEvidenceRow],

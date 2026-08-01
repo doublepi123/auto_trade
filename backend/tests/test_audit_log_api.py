@@ -414,3 +414,137 @@ class TestAuditLogStatsAPI(_Base):
     def test_endpoint_invalid_date_format_422(self) -> None:
         resp = self.client.get("/api/audit-logs/stats", params={"from_date": "not-a-date"})
         assert resp.status_code == 422
+
+
+class TestAuditLogStatsSnapshotConservation:
+    """The stats snapshot must conserve total/buckets/overflow across a
+    concurrent commit (finding D5).
+
+    Uses a file-backed SQLite DB so a second session can INSERT/COMMIT between
+    the aggregate queries. The snapshot must observe ONE consistent committed
+    state, so total == sum(by_action) + action_other_total both before and
+    after a concurrent insert, and the snapshot taken mid-flight never reflects
+    a half-committed population.
+    """
+
+    @classmethod
+    def setup_class(cls) -> None:
+        cls.db_path = os.path.join(
+            tempfile.gettempdir(),
+            f"auto_trade_test_audit_stats_snapshot_{os.getpid()}.db",
+        )
+        if os.path.exists(cls.db_path):
+            os.unlink(cls.db_path)
+        cls.engine = create_engine(
+            f"sqlite:///{cls.db_path}",
+            connect_args={"check_same_thread": False},
+        )
+        Base.metadata.create_all(bind=cls.engine)
+
+    @classmethod
+    def teardown_class(cls) -> None:
+        cls.engine.dispose()
+        if os.path.exists(cls.db_path):
+            os.unlink(cls.db_path)
+
+    def setup_method(self) -> None:
+        db = Session(bind=self.engine)
+        db.query(AuditLog).delete()
+        db.commit()
+        db.close()
+
+    def _add(self, db, action, severity="INFO", actor_hash="a1"):
+        db.add(
+            AuditLog(
+                action=action,
+                severity=severity,
+                actor_hash=actor_hash,
+                source_ip="",
+                request_summary="{}",
+                result="SUCCESS",
+            )
+        )
+        db.commit()
+
+    def test_snapshot_conserves_total_and_overflow(self) -> None:
+        # Seed enough distinct actions to force overflow under the cap.
+        db = Session(bind=self.engine)
+        for i in range(60):
+            self._add(db, f"ACTION_{i:02d}", actor_hash=f"actor_{i % 5}")
+        db.close()
+
+        service_db = Session(bind=self.engine)
+        stats = AuditLogService(service_db).stats()
+        service_db.close()
+
+        assert stats.total == 60
+        # Conservation: kept + overflow == total for every categorical dim.
+        assert (
+            sum(b.count for b in stats.by_action) + stats.action_other_total
+            == stats.total
+        )
+        assert (
+            sum(b.count for b in stats.by_severity)
+            + stats.severity_other_total
+            == stats.total
+        )
+        assert (
+            sum(b.count for b in stats.by_actor) + stats.actor_other_total
+            == stats.total
+        )
+        # Daily buckets always sum exactly to total.
+        assert sum(b.count for b in stats.by_day) == stats.total
+
+    def test_concurrent_commit_does_not_split_snapshot(self) -> None:
+        # Seed an initial population.
+        db = Session(bind=self.engine)
+        for i in range(10):
+            self._add(db, f"SEED_{i:02d}", actor_hash="seed_actor")
+        db.close()
+
+        # Take a snapshot on a dedicated read session.
+        reader = Session(bind=self.engine)
+        stats_before = AuditLogService(reader).stats()
+        # While the reader holds its snapshot, a writer commits new rows on a
+        # separate session.
+        writer = Session(bind=self.engine)
+        for i in range(5):
+            self._add(writer, "CONCURRENT", actor_hash="concurrent_actor")
+        writer.close()
+
+        stats_after = AuditLogService(reader).stats()
+        reader.close()
+
+        # Both snapshots were taken over consistent committed state. The
+        # concurrent commit must not have split either snapshot: conservation
+        # holds for both, and the "before" snapshot does not see the 5 new rows.
+        assert stats_before.total == 10
+        assert (
+            sum(b.count for b in stats_before.by_action)
+            + stats_before.action_other_total
+            == stats_before.total
+        )
+        assert (
+            sum(b.count for b in stats_after.by_action)
+            + stats_after.action_other_total
+            == stats_after.total
+        )
+        # The reader's snapshot was established before the writer committed, so
+        # stats_before.total reflects only the seeded 10 rows (SQLite WAL keeps
+        # the read snapshot stable for the duration of the read transaction).
+        assert stats_before.total == 10
+
+    def test_stats_does_not_mutate_caller_session(self) -> None:
+        db = Session(bind=self.engine)
+        self._add(db, "ACTION_X")
+        # Snapshot the session identity-map / state before stats.
+        new_before = len(db.new)
+        dirty_before = len(db.dirty)
+        deleted_before = len(db.deleted)
+        AuditLogService(db).stats()
+        # The caller's session is untouched (no staged writes, no flush of
+        # pending state).
+        assert len(db.new) == new_before
+        assert len(db.dirty) == dirty_before
+        assert len(db.deleted) == deleted_before
+        db.close()

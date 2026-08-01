@@ -35,6 +35,7 @@ from app.services.rotation_forward_scorecard_service import (
 from app.services.research_observation_health_service import (
     ResearchObservationHealthService,
 )
+from app.services.universe_run_history_service import UniverseRunHistoryService
 from app.services.universe_selection_service import (
     UniverseRefreshResult,
     UniverseSelectionService,
@@ -188,21 +189,6 @@ def get_latest_universe_run(
     return _run_response(latest, service.items_for_run(latest.id), db)
 
 
-def _run_history_item(
-    run: UniverseSelectionRun,
-) -> UniverseSelectionRunResponse:
-    """Project a stored run row into a response without candidate items.
-
-    History is a lightweight list view: it reuses the existing
-    ``UniverseSelectionRunResponse`` semantics (parameters_json decoded,
-    items defaulting to an empty list) without loading candidate rows or
-    performing per-run strategy/shadow lookups.
-    """
-    return UniverseSelectionRunResponse.model_validate(
-        {column.name: getattr(run, column.name) for column in run.__table__.columns}
-    )
-
-
 @router.get("/runs", response_model=UniverseSelectionRunPage)
 def list_universe_runs(
     page: int = Query(default=1, ge=1, description="Page number (1-indexed)"),
@@ -224,13 +210,14 @@ def list_universe_runs(
 ) -> UniverseSelectionRunPage:
     """Read-only bounded paginated universe-selection run history.
 
-    Queries stored rows only. Never invokes selection, quote fetches,
-    refresh, shadow synchronization, or any write. Stable newest-first
-    ordering by authoritative ``as_of_date`` then ``created_at`` then ``id``.
+    Uses a DB-only query service over stored ``UniverseSelectionRun`` rows.
+    Never invokes selection, quote fetches, refresh, shadow synchronization,
+    the broker, or any write. Stable newest-first ordering by authoritative
+    ``as_of_date`` then ``created_at`` then ``id``. Page items use the honest
+    ``UniverseSelectionRunSummary`` model (no candidate ``items``).
     """
-    service = build_universe_selection_service(db)
     try:
-        rows, total = service.list_runs(
+        return UniverseRunHistoryService(db).list_runs(
             page=page,
             page_size=page_size,
             from_date=from_date,
@@ -238,18 +225,6 @@ def list_universe_runs(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    filters: dict[str, object] = {"page": page, "page_size": page_size}
-    if from_date is not None:
-        filters["from_date"] = from_date.isoformat()
-    if to_date is not None:
-        filters["to_date"] = to_date.isoformat()
-    return UniverseSelectionRunPage(
-        items=[_run_history_item(run) for run in rows],
-        total=total,
-        page=page,
-        page_size=page_size,
-        filters=filters,
-    )
 
 
 @router.get(
