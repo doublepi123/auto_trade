@@ -21,6 +21,17 @@ from app.services.risk_timeline_service import RiskTimelineService
 _NOW = datetime(2026, 7, 30, 14, 31, tzinfo=timezone.utc)
 
 
+def _now_utc() -> datetime:
+    """Current UTC timestamp for trailing-window summary tests.
+
+    ``RiskTimelineService.get_risk_summary`` filters on a trailing window anchored
+    to ``datetime.now(timezone.utc)``, so events that omit ``created_at`` must
+    land inside that window regardless of when the suite runs. ``_NOW`` is kept
+    only for tests where an explicit, deterministic chronology is under test.
+    """
+    return datetime.now(timezone.utc)
+
+
 class _Base:
     @classmethod
     def setup_class(cls) -> None:
@@ -82,7 +93,7 @@ class _Base:
             status=status,
             message=message,
             payload_json=json.dumps(payload or {}),
-            created_at=created_at or _NOW,
+            created_at=created_at or _now_utc(),
         )
         db = self._db()
         db.add(event)
@@ -233,10 +244,14 @@ class TestRiskSummary(_Base):
         assert summary["by_category"]["COOLDOWN"] == 0
 
     def test_recent_blocks_capped_at_ten(self) -> None:
+        # Relative chronology is under test (most-recent-first ordering); anchor
+        # the base to the current time so all events land inside the trailing
+        # 24h summary window regardless of when the suite runs.
+        base = _now_utc()
         for i in range(12):
             self._add_event(
                 event_type="ORDER_SKIPPED",
-                created_at=_NOW - timedelta(minutes=i),
+                created_at=base - timedelta(minutes=i),
                 payload={"skip_category": "RISK"},
             )
         summary = RiskTimelineService(self._db()).get_risk_summary(hours=24)

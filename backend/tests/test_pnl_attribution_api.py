@@ -112,7 +112,10 @@ class TestPnlBySymbolAPI(_Base):
 
     def test_unresolved_exit_omits_symbol_day_from_attribution(self) -> None:
         db = self._db()
-        day = date(2026, 7, 1)
+        # Use today (consistent with sibling tests) so the round trip lands inside
+        # the live trailing-30-day attribution window; a fixed past date would
+        # fall outside it and mask the unresolved-exit path under test.
+        day = date.today()
         db.add_all(
             self._roundtrip(
                 "quality-buy",

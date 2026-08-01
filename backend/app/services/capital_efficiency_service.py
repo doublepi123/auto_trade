@@ -41,8 +41,8 @@ class CapitalEfficiencyService:
                 "error": "Need at least 5 closed trades.",
             }
 
-        pnls = [pnl for _, pnl in rows]
-        quantities = [qty for qty, _ in rows]
+        pnls = [pnl for _, pnl, _ in rows]
+        quantities = [qty for _, _, qty in rows]
         total_pnl = sum(pnls)
         total_traded_value = sum(
             abs(qty) * 100 for qty in quantities  # approximate notional
@@ -59,8 +59,8 @@ class CapitalEfficiencyService:
         pnl_per_traded = total_pnl / total_traded_value if total_traded_value > 0 else 0
 
         # win/loss capital allocation
-        win_capital = sum(abs(q) * 100 for q, p in rows if p > 0)
-        loss_capital = sum(abs(q) * 100 for q, p in rows if p < 0)
+        win_capital = sum(abs(qty) * 100 for _, pnl, qty in rows if pnl > 0)
+        loss_capital = sum(abs(qty) * 100 for _, pnl, qty in rows if pnl < 0)
         capital_efficiency = (
             win_capital / (win_capital + loss_capital)
             if (win_capital + loss_capital) > 0
@@ -69,7 +69,7 @@ class CapitalEfficiencyService:
 
         # daily utilization estimate
         active_days = len(set(
-            ts.strftime("%Y-%m-%d") for ts, _ in rows if ts
+            ts.strftime("%Y-%m-%d") for ts, _, _ in rows if ts
         ))
         utilization = active_days / max(lookback_days, 1)
 
