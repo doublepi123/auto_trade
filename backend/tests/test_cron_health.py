@@ -558,6 +558,7 @@ class TestMainRegistersCronJobs:
             main_module._CRON_OPENING_MOMENTUM_SHADOW,
             main_module._CRON_UNIVERSE_SELECTION,
             main_module._CRON_WATCHLIST_QUANT,
+            main_module._CRON_WATCHLIST_QUANT_V6_EVALUATION,
             main_module._CRON_WS_CLEANUP,
         }
         assert names == expected
@@ -609,10 +610,38 @@ class TestMainRegistersCronJobs:
 
         monkeypatch.setattr(main_module.settings, "universe_selection_enabled", False)
         monkeypatch.setattr(main_module.settings, "watchlist_quant_auto_score_enabled", False)
+        monkeypatch.setattr(
+            main_module.settings, "watchlist_quant_v6_evaluation_enabled", False
+        )
         main_module._register_cron_health_jobs()
         rows = {row.name: row for row in isolated.snapshot()}
         assert rows[main_module._CRON_UNIVERSE_SELECTION].enabled is False
         assert rows[main_module._CRON_WATCHLIST_QUANT].enabled is False
+        assert rows[main_module._CRON_WATCHLIST_QUANT_V6_EVALUATION].enabled is False
+        # Disabled jobs are not stale and do not pretend enabled work ran.
+        assert rows[main_module._CRON_WATCHLIST_QUANT_V6_EVALUATION].stale is False
+        assert rows[main_module._CRON_WATCHLIST_QUANT_V6_EVALUATION].status == "disabled"
+        set_cron_health_service(None)
+
+    def test_quant_v6_enabled_reports_true_and_expected_interval(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        isolated = CronHealthService()
+        set_cron_health_service(isolated)
+        monkeypatch.setattr(cron_health_api, "get_cron_health_service", lambda: isolated)
+        from app import main as main_module
+
+        monkeypatch.setattr(
+            main_module.settings, "watchlist_quant_v6_evaluation_enabled", True
+        )
+        monkeypatch.setattr(
+            main_module.settings, "watchlist_quant_v6_evaluation_interval_minutes", 180
+        )
+        main_module._register_cron_health_jobs()
+        rows = {row.name: row for row in isolated.snapshot()}
+        v6 = rows[main_module._CRON_WATCHLIST_QUANT_V6_EVALUATION]
+        assert v6.enabled is True
+        assert v6.expected_interval_seconds == 180 * 60
         set_cron_health_service(None)
 
 
@@ -627,15 +656,15 @@ class TestRepeatedLifecycleIsolation:
         from app import main as main_module
 
         main_module._register_cron_health_jobs()
-        assert len(s1.snapshot()) == 9
+        assert len(s1.snapshot()) == 10
         # Reset to None (simulating teardown).
         set_cron_health_service(None)
         # Second lifecycle with a fresh service.
         s2 = CronHealthService()
         set_cron_health_service(s2)
         main_module._register_cron_health_jobs()
-        # s2 must have exactly 9 jobs (not contaminated by s1, not empty).
-        assert len(s2.snapshot()) == 9
+        # s2 must have exactly 10 jobs (not contaminated by s1, not empty).
+        assert len(s2.snapshot()) == 10
         names = {row.name for row in s2.snapshot()}
         assert names == {row.name for row in s1.snapshot()}
         set_cron_health_service(None)

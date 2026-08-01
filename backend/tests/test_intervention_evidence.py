@@ -850,8 +850,7 @@ class TestInterventionEvidenceAPI503:
 
         from sqlalchemy.pool import StaticPool
 
-        from app.api.intervention_evidence import router as intervention_router
-        from app.database import get_db
+        from app.api import intervention_evidence as intervention_evidence_api
 
         engine = create_engine(
             "sqlite://",
@@ -861,7 +860,7 @@ class TestInterventionEvidenceAPI503:
         Base.metadata.create_all(bind=engine)
         try:
             local_app = FastAPI()
-            local_app.include_router(intervention_router)
+            local_app.include_router(intervention_evidence_api.router)
 
             def override_get_db():
                 # A connection-bound session dependency (the unsafe case).
@@ -871,7 +870,9 @@ class TestInterventionEvidenceAPI503:
                 finally:
                     conn.close()
 
-            local_app.dependency_overrides[get_db] = override_get_db
+            local_app.dependency_overrides[
+                intervention_evidence_api.get_db
+            ] = override_get_db
             client = TestClient(local_app)
             resp = client.get("/api/intervention-evidence")
             assert resp.status_code == 503, resp.text

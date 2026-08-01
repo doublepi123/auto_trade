@@ -31,6 +31,99 @@ class TestSettings:
         assert s.live_max_entries_per_symbol_per_day == 1
         assert s.live_entry_crossing_required is False
         assert s.live_entry_crossing_max_age_seconds == 30
+        assert s.watchlist_quant_v6_evaluation_enabled is False
+        assert s.watchlist_quant_v6_evaluation_interval_minutes == 1_440
+        assert (
+            s.watchlist_quant_v6_evaluation_retry_interval_minutes == 60
+        )
+        assert s.watchlist_quant_v6_provider_page_timeout_seconds == 30.0
+
+    def test_quant_v6_evaluation_controls_read_environment(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_ENABLED",
+            "true",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_INTERVAL_MINUTES",
+            "360",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_RETRY_INTERVAL_MINUTES",
+            "30",
+        )
+
+        configured = Settings()
+
+        assert configured.watchlist_quant_v6_evaluation_enabled is True
+        assert configured.watchlist_quant_v6_evaluation_interval_minutes == 360
+        assert (
+            configured.watchlist_quant_v6_evaluation_retry_interval_minutes
+            == 30
+        )
+
+    @pytest.mark.parametrize("value", ["59", "10081"])
+    def test_quant_v6_evaluation_interval_is_bounded(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_INTERVAL_MINUTES",
+            value,
+        )
+
+        with pytest.raises(ValidationError):
+            Settings()
+
+    @pytest.mark.parametrize("value", ["14", "1441"])
+    def test_quant_v6_evaluation_retry_interval_is_bounded(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_RETRY_INTERVAL_MINUTES",
+            value,
+        )
+
+        with pytest.raises(ValidationError):
+            Settings()
+
+    def test_quant_v6_retry_cannot_exceed_regular_interval(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_INTERVAL_MINUTES",
+            "60",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_RETRY_INTERVAL_MINUTES",
+            "61",
+        )
+
+        with pytest.raises(
+            ValidationError,
+            match="retry interval must not exceed",
+        ):
+            Settings()
+
+    @pytest.mark.parametrize("value", ["4.99", "120.01", "nan"])
+    def test_quant_v6_provider_page_timeout_is_bounded(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_PROVIDER_PAGE_TIMEOUT_SECONDS",
+            value,
+        )
+
+        with pytest.raises(ValidationError):
+            Settings()
 
     def test_default_strategy_empty(self) -> None:
         s = Settings()

@@ -321,6 +321,14 @@ python3 scripts/build_index_membership_snapshot.py
 无法返回已退市或已收购证券，因此 PIT 缺失阻断必须保留；当前成分结果和不完整 PIT 均不能
 作为自动晋级或下单依据。
 
+quote-only quant-v6 发布会把服务端评估器接收的行情时间戳投影为共享交易日网格的紧凑
+覆盖位图，并据此重放每个目标日的 `COVERED` / `MISSING` 与精确阻断原因；完整时间戳序列
+另以 SHA-256 承诺绑定，避免把约 38 万个时间戳塞进发布根。这里的信任边界仍是
+server-owned evaluator：当前证据可以发现不改取数投影却删除 session/event 的降级攻击，
+但尚不是原始 provider OHLCV 的完整来源证明，也不能证明同一时间戳在所有重叠 artifact
+中的 OHLCV 一致。后续 typed acquisition artifact 会补齐该 provenance；在此之前这些结果
+只能用于只读研究和人工审计，不能自动晋级或下单。
+
 ---
 
 ## 项目结构
@@ -776,6 +784,10 @@ auto_trade/
 | `AUTO_TRADE_WATCHLIST_QUANT_INTERVAL_MINUTES` | 同一标的两次量化 v5 评分的最小间隔（分钟） | `30` |
 | `AUTO_TRADE_WATCHLIST_QUANT_SCORE_TTL_MINUTES` | 量化 v5 证据有效期（分钟），与盘中刷新频率分离 | `1440` |
 | `AUTO_TRADE_WATCHLIST_QUANT_BATCH_SIZE` | 每次自动量化刷新最多处理的到期标的数，分批为实时行情与影子策略保留 API 配额 | `3` |
+| `AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_ENABLED` | 启用独立的 quote-only quant-v6 历史评估与不可变证据发布；不读取当前 watchlist/universe，不提交订单、不自动晋级 | `false` |
+| `AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_INTERVAL_MINUTES` | quant-v6 历史评估成功后的常规周期（分钟，`60-10080`） | `1440` |
+| `AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_RETRY_INTERVAL_MINUTES` | quant-v6 provider/发布失败后的重试周期（分钟，`15-1440`，不得大于常规周期） | `60` |
+| `AUTO_TRADE_WATCHLIST_QUANT_V6_PROVIDER_PAGE_TIMEOUT_SECONDS` | 单页 quote-only 历史 SDK 调用的硬超时（秒，`5-120`）；取消部署时会协作终止剩余 cohort | `30` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_MAX_SYMBOLS` | 每次最多入选标的数 | `12` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_EXPLORATION_MAX_SYMBOLS` | 先补足已入选风险组的残差基准同伴（可使用仅成交额处于实盘门槛 75%-100% 的 peer-only 标的），再保留冻结轮动与最高分新挑战者，剩余容量用于细行业和长期观察；自动新增或重新启用的标的仅观察、不会获得开仓资格，已启用的开仓池独立保留且不占探索配额，`0` 表示关闭 | `24` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_EXPLORATION_TOP_SCORE_CHALLENGERS` | 同伴与轮动覆盖完成后、长期观察标的占用容量前，优先保留的最高分硬门槛通过者数量；只收集前向证据，不会正式入选、切换主标的或下单 | `2` |

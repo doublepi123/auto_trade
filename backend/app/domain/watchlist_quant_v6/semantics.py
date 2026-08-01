@@ -23,8 +23,13 @@ from app.core.market_calendar import get_session
 
 from app.domain.watchlist_quant_v6.artifact import (
     MAX_QUANT_V6_ARTIFACT_COMPRESSED_BYTES,
+    MAX_QUANT_V6_ARTIFACT_CONTAINER_ITEMS,
+    MAX_QUANT_V6_ARTIFACT_INTEGER_ABS,
     MAX_QUANT_V6_ARTIFACT_JSON_DEPTH,
+    MAX_QUANT_V6_ARTIFACT_JSON_NODES,
+    MAX_QUANT_V6_ARTIFACT_KEY_BYTES,
     MAX_QUANT_V6_ARTIFACT_RAW_BYTES,
+    MAX_QUANT_V6_ARTIFACT_STRING_BYTES,
     MAX_QUANT_V6_DECIMAL_ADJUSTED_EXPONENT,
     MAX_QUANT_V6_DECIMAL_DIGITS,
     QUANT_V6_ARTIFACT_CODEC,
@@ -40,6 +45,7 @@ from app.domain.watchlist_quant_v6.artifact import (
     EncodedQuantV6Artifact,
     QuantV6ArtifactError,
     canonical_decimal,
+    canonical_quant_v6_json,
     canonical_utc_timestamp,
     encode_quant_v6_artifact,
     quant_v6_payload_sha256,
@@ -48,6 +54,9 @@ from app.domain.watchlist_quant_v6.artifact import (
 
 QUANT_V6_ALGORITHM_VERSION = "quant-v6-bar-next-open-stressed-v1"
 BAR_NEXT_OPEN_STRESSED = "BAR_NEXT_OPEN_STRESSED"
+QUANT_V6_ACQUISITION_CONTRACT_VERSION = "watchlist-quant-v6-acquisition-v1"
+QUANT_V6_ACQUISITION_PERIOD = "MIN_5"
+QUANT_V6_ACQUISITION_ADJUSTMENT_MODE = "NO_ADJUST"
 QUANT_V6_BAR_MINUTES = 5
 QUANT_V6_ENTRY_OFFSET_BARS = 1
 QUANT_V6_HOLDING_BARS = 6
@@ -123,7 +132,26 @@ def _deep_freeze_semantic_mapping(
         for key, item in value.items()
     })
 
+
+QUANT_V6_ACQUISITION_SPEC: Mapping[str, object] = (
+    _deep_freeze_semantic_mapping({
+        "adjustment_mode": QUANT_V6_ACQUISITION_ADJUSTMENT_MODE,
+        "bar_period": QUANT_V6_ACQUISITION_PERIOD,
+        "contract": QUANT_V6_ACQUISITION_CONTRACT_VERSION,
+        "exact_rth_grid_required": True,
+        "fallback_allowed": False,
+        "history_direction": "FORWARD_AFTER_CURSOR",
+        "quote_context_only": True,
+        "schema_version": 1,
+    })
+)
+QUANT_V6_ACQUISITION_SPEC_DIGEST = quant_v6_payload_sha256(
+    QUANT_V6_ACQUISITION_SPEC
+)
+
+
 QUANT_V6_SEMANTIC_SPEC: Mapping[str, object] = _deep_freeze_semantic_mapping({
+    "acquisition": QUANT_V6_ACQUISITION_SPEC,
     "algorithm_version": QUANT_V6_ALGORITHM_VERSION,
     "artifact_envelope": {
         "codec": QUANT_V6_ARTIFACT_CODEC,
@@ -135,10 +163,15 @@ QUANT_V6_SEMANTIC_SPEC: Mapping[str, object] = _deep_freeze_semantic_mapping({
         },
         "limits": {
             "compressed_bytes": MAX_QUANT_V6_ARTIFACT_COMPRESSED_BYTES,
+            "container_items": MAX_QUANT_V6_ARTIFACT_CONTAINER_ITEMS,
             "decimal_adjusted_exponent": MAX_QUANT_V6_DECIMAL_ADJUSTED_EXPONENT,
             "decimal_digits": MAX_QUANT_V6_DECIMAL_DIGITS,
+            "integer_abs": MAX_QUANT_V6_ARTIFACT_INTEGER_ABS,
             "json_depth": MAX_QUANT_V6_ARTIFACT_JSON_DEPTH,
+            "json_nodes": MAX_QUANT_V6_ARTIFACT_JSON_NODES,
+            "key_bytes": MAX_QUANT_V6_ARTIFACT_KEY_BYTES,
             "raw_bytes": MAX_QUANT_V6_ARTIFACT_RAW_BYTES,
+            "string_bytes": MAX_QUANT_V6_ARTIFACT_STRING_BYTES,
         },
         "schema_version": QUANT_V6_ARTIFACT_SCHEMA_VERSION,
     },
@@ -196,6 +229,7 @@ QUANT_V6_SEMANTIC_SPEC: Mapping[str, object] = _deep_freeze_semantic_mapping({
     "p0": {
         "automatic_promotion_allowed": False,
         "order_submission_allowed": False,
+        "position_add_on_allowed": False,
         "short_entry_allowed": False,
     },
     "schema_version": QUANT_V6_PAYLOAD_SCHEMA_VERSION,
@@ -224,7 +258,7 @@ def _decimal(value: Decimal | int | str, *, label: str) -> Decimal:
 
 
 def _canonical_symbol(value: str) -> str:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise QuantV6SemanticError("symbol must be a string")
     if (
         not value
@@ -238,6 +272,8 @@ def _canonical_symbol(value: str) -> str:
 
 
 def _canonical_market(value: str) -> str:
+    if type(value) is not str:
+        raise QuantV6SemanticError("market must be a string")
     if value not in {"US", "HK"}:
         raise QuantV6SemanticError("market must be US or HK")
     return value
@@ -304,6 +340,8 @@ class QuantV6Bar:
         return self.start_at + timedelta(minutes=QUANT_V6_BAR_MINUTES)
 
     def canonical_payload(self) -> dict[str, object]:
+        if type(self) is not QuantV6Bar:
+            raise QuantV6SemanticError("bar has an unsupported type")
         return {
             "close": canonical_decimal(self.close),
             "high": canonical_decimal(self.high),
@@ -335,6 +373,8 @@ class QuantV6ThresholdEvidence:
     preimage_digest_sha256: str
 
     def canonical_preimage(self) -> dict[str, object]:
+        if type(self) is not QuantV6ThresholdEvidence:
+            raise QuantV6SemanticError("threshold evidence has an unsupported type")
         return {
             "market": self.market,
             "minimum_returns": QUANT_V6_MIN_THRESHOLD_RETURNS,
@@ -353,8 +393,10 @@ class QuantV6ThresholdEvidence:
         }
 
     def canonical_payload(self) -> dict[str, object]:
+        if type(self) is not QuantV6ThresholdEvidence:
+            raise QuantV6SemanticError("threshold evidence has an unsupported type")
         return {
-            **self.canonical_preimage(),
+            **QuantV6ThresholdEvidence.canonical_preimage(self),
             "preimage_digest_sha256": self.preimage_digest_sha256,
             "shock_threshold_bps": canonical_decimal(self.shock_threshold_bps),
         }
@@ -450,6 +492,10 @@ def build_quant_v6_threshold_evidence(
     if not quant_v6_expected_rth_bar_starts(normalized_market, target_session_date):
         raise QuantV6SemanticError("target session date must be an open trading day")
     sessions = tuple(training_sessions)
+    if any(type(item) is not QuantV6TrainingSession for item in sessions):
+        raise QuantV6SemanticError(
+            "threshold training sessions contain an unsupported type"
+        )
     threshold, preimage_digest = _threshold_calculation(
         normalized_symbol,
         normalized_market,
@@ -474,6 +520,10 @@ def _threshold_calculation(
     sessions: tuple[QuantV6TrainingSession, ...],
 ) -> tuple[Decimal, str]:
     """Cache only immutable derived values, never a validation-success result."""
+    if any(type(item) is not QuantV6TrainingSession for item in sessions):
+        raise QuantV6SemanticError(
+            "threshold training sessions contain an unsupported type"
+        )
     if len(sessions) != QUANT_V6_THRESHOLD_TRAINING_SESSIONS:
         raise QuantV6SemanticError("threshold requires exactly 10 training sessions")
     expected_dates = quant_v6_previous_trading_session_dates(
@@ -511,14 +561,16 @@ def _threshold_calculation(
     )
     return (
         threshold,
-        quant_v6_payload_sha256(provisional.canonical_preimage()),
+        quant_v6_payload_sha256(
+            QuantV6ThresholdEvidence.canonical_preimage(provisional)
+        ),
     )
 
 
 def validate_quant_v6_threshold_evidence(
     evidence: QuantV6ThresholdEvidence,
 ) -> None:
-    if not isinstance(evidence, QuantV6ThresholdEvidence):
+    if type(evidence) is not QuantV6ThresholdEvidence:
         raise QuantV6SemanticError("threshold evidence has an unsupported type")
     rebuilt = build_quant_v6_threshold_evidence(
         symbol=evidence.symbol,
@@ -526,7 +578,11 @@ def validate_quant_v6_threshold_evidence(
         target_session_date=evidence.target_session_date,
         training_sessions=evidence.training_sessions,
     )
-    if rebuilt != evidence:
+    rebuilt_payload = QuantV6ThresholdEvidence.canonical_payload(rebuilt)
+    evidence_payload = QuantV6ThresholdEvidence.canonical_payload(evidence)
+    if canonical_quant_v6_json(rebuilt_payload) != canonical_quant_v6_json(
+        evidence_payload
+    ):
         raise QuantV6SemanticError("threshold evidence failed canonical replay")
 
 
@@ -548,7 +604,7 @@ def quant_v6_session_bars_sha256(
     )
     return quant_v6_payload_sha256({
         "bar_minutes": QUANT_V6_BAR_MINUTES,
-        "bars": [item.canonical_payload() for item in normalized_bars],
+        "bars": [QuantV6Bar.canonical_payload(item) for item in normalized_bars],
         "market": normalized_market,
         "session_date": session_date.isoformat(),
         "symbol": normalized_symbol,
@@ -590,6 +646,8 @@ def _training_session_preimage(
     market: str,
     training_session: QuantV6TrainingSession,
 ) -> dict[str, object]:
+    if type(training_session) is not QuantV6TrainingSession:
+        raise QuantV6SemanticError("training session has an unsupported type")
     returns = _training_session_absolute_returns(training_session)
     return {
         "absolute_log_returns_bps": [
@@ -601,7 +659,10 @@ def _training_session_preimage(
             session_date=training_session.session_date,
             bars=training_session.bars,
         ),
-        "bars": [item.canonical_payload() for item in training_session.bars],
+        "bars": [
+            QuantV6Bar.canonical_payload(item)
+            for item in training_session.bars
+        ],
         "return_count": len(returns),
         "session_date": training_session.session_date.isoformat(),
     }
@@ -611,6 +672,8 @@ def _training_session_preimage(
 def _training_session_absolute_returns(
     training_session: QuantV6TrainingSession,
 ) -> tuple[Decimal, ...]:
+    if type(training_session) is not QuantV6TrainingSession:
+        raise QuantV6SemanticError("training session has an unsupported type")
     return _absolute_log_returns_bps(training_session.bars)
 
 
@@ -656,8 +719,8 @@ def _validate_complete_session_bars(
     expected = quant_v6_expected_rth_bar_starts(market, session_date)
     if not expected:
         raise QuantV6SemanticError("session date must be an open trading day")
-    if any(not isinstance(item, QuantV6Bar) for item in bars):
-        raise QuantV6SemanticError("bars must contain QuantV6Bar values")
+    if any(type(item) is not QuantV6Bar for item in bars):
+        raise QuantV6SemanticError("bars contain an unsupported QuantV6Bar type")
     if tuple(item.start_at for item in bars) != expected:
         raise QuantV6SemanticError(
             "covered session bars must match the complete canonical RTH grid"
@@ -723,6 +786,8 @@ class BarNextOpenStressedEvent:
         return self.exit_bar.start_at
 
     def canonical_payload(self) -> dict[str, object]:
+        if type(self) is not BarNextOpenStressedEvent:
+            raise QuantV6SemanticError("event has an unsupported type")
         return {
             "algorithm_version": QUANT_V6_ALGORITHM_VERSION,
             "capture": {
@@ -758,7 +823,7 @@ class BarNextOpenStressedEvent:
                     self.entry_reference_price
                 ),
                 "exit_at": canonical_utc_timestamp(self.exit_at),
-                "exit_bar": self.exit_bar.canonical_payload(),
+                "exit_bar": QuantV6Bar.canonical_payload(self.exit_bar),
                 "exit_fill_price": canonical_decimal(self.exit_fill_price),
                 "exit_offset_bars": QUANT_V6_EXIT_OFFSET_BARS,
                 "exit_reference_price": canonical_decimal(
@@ -768,7 +833,8 @@ class BarNextOpenStressedEvent:
                     QUANT_V6_HISTORICAL_STRESS_BPS_PER_SIDE
                 ),
                 "holding_bars": [
-                    item.canonical_payload() for item in self.holding_bars
+                    QuantV6Bar.canonical_payload(item)
+                    for item in self.holding_bars
                 ],
                 "holding_bars_count": QUANT_V6_HOLDING_BARS,
                 "overlap_allowed": False,
@@ -794,13 +860,17 @@ class BarNextOpenStressedEvent:
             "semantic_digest": QUANT_V6_SEMANTIC_DIGEST,
             "signal": {
                 "direction": "DOWN",
-                "previous_bar": self.previous_bar.canonical_payload(),
+                "previous_bar": QuantV6Bar.canonical_payload(self.previous_bar),
                 "shock_return_bps": canonical_decimal(self.shock_return_bps),
                 "shock_threshold_bps": canonical_decimal(
                     self.threshold_evidence.shock_threshold_bps
                 ),
-                "signal_bar": self.signal_bar.canonical_payload(),
-                "threshold_evidence": self.threshold_evidence.canonical_payload(),
+                "signal_bar": QuantV6Bar.canonical_payload(self.signal_bar),
+                "threshold_evidence": (
+                    QuantV6ThresholdEvidence.canonical_payload(
+                        self.threshold_evidence
+                    )
+                ),
                 "trigger": "RETURN_LTE_NEGATIVE_THRESHOLD",
             },
         }
@@ -808,14 +878,16 @@ class BarNextOpenStressedEvent:
     def encoded_artifact(self) -> EncodedQuantV6Artifact:
         validate_bar_next_open_stressed_event(self)
         return encode_quant_v6_artifact(
-            self.canonical_payload(),
+            BarNextOpenStressedEvent.canonical_payload(self),
             kind=QUANT_V6_EVENT_ARTIFACT_KIND,
         )
 
     @property
     def artifact_digest_sha256(self) -> str:
         validate_bar_next_open_stressed_event(self)
-        return quant_v6_payload_sha256(self.canonical_payload())
+        return quant_v6_payload_sha256(
+            BarNextOpenStressedEvent.canonical_payload(self)
+        )
 
 
 def build_bar_next_open_stressed_events(
@@ -895,7 +967,7 @@ def validate_bar_next_open_stressed_event(
     event: BarNextOpenStressedEvent,
 ) -> None:
     """Replay one self-contained event and reject any altered preimage field."""
-    if not isinstance(event, BarNextOpenStressedEvent):
+    if type(event) is not BarNextOpenStressedEvent:
         raise QuantV6SemanticError("event has an unsupported type")
     local_bars = (
         event.previous_bar,
@@ -911,7 +983,13 @@ def validate_bar_next_open_stressed_event(
         threshold_evidence=event.threshold_evidence,
         fee_rate=event.fee_rate,
     )
-    if len(rebuilt) != 1 or rebuilt[0] != event:
+    if len(rebuilt) != 1:
+        raise QuantV6SemanticError("event does not match its canonical replay")
+    rebuilt_payload = BarNextOpenStressedEvent.canonical_payload(rebuilt[0])
+    event_payload = BarNextOpenStressedEvent.canonical_payload(event)
+    if canonical_quant_v6_json(rebuilt_payload) != canonical_quant_v6_json(
+        event_payload
+    ):
         raise QuantV6SemanticError("event does not match its canonical replay")
 
 
@@ -923,8 +1001,10 @@ def _validate_contiguous_bars(
 ) -> None:
     session = get_session(market)
     for item in bars:
-        if not isinstance(item, QuantV6Bar):
-            raise QuantV6SemanticError("bars must contain QuantV6Bar values")
+        if type(item) is not QuantV6Bar:
+            raise QuantV6SemanticError(
+                "bars contain an unsupported QuantV6Bar type"
+            )
         if not session.is_rth(item.start_at):
             raise QuantV6SemanticError("event bars must be inside market RTH")
         if session.local(item.start_at).date() != session_date:
@@ -960,7 +1040,7 @@ def _build_event(
         ]
     )
     exit_bar = bars[signal_index + QUANT_V6_EXIT_OFFSET_BARS]
-    if len(holding) != QUANT_V6_HOLDING_BARS or holding[0] != entry:
+    if len(holding) != QUANT_V6_HOLDING_BARS or holding[0] is not entry:
         raise QuantV6SemanticError("event does not contain exactly six holding bars")
 
     with localcontext() as context:

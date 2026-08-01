@@ -11,11 +11,14 @@ from app.domain.watchlist_quant_v6.artifact import (
     QUANT_V6_SESSION_INPUT_ARTIFACT_KIND,
     EncodedQuantV6Artifact,
     canonical_decimal,
+    canonical_quant_v6_json,
     encode_quant_v6_artifact,
     quant_v6_payload_sha256,
 )
 from app.domain.watchlist_quant_v6.semantics import (
     BAR_NEXT_OPEN_STRESSED,
+    QUANT_V6_ACQUISITION_SPEC,
+    QUANT_V6_ACQUISITION_SPEC_DIGEST,
     QUANT_V6_ALGORITHM_VERSION,
     QUANT_V6_ASSESSMENT_CONTRACT,
     QUANT_V6_ASSESSMENT_SESSIONS,
@@ -51,6 +54,24 @@ class QuantV6AssessmentError(ValueError):
     """Raised when a fixed-window assessment preimage is structurally invalid."""
 
 
+def _validated_event_payload(
+    event: BarNextOpenStressedEvent,
+) -> dict[str, object]:
+    try:
+        validate_bar_next_open_stressed_event(event)
+    except QuantV6SemanticError as exc:
+        raise QuantV6AssessmentError(
+            "event failed canonical replay validation"
+        ) from exc
+    return BarNextOpenStressedEvent.canonical_payload(event)
+
+
+def _validated_event_artifact_digest(
+    event: BarNextOpenStressedEvent,
+) -> str:
+    return quant_v6_payload_sha256(_validated_event_payload(event))
+
+
 @dataclass(frozen=True)
 class QuantV6SessionLeaf:
     session_date: date
@@ -64,13 +85,32 @@ class QuantV6SessionLeaf:
     def __post_init__(self) -> None:
         if type(self.session_date) is not date:
             raise QuantV6AssessmentError("leaf session_date must be a date")
+        if type(self.status) is not str:
+            raise QuantV6AssessmentError("leaf status must be canonical text")
         if self.status not in _SESSION_STATUSES:
             raise QuantV6AssessmentError("unsupported session leaf status")
         object.__setattr__(self, "session_bars", tuple(self.session_bars))
         object.__setattr__(self, "events", tuple(self.events))
         object.__setattr__(self, "blockers", tuple(self.blockers))
+        if any(type(value) is not QuantV6Bar for value in self.session_bars):
+            raise QuantV6AssessmentError(
+                "leaf bars contain an unsupported type"
+            )
+        if self.threshold_evidence is not None and (
+            type(self.threshold_evidence) is not QuantV6ThresholdEvidence
+        ):
+            raise QuantV6AssessmentError(
+                "leaf threshold evidence has an unsupported type"
+            )
         if any(
-            not isinstance(value, str)
+            type(value) is not BarNextOpenStressedEvent
+            for value in self.events
+        ):
+            raise QuantV6AssessmentError(
+                "leaf events contain an unsupported type"
+            )
+        if any(
+            type(value) is not str
             or not value
             or value != value.strip()
             for value in self.blockers
@@ -83,7 +123,7 @@ class QuantV6SessionLeaf:
                 raise QuantV6AssessmentError(
                     "covered leaf requires complete canonical session bars"
                 )
-            if not isinstance(self.threshold_evidence, QuantV6ThresholdEvidence):
+            if type(self.threshold_evidence) is not QuantV6ThresholdEvidence:
                 raise QuantV6AssessmentError(
                     "covered leaf requires threshold evidence"
                 )
@@ -126,6 +166,8 @@ class QuantV6SessionLeaf:
         symbol: str,
         market: str,
     ) -> dict[str, object]:
+        if type(self) is not QuantV6SessionLeaf:
+            raise QuantV6AssessmentError("session leaf has an unsupported type")
         if self.status != SESSION_COVERED or self.threshold_evidence is None:
             raise QuantV6AssessmentError(
                 "only a covered leaf has a replay-input artifact"
@@ -149,6 +191,10 @@ class QuantV6SessionLeaf:
                 "session replay fee rate does not match frozen market authority"
             )
         return {
+            "acquisition": {
+                **dict(QUANT_V6_ACQUISITION_SPEC),
+                "spec_digest_sha256": QUANT_V6_ACQUISITION_SPEC_DIGEST,
+            },
             "algorithm_version": QUANT_V6_ALGORITHM_VERSION,
             "bar_input_sha256": quant_v6_session_bars_sha256(
                 symbol=symbol,
@@ -156,7 +202,10 @@ class QuantV6SessionLeaf:
                 session_date=self.session_date,
                 bars=self.session_bars,
             ),
-            "bars": [item.canonical_payload() for item in self.session_bars],
+            "bars": [
+                QuantV6Bar.canonical_payload(item)
+                for item in self.session_bars
+            ],
             "capture_mode": BAR_NEXT_OPEN_STRESSED,
             "contract": QUANT_V6_SESSION_INPUT_CONTRACT,
             "fee_rate": _optional_decimal(self.fee_rate),
@@ -168,11 +217,16 @@ class QuantV6SessionLeaf:
             "p0": {
                 "automatic_promotion_allowed": False,
                 "order_submission_allowed": False,
+                "position_add_on_allowed": False,
                 "short_entry_allowed": False,
             },
             "schema_version": QUANT_V6_PAYLOAD_SCHEMA_VERSION,
             "semantic_digest": QUANT_V6_SEMANTIC_DIGEST,
-            "threshold_evidence": self.threshold_evidence.canonical_payload(),
+            "threshold_evidence": (
+                QuantV6ThresholdEvidence.canonical_payload(
+                    self.threshold_evidence
+                )
+            ),
         }
 
     def encoded_replay_input(
@@ -181,16 +235,25 @@ class QuantV6SessionLeaf:
         symbol: str,
         market: str,
     ) -> EncodedQuantV6Artifact:
+        if type(self) is not QuantV6SessionLeaf:
+            raise QuantV6AssessmentError("session leaf has an unsupported type")
         return encode_quant_v6_artifact(
-            self.canonical_replay_input(symbol=symbol, market=market),
+            QuantV6SessionLeaf.canonical_replay_input(
+                self,
+                symbol=symbol,
+                market=market,
+            ),
             kind=QUANT_V6_SESSION_INPUT_ARTIFACT_KIND,
         )
 
     def canonical_payload(self, *, symbol: str, market: str) -> dict[str, object]:
+        if type(self) is not QuantV6SessionLeaf:
+            raise QuantV6AssessmentError("session leaf has an unsupported type")
         bar_digest: object = None
         replay_input_digest: str | None = None
         if self.status == SESSION_COVERED:
-            replay_input = self.canonical_replay_input(
+            replay_input = QuantV6SessionLeaf.canonical_replay_input(
+                self,
                 symbol=symbol,
                 market=market,
             )
@@ -200,7 +263,8 @@ class QuantV6SessionLeaf:
             "bar_input_sha256": bar_digest,
             "blockers": list(self.blockers),
             "event_artifact_sha256": [
-                event.artifact_digest_sha256 for event in self.events
+                _validated_event_artifact_digest(event)
+                for event in self.events
             ],
             "event_count": len(self.events),
             "fee_rate": _optional_decimal(self.fee_rate),
@@ -240,6 +304,10 @@ class QuantV6Assessment:
     def __post_init__(self) -> None:
         object.__setattr__(self, "leaves", tuple(self.leaves))
         object.__setattr__(self, "blockers", tuple(self.blockers))
+        if any(type(value) is not QuantV6SessionLeaf for value in self.leaves):
+            raise QuantV6AssessmentError(
+                "assessment leaves contain an unsupported type"
+            )
         if (
             self.promotion_eligible is not False
             or self.automatic_promotion_allowed is not False
@@ -248,7 +316,10 @@ class QuantV6Assessment:
             raise QuantV6AssessmentError(
                 "historical assessment P0 flags must remain false"
             )
-        if self.recommended_action not in {"AVOID", "WATCH"}:
+        if (
+            type(self.recommended_action) is not str
+            or self.recommended_action not in {"AVOID", "WATCH"}
+        ):
             raise QuantV6AssessmentError(
                 "historical assessment action must be AVOID or WATCH"
             )
@@ -263,7 +334,7 @@ class QuantV6Assessment:
             ("event_count", self.event_count),
             ("event_sessions", self.event_sessions),
         ):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            if type(value) is not int or value < 0:
                 raise QuantV6AssessmentError(
                     f"{label} must be a non-negative integer"
                 )
@@ -272,8 +343,8 @@ class QuantV6Assessment:
         if self.event_sessions > self.covered_sessions:
             raise QuantV6AssessmentError("event sessions exceed covered sessions")
         if (
-            not isinstance(self.window_digest_sha256, str)
-            or not isinstance(self.event_set_digest_sha256, str)
+            type(self.window_digest_sha256) is not str
+            or type(self.event_set_digest_sha256) is not str
             or _SHA256_PATTERN.fullmatch(self.window_digest_sha256) is None
             or _SHA256_PATTERN.fullmatch(self.event_set_digest_sha256) is None
         ):
@@ -281,7 +352,7 @@ class QuantV6Assessment:
                 "assessment digests must be lowercase SHA-256"
             )
         if any(
-            not isinstance(value, str)
+            type(value) is not str
             or not value
             or value != value.strip()
             for value in self.blockers
@@ -297,62 +368,99 @@ class QuantV6Assessment:
             ("session_cluster_lcb_90_bps", self.session_cluster_lcb_90_bps),
         ):
             if value is not None and (
-                not isinstance(value, Decimal) or not value.is_finite()
+                type(value) is not Decimal or not value.is_finite()
             ):
                 raise QuantV6AssessmentError(
                     f"{label} must be a finite Decimal or None"
                 )
 
     def canonical_payload(self) -> dict[str, object]:
+        if type(self) is not QuantV6Assessment:
+            raise QuantV6AssessmentError("assessment has an unsupported type")
         expected = assess_bar_next_open_stressed_window(
             symbol=self.symbol,
             market=self.market,
             leaves=self.leaves,
         )
-        if expected != self:
+        expected_payload = _canonical_assessment_payload(expected)
+        actual_payload = _canonical_assessment_payload(self)
+        if canonical_quant_v6_json(expected_payload) != canonical_quant_v6_json(
+            actual_payload
+        ):
             raise QuantV6AssessmentError(
                 "assessment aggregates or digests failed canonical replay"
             )
-        return {
+        return actual_payload
+
+    @property
+    def assessment_digest_sha256(self) -> str:
+        if type(self) is not QuantV6Assessment:
+            raise QuantV6AssessmentError("assessment has an unsupported type")
+        return quant_v6_payload_sha256(
+            QuantV6Assessment.canonical_payload(self)
+        )
+
+    def encoded_artifact(self) -> EncodedQuantV6Artifact:
+        if type(self) is not QuantV6Assessment:
+            raise QuantV6AssessmentError("assessment has an unsupported type")
+        return encode_quant_v6_artifact(
+            QuantV6Assessment.canonical_payload(self),
+            kind=QUANT_V6_ASSESSMENT_ARTIFACT_KIND,
+        )
+
+
+def _canonical_assessment_payload(
+    assessment: QuantV6Assessment,
+) -> dict[str, object]:
+    return {
             "aggregates": {
-                "candidate_thresholds_met": self.candidate_thresholds_met,
-                "covered_sessions": self.covered_sessions,
-                "event_count": self.event_count,
-                "event_sessions": self.event_sessions,
+                "candidate_thresholds_met": assessment.candidate_thresholds_met,
+                "covered_sessions": assessment.covered_sessions,
+                "event_count": assessment.event_count,
+                "event_sessions": assessment.event_sessions,
                 "gross_edge_to_cost_ratio": _optional_decimal(
-                    self.gross_edge_to_cost_ratio
+                    assessment.gross_edge_to_cost_ratio
                 ),
-                "median_cost_bps": _optional_decimal(self.median_cost_bps),
+                "median_cost_bps": _optional_decimal(
+                    assessment.median_cost_bps
+                ),
                 "median_gross_edge_bps": _optional_decimal(
-                    self.median_gross_edge_bps
+                    assessment.median_gross_edge_bps
                 ),
                 "median_net_return_bps": _optional_decimal(
-                    self.median_net_return_bps
+                    assessment.median_net_return_bps
                 ),
                 "session_cluster_lcb_90_bps": _optional_decimal(
-                    self.session_cluster_lcb_90_bps
+                    assessment.session_cluster_lcb_90_bps
                 ),
                 "session_denominator": QUANT_V6_ASSESSMENT_SESSIONS,
             },
             "algorithm_version": QUANT_V6_ALGORITHM_VERSION,
-            "blockers": list(self.blockers),
+            "blockers": list(assessment.blockers),
             "capture_mode": BAR_NEXT_OPEN_STRESSED,
             "contract": QUANT_V6_ASSESSMENT_CONTRACT,
-            "event_set_digest_sha256": self.event_set_digest_sha256,
+            "event_set_digest_sha256": assessment.event_set_digest_sha256,
             "identity": {
-                "market": self.market,
-                "symbol": self.symbol,
-                "window_digest_sha256": self.window_digest_sha256,
+                "market": assessment.market,
+                "symbol": assessment.symbol,
+                "window_digest_sha256": assessment.window_digest_sha256,
             },
             "leaves": [
-                leaf.canonical_payload(symbol=self.symbol, market=self.market)
-                for leaf in self.leaves
+                QuantV6SessionLeaf.canonical_payload(
+                    leaf,
+                    symbol=assessment.symbol,
+                    market=assessment.market,
+                )
+                for leaf in assessment.leaves
             ],
             "policy": {
-                "automatic_promotion_allowed": self.automatic_promotion_allowed,
-                "order_submission_allowed": self.order_submission_allowed,
-                "promotion_eligible": self.promotion_eligible,
-                "recommended_action": self.recommended_action,
+                "automatic_promotion_allowed": (
+                    assessment.automatic_promotion_allowed
+                ),
+                "order_submission_allowed": assessment.order_submission_allowed,
+                "promotion_eligible": assessment.promotion_eligible,
+                "recommended_action": assessment.recommended_action,
+                "position_add_on_allowed": False,
                 "short_entry_allowed": False,
             },
             "schema_version": QUANT_V6_PAYLOAD_SCHEMA_VERSION,
@@ -360,7 +468,7 @@ class QuantV6Assessment:
             "session_cluster_methodology": {
                 "missing_session_treatment": "EXCLUDED_NOT_ZERO",
                 "sample": "ALL_COVERED_SESSIONS",
-                "sample_sessions": self.covered_sessions,
+                "sample_sessions": assessment.covered_sessions,
                 "zero_event_covered_session_return_bps": "0",
             },
             "thresholds": {
@@ -374,16 +482,6 @@ class QuantV6Assessment:
                 "session_cluster_lcb_90_bps": "STRICTLY_POSITIVE",
             },
         }
-
-    @property
-    def assessment_digest_sha256(self) -> str:
-        return quant_v6_payload_sha256(self.canonical_payload())
-
-    def encoded_artifact(self) -> EncodedQuantV6Artifact:
-        return encode_quant_v6_artifact(
-            self.canonical_payload(),
-            kind=QUANT_V6_ASSESSMENT_ARTIFACT_KIND,
-        )
 
 
 def assess_bar_next_open_stressed_window(
@@ -402,6 +500,27 @@ def assess_bar_next_open_stressed_window(
     normalized_leaves = tuple(leaves)
     if len(normalized_leaves) != QUANT_V6_ASSESSMENT_SESSIONS:
         raise QuantV6AssessmentError("assessment requires exactly 30 session leaves")
+    if any(type(leaf) is not QuantV6SessionLeaf for leaf in normalized_leaves):
+        raise QuantV6AssessmentError(
+            "assessment leaves contain an unsupported type"
+        )
+    try:
+        normalized_leaves = tuple(
+            QuantV6SessionLeaf(
+                session_date=leaf.session_date,
+                status=leaf.status,
+                session_bars=leaf.session_bars,
+                threshold_evidence=leaf.threshold_evidence,
+                fee_rate=leaf.fee_rate,
+                events=leaf.events,
+                blockers=leaf.blockers,
+            )
+            for leaf in normalized_leaves
+        )
+    except QuantV6AssessmentError as exc:
+        raise QuantV6AssessmentError(
+            "assessment contains an invalid session leaf"
+        ) from exc
     dates = [leaf.session_date for leaf in normalized_leaves]
     if dates != sorted(dates) or len(set(dates)) != len(dates):
         raise QuantV6AssessmentError(
@@ -445,20 +564,32 @@ def assess_bar_next_open_stressed_window(
             raise QuantV6AssessmentError(
                 "covered leaf failed canonical session replay"
             ) from exc
-        if expected_events != leaf.events:
+        actual_event_payloads = tuple(
+            _validated_event_payload(event)
+            for event in leaf.events
+        )
+        expected_event_payloads = tuple(
+            BarNextOpenStressedEvent.canonical_payload(event)
+            for event in expected_events
+        )
+        if tuple(
+            canonical_quant_v6_json(payload)
+            for payload in expected_event_payloads
+        ) != tuple(
+            canonical_quant_v6_json(payload)
+            for payload in actual_event_payloads
+        ):
             raise QuantV6AssessmentError(
                 "covered leaf events do not equal the complete replay event set"
             )
         if leaf.events:
             event_sessions += 1
         previous_event: BarNextOpenStressedEvent | None = None
-        for event in leaf.events:
-            try:
-                validate_bar_next_open_stressed_event(event)
-            except QuantV6SemanticError as exc:
-                raise QuantV6AssessmentError(
-                    "event failed canonical replay validation"
-                ) from exc
+        for event, event_payload in zip(
+            leaf.events,
+            actual_event_payloads,
+            strict=True,
+        ):
             if event.symbol != symbol or event.market != market:
                 raise QuantV6AssessmentError(
                     "event symbol and market must match the assessment"
@@ -477,7 +608,7 @@ def assess_bar_next_open_stressed_window(
                     "events must be ordered and non-overlapping within a session"
                 )
             event_keys.add(event.event_key_sha256)
-            artifact_digests.append(event.artifact_digest_sha256)
+            artifact_digests.append(quant_v6_payload_sha256(event_payload))
             covered_events.append(event)
             previous_event = event
         session_returns.append(

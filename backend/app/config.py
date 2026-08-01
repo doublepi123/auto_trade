@@ -444,6 +444,51 @@ class Settings(BaseSettings):
             "and shadow strategies."
         ),
     )
+    watchlist_quant_v6_evaluation_enabled: bool = Field(
+        default=False,
+        validation_alias=(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_ENABLED"
+        ),
+        description=(
+            "Run the quote-only historical quant-v6 evidence publication "
+            "job. This research path cannot submit orders or change the "
+            "live watchlist/universe."
+        ),
+    )
+    watchlist_quant_v6_evaluation_interval_minutes: int = Field(
+        default=1_440,
+        ge=60,
+        le=10_080,
+        validation_alias=(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_INTERVAL_MINUTES"
+        ),
+        description=(
+            "Bounded interval for the historical quant-v6 publication job."
+        ),
+    )
+    watchlist_quant_v6_evaluation_retry_interval_minutes: int = Field(
+        default=60,
+        ge=15,
+        le=1_440,
+        validation_alias=(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_RETRY_INTERVAL_MINUTES"
+        ),
+        description=(
+            "Bounded retry interval after a historical quant-v6 tick fails."
+        ),
+    )
+    watchlist_quant_v6_provider_page_timeout_seconds: float = Field(
+        default=30.0,
+        ge=5.0,
+        le=120.0,
+        allow_inf_nan=False,
+        validation_alias=(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_PROVIDER_PAGE_TIMEOUT_SECONDS"
+        ),
+        description=(
+            "Hard wall-clock limit for one quote-only historical SDK page."
+        ),
+    )
     universe_selection_max_symbols: int = Field(
         default=12,
         ge=1,
@@ -732,6 +777,14 @@ class Settings(BaseSettings):
             raise ValueError(
                 "watchlist quant score TTL must not be shorter than its "
                 "refresh interval"
+            )
+        if (
+            self.watchlist_quant_v6_evaluation_retry_interval_minutes
+            > self.watchlist_quant_v6_evaluation_interval_minutes
+        ):
+            raise ValueError(
+                "watchlist quant-v6 evaluation retry interval must not "
+                "exceed its regular interval"
             )
         self.llm_min_confidence = max(self.llm_min_confidence, 0.7)
         self.llm_max_stripe_width_pct = min(self.llm_max_stripe_width_pct, 8.0)
