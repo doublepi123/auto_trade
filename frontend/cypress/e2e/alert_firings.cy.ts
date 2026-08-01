@@ -129,6 +129,37 @@ describe('Alert firing history', () => {
         total: 4,
       },
     }).as('rules')
+    cy.intercept('GET', '/api/alert-rules/effectiveness*', {
+      body: {
+        items: [
+          {
+            id: 7, name: 'AAPL 高点', symbol: 'AAPL.US', rule_type: 'price_above',
+            threshold: 150, severity: 'WARNING', enabled: true, cooldown_seconds: 300,
+            created_at: '2026-06-15T00:00:00Z', firing_count: 3,
+            last_fired_at: '2026-06-17T10:00:00Z', never_fired: false,
+          },
+          {
+            id: 8, name: 'TSLA 低点', symbol: 'TSLA.US', rule_type: 'price_below',
+            threshold: 200, severity: 'CRITICAL', enabled: true, cooldown_seconds: 600,
+            created_at: '2026-06-15T00:00:00Z', firing_count: 1,
+            last_fired_at: '2026-06-16T09:00:00Z', never_fired: false,
+          },
+          {
+            id: 9, name: '日亏损', symbol: 'AAPL.US', rule_type: 'daily_loss',
+            threshold: -500, severity: 'CRITICAL', enabled: false, cooldown_seconds: 900,
+            created_at: '2026-06-15T00:00:00Z', firing_count: 0,
+            last_fired_at: null, never_fired: true,
+          },
+          {
+            id: 10, name: '从未触发', symbol: 'MSFT.US', rule_type: 'price_above',
+            threshold: 420, severity: 'INFO', enabled: true, cooldown_seconds: 300,
+            created_at: '2026-06-15T00:00:00Z', firing_count: 0,
+            last_fired_at: null, never_fired: true,
+          },
+        ],
+        total: 4,
+      },
+    }).as('effectiveness')
     cy.intercept('GET', '/api/alert-rules/7/history*', {
       body: {
         items: [
@@ -172,6 +203,7 @@ describe('Alert firing history', () => {
 
     cy.visit('/#/alerts')
     cy.wait('@rules')
+    cy.wait('@effectiveness')
 
     cy.get('[data-testid="alert-rule-health"]').should('contain', '4')
     cy.get('[data-testid="alert-rule-health"]').should('contain', '3')

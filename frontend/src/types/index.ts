@@ -953,7 +953,12 @@ export interface BacktestRunCompare {
   runs: BacktestRunOut[]
 }
 
-export type AlertRuleType = 'price_above' | 'price_below' | 'daily_loss'
+export type AlertRuleType =
+  | 'price_above'
+  | 'price_below'
+  | 'daily_loss'
+  | 'consecutive_losses'
+  | 'kill_switch_engaged'
 export type AlertSeverity = 'INFO' | 'WARNING' | 'CRITICAL'
 
 export interface AlertRule {
@@ -988,6 +993,34 @@ export interface AlertEvaluateResult {
   evaluated: number
   fired: number
   skipped_cooldown: number
+}
+
+/**
+ * Server-side per-rule firing effectiveness (GET /api/alert-rules/effectiveness).
+ *
+ * `firing_count` is scoped to the requested [from_date, to_date] window, while
+ * `last_fired_at` / `never_fired` are all-time semantics (never_fired is true
+ * only when the rule has no firing row at all). The response covers every
+ * rule, not just the currently listed page.
+ */
+export interface AlertRuleEffectiveness {
+  id: number
+  name: string
+  symbol: string
+  rule_type: string
+  threshold: number
+  severity: string
+  enabled: boolean
+  cooldown_seconds: number
+  created_at: string
+  firing_count: number
+  last_fired_at: string | null
+  never_fired: boolean
+}
+
+export interface AlertRuleEffectivenessPage {
+  items: AlertRuleEffectiveness[]
+  total: number
 }
 
 export interface AlertFiring {

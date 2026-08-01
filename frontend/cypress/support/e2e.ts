@@ -2317,6 +2317,12 @@ Cypress.Commands.add('stubApi', () => {
     body: { items: [], total: 0 },
   }).as('listAlertRules')
 
+  // Registered after the generic '/api/alert-rules*' stub so it takes
+  // precedence for the effectiveness path (later intercepts win).
+  cy.intercept('GET', '/api/alert-rules/effectiveness*', {
+    body: { items: [], total: 0 },
+  }).as('getAlertRuleEffectiveness')
+
   cy.intercept('POST', '/api/alert-rules', (req) => {
     req.reply({
       body: {

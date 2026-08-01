@@ -125,3 +125,20 @@ export function tradeEventTypeLabel(eventType?: string | null): string {
       return eventType || '事件'
   }
 }
+
+export function alertRuleTypeLabel(ruleType?: string | null): string {
+  switch (ruleType) {
+    case 'price_above':
+      return '价格上穿 ≥'
+    case 'price_below':
+      return '价格下穿 ≤'
+    case 'daily_loss':
+      return '日内亏损 ≤'
+    case 'consecutive_losses':
+      return '连续亏损 ≥'
+    case 'kill_switch_engaged':
+      return '熔断开关触发'
+    default:
+      return ruleType || '未知类型'
+  }
+}

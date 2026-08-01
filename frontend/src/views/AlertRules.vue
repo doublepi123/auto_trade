@@ -26,15 +26,51 @@
           <span>总计 {{ rules.length }}</span>
           <span>启用 {{ enabledRules.length }}</span>
           <span>停用 {{ disabledRules.length }}</span>
-          <span>有触发记录 {{ recentlyFiredRules.length }}</span>
-          <span>从未触发 {{ neverFiredRules.length }}</span>
+          <span>有触发记录 {{ effectivenessLoaded ? firedRuleCount : '—' }}</span>
+          <span>从未触发 {{ effectivenessLoaded ? neverFiredRuleCount : '—' }}</span>
+        </div>
+        <div class="summary-empty">触发统计来自服务端全量聚合（见下方明细），未加载时显示 —。</div>
+      </div>
+      <div class="summary-card" data-testid="alert-effectiveness-summary">
+        <div class="summary-title">触发统计（服务端）</div>
+        <div class="effectiveness-controls">
+          <span data-testid="alert-effectiveness-range">
+            <el-date-picker
+              v-model="effectivenessRange"
+              type="daterange"
+              range-separator="至"
+              start-placeholder="开始日期"
+              end-placeholder="结束日期"
+              value-format="YYYY-MM-DD"
+              clearable
+              size="small"
+              style="width: 240px"
+            />
+          </span>
+          <el-button size="small" :loading="effectivenessLoading" data-testid="alert-effectiveness-reload" @click="loadEffectiveness">查询</el-button>
+        </div>
+        <div v-if="effectivenessError" class="summary-error" data-testid="alert-effectiveness-error">
+          {{ effectivenessError }}
+          <el-button link size="small" type="primary" @click="loadEffectiveness">重试</el-button>
+        </div>
+        <template v-else-if="effectivenessLoaded">
+          <div class="summary-items">
+            <span>规则总数 {{ effectivenessTotal }}</span>
+            <span>窗口内触发 {{ windowFiringTotal }} 次</span>
+            <span>窗口内有触发 {{ windowFiredRuleCount }} 条</span>
+            <span>从未触发（全量） {{ neverFiredRuleCount }} 条</span>
+          </div>
+          <div class="summary-empty" data-testid="alert-effectiveness-window">{{ effectivenessWindowLabel }}</div>
+        </template>
+        <div v-else class="summary-empty" data-testid="alert-effectiveness-placeholder">
+          {{ effectivenessLoading ? '加载中…' : '尚未加载触发统计' }}
         </div>
       </div>
       <div class="summary-card" data-testid="alert-recent-firings">
-        <div class="summary-title">上次触发规则</div>
+        <div class="summary-title">上次触发规则（全量）</div>
         <div v-if="recentlyFiredRules.length" class="summary-items">
           <span v-for="rule in recentlyFiredRules" :key="rule.id">
-            {{ rule.name }} · {{ formatDateTime(rule.last_fired_at ?? '') }}
+            {{ rule.name }} · {{ formatDateTime(ruleLastFiredAt(rule) ?? '') }}
           </span>
         </div>
         <div v-else class="summary-empty">暂无触发记录</div>
@@ -51,9 +87,11 @@
 
     <el-table :data="filteredRules" size="small" class="responsive-table" v-loading="loading">
       <el-table-column prop="name" label="名称" min-width="120" />
-      <el-table-column prop="symbol" label="标的" min-width="90" />
+      <el-table-column label="标的" min-width="90">
+        <template #default="{ row }">{{ ruleSymbolLabel(row) }}</template>
+      </el-table-column>
       <el-table-column label="条件" min-width="130">
-        <template #default="{ row }">{{ ruleTypeLabel(row.rule_type) }} {{ row.threshold }}</template>
+        <template #default="{ row }">{{ ruleConditionLabel(row) }}</template>
       </el-table-column>
       <el-table-column label="严重度" min-width="90">
         <template #default="{ row }">
@@ -80,23 +118,85 @@
       </el-table-column>
     </el-table>
 
+    <div class="effectiveness-section" data-testid="alert-effectiveness">
+      <div class="effectiveness-header">
+        <h4>触发统计明细</h4>
+        <span class="hint" data-testid="alert-effectiveness-note">
+          覆盖全部规则；触发次数按所选窗口统计，「最近触发」与「从未触发」为全量口径。
+        </span>
+      </div>
+      <div v-if="effectivenessError" class="effectiveness-state" data-testid="alert-effectiveness-detail-error">
+        <el-alert type="error" :title="effectivenessError" :closable="false" show-icon />
+        <el-button size="small" style="margin-top: 8px" data-testid="alert-effectiveness-retry" @click="loadEffectiveness">重新加载</el-button>
+      </div>
+      <div v-else-if="effectivenessLoading" class="effectiveness-state" data-testid="alert-effectiveness-loading">加载中…</div>
+      <el-table v-else-if="effectivenessItems.length" :data="effectivenessItems" size="small" class="responsive-table" data-testid="alert-effectiveness-table">
+        <el-table-column prop="name" label="名称" min-width="120" />
+        <el-table-column label="标的" min-width="90">
+          <template #default="{ row }">{{ row.symbol || '—' }}</template>
+        </el-table-column>
+        <el-table-column label="类型" min-width="120">
+          <template #default="{ row }">{{ alertRuleTypeLabel(row.rule_type) }}</template>
+        </el-table-column>
+        <el-table-column label="窗口触发次数" min-width="100">
+          <template #default="{ row }">{{ row.firing_count }}</template>
+        </el-table-column>
+        <el-table-column label="最近触发（全量）" min-width="140">
+          <template #default="{ row }">{{ row.last_fired_at ? formatDateTime(row.last_fired_at) : '—' }}</template>
+        </el-table-column>
+        <el-table-column label="状态" min-width="100">
+          <template #default="{ row }">
+            <el-tag v-if="row.never_fired" size="small" type="info">从未触发</el-tag>
+            <el-tag v-else size="small" type="success">有触发记录</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="启用" min-width="70">
+          <template #default="{ row }">
+            <el-tag size="small" :type="row.enabled ? 'success' : 'info'">{{ row.enabled ? '启用' : '停用' }}</el-tag>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div v-else class="effectiveness-state" data-testid="alert-effectiveness-empty">暂无规则触发统计数据</div>
+    </div>
+
     <el-dialog v-model="dialog.visible" :title="dialog.id ? '编辑规则' : '新建规则'" width="480px" data-testid="alert-dialog">
       <el-form label-width="90px">
         <el-form-item label="名称">
           <el-input v-model="dialog.name" placeholder="规则名称" data-testid="alert-name" />
         </el-form-item>
-        <el-form-item label="标的">
-          <el-input v-model="dialog.symbol" placeholder="AAPL.US" />
-        </el-form-item>
         <el-form-item label="类型">
-          <el-select v-model="dialog.rule_type" data-testid="alert-rule-type" style="width: 100%">
+          <el-select v-model="dialog.rule_type" data-testid="alert-rule-type" style="width: 100%" @change="handleRuleTypeChange">
             <el-option label="价格上穿 ≥" value="price_above" />
             <el-option label="价格下穿 ≤" value="price_below" />
             <el-option label="日内亏损 ≤" value="daily_loss" />
+            <el-option label="连续亏损 ≥（账户级）" value="consecutive_losses" data-testid="alert-type-consecutive-losses" />
+            <el-option label="熔断开关触发（账户级）" value="kill_switch_engaged" data-testid="alert-type-kill-switch" />
           </el-select>
         </el-form-item>
+        <el-form-item label="标的">
+          <el-input
+            v-model="dialog.symbol"
+            :placeholder="isAccountWideType ? '账户级规则，无需标的' : 'AAPL.US'"
+            :disabled="isAccountWideType"
+            data-testid="alert-symbol"
+          />
+          <div v-if="isAccountWideType" class="field-hint" data-testid="alert-account-wide-hint">
+            账户级规则读取账户整体风控状态，标的固定留空。
+          </div>
+        </el-form-item>
         <el-form-item label="阈值">
-          <el-input-number v-model="dialog.threshold" :precision="2" :step="1" />
+          <template v-if="dialog.rule_type === 'kill_switch_engaged'">
+            <el-input-number :model-value="1" disabled :precision="0" data-testid="alert-threshold-fixed" />
+            <div class="field-hint">熔断开关启用时触发，阈值固定为 1。</div>
+          </template>
+          <template v-else-if="dialog.rule_type === 'consecutive_losses'">
+            <el-input-number v-model="dialog.threshold" :precision="0" :step="1" data-testid="alert-threshold" />
+            <div class="field-hint">连续亏损笔数达到阈值时触发，须为 ≥ 1 的整数。</div>
+          </template>
+          <template v-else>
+            <el-input-number v-model="dialog.threshold" :precision="2" :step="1" data-testid="alert-threshold" />
+            <div v-if="dialog.rule_type === 'daily_loss'" class="field-hint">日内盈亏（含符号）低于阈值时触发，例如 -500。</div>
+          </template>
         </el-form-item>
         <el-form-item label="严重度">
           <el-select v-model="dialog.severity" style="width: 100%">
@@ -192,16 +292,81 @@ import {
   updateAlertRule,
   deleteAlertRule,
   evaluateAlertRules,
+  getAlertRuleEffectiveness,
   getAlertRuleHistory,
 } from '../api'
-import type { AlertRule, AlertRuleCreate, AlertEvaluateResult, AlertRuleType, AlertSeverity, AlertFiring } from '../types'
+import type { AlertRule, AlertRuleCreate, AlertEvaluateResult, AlertRuleEffectiveness, AlertRuleType, AlertSeverity, AlertFiring } from '../types'
+import { alertRuleTypeLabel } from '../utils/labels'
 import { resolveErrorMessage } from '../utils/error'
+
+const ACCOUNT_WIDE_RULE_TYPES: ReadonlySet<AlertRuleType> = new Set(['consecutive_losses', 'kill_switch_engaged'])
 
 const rules = ref<AlertRule[]>([])
 const loading = ref(false)
 const evaluating = ref(false)
 const evalResult = ref<AlertEvaluateResult | null>(null)
 const activeFilter = ref<'all' | 'enabled' | 'disabled' | 'recent-fired' | 'never-fired'>('all')
+
+// Server-backed firing effectiveness (GET /api/alert-rules/effectiveness).
+// Covers ALL rules server-side; firing_count is window-scoped while
+// last_fired_at / never_fired are all-time semantics. Loading it is read-only
+// and never triggers rule evaluation or notification sends.
+const effectivenessItems = ref<AlertRuleEffectiveness[]>([])
+const effectivenessTotal = ref(0)
+const effectivenessLoading = ref(false)
+const effectivenessError = ref('')
+const effectivenessLoaded = ref(false)
+
+function defaultEffectivenessRange(): [string, string] {
+  const to = new Date()
+  const from = new Date(to.getTime() - 29 * 24 * 60 * 60 * 1000)
+  return [from.toISOString().slice(0, 10), to.toISOString().slice(0, 10)]
+}
+const effectivenessRange = ref<string[]>(defaultEffectivenessRange())
+
+const effectivenessById = computed(() => {
+  const map = new Map<number, AlertRuleEffectiveness>()
+  for (const item of effectivenessItems.value) map.set(item.id, item)
+  return map
+})
+
+const windowFiringTotal = computed(() =>
+  effectivenessItems.value.reduce((sum, item) => sum + item.firing_count, 0),
+)
+const windowFiredRuleCount = computed(() =>
+  effectivenessItems.value.filter((item) => item.firing_count > 0).length,
+)
+const neverFiredRuleCount = computed(() =>
+  effectivenessItems.value.filter((item) => item.never_fired).length,
+)
+const firedRuleCount = computed(() =>
+  effectivenessItems.value.filter((item) => !item.never_fired).length,
+)
+
+const effectivenessWindowLabel = computed(() => {
+  const from = effectivenessRange.value?.[0]
+  const to = effectivenessRange.value?.[1]
+  if (from || to) {
+    return `统计窗口：${from || '最早'} 至 ${to || '最新'}（窗口触发次数按窗口计；从未触发为全量口径）`
+  }
+  return '统计窗口：全部时间（触发次数为全量计数）'
+})
+
+/** Prefer the server-side all-time never_fired flag when effectiveness has
+ * been loaded; the local `last_fired_at === null` heuristic can mislabel
+ * legacy rules whose firing rows exist but last_fired_at was never
+ * backfilled. */
+function isRuleNeverFired(rule: AlertRule): boolean {
+  const server = effectivenessById.value.get(rule.id)
+  if (effectivenessLoaded.value && server) return server.never_fired
+  return rule.last_fired_at === null
+}
+
+function ruleLastFiredAt(rule: AlertRule): string | null {
+  const server = effectivenessById.value.get(rule.id)
+  if (effectivenessLoaded.value && server) return server.last_fired_at
+  return rule.last_fired_at
+}
 
 const historyDialog = reactive({
   visible: false,
@@ -251,12 +416,33 @@ const dialog = reactive({
   cooldown_seconds: 300,
 })
 
+const isAccountWideType = computed(() => isAccountWideRuleType(dialog.rule_type))
+
+// Adjust form defaults only — never persists. Saving stays behind the
+// explicit 保存 button regardless of rule type. Fired by the type select's
+// change event (user interaction only), so opening the dialog for edit never
+// clobbers the loaded rule's values.
+function handleRuleTypeChange(next: AlertRuleType) {
+  if (isAccountWideRuleType(next)) {
+    dialog.symbol = ''
+  }
+  if (next === 'kill_switch_engaged') {
+    dialog.threshold = 1
+  } else if (next === 'consecutive_losses') {
+    dialog.threshold = 3
+  } else if (next === 'daily_loss') {
+    dialog.threshold = -500
+  } else {
+    dialog.threshold = 150
+  }
+}
+
 const filteredRules = computed(() => {
   const current = rules.value
   if (activeFilter.value === 'enabled') return current.filter((rule) => rule.enabled)
   if (activeFilter.value === 'disabled') return current.filter((rule) => !rule.enabled)
-  if (activeFilter.value === 'recent-fired') return current.filter((rule) => rule.last_fired_at !== null)
-  if (activeFilter.value === 'never-fired') return current.filter((rule) => rule.last_fired_at === null)
+  if (activeFilter.value === 'recent-fired') return current.filter((rule) => !isRuleNeverFired(rule))
+  if (activeFilter.value === 'never-fired') return current.filter((rule) => isRuleNeverFired(rule))
   return current
 })
 
@@ -264,10 +450,9 @@ const enabledRules = computed(() => rules.value.filter((rule) => rule.enabled))
 const disabledRules = computed(() => rules.value.filter((rule) => !rule.enabled))
 const recentlyFiredRules = computed(() =>
   [...rules.value]
-    .filter((rule) => rule.last_fired_at !== null)
-    .sort((a, b) => new Date(b.last_fired_at ?? '').getTime() - new Date(a.last_fired_at ?? '').getTime()),
+    .filter((rule) => !isRuleNeverFired(rule) && ruleLastFiredAt(rule) !== null)
+    .sort((a, b) => new Date(ruleLastFiredAt(b) ?? '').getTime() - new Date(ruleLastFiredAt(a) ?? '').getTime()),
 )
-const neverFiredRules = computed(() => rules.value.filter((rule) => rule.last_fired_at === null))
 
 const historyLatestTriggerValue = computed(() => historyDialog.items[0]?.trigger_value ?? '—')
 const historyAverageTriggerValue = computed(() => {
@@ -299,11 +484,42 @@ async function loadRules() {
   }
 }
 
-function ruleTypeLabel(t: string): string {
-  if (t === 'price_above') return '价格上穿 ≥'
-  if (t === 'price_below') return '价格下穿 ≤'
-  if (t === 'daily_loss') return '日内亏损 ≤'
-  return t
+/** Read-only server aggregate; never evaluates rules or sends notifications. */
+async function loadEffectiveness() {
+  effectivenessLoading.value = true
+  effectivenessError.value = ''
+  try {
+    const params: { from_date?: string; to_date?: string } = {}
+    const range = effectivenessRange.value
+    if (range?.[0]) params.from_date = range[0]
+    if (range?.[1]) params.to_date = range[1]
+    const page = await getAlertRuleEffectiveness(params)
+    effectivenessItems.value = page.items
+    effectivenessTotal.value = page.total
+    effectivenessLoaded.value = true
+  } catch (e) {
+    effectivenessError.value = resolveErrorMessage(e, '加载触发统计失败')
+    effectivenessItems.value = []
+    effectivenessTotal.value = 0
+  } finally {
+    effectivenessLoading.value = false
+  }
+}
+
+function isAccountWideRuleType(t: AlertRuleType): boolean {
+  return ACCOUNT_WIDE_RULE_TYPES.has(t)
+}
+
+function ruleSymbolLabel(rule: AlertRule): string {
+  if (rule.symbol) return rule.symbol
+  return isAccountWideRuleType(rule.rule_type) ? '账户级' : '—'
+}
+
+function ruleConditionLabel(rule: AlertRule): string {
+  // kill_switch_engaged stores a fixed threshold of 1 as a storage contract;
+  // showing it would be noise, so the condition is the label alone.
+  if (rule.rule_type === 'kill_switch_engaged') return alertRuleTypeLabel(rule.rule_type)
+  return `${alertRuleTypeLabel(rule.rule_type)} ${rule.threshold}`
 }
 
 function severityType(s: string): string {
@@ -332,20 +548,38 @@ function openEdit(row: AlertRule) {
 }
 
 function payload(): AlertRuleCreate {
+  const accountWide = isAccountWideRuleType(dialog.rule_type)
   return {
     name: dialog.name.trim(),
-    symbol: dialog.symbol.trim().toUpperCase(),
+    // Account-wide rules read the authoritative account state; the backend
+    // rejects any non-blank symbol for them.
+    symbol: accountWide ? '' : dialog.symbol.trim().toUpperCase(),
     rule_type: dialog.rule_type,
-    threshold: dialog.threshold,
+    // kill_switch_engaged has a fixed threshold contract of exactly 1.0.
+    threshold: dialog.rule_type === 'kill_switch_engaged' ? 1 : dialog.threshold,
     severity: dialog.severity,
     enabled: dialog.enabled,
     cooldown_seconds: dialog.cooldown_seconds,
   }
 }
 
+function validateDialog(): string | null {
+  if (!dialog.name.trim()) return '请填写名称'
+  if (dialog.rule_type === 'consecutive_losses') {
+    if (!Number.isInteger(dialog.threshold) || dialog.threshold < 1) {
+      return '连续亏损阈值须为 ≥ 1 的整数'
+    }
+  }
+  if (isAccountWideRuleType(dialog.rule_type) && dialog.symbol.trim() !== '') {
+    return '账户级规则标的须留空'
+  }
+  return null
+}
+
 async function save() {
-  if (!dialog.name.trim()) {
-    ElMessage.warning('请填写名称')
+  const invalid = validateDialog()
+  if (invalid) {
+    ElMessage.warning(invalid)
     return
   }
   dialog.saving = true
@@ -357,6 +591,7 @@ async function save() {
     }
     dialog.visible = false
     await loadRules()
+    await loadEffectiveness()
     ElMessage.success('已保存')
   } catch (e) {
     ElMessage.error(resolveErrorMessage(e, '保存失败'))
@@ -374,6 +609,7 @@ async function remove(id: number) {
   try {
     await deleteAlertRule(id)
     await loadRules()
+    await loadEffectiveness()
   } catch {
     ElMessage.error('删除失败')
   }
@@ -475,6 +711,7 @@ async function toggleEnabled(row: AlertRule, value: boolean | string | number) {
       cooldown_seconds: row.cooldown_seconds,
     })
     await loadRules()
+    await loadEffectiveness()
   } catch {
     ElMessage.error('更新失败')
   }
@@ -513,7 +750,10 @@ async function reloadHistory() {
   }
 }
 
-onMounted(loadRules)
+onMounted(() => {
+  loadRules()
+  loadEffectiveness()
+})
 </script>
 
 <style scoped>
@@ -580,6 +820,52 @@ onMounted(loadRules)
 .summary-empty {
   font-size: 12px;
   color: #909399;
+}
+
+.summary-error {
+  font-size: 12px;
+  color: var(--el-color-danger);
+}
+
+.effectiveness-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.effectiveness-section {
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.effectiveness-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+
+.effectiveness-header h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.effectiveness-state {
+  padding: 16px;
+  text-align: center;
+  color: #909399;
+  font-size: 13px;
+}
+
+.field-hint {
+  margin-top: 4px;
+  color: #909399;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .filter-row {
