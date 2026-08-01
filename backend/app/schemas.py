@@ -4158,6 +4158,211 @@ class WatchlistScoreListResponse(BaseModel):
     reviews: list[WatchlistScoreResponse] = Field(default_factory=list)
 
 
+class WatchlistQuantV6PolicyResponse(BaseModel):
+    promotion_eligible: Literal[False] = False
+    automatic_promotion_allowed: Literal[False] = False
+    order_submission_allowed: Literal[False] = False
+    short_entry_allowed: Literal[False] = False
+    position_add_on_allowed: Literal[False] = False
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class WatchlistQuantV6PublicationSummary(BaseModel):
+    publication_id: int = Field(ge=1)
+    registration_id: int = Field(ge=1)
+    market: Literal["US", "HK"]
+    status: Literal["PUBLISHED"] = "PUBLISHED"
+    contract_version: str = Field(min_length=1, max_length=100)
+    algorithm_version: str = Field(min_length=1, max_length=160)
+    registration_identity_sha256: str = Field(min_length=64, max_length=64)
+    identity_sha256: str = Field(min_length=64, max_length=64)
+    manifest_sha256: str = Field(min_length=64, max_length=64)
+    registered_member_count: int = Field(ge=1)
+    assessment_artifact_count: int = Field(ge=1)
+    session_input_artifact_count: int = Field(ge=0)
+    event_artifact_count: int = Field(ge=0)
+    binding_count: int = Field(ge=1)
+    first_training_session_date: date
+    first_target_session_date: date
+    last_target_session_date: date
+    data_cutoff_at: datetime
+    registered_at: datetime
+    published_at: datetime
+    policy: WatchlistQuantV6PolicyResponse
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class WatchlistQuantV6PublicationPage(BaseModel):
+    integrity_scope: Literal["PERSISTED_HEADERS"] = "PERSISTED_HEADERS"
+    items: list[WatchlistQuantV6PublicationSummary]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1, le=50)
+    next_cursor: str | None = Field(default=None, max_length=512)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class WatchlistQuantV6ValidationResponse(BaseModel):
+    integrity_scope: Literal["SELF_CONSISTENT"] = "SELF_CONSISTENT"
+    registration_identity_verified: Literal[True] = True
+    publication_identity_verified: Literal[True] = True
+    binding_manifest_verified: Literal[True] = True
+    artifact_payloads_verified: Literal[False] = False
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class WatchlistQuantV6RegistrationResponse(BaseModel):
+    registration_id: int = Field(ge=1)
+    identity_sha256: str = Field(min_length=64, max_length=64)
+    schema_version: Literal[1] = 1
+    contract_version: str = Field(min_length=1, max_length=100)
+    selection_rule_version: str = Field(min_length=1, max_length=160)
+    algorithm_version: str = Field(min_length=1, max_length=160)
+    semantic_digest_sha256: str = Field(min_length=64, max_length=64)
+    evaluator_digest_sha256: str = Field(min_length=64, max_length=64)
+    acquisition_spec_sha256: str = Field(min_length=64, max_length=64)
+    cohort_source: Literal["ROTATION_RESEARCH_CATALOG_PIT"]
+    market: Literal["US", "HK"]
+    source_snapshot_sha256: str = Field(min_length=64, max_length=64)
+    cohort_manifest_sha256: str = Field(min_length=64, max_length=64)
+    cohort_member_count: int = Field(ge=1, le=1_000)
+    schedule_sha256: str = Field(min_length=64, max_length=64)
+    training_session_count: Literal[10] = 10
+    target_session_count: Literal[30] = 30
+    first_training_session_date: date
+    first_target_session_date: date
+    last_target_session_date: date
+    data_cutoff_at: datetime
+    bar_period: Literal["MIN_5"] = "MIN_5"
+    adjustment_mode: Literal["NO_ADJUST"] = "NO_ADJUST"
+    server_generated: Literal[True] = True
+    short_entry_allowed: Literal[False] = False
+    position_add_on_allowed: Literal[False] = False
+    order_submission_allowed: Literal[False] = False
+    automatic_promotion_allowed: Literal[False] = False
+    cohort_observed_at: datetime
+    registered_at: datetime
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class WatchlistQuantV6PublicationDetail(BaseModel):
+    publication: WatchlistQuantV6PublicationSummary
+    registration: WatchlistQuantV6RegistrationResponse
+    acquisition_request_start_at: datetime
+    acquisition_request_end_at: datetime
+    validation: WatchlistQuantV6ValidationResponse
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class WatchlistQuantV6MemberAcquisitionResponse(BaseModel):
+    pages: int = Field(ge=0)
+    raw_rows: int = Field(ge=0)
+    accepted_bars: int = Field(ge=0)
+    rejected_rows: int = Field(ge=0)
+    complete_session_count: int = Field(ge=0)
+    off_grid_accepted_bars: int = Field(ge=0)
+    scheduled_grid_present_bars: int = Field(ge=0)
+    accepted_bar_starts_sha256: str = Field(min_length=64, max_length=64)
+    scheduled_grid_present_starts_sha256: str = Field(
+        min_length=64,
+        max_length=64,
+    )
+    scheduled_grid_coverage_bitset_hex: str
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class WatchlistQuantV6MemberSummary(BaseModel):
+    member_ordinal: int = Field(ge=0)
+    symbol: str = Field(min_length=4, max_length=50)
+    market: Literal["US", "HK"]
+    alias: str = Field(default="", max_length=160)
+    sector: str = Field(default="", max_length=160)
+    memberships: list[str] = Field(default_factory=list, max_length=20)
+    assessment_artifact_sha256: str = Field(min_length=64, max_length=64)
+    assessment_binding_sha256: str = Field(min_length=64, max_length=64)
+    acquisition: WatchlistQuantV6MemberAcquisitionResponse
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class WatchlistQuantV6MemberPage(BaseModel):
+    integrity_scope: Literal["REQUESTED_PAGE"] = "REQUESTED_PAGE"
+    publication_id: int = Field(ge=1)
+    items: list[WatchlistQuantV6MemberSummary]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1, le=200)
+    next_cursor: str | None = Field(default=None, max_length=512)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class WatchlistQuantV6BindingResponse(BaseModel):
+    publication_id: int = Field(ge=1)
+    member_ordinal: int = Field(ge=0)
+    symbol: str = Field(min_length=4, max_length=50)
+    market: Literal["US", "HK"]
+    role: Literal["ASSESSMENT", "SESSION_INPUT", "EVENT"]
+    artifact_ordinal: int = Field(ge=0, le=49_999)
+    session_date: date | None = None
+    artifact_sha256: str = Field(min_length=64, max_length=64)
+    artifact_kind: Literal[
+        "WATCHLIST_QUANT_V6_ASSESSMENT",
+        "WATCHLIST_QUANT_V6_SESSION_INPUT",
+        "WATCHLIST_QUANT_V6_EVENT",
+    ]
+    binding_sha256: str = Field(min_length=64, max_length=64)
+    artifact_schema_version: Literal[1] = 1
+    artifact_codec: Literal["zlib"] = "zlib"
+    artifact_compression_level: Literal[9] = 9
+    artifact_raw_size: int = Field(ge=1, le=2_097_152)
+    artifact_compressed_size: int = Field(ge=1, le=524_288)
+    binding_created_at: datetime
+    artifact_created_at: datetime
+    binding_identity_verified: Literal[True] = True
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class WatchlistQuantV6BindingPage(BaseModel):
+    integrity_scope: Literal["REQUESTED_PAGE"] = "REQUESTED_PAGE"
+    publication_id: int = Field(ge=1)
+    items: list[WatchlistQuantV6BindingResponse]
+    total: int = Field(ge=0)
+    limit: int = Field(ge=1, le=500)
+    next_cursor: str | None = Field(default=None, max_length=512)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class WatchlistQuantV6ArtifactResponse(BaseModel):
+    integrity_scope: Literal["REQUESTED_ARTIFACT"] = "REQUESTED_ARTIFACT"
+    publication_id: int = Field(ge=1)
+    digest_sha256: str = Field(min_length=64, max_length=64)
+    schema_version: Literal[1] = 1
+    kind: Literal[
+        "WATCHLIST_QUANT_V6_ASSESSMENT",
+        "WATCHLIST_QUANT_V6_SESSION_INPUT",
+        "WATCHLIST_QUANT_V6_EVENT",
+    ]
+    codec: Literal["zlib"] = "zlib"
+    compression_level: Literal[9] = 9
+    raw_size: int = Field(ge=1, le=2_097_152)
+    compressed_size: int = Field(ge=1, le=524_288)
+    created_at: datetime
+    binding_count: Literal[1] = 1
+    payload: dict[str, Any]
+    payload_identity_verified: Literal[True] = True
+    bound_to_publication: Literal[True] = True
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class PromptVersionCreate(BaseModel):
     name: str = Field(max_length=100)
     version: str = Field(max_length=20)

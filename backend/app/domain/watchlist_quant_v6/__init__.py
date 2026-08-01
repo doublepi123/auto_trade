@@ -1,5 +1,7 @@
 """Frozen, order-incapable quant-v6 research semantics."""
 
+from typing import TYPE_CHECKING
+
 from app.domain.watchlist_quant_v6.artifact import (
     MAX_QUANT_V6_ARTIFACT_COMPRESSED_BYTES,
     MAX_QUANT_V6_ARTIFACT_CONTAINER_ITEMS,
@@ -36,12 +38,6 @@ from app.domain.watchlist_quant_v6.assessment import (
     QuantV6SessionLeaf,
     assess_bar_next_open_stressed_window,
     session_cluster_one_sided_90_lcb,
-)
-from app.domain.watchlist_quant_v6.evaluator import (
-    QUANT_V6_EVALUATOR_MANIFEST_VERSION,
-    QUANT_V6_EVALUATOR_SOURCE_KEYS,
-    quant_v6_evaluator_digest_sha256,
-    quant_v6_evaluator_manifest,
 )
 from app.domain.watchlist_quant_v6.semantics import (
     BAR_NEXT_OPEN_STRESSED,
@@ -84,6 +80,35 @@ from app.domain.watchlist_quant_v6.semantics import (
     validate_quant_v6_threshold_evidence,
     validate_quant_v6_symbol_market,
 )
+
+if TYPE_CHECKING:
+    from app.domain.watchlist_quant_v6.evaluator import (
+        QUANT_V6_EVALUATOR_MANIFEST_VERSION,
+        QUANT_V6_EVALUATOR_SOURCE_KEYS,
+        quant_v6_evaluator_digest_sha256,
+        quant_v6_evaluator_manifest,
+    )
+
+
+_EVALUATOR_EXPORT_NAMES = frozenset({
+    "QUANT_V6_EVALUATOR_MANIFEST_VERSION",
+    "QUANT_V6_EVALUATOR_SOURCE_KEYS",
+    "quant_v6_evaluator_digest_sha256",
+    "quant_v6_evaluator_manifest",
+})
+
+
+def __getattr__(name: str) -> object:
+    """Load evaluator-only exports when a caller explicitly requests them."""
+    if name not in _EVALUATOR_EXPORT_NAMES:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    from app.domain.watchlist_quant_v6 import evaluator as evaluator_module
+
+    value = getattr(evaluator_module, name)
+    globals()[name] = value
+    return value
+
 
 __all__ = [
     "BAR_NEXT_OPEN_STRESSED",

@@ -170,16 +170,39 @@ def test_evaluator_closure_has_no_io_framework_or_order_dependency() -> None:
                     assert node.func.attr not in forbidden_attribute_calls
 
 
-def test_package_initializer_is_safe_reexports_only() -> None:
+def test_package_initializer_has_safe_static_and_lazy_exports() -> None:
     tree = ast.parse(inspect.getsource(quant_v6_package))
-    allowed_modules = {
+    allowed_static_modules = {
         "app.domain.watchlist_quant_v6.artifact",
         "app.domain.watchlist_quant_v6.assessment",
-        "app.domain.watchlist_quant_v6.evaluator",
         "app.domain.watchlist_quant_v6.semantics",
     }
-    imported_names: set[str] = set()
+    evaluator_module = "app.domain.watchlist_quant_v6.evaluator"
+    evaluator_export_names = {
+        "QUANT_V6_EVALUATOR_MANIFEST_VERSION",
+        "QUANT_V6_EVALUATOR_SOURCE_KEYS",
+        "quant_v6_evaluator_digest_sha256",
+        "quant_v6_evaluator_manifest",
+    }
+    expected_getattr = ast.parse('''
+def __getattr__(name: str) -> object:
+    """Load evaluator-only exports when a caller explicitly requests them."""
+    if name not in _EVALUATOR_EXPORT_NAMES:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    from app.domain.watchlist_quant_v6 import evaluator as evaluator_module
+
+    value = getattr(evaluator_module, name)
+    globals()[name] = value
+    return value
+''').body[0]
+    static_imported_names: set[str] = set()
+    type_checking_names: set[str] = set()
     exported_names: set[str] = set()
+    saw_evaluator_name_guard = False
+    saw_getattr = False
+    saw_type_checking_block = False
+    saw_type_checking_import = False
 
     for statement in tree.body:
         if (
@@ -190,29 +213,96 @@ def test_package_initializer_is_safe_reexports_only() -> None:
             continue
         if isinstance(statement, ast.ImportFrom):
             assert statement.level == 0
-            assert statement.module in allowed_modules
-            assert all(alias.name != "*" for alias in statement.names)
-            imported_names.update(
+            if statement.module == "typing":
+                assert not saw_type_checking_import
+                assert [alias.name for alias in statement.names] == [
+                    "TYPE_CHECKING"
+                ]
+                assert statement.names[0].asname is None
+                saw_type_checking_import = True
+                continue
+            assert statement.module in allowed_static_modules
+            assert all(
+                alias.name != "*" and alias.asname is None
+                for alias in statement.names
+            )
+            static_imported_names.update(
                 alias.asname or alias.name for alias in statement.names
             )
+            continue
+        if isinstance(statement, ast.If):
+            assert not saw_type_checking_block
+            assert isinstance(statement.test, ast.Name)
+            assert statement.test.id == "TYPE_CHECKING"
+            assert not statement.orelse
+            assert len(statement.body) == 1
+            lazy_import = statement.body[0]
+            assert isinstance(lazy_import, ast.ImportFrom)
+            assert lazy_import.level == 0
+            assert lazy_import.module == evaluator_module
+            assert all(
+                alias.name != "*" and alias.asname is None
+                for alias in lazy_import.names
+            )
+            type_checking_names = {
+                alias.name for alias in lazy_import.names
+            }
+            saw_type_checking_block = True
             continue
         if isinstance(statement, ast.Assign):
             assert len(statement.targets) == 1
             target = statement.targets[0]
-            assert isinstance(target, ast.Name) and target.id == "__all__"
-            assert isinstance(statement.value, ast.List)
+            assert isinstance(target, ast.Name)
+            if target.id == "_EVALUATOR_EXPORT_NAMES":
+                assert not saw_evaluator_name_guard
+                value = statement.value
+                assert isinstance(value, ast.Call)
+                assert isinstance(value.func, ast.Name)
+                assert value.func.id == "frozenset"
+                assert len(value.args) == 1 and not value.keywords
+                names = value.args[0]
+                assert isinstance(names, ast.Set)
+                assert all(
+                    isinstance(item, ast.Constant)
+                    and type(item.value) is str
+                    for item in names.elts
+                )
+                assert {
+                    item.value
+                    for item in names.elts
+                    if isinstance(item, ast.Constant)
+                    and type(item.value) is str
+                } == evaluator_export_names
+                saw_evaluator_name_guard = True
+                continue
+            assert target.id == "__all__"
+            values = statement.value
+            assert isinstance(values, ast.List)
             assert all(
                 isinstance(item, ast.Constant) and type(item.value) is str
-                for item in statement.value.elts
+                for item in values.elts
             )
             exported_names = {
                 item.value
-                for item in statement.value.elts
+                for item in values.elts
                 if isinstance(item, ast.Constant) and type(item.value) is str
             }
+            continue
+        if isinstance(statement, ast.FunctionDef):
+            assert not saw_getattr
+            assert ast.dump(statement, include_attributes=False) == ast.dump(
+                expected_getattr,
+                include_attributes=False,
+            )
+            saw_getattr = True
             continue
         pytest.fail(
             f"unsafe package initializer statement: {type(statement).__name__}"
         )
 
-    assert exported_names == imported_names
+    assert saw_type_checking_import is True
+    assert saw_evaluator_name_guard is True
+    assert saw_getattr is True
+    assert saw_type_checking_block is True
+    assert type_checking_names == evaluator_export_names
+    assert exported_names == static_imported_names | evaluator_export_names
