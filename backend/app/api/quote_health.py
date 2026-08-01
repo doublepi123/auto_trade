@@ -2,15 +2,26 @@
 
 Exposes a safe snapshot of the runner's primary-symbol quote stream health:
 quotes received, last quote timestamp/age, maximum observed gap between
-consecutive trusted primary quotes, disconnect/resubscribe/retry counts, and
-a status verdict. The endpoint performs no I/O, database, or broker work and
-never subscribes, reconnects, pauses, or alters the quote freshness threshold.
+consecutive trusted primary push quotes, disconnect/resubscribe/retry counts,
+and a status verdict. The endpoint performs no I/O, database, or broker work
+and never subscribes, reconnects, pauses, or alters the quote freshness
+threshold.
+
+This endpoint never constructs an ``AppRunner``/``BrokerGateway`` or contacts
+the broker. It uses :func:`app.runner.peek_runner` (non-constructing) to look
+up the current runner's bound tracker. If no runner/tracker exists, it returns
+an explicit ``unavailable`` response with HTTP 503 — it never synthesizes an
+all-zero disconnected tracker.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 
 from app.api.auth import require_api_key
+from app.runner import peek_runner
 from app.schemas import QuoteStreamHealth
 from app.services.quote_stream_health_service import QuoteStreamHealthTracker
 
@@ -21,29 +32,53 @@ router = APIRouter(
 )
 
 
-def get_quote_stream_health_tracker() -> QuoteStreamHealthTracker:
-    """Return the runner's bound quote-stream health tracker.
+def _peek_quote_stream_health_tracker() -> QuoteStreamHealthTracker | None:
+    """Return the runner's bound quote-stream health tracker without
+    constructing a runner.
 
-    Resolved lazily from the runner so the endpoint never constructs a tracker
-    or touches the broker. If the runner is unavailable, a fresh empty tracker
-    is returned (all-zero snapshot, status ``disconnected``).
+    Uses :func:`peek_runner` (non-constructing). Returns ``None`` when no
+    runner exists or the runner has no bound tracker, so the endpoint can
+    return an explicit unavailable response instead of synthesizing state.
     """
-    from app.runner import get_runner
-
     try:
-        runner = get_runner()
+        runner = peek_runner()
+        if runner is None:
+            return None
         tracker = getattr(runner, "quote_stream_health", None)
         if isinstance(tracker, QuoteStreamHealthTracker):
             return tracker
     except Exception:
         pass
-    return QuoteStreamHealthTracker()
+    return None
 
 
-@router.get("/quote-health", response_model=QuoteStreamHealth)
-def get_quote_health() -> QuoteStreamHealth:
-    """Read-only process-local quote stream health snapshot (authenticated)."""
-    tracker = get_quote_stream_health_tracker()
+@router.get("/quote-health", response_model=None)
+def get_quote_health() -> JSONResponse | QuoteStreamHealth:
+    """Read-only process-local quote stream health snapshot (authenticated).
+
+    Returns HTTP 503 with an ``unavailable`` status when no runner/tracker
+    exists, so callers can distinguish "no runtime yet" from a known
+    disconnected stream. Never instantiates ``AppRunner``/``BrokerGateway``
+    or contacts the broker.
+    """
+    tracker = _peek_quote_stream_health_tracker()
+    if tracker is None:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "symbol": "",
+                "quotes_received": 0,
+                "last_quote_timestamp": None,
+                "last_quote_age_seconds": None,
+                "max_gap_seconds": 0.0,
+                "disconnect_count": 0,
+                "resubscribe_count": 0,
+                "disconnect_retry_count": 0,
+                "quotes_subscribed": False,
+                "status": "unavailable",
+                "as_of": datetime.now(timezone.utc).isoformat(),
+            },
+        )
     snap = tracker.snapshot()
     return QuoteStreamHealth(
         symbol=snap.symbol,

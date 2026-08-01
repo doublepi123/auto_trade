@@ -641,6 +641,7 @@ class AppRunner:
 
         self._reset_quote_tracking(clear_history=True)
         # Observer-only: sync the health tracker's symbol with the primary.
+        # set_symbol resets symbol-bound quote count/arrival/gap state.
         self.quote_stream_health.set_symbol(self.engine.params.symbol or "")
         with self._state_lock:
             symbols = self._desired_quote_symbols_locked()
@@ -649,13 +650,15 @@ class AppRunner:
                 self._subscribe_quote_symbols(self.broker, symbols)
                 self._quotes_subscribed = True
                 self._last_push_quote_at = time.monotonic()
-                # Observer-only: record the initial subscription as a
-                # resubscribe so the gap window and counters start cleanly.
-                self.quote_stream_health.set_quotes_subscribed(True)
+                # Observer-only: record the successful initial subscription;
+                # resets the window so old quote age cannot report healthy.
+                self._observe_quote_subscription(True)
                 logger.info("subscribed to quote streams: %s", ", ".join(symbols))
             except Exception as exc:
                 logger.error("quote subscription failed for %s: %s", ", ".join(symbols), exc)
                 logger.error("system running without quote updates")
+                # Observer-only: failed subscription stays unsubscribed.
+                self._observe_quote_subscription(False)
 
     def _load_opening_execution_registry(self, db: Session) -> None:
         from app.services.opening_momentum_execution_service import (
@@ -728,8 +731,8 @@ class AppRunner:
                     self.broker,
                     desired_symbols,
                 )
-                # Observer-only: a symbol-set refresh starts a fresh gap window.
-                self.quote_stream_health.record_resubscribe()
+                # Observer-only: a symbol-set refresh starts a fresh window.
+                self._observe_quote_subscription(True)
             except Exception as exc:
                 reason = (
                     "opening-execution quote subscription refresh failed: "
@@ -738,8 +741,8 @@ class AppRunner:
                 logger.exception(reason)
                 with self._state_lock:
                     self._quotes_subscribed = False
-                # Observer-only: the refresh failed; stream is no longer subscribed.
-                self.quote_stream_health.set_quotes_subscribed(False)
+                # Observer-only: the refresh failed; stream stays unsubscribed.
+                self._observe_quote_subscription(False)
                 self.risk.pause(reason, auto_resumable=False)
 
     def _managed_opening_symbols(self) -> set[str]:
@@ -1160,6 +1163,26 @@ class AppRunner:
             return
         register(self._on_disconnect)
 
+    def _observe_quote_subscription(self, success: bool) -> None:
+        """Narrow no-throw observer for quote subscription lifecycle events.
+
+        Used by every existing subscription path (initial start, stop/start,
+        silent-watchdog resubscribe, disconnect/reconnect, credential reload,
+        primary-symbol change). On success, resets the current subscription
+        window's quote-arrival/gap state so old quote age cannot report
+        healthy before the first new push quote. On failure, leaves the stream
+        unsubscribed/unavailable. Observer failures are swallowed (ordinary
+        ``Exception`` only) and never alter broker calls, pause/recovery
+        decisions, or exception flow.
+        """
+        try:
+            if success:
+                self.quote_stream_health.record_subscription_success()
+            else:
+                self.quote_stream_health.record_subscription_failure()
+        except Exception:
+            logger.debug("quote-health subscription observation failed", exc_info=True)
+
     def _desired_quote_symbols_locked(self) -> list[str]:
         primary_symbol = self.engine.params.symbol
         symbols: list[str] = []
@@ -1238,6 +1261,7 @@ class AppRunner:
                 retry_count = self._disconnect_retry_count
             # Observer-only: a failed resubscribe is a retry, not a success.
             self.quote_stream_health.record_disconnect_retry()
+            self._observe_quote_subscription(False)
             if retry_count >= DISCONNECT_RETRY_EXHAUSTED_THRESHOLD:
                 self._record_broker_retry_exhausted(str(exc))
             raise
@@ -1245,8 +1269,8 @@ class AppRunner:
             self._quotes_subscribed = True
             self._disconnect_retry_count = 0
             self._last_push_quote_at = time.monotonic()
-        # Observer-only: a successful resubscribe starts a fresh gap window.
-        self.quote_stream_health.record_resubscribe()
+        # Observer-only: a successful resubscribe resets the window.
+        self._observe_quote_subscription(True)
 
     def start(self, *, loop: asyncio.AbstractEventLoop | None = None) -> bool:
         with self._start_lock:
@@ -1500,7 +1524,7 @@ class AppRunner:
                     self._defer_broker_close = True
                     defer_broker_close = True
             # Observer-only: mark the stream as no longer subscribed on stop.
-            self.quote_stream_health.set_quotes_subscribed(False)
+            self._observe_quote_subscription(False)
             # A broker SDK call can outlive the polite shutdown timeout. The
             # thread remains the authoritative lifecycle guard: start() and
             # credential switching refuse to proceed until it actually exits.
@@ -1799,12 +1823,20 @@ class AppRunner:
                         with self._state_lock:
                             self._quotes_subscribed = True
                             self._last_push_quote_at = time.monotonic()
+                        # Observer-only: primary-symbol change updates the
+                        # tracker symbol (resetting symbol-bound state) and
+                        # records the successful resubscribe.
+                        if primary_changed:
+                            self.quote_stream_health.set_symbol(new_params.symbol or "")
+                        self._observe_quote_subscription(True)
                         logger.info(
                             "re-subscribed to quote streams after strategy reload: %s",
                             ", ".join(resubscribe_symbols),
                         )
                     except Exception as exc:
                         logger.error("quote subscription failed after strategy reload: %s", exc)
+                        # Observer-only: failed resubscribe stays unsubscribed.
+                        self._observe_quote_subscription(False)
                         reason = f"quote subscription failed after strategy reload: {exc}"
                         self.risk.pause(reason, auto_resumable=False)
                         raise RuntimeError(reason) from exc
@@ -1820,6 +1852,26 @@ class AppRunner:
             self._remember_quote(quote)
             runtime = self._symbol_runtimes.get(quote.symbol)
             is_primary_symbol = quote.symbol == self.engine.params.symbol
+            # Observer-only: record push-stream quotes only (not active
+            # polling refresh) for the primary symbol, so a polling refresh
+            # cannot mask a silent push stream. Constant-time, non-blocking,
+            # never raises into the quote callback.
+            if is_push and is_primary_symbol:
+                push_quality = self._evaluate_quote_quality(
+                    {
+                        "last_price": quote.last_price,
+                        "bid": quote.bid,
+                        "ask": quote.ask,
+                        "timestamp": quote.timestamp,
+                    }
+                )
+                if (
+                    push_quality["price_positive"]
+                    and push_quality["spread_reasonable"]
+                    and push_quality["last_bbo_consistent"]
+                    and push_quality["source_timestamp_fresh"]
+                ):
+                    self.quote_stream_health.record_quote(quote.timestamp)
             opening_policy = self._opening_execution_policies.get(quote.symbol)
             if runtime is None and not is_primary_symbol:
                 decision.early_return = True
@@ -3236,9 +3288,11 @@ class AppRunner:
         # primary's active refresh loop.
         if trusted and quote.symbol == self.engine.params.symbol:
             self._last_quote_at = time.monotonic()
-            # Observer-only health metric; constant-time, non-blocking, never
-            # raises into the quote callback.
-            self.quote_stream_health.record_quote(quote.timestamp)
+            # NOTE: the quote-stream health tracker records push-stream quotes
+            # only (in _evaluate_quote_trigger), not active polling refresh, so
+            # a polling refresh cannot mask a silent push stream. The runner's
+            # own _last_quote_at freshness signal is updated for both push and
+            # poll here — that behavior is unchanged.
         self._recent_quotes.append(
             {
                 "symbol": quote.symbol,
@@ -3769,10 +3823,14 @@ class AppRunner:
             )
             with self._state_lock:
                 self._quotes_subscribed = False
+            # Observer-only: failed silent-watchdog resubscribe stays unsubscribed.
+            self._observe_quote_subscription(False)
             return False
         with self._state_lock:
             self._quotes_subscribed = True
             self._last_push_quote_at = time.monotonic()
+        # Observer-only: successful silent-watchdog resubscribe resets the window.
+        self._observe_quote_subscription(True)
         logger.warning(
             "resubscribed quotes for %s after %.0fs silence",
             ", ".join(in_session_symbols),
@@ -5687,6 +5745,8 @@ class AppRunner:
                 except Exception as exc:
                     logger.warning("cannot subscribe quotes after credential reload: %s", exc)
                     new_broker.close()
+                    # Observer-only: failed subscription stays unsubscribed.
+                    self._observe_quote_subscription(False)
                     return
             old_broker = self.broker
             old_notifier = self.notifier
@@ -5708,8 +5768,12 @@ class AppRunner:
                 self._quotes_subscribed = True
                 self._reset_quote_tracking(clear_history=True)
                 self._last_push_quote_at = time.monotonic()
+                # Observer-only: successful credential-reload resubscribe.
+                self._observe_quote_subscription(True)
             else:
                 self._quotes_subscribed = False
+                # Observer-only: no resubscribe; stream is unsubscribed.
+                self._observe_quote_subscription(False)
 
     @staticmethod
     def _set_or_clear_env(name: str, value: str) -> None:
@@ -7436,4 +7500,14 @@ def get_runner() -> AppRunner:
         with _runner_lock:
             if _runner is None:
                 _runner = AppRunner()
+    return _runner
+
+
+def peek_runner() -> AppRunner | None:
+    """Return the current runner instance without constructing one.
+
+    Used by read-only observers (e.g. ``GET /api/quote-health``) that must
+    never instantiate ``AppRunner``/``BrokerGateway`` or contact the broker.
+    Returns ``None`` when no runner has been created yet.
+    """
     return _runner

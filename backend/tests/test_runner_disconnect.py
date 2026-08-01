@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 
 from app.core.engine import StrategyEngine, StrategyParams
 from app.runner import AppRunner
+from app.services.quote_stream_health_service import QuoteStreamHealthTracker
 
 
 def _runner_for_disconnect_tests() -> tuple[AppRunner, MagicMock, MagicMock]:
@@ -22,6 +23,8 @@ def _runner_for_disconnect_tests() -> tuple[AppRunner, MagicMock, MagicMock]:
     runner._audit = MagicMock(record=record_mock)
     runner._disconnect_retry_count = 0
     runner._trigger_in_flight = False
+    # Observer-only health tracker (normally created in __init__).
+    runner.quote_stream_health = QuoteStreamHealthTracker("AAPL.US")
     return runner, record_mock, broker_mock
 
 

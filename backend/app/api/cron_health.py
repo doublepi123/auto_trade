@@ -43,6 +43,7 @@ def get_cron_health() -> CronHealthSnapshot:
                 last_failure_code=row.last_failure_code,
                 tick_count=row.tick_count,
                 failure_count=row.failure_count,
+                last_outcome=row.last_outcome,
                 stale=row.stale,
                 status=row.status,
             )

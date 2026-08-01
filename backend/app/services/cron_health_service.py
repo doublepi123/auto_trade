@@ -1,44 +1,56 @@
-"""Process-local health tracking for background cron loops.
+"""Process-local scheduler-loop health tracking for background cron jobs.
 
 This module is a deliberately small, dependency-free observer: it records
-per-job success/failure timestamps and tick/failure counts so the
-``/api/cron-health`` endpoint can report whether each background loop is
-making progress. It is **not** a generic health framework — it knows about
-the specific cron jobs created in ``app/main.py`` and nothing else.
+per-job tick outcomes (success/failure) so the ``/api/cron-health`` endpoint
+can report whether each background scheduler loop is making progress. It is
+**not** a generic health framework — it knows about the specific cron jobs
+created in ``app/main.py`` and nothing else.
+
+Scheduler-loop health semantics (documented explicitly):
+
+* A **tick** is one completed invocation of a cron's existing tick function —
+  including a legitimate enabled no-op or "no due work" return. ``tick_count``
+  counts completed attempts of either outcome. ``failure_count`` counts the
+  subset of ticks that failed. A disabled loop that returns without doing
+  work is still a completed tick *of that loop*, but the job's ``enabled``
+  flag is reported separately so a disabled no-op is never mistaken for
+  enabled work.
+* The **latest outcome** controls the health verdict. A first failure is
+  ``failing`` (not ``pending``). A success→failure transition is
+  ``failing``/unhealthy. A failure→success transition becomes ``healthy``. No
+  historical success may mask the latest failure.
+* A job is **stale** when it is enabled, has a known expected interval, has
+  been activated, and ``monotonic_now - last_tick_at > interval *
+  stale_multiplier`` (default 2.0 — one missed tick is a warning, two is
+  stale). Staleness uses a monotonic clock so wall-clock jumps cannot affect
+  classification.
+* A job is **pending** when it has been registered/activated but has not yet
+  completed its first tick within the grace period. A job that is registered
+  but not yet activated (e.g. during delayed pre-start/import time) is
+  ``pending`` and never stale.
+* Disabled jobs (``enabled is False``) are explicitly disabled and never
+  stale; their ticks are not counted as evidence of enabled work.
 
 Design constraints (P0 live safety):
 
 * Tracking is best-effort and cannot break a cron. Every public mutator
-  swallows its own errors and never raises into the caller's try/except.
+  swallows its own errors (ordinary ``Exception`` only — never
+  ``BaseException``/``CancelledError``) and never raises into the caller's
+  try/except.
 * Instrumentation never alters existing try/except behavior, exception
   propagation/swallowing, loop cadence, task creation, or settings gates.
-  Callers record success/failure *after* their existing work completes;
-  the tracker does not wrap or intercept the work.
-* A "success" means the job's existing tick completed normally. A disabled
-  no-op tick is *not* counted as evidence of enabled work — disabled jobs
-  record nothing and are never stale.
 * No I/O, no DB, no broker calls. ``enabled`` for DB-gated jobs is provided
-  by a no-arg callable registered with the job; if the callable itself is
-  unavailable or raises, ``enabled`` is reported as ``None`` (unknown) and
-  the failure is swallowed.
-
-Clock/staleness semantics:
-
-* ``now`` is injected (default ``datetime.now(timezone.utc)``) so tests use a
-  deterministic fake clock.
-* A job is **stale** when it is enabled, has a known expected interval, and
-  ``now - last_success_at > expected_interval_seconds * stale_multiplier``
-  (default multiplier 2.0 — one missed tick is a warning, two is stale).
-* A job that has never succeeded but is enabled is stale only if it has a
-  known expected interval and enough wall-clock has elapsed since process
-  start to expect at least one tick; otherwise it is ``pending`` (newly
-  started, no heartbeat yet).
-* Disabled jobs are never stale.
+  by a no-arg callable registered with the job; if the callable raises,
+  ``enabled`` is reported as ``None`` (unknown) and the failure is swallowed.
+* All mutable job state is copied into an immutable snapshot dataclass
+  **while holding the service lock**; classification happens inside the lock
+  so no mutable reference escapes.
 """
 from __future__ import annotations
 
 import logging
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Final
@@ -58,6 +70,10 @@ _MAX_FAILURE_CODE_LEN: Final[int] = 120
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _monotonic_now() -> float:
+    return time.monotonic()
 
 
 def _sanitize_failure_code(exc: BaseException) -> str:
@@ -80,12 +96,19 @@ class JobHealth:
     name: str
     expected_interval_seconds: float | None
     enabled_provider: Callable[[], bool | None] | None
-    last_success_at: datetime | None = None
-    last_failure_at: datetime | None = None
+    # Monotonic timestamps for staleness (immune to wall-clock jumps).
+    last_tick_at: float | None = None
+    last_success_at: float | None = None
+    last_failure_at: float | None = None
+    # Wall-clock timestamps for response display only.
+    last_success_at_wall: datetime | None = None
+    last_failure_at_wall: datetime | None = None
     last_failure_code: str | None = None
+    last_outcome: str = ""  # "success" | "failure" | ""
     tick_count: int = 0
     failure_count: int = 0
-    registered_at: datetime | None = None
+    registered_at_mono: float | None = None
+    activated_at_mono: float | None = None
 
     def is_enabled(self) -> bool | None:
         provider = self.enabled_provider
@@ -108,7 +131,11 @@ class JobHealth:
 
 @dataclass(frozen=True)
 class JobHealthSnapshot:
-    """Immutable safe projection of a single job's health for the API."""
+    """Immutable safe projection of a single job's health for the API.
+
+    All timestamps copied from the mutable record while holding the service
+    lock; ``*_wall`` fields are for display only and never used for staleness.
+    """
 
     name: str
     enabled: bool | None
@@ -118,6 +145,7 @@ class JobHealthSnapshot:
     last_failure_code: str | None
     tick_count: int
     failure_count: int
+    last_outcome: str
     stale: bool
     status: str
 
@@ -134,15 +162,17 @@ class CronHealthService:
     def __init__(
         self,
         *,
-        now: Callable[[], datetime] = _utc_now,
+        now_monotonic: Callable[[], float] = _monotonic_now,
+        now_wall: Callable[[], datetime] = _utc_now,
         stale_multiplier: float = DEFAULT_STALE_MULTIPLIER,
     ) -> None:
-        self._now = now
+        self._now_monotonic = now_monotonic
+        self._now_wall = now_wall
         self._stale_multiplier = max(1.0, float(stale_multiplier))
         self._lock = threading.Lock()
         self._jobs: dict[str, JobHealth] = {}
 
-    # --- registration ----------------------------------------------------
+    # --- registration / activation ---------------------------------------
 
     def register(
         self,
@@ -153,54 +183,94 @@ class CronHealthService:
     ) -> None:
         """Register a job (idempotent). Re-registration preserves accumulated
         counters so a re-import of ``app.main`` in tests does not reset state.
+        Registration records ``registered_at_mono`` but does NOT activate the
+        job — :meth:`activate` marks the job as ready to tick so delayed
+        pre-start/import time stays pending rather than stale.
         """
-        now = self._now()
+        now_mono = self._now_monotonic()
         with self._lock:
             existing = self._jobs.get(name)
             if existing is not None:
                 # Update mutable metadata only; keep counters/timestamps.
                 existing.expected_interval_seconds = expected_interval_seconds
                 existing.enabled_provider = enabled_provider
-                # Ensure registered_at is set (older instances may predate it).
-                if existing.registered_at is None:
-                    existing.registered_at = now
+                if existing.registered_at_mono is None:
+                    existing.registered_at_mono = now_mono
                 return
             self._jobs[name] = JobHealth(
                 name=name,
                 expected_interval_seconds=expected_interval_seconds,
                 enabled_provider=enabled_provider,
-                registered_at=now,
+                registered_at_mono=now_mono,
             )
+
+    def activate(self, name: str) -> None:
+        """Mark a registered job as ready to tick (called at startup).
+
+        Idempotent. Best-effort: never raises. A job activated before its
+        first tick is ``pending``; staleness is only judged after activation
+        so delayed pre-start/import time cannot be reported as stale.
+        """
+        try:
+            now_mono = self._now_monotonic()
+            with self._lock:
+                job = self._jobs.get(name)
+                if job is None:
+                    return
+                if job.activated_at_mono is None:
+                    job.activated_at_mono = now_mono
+        except Exception:
+            logger.debug("cron-health activate failed", exc_info=True)
+
+    def activate_all(self) -> None:
+        """Activate every registered job (best-effort, never raises)."""
+        try:
+            with self._lock:
+                names = list(self._jobs.keys())
+        except Exception:
+            logger.debug("cron-health activate_all snapshot failed", exc_info=True)
+            return
+        for name in names:
+            self.activate(name)
 
     def reset(self) -> None:
         """Drop all registered jobs and their counters (tests only)."""
         with self._lock:
             self._jobs.clear()
 
-    # --- mutators (best-effort, never raise) -----------------------------
+    # --- mutators (best-effort, never raise; ordinary Exception only) ----
 
     def record_success(self, name: str) -> None:
         try:
-            now = self._now()
+            now_mono = self._now_monotonic()
+            now_wall = self._now_wall()
             with self._lock:
                 job = self._jobs.get(name)
                 if job is None:
                     return
-                job.last_success_at = now
+                job.last_tick_at = now_mono
+                job.last_success_at = now_mono
+                job.last_success_at_wall = now_wall
+                job.last_outcome = "success"
                 job.tick_count += 1
         except Exception:
             logger.debug("cron-health record_success failed", exc_info=True)
 
     def record_failure(self, name: str, exc: BaseException) -> None:
         try:
-            now = self._now()
+            now_mono = self._now_monotonic()
+            now_wall = self._now_wall()
             code = _sanitize_failure_code(exc)
             with self._lock:
                 job = self._jobs.get(name)
                 if job is None:
                     return
-                job.last_failure_at = now
+                job.last_tick_at = now_mono
+                job.last_failure_at = now_mono
+                job.last_failure_at_wall = now_wall
                 job.last_failure_code = code
+                job.last_outcome = "failure"
+                job.tick_count += 1
                 job.failure_count += 1
         except Exception:
             logger.debug("cron-health record_failure failed", exc_info=True)
@@ -208,76 +278,99 @@ class CronHealthService:
     # --- read projection -------------------------------------------------
 
     def as_of(self) -> datetime:
-        """Return the service's current clock value (for response ``as_of``)."""
-        return self._now()
+        """Return the service's current wall-clock value (for ``as_of``)."""
+        return self._now_wall()
 
     def snapshot(self) -> list[JobHealthSnapshot]:
-        """Return a safe, sorted projection of all registered jobs."""
-        now = self._now()
-        with self._lock:
-            jobs = list(self._jobs.values())
+        """Return a safe, sorted projection of all registered jobs.
+
+        All mutable state is copied into the immutable snapshot dataclass
+        while holding the service lock, and classification happens inside the
+        lock so no mutable reference escapes.
+        """
+        now_mono = self._now_monotonic()
         rows: list[JobHealthSnapshot] = []
-        for job in jobs:
-            enabled = job.is_enabled()
-            stale, status = self._classify(job, enabled, now)
-            rows.append(
-                JobHealthSnapshot(
-                    name=job.name,
-                    enabled=enabled,
-                    expected_interval_seconds=job.expected_interval_seconds,
-                    last_success_at=job.last_success_at,
-                    last_failure_at=job.last_failure_at,
-                    last_failure_code=job.last_failure_code,
-                    tick_count=job.tick_count,
-                    failure_count=job.failure_count,
-                    stale=stale,
-                    status=status,
+        with self._lock:
+            for job in self._jobs.values():
+                enabled = job.is_enabled()
+                stale, status = self._classify_locked(job, enabled, now_mono)
+                rows.append(
+                    JobHealthSnapshot(
+                        name=job.name,
+                        enabled=enabled,
+                        expected_interval_seconds=job.expected_interval_seconds,
+                        last_success_at=job.last_success_at_wall,
+                        last_failure_at=job.last_failure_at_wall,
+                        last_failure_code=job.last_failure_code,
+                        tick_count=job.tick_count,
+                        failure_count=job.failure_count,
+                        last_outcome=job.last_outcome,
+                        stale=stale,
+                        status=status,
+                    )
                 )
-            )
         rows.sort(key=lambda r: r.name)
         return rows
 
-    def _classify(
+    def _classify_locked(
         self,
         job: JobHealth,
         enabled: bool | None,
-        now: datetime,
+        now_mono: float,
     ) -> tuple[bool, str]:
-        """Classify a job as (stale, status).
+        """Classify a job as (stale, status). Caller holds the lock.
 
-        Status is one of: ``disabled``, ``healthy``, ``stale``, ``pending``,
-        ``failing``, ``unknown``.
+        Status is one of: ``disabled``, ``healthy``, ``failing``, ``stale``,
+        ``pending``, ``unknown``.
+
+        Latest-outcome semantics:
+        * A first failure is ``failing`` (not pending).
+        * success→failure is ``failing``.
+        * failure→success is ``healthy``.
+        * No historical success masks the latest failure.
         """
-        # Disabled jobs are never stale.
+        # Disabled jobs are never stale and not counted as enabled work.
         if enabled is False:
             return False, "disabled"
         interval = job.expected_interval_seconds
-        # Without an expected interval we cannot judge staleness.
+        # Latest-outcome verdicts take precedence when we have no interval
+        # clock to judge staleness.
         if interval is None or interval <= 0:
-            # If it has succeeded at least once and is enabled, call it healthy;
-            # otherwise we have no clock to judge by.
-            if job.last_success_at is not None:
-                return False, "healthy"
-            if job.last_failure_at is not None and (
-                job.last_success_at is None
-            ):
+            if job.last_outcome == "failure":
                 return False, "failing"
+            if job.last_outcome == "success":
+                return False, "healthy"
             return False, "unknown"
-        # Enabled with a known interval.
-        if job.last_success_at is not None:
-            elapsed = (now - job.last_success_at).total_seconds()
-            threshold = interval * self._stale_multiplier
-            if elapsed > threshold:
+        # Enabled with a known interval. Latest outcome controls health.
+        if job.last_outcome == "failure":
+            # A failing job is failing regardless of age; staleness is a
+            # separate dimension about whether ticks have stopped arriving.
+            return self._stale_if_overdue_locked(job, now_mono, interval), "failing"
+        if job.last_outcome == "success":
+            stale = self._stale_if_overdue_locked(job, now_mono, interval)
+            return stale, ("stale" if stale else "healthy")
+        # Never ticked yet. Decide pending vs stale by activation time.
+        if job.activated_at_mono is not None:
+            elapsed_since_activation = now_mono - job.activated_at_mono
+            if elapsed_since_activation > interval * self._stale_multiplier:
                 return True, "stale"
-            return False, "healthy"
-        # Enabled, never succeeded yet. Decide pending vs stale by checking
-        # whether enough wall-clock has elapsed since registration to expect
-        # at least one tick.
-        if job.registered_at is not None:
-            elapsed_since_register = (now - job.registered_at).total_seconds()
-            if elapsed_since_register > interval * self._stale_multiplier:
-                return True, "stale"
+        # Registered but not activated, or within grace period -> pending.
         return False, "pending"
+
+    def _stale_if_overdue_locked(
+        self,
+        job: JobHealth,
+        now_mono: float,
+        interval: float,
+    ) -> bool:
+        """True when the last tick is older than interval * multiplier."""
+        last = job.last_tick_at
+        if last is None:
+            # No tick yet; fall back to activation time if available.
+            if job.activated_at_mono is not None:
+                return (now_mono - job.activated_at_mono) > interval * self._stale_multiplier
+            return False
+        return (now_mono - last) > interval * self._stale_multiplier
 
 
 # --- module singleton ----------------------------------------------------
@@ -300,7 +393,13 @@ def get_cron_health_service() -> CronHealthService:
 
 
 def set_cron_health_service(service: CronHealthService | None) -> None:
-    """Override the shared service (tests only). Pass ``None`` to reset."""
+    """Override the shared service (tests only). Pass ``None`` to reset.
+
+    Restores the prior instance semantics: replacing the singleton with a
+    fresh isolated service means later ``get_cron_health_service()`` callers
+    see only that service's registrations, so repeated app/TestClient
+    lifecycles cannot leave later registries empty or contaminated.
+    """
     global _singleton
     with _singleton_lock:
         _singleton = service

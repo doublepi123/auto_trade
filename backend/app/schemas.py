@@ -3038,7 +3038,10 @@ class CronJobHealth(BaseModel):
     without database or broker work (the health endpoint never performs I/O).
     ``last_failure_code`` is a sanitized exception class/category only — never
     a raw message, order id, or credential. ``stale`` is ``False`` for
-    disabled jobs by definition.
+    disabled jobs by definition. ``tick_count`` counts completed attempts of
+    either outcome; ``failure_count`` is the subset that failed. ``last_outcome``
+    is ``"success"``/``"failure"``/``""`` and controls the health verdict so no
+    historical success masks the latest failure.
     """
 
     name: str
@@ -3049,6 +3052,7 @@ class CronJobHealth(BaseModel):
     last_failure_code: Optional[str] = None
     tick_count: int = 0
     failure_count: int = 0
+    last_outcome: str = ""
     stale: bool = False
     status: str
 

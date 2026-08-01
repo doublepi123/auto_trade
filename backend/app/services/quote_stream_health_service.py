@@ -3,7 +3,7 @@
 A small, dependency-free observer that records the minimum counters needed to
 report quote-stream health on ``GET /api/quote-health``: quotes received, last
 quote timestamp/age, maximum observed gap between consecutive trusted primary
-quotes, disconnect count, resubscribe count, and disconnect retry count.
+push quotes, disconnect count, resubscribe count, and disconnect retry count.
 
 Design constraints (P0 live safety):
 
@@ -15,24 +15,46 @@ Design constraints (P0 live safety):
   ``_state_lock``.
 * The tracker does not change the existing quote freshness threshold or any
   pause/recovery decision. It only observes.
-* ``max_gap_seconds`` is the maximum delta between consecutive trusted primary
-  quote *source* timestamps observed during the *current subscription window*.
-  It is reset to ``0.0`` on :meth:`reset_gap` (called when the stream is
-  resubscribed or reconnects), so a gap across a disconnect is not counted as
-  an in-stream gap and the metric reflects the current stream's quality, not a
-  process-lifetime accumulator. A gap is only counted between two
-  successfully-parsed, monotonically-increasing source timestamps; out-of-order
-  or unparseable timestamps do not advance the max.
-* ``last_quote_age_seconds`` is computed against an injected ``now_monotonic``
-  callable so tests are deterministic. In production it uses
-  ``time.monotonic``.
+* All mutators are best-effort and swallow ordinary ``Exception`` only —
+  never ``BaseException``/``CancelledError`` — so observer failures cannot
+  alter broker calls, pause/recovery decisions, or exception flow.
+
+Counter semantics (documented explicitly):
+
+* ``quotes_received`` — count of trusted primary **push-stream** quotes
+  received during the current subscription window. Active polling/trusted
+  refresh (``is_push=False``) does NOT increment this counter or update
+  freshness, so a polling refresh cannot mask a silent push stream. Reset to
+  ``0`` on a successful new subscription/reconnect and on a primary-symbol
+  change.
+* ``max_gap_seconds`` — maximum delta between consecutive trusted primary
+  push quote *source* timestamps during the *current subscription window*.
+  Reset to ``0.0`` on a successful new subscription/reconnect and on a
+  primary-symbol change. Only monotonically-increasing source timestamps
+  advance the max: out-of-order timestamps are ignored entirely (neither
+  advance the max gap nor update the last-source-time reference).
+* ``disconnect_count`` — **process-lifetime** count of broker disconnect
+  events. Never reset.
+* ``resubscribe_count`` — **process-lifetime** count of successful
+  subscription/resubscription events (initial start, silent-watchdog
+  resubscribe, reconnect, credential reload, primary-symbol change). Never
+  reset.
+* ``disconnect_retry_count`` — **process-lifetime** count of disconnect
+  retry attempts. Never reset.
+
+Subscription-window state (``quotes_received``, ``last_quote_timestamp``,
+``last_quote_at``, ``last_source_time``, ``max_gap_seconds``) is reset on
+every successful new subscription/reconnect so old quote age cannot report
+healthy before the first new push quote. A failed subscription/resubscription
+leaves the stream unsubscribed/unavailable (``quotes_subscribed=False``),
+never subscribed.
 """
 from __future__ import annotations
 
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Final
 
@@ -86,9 +108,9 @@ class QuoteStreamHealthSnapshot:
 class QuoteStreamHealthTracker:
     """Process-local quote stream health metrics (observer-only).
 
-    Constructed by the runner and mutated from the existing quote/disconnect
-    code paths. All mutators are best-effort and swallow their own errors so a
-    tracker bug cannot break a quote callback.
+    Constructed by the runner and mutated from the existing quote/disconnect/
+    subscription code paths via narrow no-throw methods. All mutators swallow
+    ordinary ``Exception`` only so observer failures never alter control flow.
     """
 
     def __init__(
@@ -107,24 +129,83 @@ class QuoteStreamHealthTracker:
         self._last_quote_at: float = _NO_QUOTE
         self._last_source_time: datetime | None = None
         self._max_gap_seconds: float = 0.0
+        # Process-lifetime counters (never reset).
         self._disconnect_count: int = 0
         self._resubscribe_count: int = 0
         self._disconnect_retry_count: int = 0
         self._quotes_subscribed: bool = False
 
+    # --- symbol / subscription lifecycle (no-throw) ----------------------
+
     def set_symbol(self, symbol: str) -> None:
-        with self._lock:
-            self._symbol = symbol
+        """Update the primary symbol and reset symbol-bound quote state.
+
+        A primary-symbol change must not carry over the previous symbol's
+        quote count/arrival/gap state, so the current subscription window's
+        symbol-bound state is reset. Process-lifetime counters
+        (disconnect/resubscribe/retry) are preserved.
+        """
+        try:
+            with self._lock:
+                self._symbol = symbol
+                self._reset_window_locked()
+        except Exception:
+            logger.debug("quote-health set_symbol failed", exc_info=True)
+
+    def record_subscription_success(self) -> None:
+        """Record a successful new subscription/reconnect.
+
+        Resets the current subscription window's quote-arrival/gap state so
+        old quote age cannot report healthy before the first new push quote.
+        Increments the process-lifetime resubscribe counter.
+        """
+        try:
+            with self._lock:
+                self._resubscribe_count += 1
+                self._quotes_subscribed = True
+                self._reset_window_locked()
+        except Exception:
+            logger.debug("quote-health record_subscription_success failed", exc_info=True)
+
+    def record_subscription_failure(self) -> None:
+        """Record a failed subscription/resubscription.
+
+        The stream remains unsubscribed/unavailable (``quotes_subscribed``
+        stays ``False``). Does not increment resubscribe_count (no successful
+        subscription occurred).
+        """
+        try:
+            with self._lock:
+                self._quotes_subscribed = False
+        except Exception:
+            logger.debug("quote-health record_subscription_failure failed", exc_info=True)
 
     def set_quotes_subscribed(self, value: bool) -> None:
-        with self._lock:
-            self._quotes_subscribed = bool(value)
+        """Directly set the subscribed flag (low-level; prefer the
+        ``record_subscription_*`` methods for lifecycle events)."""
+        try:
+            with self._lock:
+                self._quotes_subscribed = bool(value)
+        except Exception:
+            logger.debug("quote-health set_quotes_subscribed failed", exc_info=True)
+
+    def _reset_window_locked(self) -> None:
+        """Reset current-subscription-window state (caller holds the lock)."""
+        self._quotes_received = 0
+        self._last_quote_timestamp = None
+        self._last_quote_at = _NO_QUOTE
+        self._last_source_time = None
+        self._max_gap_seconds = 0.0
+
+    # --- quote recording (push-stream only, no-throw) --------------------
 
     def record_quote(self, timestamp: str) -> None:
-        """Record a trusted primary quote arrival.
+        """Record a trusted primary **push-stream** quote arrival.
 
         Constant-time: one timestamp parse, one float comparison, increments.
-        Never raises into the caller.
+        Never raises into the caller. Out-of-order source timestamps are
+        ignored entirely (neither advance the max gap nor update the
+        last-source-time reference).
         """
         try:
             source_time = _parse_source_timestamp(timestamp)
@@ -135,13 +216,16 @@ class QuoteStreamHealthTracker:
                 self._last_quote_at = now_mono
                 if source_time is not None:
                     prev = self._last_source_time
-                    if prev is not None and source_time > prev:
-                        gap = (source_time - prev).total_seconds()
-                        if gap > self._max_gap_seconds:
-                            self._max_gap_seconds = gap
-                    self._last_source_time = source_time
+                    if prev is None or source_time > prev:
+                        if prev is not None:
+                            gap = (source_time - prev).total_seconds()
+                            if gap > self._max_gap_seconds:
+                                self._max_gap_seconds = gap
+                        self._last_source_time = source_time
         except Exception:
             logger.debug("quote-health record_quote failed", exc_info=True)
+
+    # --- disconnect / retry (process-lifetime, no-throw) -----------------
 
     def record_disconnect(self) -> None:
         try:
@@ -152,18 +236,8 @@ class QuoteStreamHealthTracker:
             logger.debug("quote-health record_disconnect failed", exc_info=True)
 
     def record_resubscribe(self) -> None:
-        try:
-            with self._lock:
-                self._resubscribe_count += 1
-                self._quotes_subscribed = True
-                # A resubscribe starts a fresh in-stream gap window and resets
-                # the max-gap accumulator so the metric reflects the current
-                # stream's quality, not a cross-disconnect or process-lifetime
-                # value.
-                self._last_source_time = None
-                self._max_gap_seconds = 0.0
-        except Exception:
-            logger.debug("quote-health record_resubscribe failed", exc_info=True)
+        """Record a successful resubscribe (alias for record_subscription_success)."""
+        self.record_subscription_success()
 
     def record_disconnect_retry(self) -> None:
         try:
@@ -182,58 +256,77 @@ class QuoteStreamHealthTracker:
             logger.debug("quote-health reset_gap failed", exc_info=True)
 
     def reset(self) -> None:
-        """Clear all counters (tests only)."""
+        """Clear all counters including process-lifetime (tests only)."""
         with self._lock:
-            self._quotes_received = 0
-            self._last_quote_timestamp = None
-            self._last_quote_at = _NO_QUOTE
-            self._last_source_time = None
-            self._max_gap_seconds = 0.0
+            self._reset_window_locked()
             self._disconnect_count = 0
             self._resubscribe_count = 0
             self._disconnect_retry_count = 0
             self._quotes_subscribed = False
 
+    # --- read projection -------------------------------------------------
+
     def snapshot(self) -> QuoteStreamHealthSnapshot:
-        """Return a safe, immutable projection of the current state."""
-        now_mono = self._now_monotonic()
-        with self._lock:
-            last_quote_at = self._last_quote_at
-            last_quote_age: float | None
-            if last_quote_at <= _NO_QUOTE:
-                last_quote_age = None
-            else:
-                last_quote_age = max(0.0, now_mono - last_quote_at)
-            status = self._classify_locked()
+        """Return a safe, immutable projection of the current state.
+
+        All mutable state is copied into the immutable snapshot dataclass
+        while holding the lock; classification happens inside the lock.
+        """
+        try:
+            now_mono = self._now_monotonic()
+            with self._lock:
+                last_quote_at = self._last_quote_at
+                last_quote_age: float | None
+                if last_quote_at <= _NO_QUOTE:
+                    last_quote_age = None
+                else:
+                    last_quote_age = max(0.0, now_mono - last_quote_at)
+                status = self._classify_locked(now_mono)
+                return QuoteStreamHealthSnapshot(
+                    symbol=self._symbol,
+                    quotes_received=self._quotes_received,
+                    last_quote_timestamp=self._last_quote_timestamp,
+                    last_quote_age_seconds=last_quote_age,
+                    max_gap_seconds=self._max_gap_seconds,
+                    disconnect_count=self._disconnect_count,
+                    resubscribe_count=self._resubscribe_count,
+                    disconnect_retry_count=self._disconnect_retry_count,
+                    quotes_subscribed=self._quotes_subscribed,
+                    status=status,
+                    as_of=self._now_datetime(),
+                )
+        except Exception:
+            logger.debug("quote-health snapshot failed", exc_info=True)
+            # Return a safe unavailable projection rather than raising.
             return QuoteStreamHealthSnapshot(
                 symbol=self._symbol,
-                quotes_received=self._quotes_received,
-                last_quote_timestamp=self._last_quote_timestamp,
-                last_quote_age_seconds=last_quote_age,
-                max_gap_seconds=self._max_gap_seconds,
-                disconnect_count=self._disconnect_count,
-                resubscribe_count=self._resubscribe_count,
-                disconnect_retry_count=self._disconnect_retry_count,
-                quotes_subscribed=self._quotes_subscribed,
-                status=status,
+                quotes_received=0,
+                last_quote_timestamp=None,
+                last_quote_age_seconds=None,
+                max_gap_seconds=0.0,
+                disconnect_count=0,
+                resubscribe_count=0,
+                disconnect_retry_count=0,
+                quotes_subscribed=False,
+                status="unavailable",
                 as_of=self._now_datetime(),
             )
 
-    def _classify_locked(self) -> str:
+    def _classify_locked(self, now_mono: float) -> str:
         """Classify the stream status (caller holds the lock).
 
-        ``initial`` — never received a quote.
-        ``healthy`` — subscribed and a recent quote.
-        ``stale``  — subscribed but no recent quote (age > 90s, matching the
-        runner's existing quote-silence watchdog threshold without coupling
-        to its pause decision).
-        ``disconnected`` — not currently subscribed.
+        ``unavailable`` — not currently subscribed.
+        ``waiting`` — subscribed but no push quote received yet in this window.
+        ``healthy`` — subscribed and a recent push quote.
+        ``stale``  — subscribed but no recent push quote (age > 90s, matching
+        the runner's existing quote-silence watchdog threshold without
+        coupling to its pause decision).
         """
         if not self._quotes_subscribed:
-            return "disconnected"
+            return "unavailable"
         if self._last_quote_at <= _NO_QUOTE:
-            return "initial"
-        age = max(0.0, self._now_monotonic() - self._last_quote_at)
+            return "waiting"
+        age = max(0.0, now_mono - self._last_quote_at)
         # 90s mirrors the runner's _quote_resubscribe_threshold_seconds default.
         if age > 90.0:
             return "stale"
