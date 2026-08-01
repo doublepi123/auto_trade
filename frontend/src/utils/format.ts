@@ -85,3 +85,21 @@ export function formatCompact(value: number | null | undefined): string {
   if (abs >= 1e3) return `${sign}${(abs / 1e3).toFixed(1)}k`
   return `${sign}${abs.toFixed(0)}`
 }
+
+/**
+ * Human byte size: 512 → '512 B', 2048 → '2.0 KB', 3.5e6 → '3.4 MB'.
+ * null/undefined → '—' so optional backend fields render honestly.
+ */
+export function formatBytes(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value)) return '—'
+  const abs = Math.max(0, value)
+  if (abs < 1024) return `${Math.round(abs)} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let size = abs / 1024
+  let unit = 0
+  while (size >= 1024 && unit < units.length - 1) {
+    size /= 1024
+    unit += 1
+  }
+  return `${size >= 100 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`
+}

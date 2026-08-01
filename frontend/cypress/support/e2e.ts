@@ -1085,6 +1085,23 @@ Cypress.Commands.add('stubApi', () => {
     body: { total_assets: 0, cash_balances: [], positions: [], available: true, error: null },
   }).as('getAccount')
 
+  cy.intercept('GET', '/api/database-health', (req) => {
+    req.reply({
+      body: {
+        checked_at: new Date().toISOString(),
+        dialect: 'sqlite',
+        journal_mode: 'wal',
+        page_size_bytes: 4096,
+        page_count: 1200,
+        freelist_count: 120,
+        used_page_count: 1080,
+        database_size_bytes: 4915200,
+        free_space_bytes: 491520,
+        wal_size_bytes: 204800,
+      },
+    })
+  }).as('getDatabaseHealth')
+
   cy.intercept('GET', '/api/credentials', {
     body: {
       id: 1, longbridge_app_key: '', longbridge_app_secret: '',

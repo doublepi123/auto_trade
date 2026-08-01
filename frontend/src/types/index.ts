@@ -1153,6 +1153,30 @@ export interface ReportSchedulePreviewResponse {
   content: string
 }
 
+/**
+ * Read-only SQLite storage-health snapshot (GET /api/database-health).
+ *
+ * Safe operational fields only — the backend never exposes filesystem paths,
+ * URLs, table contents or secrets. `database_size_bytes` / `free_space_bytes`
+ * are logical page metrics (page_size_bytes × page_count / freelist_count),
+ * not on-disk file sizes. `wal_size_bytes` is null for in-memory databases
+ * and when the WAL size cannot be determined, 0 for a file-backed DB with no
+ * WAL sidecar. Any metric may be null when unavailable; `checked_at` is the
+ * server-side check time.
+ */
+export interface DatabaseHealthSnapshot {
+  checked_at: string
+  dialect: string
+  journal_mode: string | null
+  page_size_bytes: number | null
+  page_count: number | null
+  freelist_count: number | null
+  used_page_count: number | null
+  database_size_bytes: number | null
+  free_space_bytes: number | null
+  wal_size_bytes: number | null
+}
+
 export interface RiskHistoryPoint {
   created_at: string
   engine_state: string

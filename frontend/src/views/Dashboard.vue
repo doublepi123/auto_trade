@@ -445,7 +445,7 @@
         <h4>运行诊断</h4>
         <div>
           <el-button size="small" plain :disabled="!diagnostics" data-testid="dash-diagnostics-export" @click="exportDiagnostics">导出 CSV</el-button>
-          <el-button size="small" plain @click="loadDiagnostics">刷新</el-button>
+          <el-button size="small" plain data-testid="dash-diagnostics-refresh" @click="refreshDiagnostics">刷新</el-button>
         </div>
       </div>
       <template v-if="diagnostics">
@@ -626,6 +626,47 @@
         </el-table>
       </template>
       <p v-else class="empty-note">暂无诊断数据</p>
+
+      <div class="db-health" data-testid="dashboard-db-health">
+        <div class="db-health-header">
+          <h5>数据库存储</h5>
+          <span v-if="dbHealth" class="db-health-checked" data-testid="db-health-checked-at">
+            检查于 {{ dbHealthCheckedLabel }}
+          </span>
+        </div>
+        <div v-if="dbHealthLoading && !dbHealth" class="db-health-state" data-testid="db-health-loading">加载中…</div>
+        <div v-else-if="dbHealthError" class="db-health-state db-health-error" data-testid="db-health-error">{{ dbHealthError }}</div>
+        <template v-else-if="dbHealth">
+          <div class="db-health-grid">
+            <div class="db-health-item">
+              <span>日志模式</span>
+              <strong data-testid="db-health-journal">{{ dbHealth.journal_mode ? dbHealth.journal_mode.toUpperCase() : '—' }}</strong>
+            </div>
+            <div class="db-health-item">
+              <span>页大小</span>
+              <strong>{{ formatBytes(dbHealth.page_size_bytes) }}</strong>
+            </div>
+            <div class="db-health-item">
+              <span>数据库占用</span>
+              <strong data-testid="db-health-size">{{ formatBytes(dbHealth.database_size_bytes) }}</strong>
+            </div>
+            <div class="db-health-item">
+              <span>空闲页空间</span>
+              <strong>{{ formatBytes(dbHealth.free_space_bytes) }}</strong>
+            </div>
+            <div class="db-health-item">
+              <span>WAL 文件</span>
+              <strong data-testid="db-health-wal">{{ walSizeLabel }}</strong>
+            </div>
+          </div>
+          <div v-if="dbUsagePct !== null" class="db-health-usage" data-testid="db-health-usage">
+            <div class="db-health-usage-track">
+              <div class="db-health-usage-fill" :style="{ width: dbUsagePct + '%' }" />
+            </div>
+            <span class="db-health-usage-label" data-testid="db-health-usage-label">{{ dbUsageLabel }}</span>
+          </div>
+        </template>
+      </div>
     </section>
 
     <section class="detail-panel" data-testid="position-pnl-section">
@@ -801,13 +842,13 @@ import { useSymbolStore } from '../composables/useSymbolStore'
 import { usePinnedSymbols } from '../composables/usePinnedSymbols'
 import { useRegisterViewRefresh } from '../composables/useViewRefreshRegistry'
 import { useDiagnosticsSnapshot } from '../composables/useDiagnosticsSnapshot'
-import { startTrading, stopTrading, pauseTrading, resumeTrading, enableProtectiveExits, disableProtectiveExits, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getNotifications, getOrders, getTradeEvents, getMetricsSummary } from '../api'
-import type { LLMIntervalStatus, NotificationLogOut, OrderRecord, Position, StatisticsQuality, StatusHistoryPoint, TradeEventRecord } from '../types'
+import { startTrading, stopTrading, pauseTrading, resumeTrading, enableProtectiveExits, disableProtectiveExits, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getNotifications, getOrders, getTradeEvents, getMetricsSummary, getDatabaseHealth } from '../api'
+import type { DatabaseHealthSnapshot, LLMIntervalStatus, NotificationLogOut, OrderRecord, Position, StatisticsQuality, StatusHistoryPoint, TradeEventRecord } from '../types'
 import { engineStateLabel, auditActionLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 import { EVENT_TYPE } from '../utils/constants'
 import { downloadCsv } from '../utils/csv'
 import { relativeAgeLabel } from '../utils/time'
-import { formatCurrency, formatNumber, signedCurrency, signedPercent } from '../utils/format'
+import { formatBytes, formatCurrency, formatNumber, signedCurrency, signedPercent } from '../utils/format'
 import { resolveErrorMessage } from '../utils/error'
 
 type CypressWindow = Window & { Cypress?: unknown }
@@ -866,6 +907,61 @@ const {
   loading: diagnosticsLoading,
   load: loadDiagnostics,
 } = useDiagnosticsSnapshot()
+
+// Read-only database storage health (GET /api/database-health). Passive
+// observation only — the backend exposes no maintenance operations, and this
+// panel deliberately offers none. Loaded on mount and on explicit refresh
+// (not on the 5s diagnostics poll: storage metrics change slowly).
+const dbHealth = ref<DatabaseHealthSnapshot | null>(null)
+const dbHealthLoading = ref(false)
+const dbHealthError = ref('')
+
+async function loadDatabaseHealth() {
+  dbHealthLoading.value = true
+  dbHealthError.value = ''
+  try {
+    dbHealth.value = await getDatabaseHealth()
+  } catch (err) {
+    dbHealthError.value = resolveErrorMessage(err, '数据库存储状态不可用')
+    dbHealth.value = null
+  } finally {
+    dbHealthLoading.value = false
+  }
+}
+
+function refreshDiagnostics() {
+  loadDiagnostics()
+  loadDatabaseHealth()
+}
+
+const walSizeLabel = computed(() => {
+  const wal = dbHealth.value?.wal_size_bytes
+  // null = in-memory database or WAL size undeterminable; 0 = no WAL sidecar.
+  if (wal === null || wal === undefined) return '不适用'
+  return formatBytes(wal)
+})
+
+const dbUsagePct = computed(() => {
+  const h = dbHealth.value
+  if (!h || h.used_page_count === null || h.page_count === null || h.page_count <= 0) return null
+  return Math.round((h.used_page_count / h.page_count) * 100)
+})
+
+const dbUsageLabel = computed(() => {
+  const h = dbHealth.value
+  if (!h || dbUsagePct.value === null) return ''
+  return `页使用 ${h.used_page_count} / ${h.page_count}（${dbUsagePct.value}%）· 空闲页 ${h.freelist_count ?? '—'}`
+})
+
+const dbHealthCheckedLabel = computed(() => {
+  const at = dbHealth.value?.checked_at
+  if (!at) return ''
+  const time = new Date(at)
+  if (Number.isNaN(time.getTime())) return at
+  const ageSeconds = Math.max(0, Math.floor((Date.now() - time.getTime()) / 1000))
+  const clock = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+  return `${clock} · ${relativeAgeLabel(ageSeconds)}`
+})
 let llmStatusTimer: ReturnType<typeof setInterval> | null = null
 const MAX_CHART_POINTS = 200
 const MOBILE_BREAKPOINT = 768
@@ -1297,6 +1393,7 @@ onMounted(() => {
   loadStatusHistory()
   loadMetrics()
   loadDiagnostics()
+  loadDatabaseHealth()
   startMultiSymbols()
   llmStatusTimer = setInterval(() => {
     if (pollLoading.value) return
@@ -1810,6 +1907,98 @@ function severityType(s: string): string {
 
 .live-safety {
   margin-bottom: 14px;
+}
+
+.db-health {
+  margin-bottom: 14px;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fbfcfe;
+}
+
+.db-health-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.db-health-header h5 {
+  margin: 0;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.db-health-checked {
+  color: #909399;
+  font-size: 12px;
+}
+
+.db-health-state {
+  padding: 8px 0;
+  color: #909399;
+  font-size: 12px;
+}
+
+.db-health-error {
+  color: var(--el-color-danger);
+}
+
+.db-health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.db-health-item {
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: #f4f6fa;
+}
+
+.db-health-item span {
+  display: block;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.db-health-item strong {
+  display: block;
+  margin-top: 2px;
+  color: #172033;
+  font-size: 14px;
+}
+
+.db-health-usage {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.db-health-usage-track {
+  flex: 1;
+  height: 10px;
+  background: #eef0f4;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.db-health-usage-fill {
+  height: 100%;
+  background: #409eff;
+  border-radius: 5px;
+  transition: width 0.2s ease;
+}
+
+.db-health-usage-label {
+  flex: 0 0 auto;
+  color: #6b7280;
+  font-size: 12px;
 }
 
 .live-safety h5 {
