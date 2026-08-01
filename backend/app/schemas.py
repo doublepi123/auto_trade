@@ -3060,6 +3060,30 @@ class CronHealthSnapshot(BaseModel):
     jobs: list[CronJobHealth]
 
 
+class QuoteStreamHealth(BaseModel):
+    """Safe quote-stream health snapshot for ``GET /api/quote-health``.
+
+    ``last_quote_age_seconds`` is ``None`` when no quote has been received
+    yet. ``max_gap_seconds`` is the maximum delta between consecutive trusted
+    primary quote *source* timestamps during the current subscription window,
+    reset to ``0.0`` when the stream is resubscribed/reconnects so the metric
+    reflects the current stream's quality. No order ids, prices, or credential
+    material are exposed.
+    """
+
+    symbol: str
+    quotes_received: int
+    last_quote_timestamp: Optional[str] = None
+    last_quote_age_seconds: Optional[float] = None
+    max_gap_seconds: float = 0.0
+    disconnect_count: int = 0
+    resubscribe_count: int = 0
+    disconnect_retry_count: int = 0
+    quotes_subscribed: bool = False
+    status: str
+    as_of: datetime
+
+
 # ---------------------------------------------------------------------------
 # Strategy presets (named param snapshots)
 # ---------------------------------------------------------------------------
