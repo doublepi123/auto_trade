@@ -940,6 +940,49 @@ class TestStrategyV2ShadowApi:
         with self.session_factory() as db:
             assert db.query(StrategyV2ForwardRegistration).count() == 2
 
+    def test_frozen_disproof_assessment_has_no_caller_authority_or_writes(
+        self,
+    ) -> None:
+        rejected = self.client.get(
+            "/api/strategy-shadow/frozen-disproof-assessment",
+            params={"as_of": "2027-08-03"},
+        )
+        assert rejected.status_code == 400
+
+        with self.session_factory() as db:
+            before = (
+                db.query(StrategyV2ForwardRegistration).count(),
+                db.query(StrategyV2ForwardEvidence).count(),
+                db.query(StrategyV2ForwardEvidenceArtifact).count(),
+                db.query(StrategyV2ForwardReplayArtifact).count(),
+            )
+
+        response = self.client.get(
+            "/api/strategy-shadow/frozen-disproof-assessment"
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["caller_authority_accepted"] is False
+        assert body["producer_cutoff"]["caller_cutoff_accepted"] is False
+        assert body["assessment_window"]["expected_session_count"] == 252
+        assert len(body["symbols"]) == 6
+        assert sum(len(item["leaves"]) for item in body["symbols"]) == 1_512
+        assert body["promotion_eligible"] is False
+        assert body["order_submission_allowed"] is False
+        assert body["automatic_promotion_allowed"] is False
+        assert "QUANT_CANDIDATE_VETO_NOT_VERIFIED" in body[
+            "promotion_blockers"
+        ]
+        assert "MANUAL_PROMOTION_REQUIRED" in body["promotion_blockers"]
+        with self.session_factory() as db:
+            assert (
+                db.query(StrategyV2ForwardRegistration).count(),
+                db.query(StrategyV2ForwardEvidence).count(),
+                db.query(StrategyV2ForwardEvidenceArtifact).count(),
+                db.query(StrategyV2ForwardReplayArtifact).count(),
+            ) == before
+
     def test_versions_and_evaluation_preserve_old_config_evidence(self) -> None:
         original = self.client.get("/api/strategy-shadow/config").json()
         old_version = original["config_version"]

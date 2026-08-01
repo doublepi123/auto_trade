@@ -30,9 +30,13 @@ from app.schemas import (
     StrategyV2ShadowStatusResponse,
     StrategyV2ShadowTradeResponse,
     StrategyV2ShadowVersionResponse,
+    TrustedFrozenAssessmentReport,
 )
 from app.services.live_exit_challenger_service import LiveExitChallengerService
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
+from app.services.trusted_frozen_assessment_service import (
+    TrustedFrozenAssessmentService,
+)
 from app.services.strategy_v2_portfolio_service import (
     StrategyV2PortfolioService,
 )
@@ -232,6 +236,26 @@ def get_forward_validation(
             symbol,
             candidate_algorithm_version=candidate_algorithm_version,
         )
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.get(
+    "/frozen-disproof-assessment",
+    response_model=TrustedFrozenAssessmentReport,
+)
+def get_frozen_disproof_assessment(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    """Read the fixed v3 cohort using only server-owned time and identity."""
+    if request.query_params:
+        raise HTTPException(
+            status_code=400,
+            detail="frozen disproof assessment does not accept query authority",
+        )
+    try:
+        return TrustedFrozenAssessmentService(db).get_report()
     except ValueError as exc:
         raise _bad_request(exc) from exc
 

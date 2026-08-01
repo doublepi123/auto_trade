@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import date, datetime
-from typing import Any, Literal, Optional
+from typing import Annotated, Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -1189,6 +1191,462 @@ class StrategyV2ForwardValidationResponse(BaseModel):
         default_factory=StrategyV2ShadowMetrics
     )
     daily: list[StrategyV2ForwardDailyEvidence] = Field(default_factory=list)
+
+
+TrustedFrozenSha256 = Annotated[
+    str,
+    Field(pattern=r"^[0-9a-f]{64}$"),
+]
+
+
+class TrustedFrozenTradeSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    closed_trades: int = Field(ge=0)
+    gross_pnl_decimal: str
+    gross_pnl_float_hex: str
+    fees_decimal: str
+    fees_float_hex: str
+    net_pnl_decimal: str
+    net_pnl_float_hex: str
+    closed_trade_entry_notional_decimal: str
+    net_return_bps: float | None = None
+    return_preimage_complete: bool
+    ordered_trade_preimage_sha256: TrustedFrozenSha256
+
+
+class TrustedFrozenDailyLeaf(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    symbol: str
+    role: str
+    config_hash: TrustedFrozenSha256
+    session_date: str
+    disposition: Literal[
+        "PENDING",
+        "MISSING",
+        "INCLUDED",
+        "EXCLUDED_NON_STRUCTURAL",
+        "EXCLUDED_STRUCTURAL",
+        "INVALID",
+    ]
+    exclusion_reason: str
+    structural_failure: bool
+    row_present_after_cutoff: bool
+    evidence_id: int | None = None
+    evidence_digest_sha256: TrustedFrozenSha256 | None = None
+    baseline_result_sha256: TrustedFrozenSha256 | None = None
+    candidate_result_sha256: TrustedFrozenSha256 | None = None
+    artifact_digest_sha256: TrustedFrozenSha256 | None = None
+    artifact_binding_sha256: TrustedFrozenSha256 | None = None
+    daily_binding_sha256: TrustedFrozenSha256 | None = None
+    baseline: TrustedFrozenTradeSummary | None = None
+    candidate: TrustedFrozenTradeSummary | None = None
+    blockers: list[str]
+    leaf_digest_sha256: TrustedFrozenSha256
+
+
+class TrustedFrozenSymbolReport(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    symbol: str
+    role: str
+    reason: str
+    config_hash: TrustedFrozenSha256
+    registration_id: int | None = None
+    candidate_algorithm_version: Literal[
+        "strategy-v2-causal-trend-prewarm-v1"
+    ] | None = None
+    evaluator_digest: Literal[
+        "e5ae9ea3e68dcc47d5131c21d8ba223824aecabf59da1f4b592df72cb9aa0294"
+    ] | None = None
+    registered_at: str | None = None
+    eligible_after: str | None = None
+    registration_blockers: list[str]
+    pre_window_rows_excluded: int = Field(ge=0)
+    post_window_rows_excluded: int = Field(ge=0)
+    expected_session_count: Literal[252]
+    evidence_root_sha256: TrustedFrozenSha256
+    leaves: list[TrustedFrozenDailyLeaf] = Field(
+        min_length=252,
+        max_length=252,
+    )
+
+
+class TrustedFrozenCandidateReport(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    symbol: str
+    role: str
+    reason: str
+    config_hash: TrustedFrozenSha256
+    status: Literal[
+        "INSUFFICIENT_EVIDENCE",
+        "READY_FOR_MANUAL_DISPROOF_REVIEW",
+    ]
+    evidence_review_ready: bool
+    promotion_eligible: Literal[False]
+    promotion_blockers: list[str]
+    expected_session_count: Literal[252]
+    candidate_included_sessions: int = Field(ge=0, le=252)
+    nvda_included_sessions: int = Field(ge=0, le=252)
+    paired_included_sessions: int = Field(ge=0, le=252)
+    candidate_expected_session_coverage_ratio: float = Field(ge=0, le=1)
+    nvda_expected_session_coverage_ratio: float = Field(ge=0, le=1)
+    paired_expected_session_coverage_ratio: float = Field(ge=0, le=1)
+    candidate_closed_trades: int = Field(ge=0)
+    remaining_candidate_closed_trades: int = Field(ge=0)
+    within_symbol_baseline: TrustedFrozenTradeSummary
+    within_symbol_candidate: TrustedFrozenTradeSummary
+    candidate_same_window: TrustedFrozenTradeSummary
+    nvda_same_window_control: TrustedFrozenTradeSummary
+    evidence_blockers: list[str]
+
+    @model_validator(mode="after")
+    def validate_candidate_readiness(self) -> "TrustedFrozenCandidateReport":
+        ready_status = self.status == "READY_FOR_MANUAL_DISPROOF_REVIEW"
+        if ready_status is not self.evidence_review_ready:
+            raise ValueError("candidate status and readiness are inconsistent")
+        required = {
+            "QUANT_CANDIDATE_VETO_NOT_VERIFIED",
+            "MANUAL_PROMOTION_REQUIRED",
+        }
+        if not required.issubset(self.promotion_blockers):
+            raise ValueError("candidate permanent promotion blockers are missing")
+        if self.evidence_review_ready:
+            if self.evidence_blockers or "EVIDENCE_REVIEW_NOT_READY" in self.promotion_blockers:
+                raise ValueError("ready candidate carries evidence blockers")
+        elif "EVIDENCE_REVIEW_NOT_READY" not in self.promotion_blockers:
+            raise ValueError("unready candidate lacks its promotion blocker")
+        return self
+
+
+class TrustedFrozenProducerCutoff(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    authority: Literal["SERVER_CLOCK_AND_STATIC_NYSE_CALENDAR"]
+    observed_at: str
+    complete_through: str | None = None
+    cutoff_at: str | None = None
+    finalization_delay_minutes: Literal[15]
+    cutoff_provenance_verified: Literal[True]
+    caller_cutoff_accepted: Literal[False]
+
+
+class TrustedFrozenFreezeIdentity(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: Literal["nasdaq-djia-disproof-2026-07-31"]
+    as_of_date: Literal["2026-07-31"]
+    freeze_digest: Literal[
+        "d2005f023cc9e1874609008a55c2b0d21d1d30647175ca607e60225e4f7ea69f"
+    ]
+    candidate_algorithm_version: Literal[
+        "strategy-v2-causal-trend-prewarm-v1"
+    ]
+    evaluator_digest: Literal[
+        "e5ae9ea3e68dcc47d5131c21d8ba223824aecabf59da1f4b592df72cb9aa0294"
+    ]
+    control_symbol: Literal["NVDA.US"]
+
+
+class TrustedFrozenAssessmentWindow(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    market: Literal["US"]
+    first_expected_session_date: Literal["2026-08-03"]
+    last_expected_session_date: Literal["2027-08-03"]
+    expected_session_count: Literal[252]
+    expected_session_dates: list[str] = Field(
+        min_length=252,
+        max_length=252,
+    )
+    expected_session_digest: Literal[
+        "3378303933970bc8dfc2bfb310ef3d98623d7e6a906e004353cc243a159621d0"
+    ]
+    denominator_is_fixed: Literal[True]
+    missing_and_excluded_count_in_denominator: Literal[True]
+
+
+class TrustedFrozenEvidenceThresholds(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    minimum_future_trade_days: Literal[20]
+    minimum_closed_trades_per_candidate: Literal[50]
+    minimum_expected_session_coverage_ratio: float = Field(ge=0.95, le=0.95)
+    full_replay_verified_required: Literal[True]
+    source_trace_archive_promotion_grade: Literal[False]
+    quant_candidate_required_for_promotion: Literal[True]
+    manual_promotion_required: Literal[True]
+    thresholds_tunable: Literal[False]
+
+
+class TrustedFrozenAssessmentReport(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    schema_version: Literal[
+        "strategy-v2-frozen-forward-disproof-trusted-report-v3"
+    ]
+    algorithm_version: Literal[
+        "strategy-v2-frozen-forward-disproof-trusted-algorithm-v3"
+    ]
+    policy_version: Literal[
+        "strategy-v2-frozen-forward-disproof-trusted-assessment-v3"
+    ]
+    status: Literal[
+        "INSUFFICIENT_EVIDENCE",
+        "READY_FOR_MANUAL_DISPROOF_REVIEW",
+    ]
+    generated_at: str
+    authority_mode: Literal["ONLINE_SERVER_DB_DIRECT_READ"]
+    caller_authority_accepted: Literal[False]
+    portable_attestation_verified: Literal[False]
+    research_only: Literal[True]
+    live_equivalent: Literal[False]
+    order_submission_allowed: Literal[False]
+    automatic_promotion_allowed: Literal[False]
+    automatic_disproof_decision_allowed: Literal[False]
+    evidence_review_ready: bool
+    promotion_eligible: Literal[False]
+    promotion_blockers: list[str]
+    producer_cutoff: TrustedFrozenProducerCutoff
+    freeze: TrustedFrozenFreezeIdentity
+    assessment_window: TrustedFrozenAssessmentWindow
+    evidence_thresholds: TrustedFrozenEvidenceThresholds
+    symbols: list[TrustedFrozenSymbolReport] = Field(
+        min_length=6,
+        max_length=6,
+    )
+    candidates: list[TrustedFrozenCandidateReport] = Field(
+        min_length=5,
+        max_length=5,
+    )
+    report_digest_sha256: TrustedFrozenSha256
+
+    @model_validator(mode="after")
+    def validate_frozen_report(self) -> "TrustedFrozenAssessmentReport":
+        from decimal import Decimal, InvalidOperation
+
+        from app.domain.strategy_v2.frozen_disproof_queue import (
+            CONTROL_SYMBOL,
+            FROZEN_QUEUE_ENTRIES,
+        )
+        from app.domain.strategy_v2.trusted_frozen_assessment import (
+            TrustedDailyLeaf as DomainDailyLeaf,
+            TrustedProducerCutoff as DomainProducerCutoff,
+            TrustedSymbolEvidence as DomainSymbolEvidence,
+            TrustedTradeSummary as DomainTradeSummary,
+            build_trusted_assessment_report,
+        )
+
+        expected = {
+            symbol: (role, reason, config_hash)
+            for symbol, role, reason, config_hash in FROZEN_QUEUE_ENTRIES
+        }
+        by_symbol = {item.symbol: item for item in self.symbols}
+        if len(by_symbol) != 6 or set(by_symbol) != set(expected):
+            raise ValueError("trusted report symbol cohort is invalid")
+        expected_dates = self.assessment_window.expected_session_dates
+        dates_digest = hashlib.sha256(
+            "\n".join(expected_dates).encode("ascii")
+        ).hexdigest()
+        if dates_digest != self.assessment_window.expected_session_digest:
+            raise ValueError("trusted report session schedule digest is invalid")
+        for symbol, (role, reason, config_hash) in expected.items():
+            item = by_symbol[symbol]
+            if (
+                item.role != role
+                or item.reason != reason
+                or item.config_hash != config_hash
+                or [leaf.session_date for leaf in item.leaves] != expected_dates
+                or any(
+                    leaf.symbol != symbol
+                    or leaf.role != role
+                    or leaf.config_hash != config_hash
+                    for leaf in item.leaves
+                )
+            ):
+                raise ValueError("trusted report symbol evidence identity is invalid")
+        expected_candidates = set(expected) - {CONTROL_SYMBOL}
+        candidate_symbols = [item.symbol for item in self.candidates]
+        if (
+            candidate_symbols != sorted(expected_candidates)
+            or set(candidate_symbols) != expected_candidates
+        ):
+            raise ValueError("trusted report candidate cohort is invalid")
+        for candidate in self.candidates:
+            role, reason, config_hash = expected[candidate.symbol]
+            symbol_report = by_symbol[candidate.symbol]
+            if (
+                candidate.role != role
+                or candidate.reason != reason
+                or candidate.config_hash != config_hash
+                or candidate.role != symbol_report.role
+                or candidate.reason != symbol_report.reason
+                or candidate.config_hash != symbol_report.config_hash
+            ):
+                raise ValueError(
+                    "trusted report candidate frozen identity is invalid"
+                )
+        all_ready = all(item.evidence_review_ready for item in self.candidates)
+        if (
+            self.evidence_review_ready is not all_ready
+            or (self.status == "READY_FOR_MANUAL_DISPROOF_REVIEW") is not all_ready
+        ):
+            raise ValueError("trusted report status and readiness are inconsistent")
+        required = {
+            "QUANT_CANDIDATE_VETO_NOT_VERIFIED",
+            "MANUAL_PROMOTION_REQUIRED",
+        }
+        if not required.issubset(self.promotion_blockers):
+            raise ValueError("trusted report permanent blockers are missing")
+        if all_ready:
+            if "EVIDENCE_REVIEW_NOT_READY" in self.promotion_blockers:
+                raise ValueError("ready report carries an evidence blocker")
+        elif "EVIDENCE_REVIEW_NOT_READY" not in self.promotion_blockers:
+            raise ValueError("unready report lacks its evidence blocker")
+        model_payload = self.model_dump(mode="python")
+        digest_payload = dict(model_payload)
+        claimed_digest = str(digest_payload.pop("report_digest_sha256"))
+        encoded = json.dumps(
+            digest_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+            allow_nan=False,
+        ).encode("utf-8")
+        if hashlib.sha256(encoded).hexdigest() != claimed_digest:
+            raise ValueError("trusted report digest is invalid")
+
+        def domain_summary(
+            item: TrustedFrozenTradeSummary | None,
+        ) -> DomainTradeSummary | None:
+            if item is None:
+                return None
+            return DomainTradeSummary(
+                closed_trades=item.closed_trades,
+                gross_pnl=float.fromhex(item.gross_pnl_float_hex),
+                fees=float.fromhex(item.fees_float_hex),
+                net_pnl=float.fromhex(item.net_pnl_float_hex),
+                entry_notional=Decimal(
+                    item.closed_trade_entry_notional_decimal
+                ),
+                ordered_trade_preimage_sha256=(
+                    item.ordered_trade_preimage_sha256
+                ),
+            )
+
+        try:
+            domain_symbols = tuple(
+                DomainSymbolEvidence(
+                    symbol=item.symbol,
+                    role=item.role,
+                    reason=item.reason,
+                    config_hash=item.config_hash,
+                    registration_id=item.registration_id,
+                    candidate_algorithm_version=(
+                        item.candidate_algorithm_version
+                    ),
+                    evaluator_digest=item.evaluator_digest,
+                    registered_at=(
+                        datetime.fromisoformat(item.registered_at)
+                        if item.registered_at is not None
+                        else None
+                    ),
+                    eligible_after=(
+                        datetime.fromisoformat(item.eligible_after)
+                        if item.eligible_after is not None
+                        else None
+                    ),
+                    registration_blockers=tuple(
+                        item.registration_blockers
+                    ),
+                    pre_window_rows_excluded=(
+                        item.pre_window_rows_excluded
+                    ),
+                    post_window_rows_excluded=(
+                        item.post_window_rows_excluded
+                    ),
+                    leaves=tuple(
+                        DomainDailyLeaf(
+                            symbol=leaf.symbol,
+                            role=leaf.role,
+                            config_hash=leaf.config_hash,
+                            session_date=date.fromisoformat(
+                                leaf.session_date
+                            ),
+                            disposition=leaf.disposition,
+                            exclusion_reason=leaf.exclusion_reason,
+                            structural_failure=leaf.structural_failure,
+                            row_present_after_cutoff=(
+                                leaf.row_present_after_cutoff
+                            ),
+                            evidence_id=leaf.evidence_id,
+                            evidence_digest_sha256=(
+                                leaf.evidence_digest_sha256
+                            ),
+                            baseline_result_sha256=(
+                                leaf.baseline_result_sha256
+                            ),
+                            candidate_result_sha256=(
+                                leaf.candidate_result_sha256
+                            ),
+                            artifact_digest_sha256=(
+                                leaf.artifact_digest_sha256
+                            ),
+                            artifact_binding_sha256=(
+                                leaf.artifact_binding_sha256
+                            ),
+                            daily_binding_sha256=(
+                                leaf.daily_binding_sha256
+                            ),
+                            baseline=domain_summary(leaf.baseline),
+                            candidate=domain_summary(leaf.candidate),
+                            blockers=tuple(leaf.blockers),
+                            leaf_digest_sha256=(
+                                leaf.leaf_digest_sha256
+                            ),
+                        )
+                        for leaf in item.leaves
+                    ),
+                )
+                for item in self.symbols
+            )
+            cutoff = DomainProducerCutoff(
+                observed_at=datetime.fromisoformat(
+                    self.producer_cutoff.observed_at
+                ),
+                complete_through=(
+                    date.fromisoformat(
+                        self.producer_cutoff.complete_through
+                    )
+                    if self.producer_cutoff.complete_through is not None
+                    else None
+                ),
+                cutoff_at=(
+                    datetime.fromisoformat(self.producer_cutoff.cutoff_at)
+                    if self.producer_cutoff.cutoff_at is not None
+                    else None
+                ),
+            )
+            rebuilt = build_trusted_assessment_report(
+                domain_symbols,
+                producer_cutoff=cutoff,
+            )
+        except (
+            InvalidOperation,
+            OverflowError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise ValueError(
+                "trusted report domain attestation is invalid"
+            ) from exc
+        if rebuilt != model_payload:
+            raise ValueError(
+                "trusted report does not match its canonical domain rebuild"
+            )
+        return self
 
 
 class StrategyV2ExitChallengerVariant(BaseModel):
