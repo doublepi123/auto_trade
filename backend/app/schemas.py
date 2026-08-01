@@ -3030,6 +3030,36 @@ class DatabaseHealthSnapshot(BaseModel):
     wal_size_bytes: Optional[int] = None
 
 
+class CronJobHealth(BaseModel):
+    """Safe per-job health row for the cron-health endpoint.
+
+    ``enabled`` is ``True``/``False`` when the job's enabled state is known
+    from a cheap (non-I/O) provider, and ``None`` when it cannot be determined
+    without database or broker work (the health endpoint never performs I/O).
+    ``last_failure_code`` is a sanitized exception class/category only — never
+    a raw message, order id, or credential. ``stale`` is ``False`` for
+    disabled jobs by definition.
+    """
+
+    name: str
+    enabled: Optional[bool] = None
+    expected_interval_seconds: Optional[float] = None
+    last_success_at: Optional[datetime] = None
+    last_failure_at: Optional[datetime] = None
+    last_failure_code: Optional[str] = None
+    tick_count: int = 0
+    failure_count: int = 0
+    stale: bool = False
+    status: str
+
+
+class CronHealthSnapshot(BaseModel):
+    """Top-level response for ``GET /api/cron-health``."""
+
+    as_of: datetime
+    jobs: list[CronJobHealth]
+
+
 # ---------------------------------------------------------------------------
 # Strategy presets (named param snapshots)
 # ---------------------------------------------------------------------------

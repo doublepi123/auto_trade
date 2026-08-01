@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import sys
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -108,11 +109,13 @@ from app.api.first_trade import router as first_trade_router
 from app.api.loss_containment import router as loss_containment_router
 from app.api.daily_consistency import router as daily_consistency_router
 from app.api.database_health import router as database_health_router
+from app.api.cron_health import router as cron_health_router
 from app.config import settings
 from app.database import init_db
 from app.runner import get_runner
 from app.services.interval_application_service import IntervalApplicationService
 from app.services.llm_symbol_state_service import LLMSymbolStateService
+from app.services.cron_health_service import get_cron_health_service
 from app.services.trade_event_service import record_trade_event
 from app import __version__ as APP_VERSION
 
@@ -141,6 +144,83 @@ _LLM_SECONDARY_ACTION_PRIORITY = {
 _LLM_QUANT_GATE_SKIP_REASON = (
     "fresh quant evidence is not actionable for secondary LLM analysis"
 )
+
+# Cron job names registered with the process-local CronHealthService. These
+# are observer-only health labels; recording success/failure never alters the
+# existing try/except behavior, loop cadence, task creation, or settings gates.
+_CRON_LLM_ANALYSIS = "llm_analysis"
+_CRON_REPORT_SCHEDULE = "report_schedule"
+_CRON_ALERT_RULES = "alert_rules"
+_CRON_LLM_STORAGE_MAINTENANCE = "llm_storage_maintenance"
+_CRON_STRATEGY_V2_SHADOW = "strategy_v2_shadow"
+_CRON_OPENING_MOMENTUM_SHADOW = "opening_momentum_shadow"
+_CRON_UNIVERSE_SELECTION = "universe_selection"
+_CRON_WATCHLIST_QUANT = "watchlist_quant"
+_CRON_WS_CLEANUP = "ws_cleanup"
+
+
+def _register_cron_health_jobs() -> None:
+    """Register the background cron loops with the process-local health service.
+
+    Idempotent and best-effort: re-registration preserves accumulated counters.
+    ``enabled`` providers are cheap (settings flags only); DB-gated jobs report
+    ``None`` so the health endpoint never performs I/O.
+    """
+    service = get_cron_health_service()
+    service.register(
+        _CRON_LLM_ANALYSIS,
+        expected_interval_seconds=60.0,
+        enabled_provider=None,
+    )
+    service.register(
+        _CRON_REPORT_SCHEDULE,
+        expected_interval_seconds=300.0,
+        enabled_provider=None,
+    )
+    service.register(
+        _CRON_ALERT_RULES,
+        expected_interval_seconds=60.0,
+        enabled_provider=None,
+    )
+    service.register(
+        _CRON_LLM_STORAGE_MAINTENANCE,
+        expected_interval_seconds=float(
+            settings.llm_storage_maintenance_interval_minutes * 60
+        ),
+        enabled_provider=lambda: True,
+    )
+    service.register(
+        _CRON_STRATEGY_V2_SHADOW,
+        expected_interval_seconds=15.0,
+        enabled_provider=lambda: True,
+    )
+    service.register(
+        _CRON_OPENING_MOMENTUM_SHADOW,
+        expected_interval_seconds=float(_OPENING_MOMENTUM_POLL_SECONDS),
+        enabled_provider=lambda: True,
+    )
+    service.register(
+        _CRON_UNIVERSE_SELECTION,
+        expected_interval_seconds=float(
+            settings.universe_selection_interval_minutes * 60
+        ),
+        enabled_provider=lambda: bool(settings.universe_selection_enabled),
+    )
+    service.register(
+        _CRON_WATCHLIST_QUANT,
+        expected_interval_seconds=float(_WATCHLIST_QUANT_POLL_SECONDS),
+        enabled_provider=lambda: bool(
+            settings.watchlist_quant_auto_score_enabled
+        ),
+    )
+    service.register(
+        _CRON_WS_CLEANUP,
+        expected_interval_seconds=60.0,
+        enabled_provider=lambda: True,
+    )
+
+
+_register_cron_health_jobs()
 
 
 def _opening_execution_priority_window(
@@ -395,8 +475,10 @@ async def _ws_cleanup_task() -> None:
         await asyncio.sleep(60)
         try:
             await ws_manager.cleanup_stale()
+            get_cron_health_service().record_success(_CRON_WS_CLEANUP)
         except Exception:
             logger.exception("WebSocket cleanup failed")
+            get_cron_health_service().record_failure(_CRON_WS_CLEANUP, sys.exc_info()[1])  # type: ignore[arg-type]
 
 
 async def _llm_analysis_tick() -> None:
@@ -776,8 +858,10 @@ async def _llm_analysis_cron() -> None:
         async with _llm_analysis_lock:
             try:
                 await _llm_analysis_tick()
+                get_cron_health_service().record_success(_CRON_LLM_ANALYSIS)
             except Exception:
                 logger.exception("LLM analysis cron failed")
+                get_cron_health_service().record_failure(_CRON_LLM_ANALYSIS, sys.exc_info()[1])  # type: ignore[arg-type]
 
 
 async def _report_schedule_cron() -> None:
@@ -799,8 +883,10 @@ async def _report_schedule_cron() -> None:
                     ReportScheduleService(db).maybe_send(runner)
                 finally:
                     db.close()
+                get_cron_health_service().record_success(_CRON_REPORT_SCHEDULE)
             except Exception:
                 logger.exception("report schedule cron failed")
+                get_cron_health_service().record_failure(_CRON_REPORT_SCHEDULE, sys.exc_info()[1])  # type: ignore[arg-type]
 
 
 async def _alert_rules_cron() -> None:
@@ -821,8 +907,10 @@ async def _alert_rules_cron() -> None:
                     AlertRuleService(db).evaluate(runner)
                 finally:
                     db.close()
+                get_cron_health_service().record_success(_CRON_ALERT_RULES)
             except Exception:
                 logger.exception("alert rules cron failed")
+                get_cron_health_service().record_failure(_CRON_ALERT_RULES, sys.exc_info()[1])  # type: ignore[arg-type]
 
 
 def _llm_storage_maintenance_tick_sync() -> None:
@@ -875,10 +963,12 @@ async def _llm_storage_maintenance_cron() -> None:
     while True:
         try:
             await _run_llm_storage_maintenance_tick()
+            get_cron_health_service().record_success(_CRON_LLM_STORAGE_MAINTENANCE)
         except asyncio.CancelledError:
             raise
         except Exception:
             logger.exception("observational storage maintenance failed")
+            get_cron_health_service().record_failure(_CRON_LLM_STORAGE_MAINTENANCE, sys.exc_info()[1])  # type: ignore[arg-type]
         await asyncio.sleep(settings.llm_storage_maintenance_interval_minutes * 60)
 
 
@@ -1047,8 +1137,10 @@ async def _strategy_v2_shadow_cron() -> None:
         async with _strategy_v2_shadow_lock:
             try:
                 await asyncio.to_thread(_strategy_v2_shadow_tick_sync)
+                get_cron_health_service().record_success(_CRON_STRATEGY_V2_SHADOW)
             except Exception:
                 logger.exception("Strategy v2 shadow cron failed")
+                get_cron_health_service().record_failure(_CRON_STRATEGY_V2_SHADOW, sys.exc_info()[1])  # type: ignore[arg-type]
 
 
 def _opening_momentum_shadow_tick_sync() -> None:
@@ -1093,10 +1185,12 @@ async def _opening_momentum_shadow_cron() -> None:
                 await asyncio.to_thread(
                     _opening_momentum_shadow_tick_sync
                 )
+                get_cron_health_service().record_success(_CRON_OPENING_MOMENTUM_SHADOW)
             except Exception:
                 logger.exception(
                     "opening momentum shadow cron failed"
                 )
+                get_cron_health_service().record_failure(_CRON_OPENING_MOMENTUM_SHADOW, sys.exc_info()[1])  # type: ignore[arg-type]
 
 
 def _watchlist_quant_tick_sync() -> None:
@@ -1178,10 +1272,12 @@ async def _watchlist_quant_cron() -> None:
         async with _watchlist_quant_lock:
             try:
                 await _run_watchlist_quant_tick()
+                get_cron_health_service().record_success(_CRON_WATCHLIST_QUANT)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("automatic watchlist quant scoring failed")
+                get_cron_health_service().record_failure(_CRON_WATCHLIST_QUANT, sys.exc_info()[1])  # type: ignore[arg-type]
         await asyncio.sleep(_WATCHLIST_QUANT_POLL_SECONDS)
 
 
@@ -1283,10 +1379,12 @@ async def _universe_selection_cron() -> None:
         async with _universe_selection_lock:
             try:
                 await _run_universe_selection_tick()
+                get_cron_health_service().record_success(_CRON_UNIVERSE_SELECTION)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 logger.exception("universe selection cron failed")
+                get_cron_health_service().record_failure(_CRON_UNIVERSE_SELECTION, sys.exc_info()[1])  # type: ignore[arg-type]
         await asyncio.sleep(
             settings.universe_selection_interval_minutes * 60
         )
@@ -1486,6 +1584,7 @@ app.include_router(first_trade_router)
 app.include_router(loss_containment_router)
 app.include_router(daily_consistency_router)
 app.include_router(database_health_router)
+app.include_router(cron_health_router)
 
 
 # Global exception handler: log unhandled exceptions and return a generic 500 JSON
