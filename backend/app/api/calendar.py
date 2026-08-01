@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -20,7 +20,8 @@ from app.core.market_calendar import (
     trade_day_for,
 )
 from app.api.auth import require_api_key
-from app.schemas import MarketSessionStatus
+from app.schemas import CalendarCoverageStatusSchema, MarketSessionStatus
+from app.services.calendar_coverage_service import CalendarCoverageService
 
 router = APIRouter(prefix="/api", tags=["calendar"])
 
@@ -154,3 +155,35 @@ def calendar_lookup(
         "closure_label": closure_label(market, day),
     }
 
+
+@router.get(
+    "/calendar/coverage",
+    dependencies=[Depends(require_api_key())],
+    response_model=CalendarCoverageStatusSchema,
+)
+def calendar_coverage(
+    as_of: date | None = Query(
+        None,
+        description="ISO 8601 date (YYYY-MM-DD); defaults to today UTC.",
+    ),
+) -> CalendarCoverageStatusSchema:
+    """Report whether the static holiday calendar data is authoritative.
+
+    Read-only. The semantic boundary is explicit: ``COVERED`` / ``WARNING`` /
+    ``EXPIRED`` describe whether the static holiday data is authoritative for
+    the as-of date, **not** whether the market is open or closed. This endpoint
+    never alters calendar closure logic.
+    """
+    status = CalendarCoverageService().status(as_of)
+    return CalendarCoverageStatusSchema(
+        status=status.status,
+        authoritative=status.authoritative,
+        coverage_start_year=status.coverage_start_year,
+        coverage_end_year=status.coverage_end_year,
+        coverage_years=status.coverage_years,
+        as_of=status.as_of,
+        coverage_end_date=status.coverage_end_date,
+        days_until_coverage_end=status.days_until_coverage_end,
+        warning_window_days=status.warning_window_days,
+        message=status.message,
+    )

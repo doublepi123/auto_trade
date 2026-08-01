@@ -3493,6 +3493,29 @@ class MarketSessionStatus(BaseModel):
     next_open: datetime
 
 
+class CalendarCoverageStatusSchema(BaseModel):
+    """Read-only market calendar coverage status.
+
+    The semantic boundary is explicit: ``COVERED`` / ``WARNING`` / ``EXPIRED``
+    describe whether the static holiday data is *authoritative* for the as-of
+    date, **not** whether the market is open or closed. ``authoritative`` is
+    ``True`` for ``COVERED`` and ``WARNING``, ``False`` for ``EXPIRED``.
+    ``days_until_coverage_end`` is signed (positive before end, zero on the
+    end date, negative after).
+    """
+
+    status: Literal["COVERED", "WARNING", "EXPIRED"]
+    authoritative: bool
+    coverage_start_year: int
+    coverage_end_year: int
+    coverage_years: list[int]
+    as_of: date
+    coverage_end_date: date
+    days_until_coverage_end: int
+    warning_window_days: int
+    message: str
+
+
 class LLMSuggestion(BaseModel):
     buy_low: float
     sell_high: float
