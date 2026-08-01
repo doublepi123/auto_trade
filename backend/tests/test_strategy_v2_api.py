@@ -25,7 +25,9 @@ from app.models import (
     StrategyV2ExitChallengerRegistration,
     StrategyV2ExitChallengerTrade,
     StrategyV2ForwardEvidence,
+    StrategyV2ForwardEvidenceArtifact,
     StrategyV2ForwardRegistration,
+    StrategyV2ForwardReplayArtifact,
     StrategyV2PortfolioObservation,
     StrategyV2PortfolioRegistration,
     StrategyV2ShadowConfig,
@@ -104,6 +106,8 @@ class TestStrategyV2ShadowApi:
                 StrategyV2PortfolioRegistration,
                 StrategyV2ExitChallengerTrade,
                 StrategyV2ExitChallengerRegistration,
+                StrategyV2ForwardEvidenceArtifact,
+                StrategyV2ForwardReplayArtifact,
                 StrategyV2ForwardEvidence,
                 StrategyV2ForwardRegistration,
                 StrategyV2ShadowDecision,
@@ -770,6 +774,57 @@ class TestStrategyV2ShadowApi:
         )
         assert missing.status_code == 400
 
+    def test_boundary_neutral_diagnostic_api_is_retrospective_only(self) -> None:
+        config = self.client.get(
+            "/api/strategy-shadow/config",
+            params={"symbol": "AAPL.US"},
+        ).json()
+        with self.session_factory() as db:
+            before = (
+                self._shadow_counts(db),
+                db.query(StrategyV2ForwardRegistration).count(),
+                db.query(StrategyV2ForwardEvidence).count(),
+            )
+
+        response = self.client.post(
+            "/api/strategy-shadow/prewarm-boundary-neutral",
+            json={
+                "symbol": "aapl.us",
+                "config_version": config["config_version"],
+            },
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["persisted"] is False
+        assert body["mode"] == "SHADOW"
+        assert body["evaluation_scope"] == "RETROSPECTIVE_DIAGNOSTIC_ONLY"
+        assert body["order_submission_allowed"] is False
+        assert body["automatic_promotion_allowed"] is False
+        assert body["retrospective_results_forward_eligible"] is False
+        assert body[
+            "forward_evidence_requires_registration_before_target_open"
+        ] is True
+        assert body["status"] == "INSUFFICIENT_EVIDENCE"
+        assert body["blockers"] == ["MIN_CAUSAL_PAIRS"]
+        assert body["variants"] == []
+        assert body["candidate_spec"]["algorithm_version"] == (
+            "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+        )
+        assert body["candidate_spec"]["boundary_rule"] == (
+            "SEED_TARGET_FIRST_5M_DM_ZERO_TR_TARGET_RANGE"
+        )
+        assert body["candidate_spec"][
+            "retrospective_results_forward_eligible"
+        ] is False
+        with self.session_factory() as db:
+            after = (
+                self._shadow_counts(db),
+                db.query(StrategyV2ForwardRegistration).count(),
+                db.query(StrategyV2ForwardEvidence).count(),
+            )
+        assert after == before
+
     def test_forward_validation_registration_and_read_only_empty_envelope(self) -> None:
         empty = self.client.get(
             "/api/strategy-shadow/forward-validation",
@@ -847,6 +902,43 @@ class TestStrategyV2ShadowApi:
                 db.query(StrategyV2ForwardRegistration).count(),
                 db.query(StrategyV2ForwardEvidence).count(),
             ) == before
+
+        neutral = self.client.post(
+            "/api/strategy-shadow/forward-validation/register",
+            json={
+                "symbol": "AAPL.US",
+                "source_config_version": source_version,
+                "candidate_algorithm_version": (
+                    "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+                ),
+                "confirm_forward_only": True,
+                "confirm_no_automatic_promotion": True,
+            },
+        )
+        assert neutral.status_code == 200
+        neutral_body = neutral.json()
+        assert neutral_body["status"] == "FROZEN"
+        assert neutral_body["registration"]["candidate_algorithm_version"] == (
+            "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+        )
+        assert neutral_body["registration"]["evaluator_digest"] != (
+            body["registration"]["evaluator_digest"]
+        )
+        fetched_neutral = self.client.get(
+            "/api/strategy-shadow/forward-validation",
+            params={
+                "symbol": "AAPL.US",
+                "candidate_algorithm_version": (
+                    "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+                ),
+            },
+        )
+        assert fetched_neutral.status_code == 200
+        assert fetched_neutral.json()["registration"] == (
+            neutral_body["registration"]
+        )
+        with self.session_factory() as db:
+            assert db.query(StrategyV2ForwardRegistration).count() == 2
 
     def test_versions_and_evaluation_preserve_old_config_evidence(self) -> None:
         original = self.client.get("/api/strategy-shadow/config").json()

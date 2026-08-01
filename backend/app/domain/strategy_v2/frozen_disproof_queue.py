@@ -6,8 +6,14 @@ import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal, cast
+
+from app.core.holiday_calendar import (
+    COVERAGE_END_YEAR,
+    COVERAGE_START_YEAR,
+    is_market_closed,
+)
 
 
 FROZEN_DISPROOF_INPUT_SCHEMA_VERSION = (
@@ -19,12 +25,22 @@ FROZEN_DISPROOF_OUTPUT_SCHEMA_VERSION = (
 FROZEN_DISPROOF_ALGORITHM_VERSION = (
     "strategy-v2-frozen-forward-disproof-queue-v1"
 )
+ASSESSMENT_POLICY_VERSION = (
+    "strategy-v2-frozen-forward-disproof-assessment-v2"
+)
+ASSESSMENT_ALGORITHM_VERSION = (
+    "strategy-v2-frozen-forward-disproof-assessment-algorithm-v2"
+)
+ASSESSMENT_REPORT_SCHEMA_VERSION = (
+    "strategy-v2-frozen-forward-disproof-assessment-report-v2"
+)
 FORWARD_CANDIDATE_ALGORITHM_VERSION = (
     "strategy-v2-causal-trend-prewarm-v1"
 )
 CONTROL_SYMBOL = "NVDA.US"
 MINIMUM_FUTURE_TRADE_DAYS = 20
 MINIMUM_CLOSED_TRADES = 50
+MINIMUM_EXPECTED_SESSION_COVERAGE_RATIO = 0.95
 FROZEN_QUEUE_AS_OF_DATE = date(2026, 7, 31)
 FROZEN_QUEUE_NAME = "nasdaq-djia-disproof-2026-07-31"
 FROZEN_EVALUATOR_DIGEST = (
@@ -181,6 +197,12 @@ def _required_true(value: object, *, field_name: str) -> None:
         raise ValueError(f"{field_name} must be true")
 
 
+def _required_bool(value: object, *, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ValueError(f"{field_name} must be a boolean")
+    return value
+
+
 def _string_list(value: object, *, field_name: str) -> tuple[str, ...]:
     raw = _sequence(value, field_name=field_name)
     result = tuple(
@@ -279,11 +301,60 @@ class _DailyMetric:
 
 
 @dataclass(frozen=True)
+class _DailyEvidence:
+    session_date: date
+    disposition: Literal[
+        "INCLUDED",
+        "EXCLUDED_NON_STRUCTURAL",
+        "EXCLUDED_STRUCTURAL",
+        "INVALID",
+    ]
+    exclusion_reason: str
+    structural_failure: bool
+    baseline_metric: _DailyMetric | None
+    candidate_metric: _DailyMetric | None
+
+
+@dataclass(frozen=True)
 class _SourceEvidence:
-    metrics_by_date: Mapping[date, _DailyMetric]
+    daily_by_date: Mapping[date, _DailyEvidence]
     blockers: tuple[str, ...]
     excluded_targets: int
     pre_freeze_rows_excluded: int
+    post_assessment_rows_excluded: int
+
+
+@dataclass(frozen=True)
+class _AssessmentPolicy:
+    assessment_as_of_date: date
+    supplied: bool
+    blockers: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "version": ASSESSMENT_POLICY_VERSION,
+            "assessment_as_of_date": self.assessment_as_of_date.isoformat(),
+            "assessment_as_of_date_provenance": (
+                "CALLER_SUPPLIED_UNSIGNED" if self.supplied else "MISSING"
+            ),
+            "cutoff_provenance_verified": False,
+            "market_calendar": "NYSE_STATIC_2024_2027",
+            "expected_session_denominator_required": True,
+            "minimum_expected_session_coverage_ratio": (
+                MINIMUM_EXPECTED_SESSION_COVERAGE_RATIO
+            ),
+            "within_symbol_return_bps_required": True,
+            "nvda_control_role": "DATA_OPERATIONAL_CONTROL_ONLY",
+            "quant_candidate_required_for_promotion": True,
+            "automatic_promotion_allowed": False,
+            "legacy_frozen_metric_track": "candidate_metrics",
+            "assessment_evidence_tracks": [
+                "baseline_metrics",
+                "candidate_metrics",
+                "daily_dispositions",
+            ],
+            "frozen_manifest_notes_are_identity_only": True,
+        }
 
 
 def canonical_frozen_queue_manifest() -> dict[str, object]:
@@ -474,35 +545,93 @@ def frozen_queue_digest(value: object) -> str:
     return parse_frozen_queue_spec(value).digest
 
 
+def _parse_assessment_policy(
+    value: object,
+    *,
+    spec: FrozenQueueSpec,
+) -> _AssessmentPolicy:
+    if value is None:
+        return _AssessmentPolicy(
+            assessment_as_of_date=spec.as_of_date,
+            supplied=False,
+            blockers=("ASSESSMENT_POLICY_MISSING",),
+        )
+    payload = _mapping(value, field_name="assessment_policy")
+    version = _required_string(
+        payload.get("version"),
+        field_name="assessment_policy.version",
+    )
+    if version != ASSESSMENT_POLICY_VERSION:
+        raise ValueError("assessment_policy.version is unsupported")
+    assessment_as_of_date = _required_date(
+        payload.get("assessment_as_of_date"),
+        field_name="assessment_policy.assessment_as_of_date",
+    )
+    if assessment_as_of_date < spec.as_of_date:
+        raise ValueError(
+            "assessment_policy.assessment_as_of_date must not precede "
+            "the frozen as-of date"
+        )
+    if not (
+        COVERAGE_START_YEAR
+        <= assessment_as_of_date.year
+        <= COVERAGE_END_YEAR
+    ):
+        raise ValueError(
+            "assessment_policy.assessment_as_of_date is outside the "
+            "repository market-calendar coverage"
+        )
+    return _AssessmentPolicy(
+        assessment_as_of_date=assessment_as_of_date,
+        supplied=True,
+        blockers=("ASSESSMENT_CUTOFF_PROVENANCE_UNVERIFIED",),
+    )
+
+
+def _expected_us_sessions(
+    *,
+    after: date,
+    through: date,
+) -> tuple[date, ...]:
+    sessions: list[date] = []
+    current = after + timedelta(days=1)
+    while current <= through:
+        if current.weekday() < 5 and not is_market_closed("US", current):
+            sessions.append(current)
+        current += timedelta(days=1)
+    return tuple(sessions)
+
+
 def _daily_metric(
     payload: Mapping[str, object],
     *,
     session_date: date,
     target_bars: int,
+    metric_track: str,
 ) -> _DailyMetric:
     bars = _non_negative_integer(
         payload.get("bars"),
-        field_name="candidate_metrics.bars",
+        field_name=f"{metric_track}.bars",
     )
     if bars != target_bars or bars == 0:
-        raise ValueError("candidate metrics must cover all target bars")
+        raise ValueError(f"{metric_track} must cover all target bars")
     closed_trades = _non_negative_integer(
         payload.get("closed_trades"),
-        field_name="candidate_metrics.closed_trades",
+        field_name=f"{metric_track}.closed_trades",
     )
     gross_pnl = _finite_number(
         payload.get("gross_pnl"),
-        field_name="candidate_metrics.gross_pnl",
+        field_name=f"{metric_track}.gross_pnl",
     )
     fees = _finite_number(
         payload.get("fees"),
-        field_name="candidate_metrics.fees",
+        field_name=f"{metric_track}.fees",
     )
     if fees < 0:
-        raise ValueError("candidate_metrics.fees must not be negative")
+        raise ValueError(f"{metric_track}.fees must not be negative")
     net_pnl = _finite_number(
         payload.get("net_pnl"),
-        field_name="candidate_metrics.net_pnl",
+        field_name=f"{metric_track}.net_pnl",
     )
     if not math.isclose(
         net_pnl,
@@ -510,7 +639,7 @@ def _daily_metric(
         rel_tol=1e-8,
         abs_tol=1e-6,
     ):
-        raise ValueError("candidate metrics net PnL is not cost adjusted")
+        raise ValueError(f"{metric_track} net PnL is not cost adjusted")
     return _DailyMetric(
         session_date=session_date,
         bars=bars,
@@ -526,10 +655,13 @@ def _source_evidence(
     *,
     entry: FrozenQueueEntry,
     spec: FrozenQueueSpec,
+    assessment_policy: _AssessmentPolicy,
+    expected_session_dates: frozenset[date],
 ) -> _SourceEvidence:
     blockers: list[str] = []
     excluded_targets = 0
     pre_freeze_rows_excluded = 0
+    post_assessment_rows_excluded = 0
     try:
         report = _mapping(raw_report, field_name=f"report[{entry.symbol}]")
         _required_false(
@@ -592,13 +724,14 @@ def _source_evidence(
         raw_daily = _sequence(report.get("daily"), field_name="daily")
     except ValueError:
         return _SourceEvidence(
-            metrics_by_date={},
+            daily_by_date={},
             blockers=("SOURCE_FORWARD_REPORT_INVALID",),
             excluded_targets=0,
             pre_freeze_rows_excluded=0,
+            post_assessment_rows_excluded=0,
         )
 
-    metrics_by_date: dict[date, _DailyMetric] = {}
+    daily_by_date: dict[date, _DailyEvidence] = {}
     observed_dates: set[date] = set()
     for raw_row in raw_daily:
         try:
@@ -610,18 +743,51 @@ def _source_evidence(
             if session_date in observed_dates:
                 raise ValueError("duplicate target session")
             observed_dates.add(session_date)
+        except ValueError:
+            blockers.append("SOURCE_DAILY_EVIDENCE_INVALID")
+            continue
+
+        if session_date <= spec.as_of_date:
+            pre_freeze_rows_excluded += 1
+            continue
+        if session_date > assessment_policy.assessment_as_of_date:
+            post_assessment_rows_excluded += 1
+            blockers.append("SOURCE_EVIDENCE_AFTER_ASSESSMENT_WINDOW")
+            continue
+        if session_date not in expected_session_dates:
+            blockers.append("SOURCE_NON_TRADING_SESSION_EVIDENCE")
+            continue
+
+        try:
             disposition = _required_string(
                 row.get("disposition"),
                 field_name="disposition",
-            )
+            ).upper()
             if disposition == "EXCLUDED":
+                structural_failure = _required_bool(
+                    row.get("structural_failure"),
+                    field_name="structural_failure",
+                )
+                exclusion_reason = _required_string(
+                    row.get("exclusion_reason"),
+                    field_name="exclusion_reason",
+                )
                 excluded_targets += 1
+                daily_by_date[session_date] = _DailyEvidence(
+                    session_date=session_date,
+                    disposition=(
+                        "EXCLUDED_STRUCTURAL"
+                        if structural_failure
+                        else "EXCLUDED_NON_STRUCTURAL"
+                    ),
+                    exclusion_reason=exclusion_reason,
+                    structural_failure=structural_failure,
+                    baseline_metric=None,
+                    candidate_metric=None,
+                )
                 continue
             if disposition != "INCLUDED":
                 raise ValueError("daily disposition is invalid")
-            if session_date <= spec.as_of_date:
-                pre_freeze_rows_excluded += 1
-                continue
             _required_false(
                 row.get("structural_failure"),
                 field_name="structural_failure",
@@ -667,24 +833,59 @@ def _source_evidence(
                     row.get(field_name),
                     field_name=field_name,
                 )
-            metric = _daily_metric(
+            baseline_metric = _daily_metric(
+                _mapping(
+                    row.get("baseline_metrics"),
+                    field_name="baseline_metrics",
+                ),
+                session_date=session_date,
+                target_bars=target_bars,
+                metric_track="baseline_metrics",
+            )
+            candidate_metric = _daily_metric(
                 _mapping(
                     row.get("candidate_metrics"),
                     field_name="candidate_metrics",
                 ),
                 session_date=session_date,
                 target_bars=target_bars,
+                metric_track="candidate_metrics",
             )
         except ValueError:
-            blockers.append("SOURCE_INCLUDED_EVIDENCE_INVALID")
+            raw_disposition = row.get("disposition")
+            blocker = (
+                "SOURCE_EXCLUDED_EVIDENCE_INVALID"
+                if (
+                    isinstance(raw_disposition, str)
+                    and raw_disposition.strip().upper() == "EXCLUDED"
+                )
+                else "SOURCE_INCLUDED_EVIDENCE_INVALID"
+            )
+            blockers.append(blocker)
+            daily_by_date[session_date] = _DailyEvidence(
+                session_date=session_date,
+                disposition="INVALID",
+                exclusion_reason=blocker,
+                structural_failure=False,
+                baseline_metric=None,
+                candidate_metric=None,
+            )
             continue
-        metrics_by_date[session_date] = metric
+        daily_by_date[session_date] = _DailyEvidence(
+            session_date=session_date,
+            disposition="INCLUDED",
+            exclusion_reason="",
+            structural_failure=False,
+            baseline_metric=baseline_metric,
+            candidate_metric=candidate_metric,
+        )
 
     return _SourceEvidence(
-        metrics_by_date=metrics_by_date,
+        daily_by_date=daily_by_date,
         blockers=tuple(dict.fromkeys(blockers)),
         excluded_targets=excluded_targets,
         pre_freeze_rows_excluded=pre_freeze_rows_excluded,
+        post_assessment_rows_excluded=post_assessment_rows_excluded,
     )
 
 
@@ -704,8 +905,78 @@ def _metric_summary(
         "gross_pnl": _round_metric(sum(item.gross_pnl for item in metrics)),
         "estimated_fees": _round_metric(sum(item.fees for item in metrics)),
         "net_pnl": _round_metric(net_pnl),
+        "closed_trade_entry_notional": None,
+        "return_preimage_complete": False,
+        "return_preimage_source": "UNAVAILABLE_IN_FROZEN_SOURCE_RESULT",
+        "net_return_bps": None,
         "average_net_pnl_per_trade": (
             _round_metric(net_pnl / trades) if trades else None
+        ),
+    }
+
+
+def _daily_disposition(
+    source: _SourceEvidence,
+    session_date: date,
+) -> tuple[str, str, bool]:
+    evidence = source.daily_by_date.get(session_date)
+    if evidence is None:
+        return "MISSING", "", False
+    return (
+        evidence.disposition,
+        evidence.exclusion_reason,
+        evidence.structural_failure,
+    )
+
+
+def _included_dates(
+    source: _SourceEvidence,
+    expected_dates: Sequence[date],
+) -> tuple[date, ...]:
+    return tuple(
+        session_date
+        for session_date in expected_dates
+        if (
+            (evidence := source.daily_by_date.get(session_date)) is not None
+            and evidence.disposition == "INCLUDED"
+            and evidence.baseline_metric is not None
+            and evidence.candidate_metric is not None
+        )
+    )
+
+
+def _within_symbol_return_comparison(
+    baseline_summary: Mapping[str, object],
+    candidate_summary: Mapping[str, object],
+    *,
+    paired_session_count: int,
+) -> dict[str, object]:
+    baseline_return = baseline_summary.get("net_return_bps")
+    candidate_return = candidate_summary.get("net_return_bps")
+    available = isinstance(baseline_return, (int, float)) and isinstance(
+        candidate_return,
+        (int, float),
+    )
+    return {
+        "available": available,
+        "comparison_design": "SAME_SYMBOL_SAME_SESSION_BASELINE_PAIRED",
+        "normalization": (
+            "SUM_NET_PNL_DIVIDED_BY_SUM_CLOSED_TRADE_ENTRY_NOTIONAL"
+        ),
+        "paired_session_count": paired_session_count,
+        "baseline_net_return_bps": baseline_return if available else None,
+        "candidate_net_return_bps": candidate_return if available else None,
+        "candidate_delta_bps": (
+            _round_metric(
+                cast(float, candidate_return) - cast(float, baseline_return)
+            )
+            if available
+            else None
+        ),
+        "missing_preimage_blocker": (
+            None
+            if available
+            else "WITHIN_SYMBOL_RETURN_BPS_PREIMAGE_MISSING"
         ),
     }
 
@@ -744,7 +1015,25 @@ def _limitations(context: FrozenEvidenceContext) -> list[str]:
         ),
         (
             "Cross-symbol PnL is descriptive and inherits the source "
-            "evaluator's sizing assumptions."
+            "evaluator's sizing assumptions; NVDA is a data/operational "
+            "control, not a performance-matched control."
+        ),
+        (
+            "The primary performance comparison is the same-symbol, "
+            "same-session candidate-versus-baseline return in basis points; "
+            "the frozen source result does not expose a result-digest-bound "
+            "closed-trade entry-notional preimage, so the comparison remains "
+            "blocked rather than accepting caller-enriched values."
+        ),
+        (
+            "Expected NYSE sessions are enumerated through the explicit "
+            "assessment as-of date; missing and excluded symbol-dates remain "
+            "visible in the coverage denominator."
+        ),
+        (
+            "The assessment cutoff is caller-supplied and unsigned, so it "
+            "cannot establish evidence-review readiness until a producer-"
+            "bound complete-session watermark is versioned."
         ),
         (
             "Only sessions strictly after the frozen as-of date count; the "
@@ -753,6 +1042,11 @@ def _limitations(context: FrozenEvidenceContext) -> list[str]:
         (
             "Twenty future trade days and fifty closed trades are evidence "
             "sufficiency gates, not promotion thresholds."
+        ),
+        (
+            "Evidence-review readiness never establishes promotion "
+            "eligibility; a separate current quant CANDIDATE veto and manual "
+            "decision remain mandatory."
         ),
         (
             "The repository-owned canonical manifest freezes queue identity; "
@@ -774,6 +1068,15 @@ def evaluate_frozen_forward_disproof_queue(
     if payload.get("schema_version") != FROZEN_DISPROOF_INPUT_SCHEMA_VERSION:
         raise ValueError("input schema_version is unsupported")
     spec = parse_frozen_queue_spec(payload.get("frozen_queue"))
+    assessment_policy = _parse_assessment_policy(
+        payload.get("assessment_policy"),
+        spec=spec,
+    )
+    expected_dates = _expected_us_sessions(
+        after=spec.as_of_date,
+        through=assessment_policy.assessment_as_of_date,
+    )
+    expected_date_set = frozenset(expected_dates)
     expected_digest_raw = payload.get("precommitted_freeze_digest")
     precommit_verified = False
     if expected_digest_raw is not None:
@@ -794,49 +1097,177 @@ def evaluate_frozen_forward_disproof_queue(
         raw_report = reports.get(entry.symbol)
         if raw_report is None:
             source_by_symbol[entry.symbol] = _SourceEvidence(
-                metrics_by_date={},
+                daily_by_date={},
                 blockers=("SOURCE_FORWARD_REPORT_MISSING",),
                 excluded_targets=0,
                 pre_freeze_rows_excluded=0,
+                post_assessment_rows_excluded=0,
             )
             continue
         source_by_symbol[entry.symbol] = _source_evidence(
             raw_report,
             entry=entry,
             spec=spec,
+            assessment_policy=assessment_policy,
+            expected_session_dates=expected_date_set,
         )
 
     control = source_by_symbol[spec.benchmark_symbol]
+    control_included_dates = _included_dates(control, expected_dates)
     candidate_reports: list[dict[str, object]] = []
     for entry in sorted(
         (row for row in spec.entries if row.role != "CONTROL"),
         key=lambda row: row.symbol,
     ):
         source = source_by_symbol[entry.symbol]
+        candidate_included_dates = _included_dates(source, expected_dates)
         common_dates = tuple(sorted(
-            set(source.metrics_by_date).intersection(control.metrics_by_date)
+            set(candidate_included_dates).intersection(control_included_dates)
         ))
         candidate_metrics = [
-            source.metrics_by_date[value] for value in common_dates
+            cast(
+                _DailyMetric,
+                source.daily_by_date[value].candidate_metric,
+            )
+            for value in common_dates
         ]
         control_metrics = [
-            control.metrics_by_date[value] for value in common_dates
+            cast(
+                _DailyMetric,
+                control.daily_by_date[value].candidate_metric,
+            )
+            for value in common_dates
+        ]
+        within_symbol_baseline_metrics = [
+            cast(
+                _DailyMetric,
+                source.daily_by_date[value].baseline_metric,
+            )
+            for value in candidate_included_dates
+        ]
+        within_symbol_candidate_metrics = [
+            cast(
+                _DailyMetric,
+                source.daily_by_date[value].candidate_metric,
+            )
+            for value in candidate_included_dates
         ]
         candidate_summary = _metric_summary(candidate_metrics)
         control_summary = _metric_summary(control_metrics)
-        blockers = [*control.blockers, *source.blockers]
+        within_symbol_baseline_summary = _metric_summary(
+            within_symbol_baseline_metrics
+        )
+        within_symbol_candidate_summary = _metric_summary(
+            within_symbol_candidate_metrics
+        )
+        within_symbol_return = _within_symbol_return_comparison(
+            within_symbol_baseline_summary,
+            within_symbol_candidate_summary,
+            paired_session_count=len(candidate_included_dates),
+        )
+
+        expected_session_dispositions: list[dict[str, object]] = []
+        disposition_mismatch = False
+        exclusion_reason_mismatch = False
+        candidate_structural_exclusion = False
+        control_structural_exclusion = False
+        for session_date in expected_dates:
+            (
+                candidate_disposition,
+                candidate_exclusion_reason,
+                candidate_structural,
+            ) = _daily_disposition(source, session_date)
+            (
+                control_disposition,
+                control_exclusion_reason,
+                control_structural,
+            ) = _daily_disposition(control, session_date)
+            disposition_mismatch = disposition_mismatch or (
+                candidate_disposition != control_disposition
+            )
+            exclusion_reason_mismatch = exclusion_reason_mismatch or (
+                candidate_disposition == control_disposition
+                and candidate_disposition
+                in {
+                    "EXCLUDED_NON_STRUCTURAL",
+                    "EXCLUDED_STRUCTURAL",
+                }
+                and candidate_exclusion_reason != control_exclusion_reason
+            )
+            candidate_structural_exclusion = (
+                candidate_structural_exclusion or candidate_structural
+            )
+            control_structural_exclusion = (
+                control_structural_exclusion or control_structural
+            )
+            expected_session_dispositions.append({
+                "session_date": session_date.isoformat(),
+                "candidate_disposition": candidate_disposition,
+                "candidate_exclusion_reason": candidate_exclusion_reason,
+                "nvda_control_disposition": control_disposition,
+                "nvda_control_exclusion_reason": control_exclusion_reason,
+                "paired_included": (
+                    candidate_disposition == "INCLUDED"
+                    and control_disposition == "INCLUDED"
+                ),
+            })
+
+        expected_session_count = len(expected_dates)
+        candidate_coverage = (
+            len(candidate_included_dates) / expected_session_count
+            if expected_session_count
+            else 0.0
+        )
+        control_coverage = (
+            len(control_included_dates) / expected_session_count
+            if expected_session_count
+            else 0.0
+        )
+        paired_coverage = (
+            len(common_dates) / expected_session_count
+            if expected_session_count
+            else 0.0
+        )
+        blockers = [
+            *assessment_policy.blockers,
+            *control.blockers,
+            *source.blockers,
+        ]
         if not precommit_verified:
             blockers.append("FREEZE_PRECOMMITMENT_MISSING")
+        if candidate_structural_exclusion:
+            blockers.append("CANDIDATE_STRUCTURAL_EXCLUSION")
+        if control_structural_exclusion:
+            blockers.append("NVDA_CONTROL_STRUCTURAL_EXCLUSION")
+        if disposition_mismatch:
+            blockers.append("EXPECTED_SESSION_DISPOSITION_MISMATCH")
+        if exclusion_reason_mismatch:
+            blockers.append("EXPECTED_SESSION_EXCLUSION_REASON_MISMATCH")
+        if (
+            paired_coverage + 1e-12
+            < MINIMUM_EXPECTED_SESSION_COVERAGE_RATIO
+        ):
+            blockers.append("EXPECTED_SESSION_COVERAGE_INSUFFICIENT")
         if len(common_dates) < MINIMUM_FUTURE_TRADE_DAYS:
             blockers.append("FUTURE_TRADE_DAYS_INSUFFICIENT")
         candidate_trades = cast(int, candidate_summary["closed_trades"])
         control_trades = cast(int, control_summary["closed_trades"])
         if candidate_trades < MINIMUM_CLOSED_TRADES:
             blockers.append("CANDIDATE_CLOSED_TRADES_INSUFFICIENT")
-        if control_trades < MINIMUM_CLOSED_TRADES:
-            blockers.append("NVDA_CONTROL_CLOSED_TRADES_INSUFFICIENT")
+        if (
+            candidate_included_dates
+            and within_symbol_return["available"] is not True
+        ):
+            blockers.append("WITHIN_SYMBOL_RETURN_BPS_PREIMAGE_MISSING")
         blockers = list(dict.fromkeys(blockers))
-        ready = not blockers
+        evidence_review_ready = not blockers
+        promotion_blockers = []
+        if not evidence_review_ready:
+            promotion_blockers.append("EVIDENCE_REVIEW_NOT_READY")
+        promotion_blockers.extend([
+            "QUANT_CANDIDATE_VETO_NOT_VERIFIED",
+            "MANUAL_PROMOTION_REQUIRED",
+        ])
         candidate_net = cast(float, candidate_summary["net_pnl"])
         control_net = cast(float, control_summary["net_pnl"])
         candidate_reports.append({
@@ -846,11 +1277,29 @@ def evaluate_frozen_forward_disproof_queue(
             "config_hash": entry.config_hash,
             "status": (
                 "READY_FOR_MANUAL_DISPROOF_REVIEW"
-                if ready
+                if evidence_review_ready
                 else "INSUFFICIENT_EVIDENCE"
             ),
-            "manual_disproof_review_ready": ready,
+            "evidence_review_ready": evidence_review_ready,
+            "manual_disproof_review_ready": evidence_review_ready,
+            "promotion_eligible": False,
+            "promotion_blockers": promotion_blockers,
             "automatic_disproof_decision_allowed": False,
+            "expected_session_count": expected_session_count,
+            "expected_session_dates": [
+                session_date.isoformat() for session_date in expected_dates
+            ],
+            "expected_session_digest": _window_digest(expected_dates),
+            "expected_session_dispositions": expected_session_dispositions,
+            "candidate_expected_session_coverage_ratio": _round_metric(
+                candidate_coverage
+            ),
+            "nvda_expected_session_coverage_ratio": _round_metric(
+                control_coverage
+            ),
+            "paired_expected_session_coverage_ratio": _round_metric(
+                paired_coverage
+            ),
             "common_future_trade_days": len(common_dates),
             "remaining_future_trade_days": max(
                 0,
@@ -863,8 +1312,8 @@ def evaluate_frozen_forward_disproof_queue(
                 common_dates[-1].isoformat() if common_dates else None
             ),
             "same_window_digest": _window_digest(common_dates),
-            "candidate_source_future_days": len(source.metrics_by_date),
-            "nvda_source_future_days": len(control.metrics_by_date),
+            "candidate_source_future_days": len(candidate_included_dates),
+            "nvda_source_future_days": len(control_included_dates),
             "candidate_excluded_targets": source.excluded_targets,
             "nvda_excluded_targets": control.excluded_targets,
             "candidate_pre_freeze_rows_excluded": (
@@ -873,11 +1322,28 @@ def evaluate_frozen_forward_disproof_queue(
             "nvda_pre_freeze_rows_excluded": (
                 control.pre_freeze_rows_excluded
             ),
+            "candidate_post_assessment_rows_excluded": (
+                source.post_assessment_rows_excluded
+            ),
+            "nvda_post_assessment_rows_excluded": (
+                control.post_assessment_rows_excluded
+            ),
             "candidate": candidate_summary,
             "nvda_same_window_control": control_summary,
+            "within_symbol_baseline": within_symbol_baseline_summary,
+            "within_symbol_candidate": within_symbol_candidate_summary,
+            "within_symbol_return_bps_comparison": within_symbol_return,
+            "nvda_control": {
+                "symbol": spec.benchmark_symbol,
+                "role": "DATA_OPERATIONAL_CONTROL_ONLY",
+                "performance_control": False,
+                "raw_dollar_comparison_descriptive_only": True,
+                "closed_trades_gate_required": False,
+            },
             "observed_net_pnl_delta_vs_nvda": _round_metric(
                 candidate_net - control_net
             ),
+            "observed_net_pnl_delta_vs_nvda_descriptive_only": True,
             "remaining_candidate_closed_trades": max(
                 0,
                 MINIMUM_CLOSED_TRADES - candidate_trades,
@@ -886,11 +1352,13 @@ def evaluate_frozen_forward_disproof_queue(
                 0,
                 MINIMUM_CLOSED_TRADES - control_trades,
             ),
+            "remaining_nvda_closed_trades_descriptive_only": True,
+            "evidence_blockers": blockers,
             "blockers": blockers,
         })
 
     all_ready = bool(candidate_reports) and all(
-        item["manual_disproof_review_ready"] is True
+        item["evidence_review_ready"] is True
         for item in candidate_reports
     )
     status: FrozenQueueStatus = (
@@ -901,7 +1369,18 @@ def evaluate_frozen_forward_disproof_queue(
     return {
         "schema_version": FROZEN_DISPROOF_OUTPUT_SCHEMA_VERSION,
         "algorithm_version": FROZEN_DISPROOF_ALGORITHM_VERSION,
+        "assessment_report_schema_version": (
+            ASSESSMENT_REPORT_SCHEMA_VERSION
+        ),
+        "assessment_algorithm_version": ASSESSMENT_ALGORITHM_VERSION,
         "status": status,
+        "evidence_review_ready": all_ready,
+        "promotion_eligible": False,
+        "promotion_blockers": [
+            *([] if all_ready else ["EVIDENCE_REVIEW_NOT_READY"]),
+            "QUANT_CANDIDATE_VETO_NOT_VERIFIED",
+            "MANUAL_PROMOTION_REQUIRED",
+        ],
         "research_only": True,
         "live_equivalent": False,
         "order_submission_allowed": False,
@@ -914,11 +1393,34 @@ def evaluate_frozen_forward_disproof_queue(
             "freeze_digest": spec.digest,
             "precommit_verified": precommit_verified,
         },
+        "assessment_policy": assessment_policy.to_dict(),
+        "assessment_window": {
+            "market": "US",
+            "first_expected_session_date": (
+                expected_dates[0].isoformat() if expected_dates else None
+            ),
+            "last_expected_session_date": (
+                expected_dates[-1].isoformat() if expected_dates else None
+            ),
+            "expected_session_count": len(expected_dates),
+            "expected_session_dates": [
+                session_date.isoformat() for session_date in expected_dates
+            ],
+            "expected_session_digest": _window_digest(expected_dates),
+        },
         "evidence_thresholds": {
             "minimum_future_trade_days": MINIMUM_FUTURE_TRADE_DAYS,
             "minimum_closed_trades_per_candidate": MINIMUM_CLOSED_TRADES,
-            "minimum_closed_trades_for_nvda_control": MINIMUM_CLOSED_TRADES,
+            "descriptive_nvda_closed_trade_reference": MINIMUM_CLOSED_TRADES,
+            "nvda_closed_trades_gate_required": False,
+            "minimum_expected_session_coverage_ratio": (
+                MINIMUM_EXPECTED_SESSION_COVERAGE_RATIO
+            ),
             "same_window_nvda_comparison_required": True,
+            "same_window_nvda_operational_comparison_required": True,
+            "nvda_performance_control": False,
+            "within_symbol_return_bps_comparison_required": True,
+            "quant_candidate_required_for_promotion": True,
             "thresholds_tunable": False,
         },
         "fidelity_mode": "ONE_MINUTE_OHLCV_FORWARD_APPROXIMATION",
@@ -928,6 +1430,7 @@ def evaluate_frozen_forward_disproof_queue(
 
 
 __all__ = [
+    "ASSESSMENT_POLICY_VERSION",
     "CONTROL_SYMBOL",
     "FORWARD_CANDIDATE_ALGORITHM_VERSION",
     "FROZEN_DISPROOF_ALGORITHM_VERSION",
@@ -937,6 +1440,7 @@ __all__ = [
     "FROZEN_QUEUE_DIGEST",
     "FROZEN_QUEUE_ROLES",
     "MINIMUM_CLOSED_TRADES",
+    "MINIMUM_EXPECTED_SESSION_COVERAGE_RATIO",
     "MINIMUM_FUTURE_TRADE_DAYS",
     "canonical_frozen_queue_manifest",
     "evaluate_frozen_forward_disproof_queue",

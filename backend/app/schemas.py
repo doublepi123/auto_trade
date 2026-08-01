@@ -994,13 +994,112 @@ class StrategyV2WarmupDiagnostic(BaseModel):
     variants: list[StrategyV2WarmupVariant] = Field(default_factory=list)
 
 
+class StrategyV2BoundaryNeutralDiagnosticRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    config_version: Optional[str] = Field(default=None, max_length=64)
+
+    @field_validator("symbol")
+    @classmethod
+    def validate_boundary_neutral_symbol(cls, value: str) -> str:
+        return _normalize_symbol(value)
+
+
+class StrategyV2BoundaryNeutralCandidateSpec(BaseModel):
+    schema_version: Literal[1] = 1
+    algorithm_version: Literal[
+        "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+    ] = "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+    legacy_algorithm_version: Literal[
+        "strategy-v2-causal-trend-prewarm-v1"
+    ] = "strategy-v2-causal-trend-prewarm-v1"
+    evaluation_scope: Literal["RETROSPECTIVE_DIAGNOSTIC_ONLY"] = (
+        "RETROSPECTIVE_DIAGNOSTIC_ONLY"
+    )
+    boundary_rule: Literal[
+        "SEED_TARGET_FIRST_5M_DM_ZERO_TR_TARGET_RANGE"
+    ] = "SEED_TARGET_FIRST_5M_DM_ZERO_TR_TARGET_RANGE"
+    warmup_scope: Literal["ADX_VOL_ONLY"] = "ADX_VOL_ONLY"
+    target_sample: Literal["SAME_PERSISTED_TARGET_BARS"] = (
+        "SAME_PERSISTED_TARGET_BARS"
+    )
+    observation_schedule: Literal["SAME_PERSISTED_OBSERVED_AT"] = (
+        "SAME_PERSISTED_OBSERVED_AT"
+    )
+    fee_slippage: Literal["SAME_FROZEN_SOURCE_CONFIG"] = (
+        "SAME_FROZEN_SOURCE_CONFIG"
+    )
+    retrospective_results_forward_eligible: Literal[False] = False
+    forward_evidence_requires_registration_before_target_open: Literal[True] = (
+        True
+    )
+    order_submission_allowed: Literal[False] = False
+    automatic_promotion_allowed: Literal[False] = False
+
+
+class StrategyV2BoundaryNeutralVariant(BaseModel):
+    label: Literal[
+        "SESSION_LOCAL_BASELINE",
+        "LEGACY_CAUSAL_TREND_PREWARM_V1",
+        "BOUNDARY_NEUTRAL_CAUSAL_TREND_PREWARM_V1",
+    ]
+    algorithm_version: str
+    warmup_scope: Literal["NONE", "ADX_VOL_ONLY"]
+    source_config_version: str
+    metrics: StrategyV2ShadowMetrics = Field(
+        default_factory=StrategyV2ShadowMetrics
+    )
+    daily: list[StrategyV2WarmupDaily] = Field(default_factory=list)
+
+
+class StrategyV2BoundaryNeutralDiagnosticResponse(BaseModel):
+    persisted: Literal[False] = False
+    mode: Literal["SHADOW"] = "SHADOW"
+    evaluation_scope: Literal["RETROSPECTIVE_DIAGNOSTIC_ONLY"] = (
+        "RETROSPECTIVE_DIAGNOSTIC_ONLY"
+    )
+    order_submission_allowed: Literal[False] = False
+    automatic_promotion_allowed: Literal[False] = False
+    retrospective_results_forward_eligible: Literal[False] = False
+    forward_evidence_requires_registration_before_target_open: Literal[True] = (
+        True
+    )
+    symbol: str
+    source_config_version: str
+    candidate_spec: StrategyV2BoundaryNeutralCandidateSpec = Field(
+        default_factory=StrategyV2BoundaryNeutralCandidateSpec
+    )
+    candidate_spec_sha256: str = Field(min_length=64, max_length=64)
+    status: Literal[
+        "INSUFFICIENT_EVIDENCE",
+        "READY_FOR_REVIEW",
+        "BLOCKED",
+    ]
+    minimum_causal_pairs: int = 5
+    observed_causal_pairs: int = 0
+    evaluated_causal_pairs: int = 0
+    blockers: list[str] = Field(default_factory=list)
+    baseline_replay_match: Optional[bool] = None
+    same_target_bars: Literal[True] = True
+    same_observation_schedule: Literal[True] = True
+    same_fee_slippage: Literal[True] = True
+    causal_history_only: Literal[True] = True
+    vwap_zscore_session_local: Literal[True] = True
+    retrospective_target_sessions: list[date] = Field(default_factory=list)
+    variants: list[StrategyV2BoundaryNeutralVariant] = Field(
+        default_factory=list
+    )
+
+
 class StrategyV2ForwardRegistrationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     symbol: str
     source_config_version: str = Field(min_length=64, max_length=64)
     candidate_algorithm_version: Literal[
-        "strategy-v2-causal-trend-prewarm-v1"
+        "strategy-v2-causal-trend-prewarm-v1",
+        "strategy-v2-causal-trend-prewarm-boundary-neutral-v1",
     ] = "strategy-v2-causal-trend-prewarm-v1"
     confirm_forward_only: Literal[True]
     confirm_no_automatic_promotion: Literal[True]
@@ -1025,7 +1124,8 @@ class StrategyV2ForwardRegistrationResponse(BaseModel):
     market: Literal["US", "HK"]
     market_timezone: str
     candidate_algorithm_version: Literal[
-        "strategy-v2-causal-trend-prewarm-v1"
+        "strategy-v2-causal-trend-prewarm-v1",
+        "strategy-v2-causal-trend-prewarm-boundary-neutral-v1",
     ]
     source_config_version: str
     evaluator_digest: str

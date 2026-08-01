@@ -1454,6 +1454,8 @@ def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
         "strategy_v2_shadow_trades",
         "strategy_v2_forward_registrations",
         "strategy_v2_forward_evidence",
+        "strategy_v2_forward_replay_artifacts",
+        "strategy_v2_forward_evidence_artifacts",
         "strategy_v2_exit_challenger_registrations",
         "strategy_v2_exit_challenger_trades",
         "strategy_v2_bracket_challenger_registrations",

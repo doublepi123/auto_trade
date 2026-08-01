@@ -8,9 +8,10 @@ from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from functools import cache
 from typing import Any, Literal, Mapping, Protocol, Sequence
 
-from sqlalchemy import func
+from sqlalchemy import and_, func, or_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -23,6 +24,8 @@ from app.core.market_calendar import (
     session_status,
 )
 from app.domain.strategy_v2 import (
+    BOUNDARY_NEUTRAL_PREWARM_ALGORITHM_VERSION,
+    BoundaryNeutralCausalTrendPrewarmFeatureEngine,
     CAUSAL_ENTRY_FILL_OFFSET_BARS,
     CausalTrendPrewarmFeatureEngine,
     StrategyBar,
@@ -38,11 +41,29 @@ from app.domain.strategy_v2 import (
     estimated_round_trip_cost_pct,
     minimum_profit_target_pct,
 )
+from app.domain.strategy_v2.forward_replay_artifact import (
+    FORWARD_REPLAY_ARTIFACT_ROLE,
+    ForwardReplayArtifactError,
+    canonical_forward_replay_json,
+    decode_forward_replay_artifact,
+    encode_forward_replay_artifact,
+    forward_replay_artifact_binding_sha256,
+)
+from app.domain.strategy_v2.forward_semantics import (
+    FORWARD_EXECUTABLE_SEMANTIC_MANIFEST_VERSION,
+    forward_executable_semantic_digest,
+)
+from app.domain.strategy_v2.frozen_disproof_queue import (
+    FROZEN_EVALUATOR_DIGEST,
+    FROZEN_QUEUE_ENTRIES,
+)
 from app.platform.strategy_quality import strategy_quality_report
 from app.models import (
     StrategyConfig,
     StrategyV2ForwardEvidence,
+    StrategyV2ForwardEvidenceArtifact,
     StrategyV2ForwardRegistration,
+    StrategyV2ForwardReplayArtifact,
     StrategyV2ShadowConfig,
     StrategyV2ShadowDecision,
     StrategyV2ShadowState,
@@ -54,6 +75,10 @@ from app.schemas import (
     StrategyV2AdxChallengerRequest,
     StrategyV2AdxChallengerResponse,
     StrategyV2AdxChallengerResult,
+    StrategyV2BoundaryNeutralCandidateSpec,
+    StrategyV2BoundaryNeutralDiagnosticRequest,
+    StrategyV2BoundaryNeutralDiagnosticResponse,
+    StrategyV2BoundaryNeutralVariant,
     StrategyV2BracketChallengerReport,
     StrategyV2ForwardDailyEvidence,
     StrategyV2ForwardRegistrationRequest,
@@ -141,6 +166,22 @@ _MAX_CHALLENGER_COMPLETE_SESSIONS = 20
 _MIN_WARMUP_CAUSAL_PAIRS = 5
 _FORWARD_CANDIDATE_VERSION = "strategy-v2-causal-trend-prewarm-v1"
 FORWARD_EVALUATOR_VERSION = "strategy-v2-forward-evaluator-v4"
+_LEGACY_FORWARD_EVALUATOR_DIGEST = (
+    "e5ae9ea3e68dcc47d5131c21d8ba223824aecabf59da1f4b592df72cb9aa0294"
+)
+_BOUNDARY_NEUTRAL_FORWARD_EVALUATOR_VERSION = (
+    "strategy-v2-boundary-neutral-forward-evaluator-v1"
+)
+_APPROVED_BOUNDARY_NEUTRAL_EXECUTABLE_SEMANTIC_DIGEST = (
+    "79a4ec7474dab811b4cadaec97bb41889fc595fa2617f17b44237be62a35f3eb"
+)
+FORWARD_CANDIDATE_VERSIONS = (
+    _FORWARD_CANDIDATE_VERSION,
+    BOUNDARY_NEUTRAL_PREWARM_ALGORITHM_VERSION,
+)
+_SUPPORTED_FORWARD_CANDIDATE_VERSIONS = frozenset(
+    FORWARD_CANDIDATE_VERSIONS
+)
 _FORWARD_READY_PAIRS = 5
 _FORWARD_MATURE_PAIRS = 20
 _FORWARD_FINALIZE_START_MINUTES = 10
@@ -176,6 +217,12 @@ _PRESERVED_WAIT_REASONS = frozenset({"SESSION_DATA_INCOMPLETE"})
 class StrategyV2WaitPruneResult:
     deleted: int = 0
     batches: int = 0
+
+
+@dataclass(frozen=True)
+class StrategyV2ForwardArtifactBackfillResult:
+    archived: int = 0
+    blocked_evidence_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -227,6 +274,7 @@ class StrategyV2ShadowService:
         cutoff = (now or datetime.now(timezone.utc)) - timedelta(
             days=retention_days
         )
+        protected_sessions = self._forward_sessions_requiring_replay_source()
         expired = (
             StrategyV2ShadowDecision.action == StrategyV2Action.WAIT.value,
             StrategyV2ShadowDecision.bar_at < cutoff,
@@ -238,20 +286,52 @@ class StrategyV2ShadowService:
         )
         deleted = 0
         batches = 0
+        cursor_bar_at: datetime | None = None
+        cursor_id = 0
         while max_batches is None or batches < max_batches:
-            ids = [
-                row[0]
-                for row in (
-                    self.db.query(StrategyV2ShadowDecision.id)
-                    .filter(*expired)
-                    .order_by(
-                        StrategyV2ShadowDecision.bar_at.asc(),
-                        StrategyV2ShadowDecision.id.asc(),
+            ids: list[int] = []
+            exhausted = False
+            while len(ids) < batch_size:
+                scan_limit = batch_size
+                query = self.db.query(
+                    StrategyV2ShadowDecision.id,
+                    StrategyV2ShadowDecision.symbol,
+                    StrategyV2ShadowDecision.config_version,
+                    StrategyV2ShadowDecision.session_date,
+                    StrategyV2ShadowDecision.bar_at,
+                ).filter(*expired)
+                if cursor_bar_at is not None:
+                    query = query.filter(or_(
+                        StrategyV2ShadowDecision.bar_at > cursor_bar_at,
+                        and_(
+                            StrategyV2ShadowDecision.bar_at == cursor_bar_at,
+                            StrategyV2ShadowDecision.id > cursor_id,
+                        ),
+                    ))
+                rows = query.order_by(
+                    StrategyV2ShadowDecision.bar_at.asc(),
+                    StrategyV2ShadowDecision.id.asc(),
+                ).limit(scan_limit).all()
+                if not rows:
+                    exhausted = True
+                    break
+                for row in rows:
+                    cursor_id = int(row.id)
+                    cursor_bar_at = _as_utc(row.bar_at)
+                    session_key = (
+                        str(row.symbol),
+                        str(row.config_version),
+                        row.session_date,
                     )
-                    .limit(batch_size)
-                    .all()
-                )
-            ]
+                    if session_key not in protected_sessions:
+                        ids.append(cursor_id)
+                    if len(ids) >= batch_size:
+                        break
+                if len(ids) >= batch_size:
+                    break
+                if len(rows) < scan_limit:
+                    exhausted = True
+                    break
             if not ids:
                 break
             try:
@@ -268,7 +348,173 @@ class StrategyV2ShadowService:
                 self.db.rollback()
                 raise
             batches += 1
+            if exhausted:
+                break
         return StrategyV2WaitPruneResult(deleted=deleted, batches=batches)
+
+    def backfill_forward_replay_artifacts(
+        self,
+        *,
+        limit: int = 250,
+    ) -> StrategyV2ForwardArtifactBackfillResult:
+        """Archive still-available immutable inputs without broker backfill."""
+        if limit <= 0:
+            raise ValueError("forward replay artifact backfill limit must be positive")
+        rows = (
+            self.db.query(StrategyV2ForwardEvidence)
+            .outerjoin(
+                StrategyV2ForwardEvidenceArtifact,
+                (
+                    StrategyV2ForwardEvidenceArtifact.evidence_id
+                    == StrategyV2ForwardEvidence.id
+                )
+                & (
+                    StrategyV2ForwardEvidenceArtifact.role
+                    == FORWARD_REPLAY_ARTIFACT_ROLE
+                ),
+            )
+            .filter(
+                StrategyV2ForwardEvidence.disposition == "INCLUDED",
+                StrategyV2ForwardEvidenceArtifact.evidence_id.is_(None),
+            )
+            .order_by(StrategyV2ForwardEvidence.id.asc())
+            .limit(limit)
+            .all()
+        )
+        archived = 0
+        blocked: list[int] = []
+        for evidence in rows:
+            evidence_id = int(evidence.id or 0)
+            try:
+                registration = self.db.get(
+                    StrategyV2ForwardRegistration,
+                    evidence.registration_id,
+                )
+                if registration is None or evidence.seed_session_date is None:
+                    raise ValueError("forward evidence registration is incomplete")
+                if (
+                    registration.candidate_algorithm_version
+                    == BOUNDARY_NEUTRAL_PREWARM_ALGORITHM_VERSION
+                ):
+                    raise ValueError(
+                        "boundary-neutral evidence requires its original "
+                        "FULL_REPLAY_VERIFIED artifact"
+                    )
+                seed_decisions = (
+                    self.db.query(StrategyV2ShadowDecision)
+                    .filter(
+                        StrategyV2ShadowDecision.symbol == registration.symbol,
+                        StrategyV2ShadowDecision.config_version
+                        == registration.source_config_version,
+                        StrategyV2ShadowDecision.session_date
+                        == evidence.seed_session_date,
+                    )
+                    .order_by(
+                        StrategyV2ShadowDecision.bar_at.asc(),
+                        StrategyV2ShadowDecision.id.asc(),
+                    )
+                    .all()
+                )
+                target_decisions = (
+                    self.db.query(StrategyV2ShadowDecision)
+                    .filter(
+                        StrategyV2ShadowDecision.symbol == registration.symbol,
+                        StrategyV2ShadowDecision.config_version
+                        == registration.source_config_version,
+                        StrategyV2ShadowDecision.session_date
+                        == evidence.target_session_date,
+                    )
+                    .order_by(
+                        StrategyV2ShadowDecision.bar_at.asc(),
+                        StrategyV2ShadowDecision.id.asc(),
+                    )
+                    .all()
+                )
+                seed_bars = self._bars_from_persisted_evidence(
+                    seed_decisions,
+                    symbol=registration.symbol,
+                )
+                target_bars = self._bars_from_persisted_evidence(
+                    target_decisions,
+                    symbol=registration.symbol,
+                )
+                observation_schedule = self._observation_schedule(
+                    target_decisions
+                )
+                if (
+                    evidence_id <= 0
+                    or len(target_bars) != evidence.target_bars
+                    or self._forward_bars_hash(seed_bars)
+                    != evidence.seed_bars_sha256
+                    or self._forward_bars_hash(target_bars)
+                    != evidence.target_bars_sha256
+                    or self._forward_replay_input_hash(
+                        target_bars,
+                        observation_schedule,
+                    )
+                    != evidence.baseline_input_sha256
+                    or evidence.baseline_input_sha256
+                    != evidence.candidate_input_sha256
+                    or self._forward_text_hash(evidence.baseline_result_json)
+                    != evidence.baseline_result_sha256
+                    or self._forward_text_hash(evidence.candidate_result_json)
+                    != evidence.candidate_result_sha256
+                    or self._forward_evidence_digest(evidence)
+                    != evidence.evidence_digest_sha256
+                ):
+                    raise ValueError("forward evidence cannot be archived losslessly")
+                source_params = self._version_params(
+                    registration.symbol,
+                    registration.source_config_version,
+                )
+                session = get_session(registration.market)
+                trades = (
+                    self.db.query(StrategyV2ShadowTrade)
+                    .filter(
+                        StrategyV2ShadowTrade.symbol == registration.symbol,
+                        StrategyV2ShadowTrade.config_version
+                        == registration.source_config_version,
+                        StrategyV2ShadowTrade.status == "CLOSED",
+                    )
+                    .order_by(StrategyV2ShadowTrade.entry_at.asc())
+                    .all()
+                )
+                target_trades = [
+                    item
+                    for item in trades
+                    if (
+                        session.trade_day(_as_utc(item.entry_at))
+                        == evidence.target_session_date
+                        or (
+                            item.exit_at is not None
+                            and session.trade_day(_as_utc(item.exit_at))
+                            == evidence.target_session_date
+                        )
+                    )
+                ]
+                payload = self._forward_replay_bundle_payload(
+                    registration=registration,
+                    evidence=evidence,
+                    source_config=source_params,
+                    seed_bars=seed_bars,
+                    target_bars=target_bars,
+                    observation_schedule=observation_schedule,
+                    seed_decisions=seed_decisions,
+                    target_decisions=target_decisions,
+                    source_trades=target_trades,
+                    baseline=None,
+                    candidate=None,
+                )
+                self._attach_forward_replay_artifact(evidence, payload)
+                self.db.commit()
+                archived += 1
+            except Exception:
+                self.db.rollback()
+                blocked.append(evidence_id)
+        return StrategyV2ForwardArtifactBackfillResult(
+            archived=archived,
+            blocked_evidence_ids=tuple(blocked),
+        )
 
     def get_config(self, symbol: str | None = None) -> StrategyV2ShadowConfigResponse:
         row = self._get_or_create_config(symbol)
@@ -1100,6 +1346,123 @@ class StrategyV2ShadowService:
             warmup_diagnostic=warmup_diagnostic,
         )
 
+    def compare_boundary_neutral_prewarm(
+        self,
+        payload: StrategyV2BoundaryNeutralDiagnosticRequest,
+    ) -> StrategyV2BoundaryNeutralDiagnosticResponse:
+        """Run a read-only three-arm retrospective prewarm diagnostic."""
+        symbol = self._resolve_symbol(payload.symbol)
+        config_version = self._resolve_existing_config_version(
+            symbol,
+            payload.config_version,
+        )
+        complete_dates = self._complete_session_dates(symbol, config_version)
+        selected_dates = complete_dates[-_MAX_CHALLENGER_COMPLETE_SESSIONS:]
+        params = self._version_params(symbol, config_version)
+        if params.get("algorithm_version") != _ALGORITHM_VERSION:
+            return self._empty_boundary_neutral_diagnostic(
+                symbol=symbol,
+                source_config_version=config_version,
+                status="BLOCKED",
+                blockers=("ALGORITHM_VERSION_UNSUPPORTED",),
+            )
+        try:
+            source_config = self._challenger_config(
+                symbol=symbol,
+                params=params,
+                max_adx=float(params["max_adx"]),
+            )
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return self._empty_boundary_neutral_diagnostic(
+                symbol=symbol,
+                source_config_version=config_version,
+                status="BLOCKED",
+                blockers=("CONFIG_SNAPSHOT_INVALID",),
+            )
+        if self._config_version(source_config) != config_version:
+            return self._empty_boundary_neutral_diagnostic(
+                symbol=symbol,
+                source_config_version=config_version,
+                status="BLOCKED",
+                blockers=("CONFIG_SNAPSHOT_VERSION_MISMATCH",),
+            )
+        if not selected_dates:
+            return self._empty_boundary_neutral_diagnostic(
+                symbol=symbol,
+                source_config_version=config_version,
+                blockers=("MIN_CAUSAL_PAIRS",),
+            )
+
+        selected_decisions = self.db.query(StrategyV2ShadowDecision).filter(
+            StrategyV2ShadowDecision.symbol == symbol,
+            StrategyV2ShadowDecision.config_version == config_version,
+            StrategyV2ShadowDecision.session_date.in_(selected_dates),
+        ).order_by(
+            StrategyV2ShadowDecision.bar_at.asc(),
+            StrategyV2ShadowDecision.id.asc(),
+        ).execution_options(populate_existing=True).all()
+        market = "HK" if symbol.endswith(".HK") else "US"
+        if any(item.market.upper() != market for item in selected_decisions):
+            raise ValueError("persisted boundary-neutral evidence mixes markets")
+        replay_bars = self._bars_from_persisted_evidence(
+            selected_decisions,
+            symbol=symbol,
+        )
+        observation_schedule = self._observation_schedule(
+            selected_decisions,
+        )
+        replay_payload = StrategyV2ShadowReplayRequest(
+            symbol=symbol,
+            market="HK" if market == "HK" else "US",
+            bars=replay_bars,
+        )
+        baseline = self._replay_payload(
+            replay_payload,
+            source_config,
+            include_feature_evidence=True,
+            observation_schedule=observation_schedule,
+        )
+        trade_window_start = datetime.combine(
+            min(selected_dates) - timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        )
+        trade_window_end = datetime.combine(
+            max(selected_dates) + timedelta(days=2),
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        )
+        trades = self.db.query(StrategyV2ShadowTrade).filter(
+            StrategyV2ShadowTrade.symbol == symbol,
+            StrategyV2ShadowTrade.config_version == config_version,
+            StrategyV2ShadowTrade.status == "CLOSED",
+            StrategyV2ShadowTrade.exit_at >= trade_window_start,
+            StrategyV2ShadowTrade.exit_at < trade_window_end,
+        ).order_by(StrategyV2ShadowTrade.entry_at.asc()).all()
+        baseline_match = self._baseline_replay_matches(
+            decisions=selected_decisions,
+            trades=trades,
+            replay=baseline,
+            market=market,
+            session_dates=set(selected_dates),
+        )
+        if not baseline_match:
+            return self._empty_boundary_neutral_diagnostic(
+                symbol=symbol,
+                source_config_version=config_version,
+                status="BLOCKED",
+                blockers=("BASELINE_REPLAY_MISMATCH",),
+                baseline_replay_match=False,
+            )
+        return self._boundary_neutral_diagnostic(
+            replay_bars=replay_bars,
+            source_config=source_config,
+            source_config_version=config_version,
+            market=market,
+            session_dates=selected_dates,
+            observation_schedule=observation_schedule,
+        )
+
     def register_forward_validation(
         self,
         payload: StrategyV2ForwardRegistrationRequest,
@@ -1108,14 +1471,18 @@ class StrategyV2ShadowService:
     ) -> StrategyV2ForwardRegistrationResponse:
         """Freeze the one prospective warm-up candidate without touching shadow state."""
         symbol = self._resolve_symbol(payload.symbol)
+        candidate_version = payload.candidate_algorithm_version
+        evaluator_digest = self._forward_evaluator_digest_for(
+            candidate_version
+        )
         existing = self.db.query(StrategyV2ForwardRegistration).filter(
             StrategyV2ForwardRegistration.symbol == symbol,
             StrategyV2ForwardRegistration.source_config_version
             == payload.source_config_version,
             StrategyV2ForwardRegistration.candidate_algorithm_version
-            == payload.candidate_algorithm_version,
+            == candidate_version,
             StrategyV2ForwardRegistration.evaluator_digest
-            == self._forward_evaluator_digest(),
+            == evaluator_digest,
         ).first()
         if existing is not None:
             if not self._forward_spec_matches(existing):
@@ -1154,13 +1521,17 @@ class StrategyV2ShadowService:
             raise ValueError("forward validation source algorithm version is unsupported")
         registered_at = _as_utc(now or datetime.now(timezone.utc))
         market = "HK" if symbol.endswith(".HK") else "US"
-        spec = self._forward_candidate_spec(source_version, params)
+        spec = self._forward_candidate_spec_for(
+            candidate_version,
+            source_version,
+            params,
+        )
         registration = StrategyV2ForwardRegistration(
             symbol=symbol,
             market=market,
-            candidate_algorithm_version=_FORWARD_CANDIDATE_VERSION,
+            candidate_algorithm_version=candidate_version,
             source_config_version=source_version,
-            evaluator_digest=self._forward_evaluator_digest(),
+            evaluator_digest=evaluator_digest,
             candidate_spec_json=json.dumps(
                 spec,
                 sort_keys=True,
@@ -1179,9 +1550,9 @@ class StrategyV2ShadowService:
                 StrategyV2ForwardRegistration.source_config_version
                 == source_version,
                 StrategyV2ForwardRegistration.candidate_algorithm_version
-                == _FORWARD_CANDIDATE_VERSION,
+                == candidate_version,
                 StrategyV2ForwardRegistration.evaluator_digest
-                == self._forward_evaluator_digest(),
+                == evaluator_digest,
             ).first()
             if (
                 existing is None
@@ -1256,7 +1627,12 @@ class StrategyV2ShadowService:
     def _forward_registration_for_symbol(
         self,
         symbol: str,
+        *,
+        candidate_algorithm_version: str = _FORWARD_CANDIDATE_VERSION,
     ) -> StrategyV2ForwardRegistration | None:
+        evaluator_digest = self._forward_evaluator_digest_for(
+            candidate_algorithm_version
+        )
         rows = self.db.query(StrategyV2ForwardRegistration).filter(
             StrategyV2ForwardRegistration.symbol == symbol,
         ).order_by(
@@ -1271,14 +1647,13 @@ class StrategyV2ShadowService:
         if config is None:
             return None
         current_version = self._config_version(config)
-        evaluator_digest = self._forward_evaluator_digest()
         return next(
             (
                 row
                 for row in rows
                 if row.source_config_version == current_version
                 if row.candidate_algorithm_version
-                == _FORWARD_CANDIDATE_VERSION
+                == candidate_algorithm_version
                 and row.evaluator_digest == evaluator_digest
             ),
             None,
@@ -1287,10 +1662,18 @@ class StrategyV2ShadowService:
     def get_forward_validation(
         self,
         symbol: str,
+        *,
+        candidate_algorithm_version: str = _FORWARD_CANDIDATE_VERSION,
     ) -> StrategyV2ForwardValidationResponse:
         """Read only materialized prospective evidence; never replay or persist here."""
         normalized = self._resolve_symbol(symbol)
-        registration = self._forward_registration_for_symbol(normalized)
+        expected_evaluator_digest = self._forward_evaluator_digest_for(
+            candidate_algorithm_version
+        )
+        registration = self._forward_registration_for_symbol(
+            normalized,
+            candidate_algorithm_version=candidate_algorithm_version,
+        )
         if registration is None:
             return StrategyV2ForwardValidationResponse(status="NOT_REGISTERED")
         current_config = self.db.query(StrategyV2ShadowConfig).filter(
@@ -1314,7 +1697,7 @@ class StrategyV2ShadowService:
         if (
             registration.market != expected_market
             or registration.candidate_algorithm_version
-            != _FORWARD_CANDIDATE_VERSION
+            != candidate_algorithm_version
             or not re.fullmatch(r"[0-9a-f]{64}", registration.evaluator_digest)
             or not re.fullmatch(
                 r"[0-9a-f]{64}",
@@ -1323,7 +1706,7 @@ class StrategyV2ShadowService:
         ):
             blockers.append("REGISTRATION_METADATA_INVALID")
         if (
-            registration.evaluator_digest != self._forward_evaluator_digest()
+            registration.evaluator_digest != expected_evaluator_digest
             or not self._forward_spec_matches(registration)
         ):
             blockers.append("EVALUATOR_DEFINITION_MISMATCH")
@@ -1348,6 +1731,18 @@ class StrategyV2ShadowService:
             candidate_daily: StrategyV2WarmupDaily | None = None
             baseline_metric: StrategyV2ShadowMetrics | None = None
             candidate_metric: StrategyV2ShadowMetrics | None = None
+            replay_artifact_valid = True
+            if (
+                row.disposition == "INCLUDED"
+                and candidate_algorithm_version
+                == BOUNDARY_NEUTRAL_PREWARM_ALGORITHM_VERSION
+            ):
+                replay_artifact_valid = self._forward_replay_artifact_matches(
+                    row,
+                    registration,
+                )
+                if not replay_artifact_valid:
+                    blockers.append("REPLAY_ARTIFACT_MISSING_OR_INVALID")
             if (
                 not self._is_sha256(row.evidence_digest_sha256)
                 or self._forward_evidence_digest(row)
@@ -1456,9 +1851,10 @@ class StrategyV2ShadowService:
                 ):
                     blockers.append("EVIDENCE_PAYLOAD_INVALID")
                 else:
-                    baseline_metrics.append((baseline_metric, baseline_net_sequence))
-                    candidate_metrics.append((candidate_metric, candidate_net_sequence))
-                    valid_included += 1
+                    if replay_artifact_valid:
+                        baseline_metrics.append((baseline_metric, baseline_net_sequence))
+                        candidate_metrics.append((candidate_metric, candidate_net_sequence))
+                        valid_included += 1
             elif not self._forward_exclusion_semantics_valid(row):
                 blockers.append("EVIDENCE_EXCLUSION_INVALID")
             if row.structural_failure:
@@ -1517,18 +1913,30 @@ class StrategyV2ShadowService:
         market: str,
         *,
         now: datetime | None = None,
+        candidate_algorithm_version: str = _FORWARD_CANDIDATE_VERSION,
     ) -> StrategyV2ForwardValidationResponse | None:
         """Materialize at most one target outcome during the fixed close window."""
         current = _as_utc(now or datetime.now(timezone.utc))
         normalized = self._resolve_symbol(symbol)
-        registration = self._forward_registration_for_symbol(normalized)
+        registration = self._forward_registration_for_symbol(
+            normalized,
+            candidate_algorithm_version=candidate_algorithm_version,
+        )
         if registration is None:
             return None
         normalized_market = market.upper()
         if normalized_market != registration.market:
             raise ValueError("forward validation registration market mismatch")
-        current_view = self.get_forward_validation(normalized)
-        if current_view.status in {"BLOCKED", "MATURE_EVIDENCE"}:
+        current_view = self.get_forward_validation(
+            normalized,
+            candidate_algorithm_version=candidate_algorithm_version,
+        )
+        if current_view.status == "BLOCKED" or (
+            current_view.status == "MATURE_EVIDENCE"
+            and not self._forward_collection_continues_after_maturity(
+                registration
+            )
+        ):
             return current_view
 
         active_config = self.db.query(StrategyV2ShadowConfig).filter(
@@ -1559,7 +1967,10 @@ class StrategyV2ShadowService:
             ),
             structural=source_superseded,
         )
-        current_view = self.get_forward_validation(normalized)
+        current_view = self.get_forward_validation(
+            normalized,
+            candidate_algorithm_version=candidate_algorithm_version,
+        )
         if appended_missed:
             return current_view
         collection_phase = self._forward_collection_phase(
@@ -1568,7 +1979,12 @@ class StrategyV2ShadowService:
         )
         if collection_phase == "WAIT":
             return None
-        if current_view.status in {"BLOCKED", "MATURE_EVIDENCE"}:
+        if current_view.status == "BLOCKED" or (
+            current_view.status == "MATURE_EVIDENCE"
+            and not self._forward_collection_continues_after_maturity(
+                registration
+            )
+        ):
             return current_view
 
         session = get_session(normalized_market)
@@ -1595,9 +2011,15 @@ class StrategyV2ShadowService:
                 reason="FINALIZATION_WINDOW_MISSED",
                 structural=False,
             )
-            return self.get_forward_validation(normalized)
+            return self.get_forward_validation(
+                normalized,
+                candidate_algorithm_version=candidate_algorithm_version,
+            )
         if (
-            registration.evaluator_digest != self._forward_evaluator_digest()
+            registration.evaluator_digest
+            != self._forward_evaluator_digest_for(
+                candidate_algorithm_version
+            )
             or not self._forward_spec_matches(registration)
         ):
             self._persist_forward_exclusion(
@@ -1608,7 +2030,10 @@ class StrategyV2ShadowService:
                 reason="EVALUATOR_DEFINITION_MISMATCH",
                 structural=True,
             )
-            return self.get_forward_validation(normalized)
+            return self.get_forward_validation(
+                normalized,
+                candidate_algorithm_version=candidate_algorithm_version,
+            )
 
         if source_superseded:
             self._persist_forward_exclusion(
@@ -1619,7 +2044,10 @@ class StrategyV2ShadowService:
                 reason="SOURCE_VERSION_SUPERSEDED",
                 structural=True,
             )
-            return self.get_forward_validation(normalized)
+            return self.get_forward_validation(
+                normalized,
+                candidate_algorithm_version=candidate_algorithm_version,
+            )
         if active_config is not None and not active_config.enabled:
             self._persist_forward_exclusion(
                 registration=registration,
@@ -1629,7 +2057,10 @@ class StrategyV2ShadowService:
                 reason="COLLECTION_DISABLED",
                 structural=False,
             )
-            return self.get_forward_validation(normalized)
+            return self.get_forward_validation(
+                normalized,
+                candidate_algorithm_version=candidate_algorithm_version,
+            )
         if (
             active_trade is not None
             or active_state is None
@@ -1644,7 +2075,10 @@ class StrategyV2ShadowService:
                 reason="TARGET_STATE_NOT_FLAT",
                 structural=True,
             )
-            return self.get_forward_validation(normalized)
+            return self.get_forward_validation(
+                normalized,
+                candidate_algorithm_version=candidate_algorithm_version,
+            )
 
         target_decisions = self.db.query(StrategyV2ShadowDecision).filter(
             StrategyV2ShadowDecision.symbol == normalized,
@@ -1668,7 +2102,10 @@ class StrategyV2ShadowService:
                 structural=True,
                 target_bars=len(target_decisions),
             )
-            return self.get_forward_validation(normalized)
+            return self.get_forward_validation(
+                normalized,
+                candidate_algorithm_version=candidate_algorithm_version,
+            )
         if (
             len(target_daily) != 1
             or not target_daily[0].complete_session
@@ -1691,7 +2128,10 @@ class StrategyV2ShadowService:
                 structural=False,
                 target_bars=(target_daily[0].bars if target_daily else 0),
             )
-            return self.get_forward_validation(normalized)
+            return self.get_forward_validation(
+                normalized,
+                candidate_algorithm_version=candidate_algorithm_version,
+            )
 
         complete_dates = self._complete_session_dates(
             normalized,
@@ -1729,7 +2169,10 @@ class StrategyV2ShadowService:
                 target_bars=target_daily[0].bars,
                 seed_day=seed_day,
             )
-            return self.get_forward_validation(normalized)
+            return self.get_forward_validation(
+                normalized,
+                candidate_algorithm_version=candidate_algorithm_version,
+            )
         if max(_as_utc(item.observed_at) for item in seed_decisions) > target_open:
             self._persist_forward_exclusion(
                 registration=registration,
@@ -1741,7 +2184,10 @@ class StrategyV2ShadowService:
                 target_bars=target_daily[0].bars,
                 seed_day=seed_day,
             )
-            return self.get_forward_validation(normalized)
+            return self.get_forward_validation(
+                normalized,
+                candidate_algorithm_version=candidate_algorithm_version,
+            )
 
         try:
             params = self._version_params(
@@ -1813,7 +2259,10 @@ class StrategyV2ShadowService:
                     candidate_input_hash=self._forward_bars_hash(target_payload.bars),
                     baseline_match=False,
                 )
-                return self.get_forward_validation(normalized)
+                return self.get_forward_validation(
+                    normalized,
+                    candidate_algorithm_version=candidate_algorithm_version,
+                )
             seed_bars = self._strategy_bars_from_replay(
                 seed_replay_bars,
                 symbol=normalized,
@@ -1844,15 +2293,31 @@ class StrategyV2ShadowService:
                     candidate_input_hash=candidate_input_hash,
                     baseline_match=True,
                 )
-                return self.get_forward_validation(normalized)
+                return self.get_forward_validation(
+                    normalized,
+                    candidate_algorithm_version=candidate_algorithm_version,
+                )
+            feature_config = self._domain_config(
+                source_config,
+                normalized_market,
+            ).feature_config()
+            candidate_features = (
+                BoundaryNeutralCausalTrendPrewarmFeatureEngine(
+                    feature_config,
+                    seed_bars,
+                )
+                if candidate_algorithm_version
+                == BOUNDARY_NEUTRAL_PREWARM_ALGORITHM_VERSION
+                else CausalTrendPrewarmFeatureEngine(
+                    feature_config,
+                    seed_bars,
+                )
+            )
             prewarmed = self._replay_payload(
                 target_payload,
                 source_config,
                 include_feature_evidence=True,
-                features=CausalTrendPrewarmFeatureEngine(
-                    self._domain_config(source_config, normalized_market).feature_config(),
-                    seed_bars,
-                ),
+                features=candidate_features,
                 observation_schedule=observation_schedule,
             )
             if self._forward_bars_hash(target_payload.bars) != target_hash:
@@ -1874,7 +2339,10 @@ class StrategyV2ShadowService:
                     baseline_match=True,
                     local_invariant=False,
                 )
-                return self.get_forward_validation(normalized)
+                return self.get_forward_validation(
+                    normalized,
+                    candidate_algorithm_version=candidate_algorithm_version,
+                )
             baseline_daily = self._warmup_daily_from_replay(
                 replay=baseline,
                 market=normalized_market,
@@ -1903,7 +2371,10 @@ class StrategyV2ShadowService:
                 target_bars=target_daily[0].bars,
                 seed_day=seed_day,
             )
-            return self.get_forward_validation(normalized)
+            return self.get_forward_validation(
+                normalized,
+                candidate_algorithm_version=candidate_algorithm_version,
+            )
 
         baseline_result = self._forward_result_json(
             baseline.metrics,
@@ -1941,12 +2412,111 @@ class StrategyV2ShadowService:
             candidate_result_sha256=self._forward_text_hash(candidate_result),
         )
         result.evidence_digest_sha256 = self._forward_evidence_digest(result)
-        self.db.add(result)
+        target_source_trades = [
+            item
+            for item in trades
+            if (
+                session.trade_day(_as_utc(item.entry_at)) == target_day
+                or (
+                    item.exit_at is not None
+                    and session.trade_day(_as_utc(item.exit_at)) == target_day
+                )
+            )
+        ]
         try:
+            self.db.add(result)
+            self.db.flush()
+            replay_bundle = self._forward_replay_bundle_payload(
+                registration=registration,
+                evidence=result,
+                source_config=params,
+                seed_bars=seed_replay_bars,
+                target_bars=target_replay_bars,
+                observation_schedule=observation_schedule,
+                seed_decisions=seed_decisions,
+                target_decisions=target_decisions,
+                source_trades=target_source_trades,
+                baseline=baseline,
+                candidate=prewarmed,
+            )
+            self._attach_forward_replay_artifact(result, replay_bundle)
             self.db.commit()
         except IntegrityError:
             self.db.rollback()
-        return self.get_forward_validation(normalized)
+            existing_result = self.db.query(
+                StrategyV2ForwardEvidence
+            ).filter(
+                StrategyV2ForwardEvidence.registration_id == registration.id,
+                StrategyV2ForwardEvidence.target_session_date == target_day,
+            ).first()
+            if (
+                existing_result is not None
+                and self._forward_evidence_duplicate_matches(
+                    result,
+                    existing_result,
+                )
+                and self._forward_replay_artifact_is_prune_safe(
+                    existing_result,
+                    registration,
+                )
+            ):
+                return self.get_forward_validation(
+                    normalized,
+                    candidate_algorithm_version=candidate_algorithm_version,
+                )
+            if existing_result is not None:
+                raise RuntimeError(
+                    "conflicting Strategy v2 forward evidence already exists"
+                )
+            self._persist_forward_exclusion(
+                registration=registration,
+                target_day=target_day,
+                target_open=target_open,
+                evaluated_at=current,
+                reason="REPLAY_ARTIFACT_PERSISTENCE_FAILED",
+                structural=True,
+                target_bars=len(target_replay_bars),
+                target_hash=target_hash,
+                seed_hash=seed_hash,
+                seed_day=seed_day,
+                baseline_input_hash=baseline_input_hash,
+                candidate_input_hash=candidate_input_hash,
+                baseline_match=True,
+                local_invariant=True,
+            )
+        except Exception:
+            self.db.rollback()
+            raise
+        return self.get_forward_validation(
+            normalized,
+            candidate_algorithm_version=candidate_algorithm_version,
+        )
+
+    @staticmethod
+    def _forward_collection_continues_after_maturity(
+        registration: StrategyV2ForwardRegistration,
+    ) -> bool:
+        if (
+            registration.candidate_algorithm_version
+            == BOUNDARY_NEUTRAL_PREWARM_ALGORITHM_VERSION
+        ):
+            return True
+        if (
+            registration.candidate_algorithm_version
+            != _FORWARD_CANDIDATE_VERSION
+            or registration.evaluator_digest != FROZEN_EVALUATOR_DIGEST
+        ):
+            return False
+        return any(
+            registration.symbol == frozen_symbol
+            and registration.source_config_version == frozen_config_version
+            for (
+                frozen_symbol,
+                _role,
+                _reason,
+                frozen_config_version,
+            ) in FROZEN_QUEUE_ENTRIES
+        )
 
     @staticmethod
     def _forward_evaluator_spec() -> dict[str, Any]:
@@ -1990,6 +2560,236 @@ class StrategyV2ShadowService:
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
     @classmethod
+    def _boundary_neutral_forward_evaluator_spec(cls) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "evaluator_version": _BOUNDARY_NEUTRAL_FORWARD_EVALUATOR_VERSION,
+            "candidate_algorithm_version": (
+                BOUNDARY_NEUTRAL_PREWARM_ALGORITHM_VERSION
+            ),
+            "legacy_comparator_algorithm_version": _FORWARD_CANDIDATE_VERSION,
+            "legacy_comparator_evaluator_digest": (
+                _LEGACY_FORWARD_EVALUATOR_DIGEST
+            ),
+            "source_algorithm_version": _ALGORITHM_VERSION,
+            "evaluation_scope": "FORWARD_OUT_OF_SAMPLE",
+            "target_semantics": (
+                "FIRST_FULL_RTH_SESSION_OPEN_STRICTLY_AFTER_REGISTRATION"
+            ),
+            "seed_semantics": (
+                "IMMEDIATE_PRIOR_COMPLETE_SAME_VERSION_SESSION_KNOWN_AT_OPEN"
+            ),
+            "warmup_scope": "ADX_VOL_ONLY",
+            "baseline_scope": "SESSION_LOCAL",
+            "boundary_rule": "SEED_TARGET_FIRST_5M_DM_ZERO_TR_TARGET_RANGE",
+            "source_feature_prewarm": (
+                "PERSISTED_IMMUTABLE_DECISION_BARS_WHEN_COMPLETE"
+            ),
+            "minimum_ready_pairs": _FORWARD_READY_PAIRS,
+            "minimum_mature_pairs": _FORWARD_MATURE_PAIRS,
+            "finalize_start_minutes_after_close": (
+                _FORWARD_FINALIZE_START_MINUTES
+            ),
+            "incomplete_deadline_minutes_after_close": (
+                _FORWARD_INCOMPLETE_DEADLINE_MINUTES
+            ),
+            "finalize_end_minutes_after_close": _POST_CLOSE_COLLECTION_MINUTES,
+            "historical_target_backfill_allowed": False,
+            "observation_schedule": (
+                "SOURCE_DECISION_OBSERVED_AT_SHARED_BY_ALL_ARMS"
+            ),
+            "execution_inputs": "SAME_BARS_OBSERVED_AT_FEES_SLIPPAGE",
+            "evidence_integrity": (
+                "CANONICAL_ROW_SHA256_PLUS_CONTENT_ADDRESSED_REPLAY_BUNDLE"
+            ),
+            "diagnostic_contract_sha256": (
+                cls._boundary_neutral_candidate_spec_digest()
+            ),
+            "executable_semantic_manifest_version": (
+                FORWARD_EXECUTABLE_SEMANTIC_MANIFEST_VERSION
+            ),
+            "executable_semantic_digest": (
+                cls._forward_executable_semantic_digest()
+            ),
+            "aggregate_drawdown": "ORDERED_TRADE_NET_PNL",
+            "order_submission_allowed": False,
+            "automatic_promotion_allowed": False,
+        }
+
+    @classmethod
+    @cache
+    def _forward_executable_semantic_digest(cls) -> str:
+        digest = forward_executable_semantic_digest(
+            extra_executables=cls._forward_semantic_executables(),
+            extra_semantic_constants=cls._forward_semantic_constants(),
+        )
+        if (
+            digest
+            != _APPROVED_BOUNDARY_NEUTRAL_EXECUTABLE_SEMANTIC_DIGEST
+        ):
+            raise RuntimeError(
+                "boundary-neutral forward executable semantics drifted"
+            )
+        return digest
+
+    @staticmethod
+    def _forward_semantic_executables() -> dict[str, object]:
+        cls = StrategyV2ShadowService
+        return {
+            "aggregate_forward_metrics": cls._aggregate_forward_metrics,
+            "attach_forward_replay_artifact": (
+                cls._attach_forward_replay_artifact
+            ),
+            "baseline_replay_matches": cls._baseline_replay_matches,
+            "bars_from_persisted_evidence": (
+                cls._bars_from_persisted_evidence
+            ),
+            "boundary_neutral_candidate_spec": (
+                cls._boundary_neutral_candidate_spec
+            ),
+            "boundary_neutral_candidate_spec_digest": (
+                cls._boundary_neutral_candidate_spec_digest
+            ),
+            "canonical_forward_replay_json": canonical_forward_replay_json,
+            "causal_entry_feature": cls._causal_entry_feature,
+            "challenger_config": cls._challenger_config,
+            "collect_forward_validation": cls.collect_forward_validation,
+            "complete_session_dates": cls._complete_session_dates,
+            "decode_forward_replay_artifact": (
+                decode_forward_replay_artifact
+            ),
+            "domain_config": cls._domain_config,
+            "encode_forward_replay_artifact": (
+                encode_forward_replay_artifact
+            ),
+            "fee_rate": cls._fee_rate,
+            "feature_evidence_matches": cls._feature_evidence_matches,
+            "forward_bars_hash": cls._forward_bars_hash,
+            "forward_candidate_spec": cls._forward_candidate_spec,
+            "forward_candidate_spec_for": cls._forward_candidate_spec_for,
+            "forward_collection_phase": cls._forward_collection_phase,
+            "forward_collection_continues_after_maturity": (
+                cls._forward_collection_continues_after_maturity
+            ),
+            "forward_eligible_after": cls._forward_eligible_after,
+            "forward_evaluator_spec": cls._forward_evaluator_spec,
+            "forward_evaluator_spec_for": cls._forward_evaluator_spec_for,
+            "forward_evidence_digest": cls._forward_evidence_digest,
+            "forward_evidence_duplicate_matches": (
+                cls._forward_evidence_duplicate_matches
+            ),
+            "forward_exclusion_semantics_valid": (
+                cls._forward_exclusion_semantics_valid
+            ),
+            "forward_net_pnl_sequence": cls._forward_net_pnl_sequence,
+            "forward_replay_artifact_binding_sha256": (
+                forward_replay_artifact_binding_sha256
+            ),
+            "forward_replay_artifact_is_prune_safe": (
+                cls._forward_replay_artifact_is_prune_safe
+            ),
+            "forward_replay_artifact_matches": (
+                cls._forward_replay_artifact_matches
+            ),
+            "forward_replay_bundle_payload": (
+                cls._forward_replay_bundle_payload
+            ),
+            "forward_replay_input_hash": cls._forward_replay_input_hash,
+            "forward_result_json": cls._forward_result_json,
+            "forward_source_trace_matches": (
+                cls._forward_source_trace_matches
+            ),
+            "forward_spec_matches": cls._forward_spec_matches,
+            "forward_validation_status": cls._forward_validation_status,
+            "metrics_from_replay": cls._metrics_from_replay,
+            "observation_schedule": cls._observation_schedule,
+            "one_side_fee_rate": one_side_fee_rate,
+            "optional_numbers_match": cls._optional_numbers_match,
+            "persist_forward_exclusion": cls._persist_forward_exclusion,
+            "record_forward_missed_targets": (
+                cls._record_forward_missed_targets
+            ),
+            "replay_payload": cls._replay_payload,
+            "session_local_features_match": (
+                cls._session_local_features_match
+            ),
+            "strategy_bars_from_replay": cls._strategy_bars_from_replay,
+            "update_replay_exit_excursion": (
+                cls._update_replay_exit_excursion
+            ),
+            "update_replay_full_bar_excursion": (
+                cls._update_replay_full_bar_excursion
+            ),
+            "validated_forward_replay_artifact_payload": (
+                cls._validated_forward_replay_artifact_payload
+            ),
+            "warmup_daily_from_replay": cls._warmup_daily_from_replay,
+        }
+
+    @staticmethod
+    def _forward_semantic_constants() -> dict[str, object]:
+        return {
+            "forward_algorithm_version": _ALGORITHM_VERSION,
+            "forward_boundary_neutral_evaluator_version": (
+                _BOUNDARY_NEUTRAL_FORWARD_EVALUATOR_VERSION
+            ),
+            "forward_candidate_versions": FORWARD_CANDIDATE_VERSIONS,
+            "forward_finalize_end_minutes": (
+                _POST_CLOSE_COLLECTION_MINUTES
+            ),
+            "forward_finalize_start_minutes": (
+                _FORWARD_FINALIZE_START_MINUTES
+            ),
+            "forward_frozen_collection_identities": tuple(sorted(
+                (symbol, config_version)
+                for symbol, _role, _reason, config_version
+                in FROZEN_QUEUE_ENTRIES
+            )),
+            "forward_frozen_evaluator_digest": FROZEN_EVALUATOR_DIGEST,
+            "forward_incomplete_deadline_minutes": (
+                _FORWARD_INCOMPLETE_DEADLINE_MINUTES
+            ),
+            "forward_legacy_candidate_version": _FORWARD_CANDIDATE_VERSION,
+            "forward_legacy_evaluator_digest": (
+                _LEGACY_FORWARD_EVALUATOR_DIGEST
+            ),
+            "forward_mature_pairs": _FORWARD_MATURE_PAIRS,
+            "forward_min_complete_session_coverage": (
+                _MIN_COMPLETE_SESSION_COVERAGE
+            ),
+            "forward_ready_pairs": _FORWARD_READY_PAIRS,
+            "forward_source_algorithm_version": _ALGORITHM_VERSION,
+        }
+
+    @classmethod
+    def _forward_evaluator_spec_for(
+        cls,
+        candidate_algorithm_version: str,
+    ) -> dict[str, Any]:
+        if candidate_algorithm_version == _FORWARD_CANDIDATE_VERSION:
+            return cls._forward_evaluator_spec()
+        if (
+            candidate_algorithm_version
+            == BOUNDARY_NEUTRAL_PREWARM_ALGORITHM_VERSION
+        ):
+            return cls._boundary_neutral_forward_evaluator_spec()
+        raise ValueError("unsupported Strategy v2 forward candidate version")
+
+    @classmethod
+    def _forward_evaluator_digest_for(
+        cls,
+        candidate_algorithm_version: str,
+    ) -> str:
+        if candidate_algorithm_version == _FORWARD_CANDIDATE_VERSION:
+            return cls._forward_evaluator_digest()
+        encoded = json.dumps(
+            cls._forward_evaluator_spec_for(candidate_algorithm_version),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @classmethod
     def _forward_candidate_spec(
         cls,
         source_config_version: str,
@@ -1997,6 +2797,24 @@ class StrategyV2ShadowService:
     ) -> dict[str, Any]:
         return {
             **cls._forward_evaluator_spec(),
+            "source_config_version": source_config_version,
+            "source_config": source_params,
+        }
+
+    @classmethod
+    def _forward_candidate_spec_for(
+        cls,
+        candidate_algorithm_version: str,
+        source_config_version: str,
+        source_params: dict[str, Any],
+    ) -> dict[str, Any]:
+        if candidate_algorithm_version == _FORWARD_CANDIDATE_VERSION:
+            return cls._forward_candidate_spec(
+                source_config_version,
+                source_params,
+            )
+        return {
+            **cls._forward_evaluator_spec_for(candidate_algorithm_version),
             "source_config_version": source_config_version,
             "source_config": source_params,
         }
@@ -2016,7 +2834,8 @@ class StrategyV2ShadowService:
         return (
             isinstance(decoded, dict)
             and decoded
-            == self._forward_candidate_spec(
+            == self._forward_candidate_spec_for(
+                registration.candidate_algorithm_version,
                 registration.source_config_version,
                 source_params,
             )
@@ -2064,6 +2883,21 @@ class StrategyV2ShadowService:
         cls,
         registration: StrategyV2ForwardRegistration,
     ) -> StrategyV2ForwardRegistrationResponse:
+        candidate_version: Literal[
+            "strategy-v2-causal-trend-prewarm-v1",
+            "strategy-v2-causal-trend-prewarm-boundary-neutral-v1",
+        ]
+        if registration.candidate_algorithm_version == _FORWARD_CANDIDATE_VERSION:
+            candidate_version = "strategy-v2-causal-trend-prewarm-v1"
+        elif (
+            registration.candidate_algorithm_version
+            == BOUNDARY_NEUTRAL_PREWARM_ALGORITHM_VERSION
+        ):
+            candidate_version = (
+                "strategy-v2-causal-trend-prewarm-boundary-neutral-v1"
+            )
+        else:
+            raise ValueError("unsupported Strategy v2 forward candidate version")
         market = "HK" if registration.symbol.endswith(".HK") else "US"
         session = get_session(market)
         return StrategyV2ForwardRegistrationResponse(
@@ -2071,7 +2905,7 @@ class StrategyV2ShadowService:
             symbol=registration.symbol,
             market=market,
             market_timezone=str(session.timezone),
-            candidate_algorithm_version=_FORWARD_CANDIDATE_VERSION,
+            candidate_algorithm_version=candidate_version,
             source_config_version=registration.source_config_version,
             evaluator_digest=registration.evaluator_digest,
             registered_at=_as_utc(registration.registered_at),
@@ -2109,6 +2943,543 @@ class StrategyV2ShadowService:
             separators=(",", ":"),
         )
         return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _forward_orm_snapshot(row: Any) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for column in row.__table__.columns:
+            value = getattr(row, column.name)
+            if isinstance(value, datetime):
+                result[column.name] = _as_utc(value).isoformat()
+            elif isinstance(value, date):
+                result[column.name] = value.isoformat()
+            else:
+                result[column.name] = value
+        return result
+
+    @classmethod
+    def _forward_replay_bundle_payload(
+        cls,
+        *,
+        registration: StrategyV2ForwardRegistration,
+        evidence: StrategyV2ForwardEvidence,
+        source_config: Mapping[str, Any],
+        seed_bars: Sequence[StrategyV2ReplayBar],
+        target_bars: Sequence[StrategyV2ReplayBar],
+        observation_schedule: Mapping[datetime, datetime],
+        seed_decisions: Sequence[StrategyV2ShadowDecision],
+        target_decisions: Sequence[StrategyV2ShadowDecision],
+        source_trades: Sequence[StrategyV2ShadowTrade],
+        baseline: StrategyV2ShadowReplayResponse | None,
+        candidate: StrategyV2ShadowReplayResponse | None,
+    ) -> dict[str, object]:
+        try:
+            candidate_spec = json.loads(registration.candidate_spec_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("forward candidate spec is not valid JSON") from exc
+        if not isinstance(candidate_spec, dict):
+            raise ValueError("forward candidate spec must be a JSON object")
+        return {
+            "bundle_contract": "strategy-v2-forward-replay-bundle-v1",
+            "capture_mode": (
+                "FULL_REPLAY_VERIFIED"
+                if baseline is not None and candidate is not None
+                else "SOURCE_TRACE_ARCHIVE"
+            ),
+            "registration": {
+                "id": registration.id,
+                "symbol": registration.symbol,
+                "market": registration.market,
+                "candidate_algorithm_version": (
+                    registration.candidate_algorithm_version
+                ),
+                "source_config_version": registration.source_config_version,
+                "evaluator_digest": registration.evaluator_digest,
+                "candidate_spec": candidate_spec,
+                "registered_at": _as_utc(
+                    registration.registered_at
+                ).isoformat(),
+                "eligible_after": _as_utc(
+                    registration.eligible_after
+                ).isoformat(),
+            },
+            "evidence": {
+                "target_session_date": evidence.target_session_date.isoformat(),
+                "seed_session_date": (
+                    evidence.seed_session_date.isoformat()
+                    if evidence.seed_session_date is not None
+                    else None
+                ),
+                "target_open_at": _as_utc(evidence.target_open_at).isoformat(),
+                "evaluated_at": _as_utc(evidence.evaluated_at).isoformat(),
+                "target_bars": evidence.target_bars,
+                "target_bars_sha256": evidence.target_bars_sha256,
+                "seed_bars_sha256": evidence.seed_bars_sha256,
+                "baseline_input_sha256": evidence.baseline_input_sha256,
+                "candidate_input_sha256": evidence.candidate_input_sha256,
+                "baseline_result_json": evidence.baseline_result_json,
+                "candidate_result_json": evidence.candidate_result_json,
+                "baseline_result_sha256": evidence.baseline_result_sha256,
+                "candidate_result_sha256": evidence.candidate_result_sha256,
+                "evidence_digest_sha256": evidence.evidence_digest_sha256,
+            },
+            "source_config": dict(source_config),
+            "seed_bars": [item.model_dump(mode="json") for item in seed_bars],
+            "target_bars": [item.model_dump(mode="json") for item in target_bars],
+            "observation_schedule": [
+                {
+                    "bar_at": _as_utc(item.timestamp).isoformat(),
+                    "observed_at": _as_utc(
+                        observation_schedule[_as_utc(item.timestamp)]
+                    ).isoformat(),
+                }
+                for item in target_bars
+            ],
+            "seed_source_trace": [
+                cls._forward_orm_snapshot(item) for item in seed_decisions
+            ],
+            "target_source_trace": [
+                cls._forward_orm_snapshot(item) for item in target_decisions
+            ],
+            "target_source_trades": [
+                cls._forward_orm_snapshot(item) for item in source_trades
+            ],
+            "baseline_replay": (
+                baseline.model_dump(mode="json")
+                if baseline is not None
+                else None
+            ),
+            "candidate_replay": (
+                candidate.model_dump(mode="json")
+                if candidate is not None
+                else None
+            ),
+        }
+
+    def _attach_forward_replay_artifact(
+        self,
+        evidence: StrategyV2ForwardEvidence,
+        payload: Mapping[str, object],
+    ) -> None:
+        if evidence.id is None:
+            raise ValueError("forward evidence must be flushed before artifact binding")
+        encoded = encode_forward_replay_artifact(payload)
+        artifact = self.db.get(
+            StrategyV2ForwardReplayArtifact,
+            encoded.digest_sha256,
+        )
+        if artifact is None:
+            artifact = StrategyV2ForwardReplayArtifact(**asdict(encoded))
+            self.db.add(artifact)
+            self.db.flush()
+        else:
+            decoded = decode_forward_replay_artifact(
+                digest_sha256=artifact.digest_sha256,
+                schema_version=artifact.schema_version,
+                kind=artifact.kind,
+                codec=artifact.codec,
+                raw_size=artifact.raw_size,
+                compressed_size=artifact.compressed_size,
+                payload=artifact.payload,
+            )
+            if decoded != dict(payload):
+                raise ValueError("forward replay artifact digest collision")
+        binding = forward_replay_artifact_binding_sha256(
+            evidence_id=evidence.id,
+            evidence_digest_sha256=evidence.evidence_digest_sha256,
+            artifact_digest_sha256=encoded.digest_sha256,
+        )
+        existing_link = self.db.get(
+            StrategyV2ForwardEvidenceArtifact,
+            (evidence.id, FORWARD_REPLAY_ARTIFACT_ROLE),
+        )
+        if existing_link is None:
+            self.db.add(StrategyV2ForwardEvidenceArtifact(
+                evidence_id=evidence.id,
+                role=FORWARD_REPLAY_ARTIFACT_ROLE,
+                artifact_sha256=encoded.digest_sha256,
+                binding_sha256=binding,
+            ))
+        elif (
+            existing_link.artifact_sha256 != encoded.digest_sha256
+            or existing_link.binding_sha256 != binding
+        ):
+            raise ValueError("forward evidence already has a conflicting replay artifact")
+
+    def _forward_replay_artifact_matches(
+        self,
+        evidence: StrategyV2ForwardEvidence,
+        registration: StrategyV2ForwardRegistration,
+    ) -> bool:
+        payload = self._validated_forward_replay_artifact_payload(
+            evidence,
+            registration,
+        )
+        return (
+            payload is not None
+            and payload.get("capture_mode") == "FULL_REPLAY_VERIFIED"
+        )
+
+    def _forward_replay_artifact_is_prune_safe(
+        self,
+        evidence: StrategyV2ForwardEvidence,
+        registration: StrategyV2ForwardRegistration,
+    ) -> bool:
+        payload = self._validated_forward_replay_artifact_payload(
+            evidence,
+            registration,
+        )
+        if payload is None:
+            return False
+        capture_mode = payload.get("capture_mode")
+        if (
+            registration.candidate_algorithm_version
+            == BOUNDARY_NEUTRAL_PREWARM_ALGORITHM_VERSION
+        ):
+            return capture_mode == "FULL_REPLAY_VERIFIED"
+        if registration.candidate_algorithm_version == _FORWARD_CANDIDATE_VERSION:
+            return capture_mode in {
+                "FULL_REPLAY_VERIFIED",
+                "SOURCE_TRACE_ARCHIVE",
+            }
+        return False
+
+    def _forward_sessions_requiring_replay_source(
+        self,
+    ) -> set[tuple[str, str, date]]:
+        protected: set[tuple[str, str, date]] = set()
+        rows = self.db.query(
+            StrategyV2ForwardEvidence,
+            StrategyV2ForwardRegistration,
+        ).join(
+            StrategyV2ForwardRegistration,
+            StrategyV2ForwardRegistration.id
+            == StrategyV2ForwardEvidence.registration_id,
+        ).filter(
+            StrategyV2ForwardEvidence.disposition == "INCLUDED",
+        ).all()
+        for evidence, registration in rows:
+            if self._forward_replay_artifact_is_prune_safe(
+                evidence,
+                registration,
+            ):
+                continue
+            for session_day in (
+                evidence.seed_session_date,
+                evidence.target_session_date,
+            ):
+                if session_day is not None:
+                    protected.add((
+                        registration.symbol,
+                        registration.source_config_version,
+                        session_day,
+                    ))
+        return protected
+
+    @staticmethod
+    def _forward_source_trace_matches(
+        raw_trace: object,
+        *,
+        bars: Sequence[StrategyV2ReplayBar],
+        registration: StrategyV2ForwardRegistration,
+        session_day: date,
+        known_by: datetime,
+        observation_schedule: Mapping[datetime, datetime] | None = None,
+    ) -> bool:
+        if not isinstance(raw_trace, list) or not raw_trace:
+            return False
+        expected_bars = {
+            _as_utc(item.timestamp): item
+            for item in bars
+        }
+        if len(expected_bars) != len(bars):
+            return False
+        traced_bars: dict[datetime, StrategyV2ReplayBar] = {}
+        traced_schedule: dict[datetime, datetime] = {}
+        for item in raw_trace:
+            if not isinstance(item, dict):
+                return False
+            try:
+                bar_at = _as_utc(datetime.fromisoformat(str(item["bar_at"])))
+                observed_at = _as_utc(
+                    datetime.fromisoformat(str(item["observed_at"]))
+                )
+                decoded_features = json.loads(str(item["features_json"]))
+                raw_bar = decoded_features["bar"]
+                if not isinstance(decoded_features, dict) or not isinstance(
+                    raw_bar,
+                    dict,
+                ):
+                    return False
+                traced_bar = StrategyV2ReplayBar(
+                    timestamp=datetime.fromisoformat(str(raw_bar["timestamp"])),
+                    open=float(raw_bar["open"]),
+                    high=float(raw_bar["high"]),
+                    low=float(raw_bar["low"]),
+                    close=float(raw_bar["close"]),
+                    volume=float(raw_bar["volume"]),
+                )
+                close_price = float(item["close_price"])
+                duration_minutes = int(raw_bar["duration_minutes"])
+            except (
+                KeyError,
+                TypeError,
+                ValueError,
+                OverflowError,
+                json.JSONDecodeError,
+            ):
+                return False
+            if (
+                str(item.get("symbol", "")).strip().upper()
+                != registration.symbol
+                or str(item.get("market", "")).strip().upper()
+                != registration.market
+                or item.get("config_version")
+                != registration.source_config_version
+                or item.get("session_date") != session_day.isoformat()
+                or str(raw_bar.get("symbol", "")).strip().upper()
+                != registration.symbol
+                or duration_minutes != 1
+                or _as_utc(traced_bar.timestamp) != bar_at
+                or observed_at > _as_utc(known_by)
+                or not math.isclose(
+                    traced_bar.close,
+                    close_price,
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+            ):
+                return False
+            previous_bar = traced_bars.get(bar_at)
+            previous_observed_at = traced_schedule.get(bar_at)
+            if (
+                previous_bar is not None
+                and (
+                    previous_bar != traced_bar
+                    or previous_observed_at != observed_at
+                )
+            ):
+                return False
+            traced_bars[bar_at] = traced_bar
+            traced_schedule[bar_at] = observed_at
+        if traced_bars != expected_bars:
+            return False
+        if observation_schedule is None:
+            return True
+        normalized_schedule = {
+            _as_utc(key): _as_utc(value)
+            for key, value in observation_schedule.items()
+        }
+        return traced_schedule == normalized_schedule
+
+    def _validated_forward_replay_artifact_payload(
+        self,
+        evidence: StrategyV2ForwardEvidence,
+        registration: StrategyV2ForwardRegistration,
+    ) -> dict[str, Any] | None:
+        if evidence.id is None:
+            return None
+        link = self.db.get(
+            StrategyV2ForwardEvidenceArtifact,
+            (evidence.id, FORWARD_REPLAY_ARTIFACT_ROLE),
+        )
+        if link is None:
+            return None
+        artifact = self.db.get(
+            StrategyV2ForwardReplayArtifact,
+            link.artifact_sha256,
+        )
+        if artifact is None:
+            return None
+        try:
+            if (
+                not self._is_sha256(evidence.evidence_digest_sha256)
+                or self._forward_evidence_digest(evidence)
+                != evidence.evidence_digest_sha256
+                or not self._forward_spec_matches(registration)
+            ):
+                return None
+            expected_binding = forward_replay_artifact_binding_sha256(
+                evidence_id=evidence.id,
+                evidence_digest_sha256=evidence.evidence_digest_sha256,
+                artifact_digest_sha256=artifact.digest_sha256,
+            )
+            if link.binding_sha256 != expected_binding:
+                return None
+            payload = decode_forward_replay_artifact(
+                digest_sha256=artifact.digest_sha256,
+                schema_version=artifact.schema_version,
+                kind=artifact.kind,
+                codec=artifact.codec,
+                raw_size=artifact.raw_size,
+                compressed_size=artifact.compressed_size,
+                payload=artifact.payload,
+            )
+            registration_payload = payload["registration"]
+            evidence_payload = payload["evidence"]
+            if not isinstance(registration_payload, dict) or not isinstance(
+                evidence_payload,
+                dict,
+            ):
+                return None
+            if registration_payload != {
+                "id": registration.id,
+                "symbol": registration.symbol,
+                "market": registration.market,
+                "candidate_algorithm_version": (
+                    registration.candidate_algorithm_version
+                ),
+                "source_config_version": registration.source_config_version,
+                "evaluator_digest": registration.evaluator_digest,
+                "candidate_spec": json.loads(registration.candidate_spec_json),
+                "registered_at": _as_utc(registration.registered_at).isoformat(),
+                "eligible_after": _as_utc(registration.eligible_after).isoformat(),
+            }:
+                return None
+            candidate_spec_payload = registration_payload.get(
+                "candidate_spec"
+            )
+            if not isinstance(candidate_spec_payload, dict):
+                return None
+            expected_evidence = {
+                "target_session_date": evidence.target_session_date.isoformat(),
+                "seed_session_date": (
+                    evidence.seed_session_date.isoformat()
+                    if evidence.seed_session_date is not None
+                    else None
+                ),
+                "target_open_at": _as_utc(evidence.target_open_at).isoformat(),
+                "evaluated_at": _as_utc(evidence.evaluated_at).isoformat(),
+                "target_bars": evidence.target_bars,
+                "target_bars_sha256": evidence.target_bars_sha256,
+                "seed_bars_sha256": evidence.seed_bars_sha256,
+                "baseline_input_sha256": evidence.baseline_input_sha256,
+                "candidate_input_sha256": evidence.candidate_input_sha256,
+                "baseline_result_json": evidence.baseline_result_json,
+                "candidate_result_json": evidence.candidate_result_json,
+                "baseline_result_sha256": evidence.baseline_result_sha256,
+                "candidate_result_sha256": evidence.candidate_result_sha256,
+                "evidence_digest_sha256": evidence.evidence_digest_sha256,
+            }
+            if evidence_payload != expected_evidence:
+                return None
+            capture_mode = payload.get("capture_mode")
+            if (
+                payload.get("bundle_contract")
+                != "strategy-v2-forward-replay-bundle-v1"
+                or capture_mode not in {
+                    "FULL_REPLAY_VERIFIED",
+                    "SOURCE_TRACE_ARCHIVE",
+                }
+                or payload.get("source_config")
+                != candidate_spec_payload.get("source_config")
+            ):
+                return None
+            seed_bars = [
+                StrategyV2ReplayBar.model_validate(item)
+                for item in payload["seed_bars"]
+            ]
+            target_bars = [
+                StrategyV2ReplayBar.model_validate(item)
+                for item in payload["target_bars"]
+            ]
+            raw_schedule = payload["observation_schedule"]
+            if not isinstance(raw_schedule, list):
+                return None
+            schedule: dict[datetime, datetime] = {}
+            for item in raw_schedule:
+                if not isinstance(item, dict):
+                    return None
+                bar_at = _as_utc(datetime.fromisoformat(str(item["bar_at"])))
+                observed_at = _as_utc(
+                    datetime.fromisoformat(str(item["observed_at"]))
+                )
+                if bar_at in schedule:
+                    return None
+                schedule[bar_at] = observed_at
+            if not (
+                len(schedule) == len(target_bars)
+                and len(target_bars) == evidence.target_bars
+                and self._forward_bars_hash(seed_bars)
+                == evidence.seed_bars_sha256
+                and self._forward_bars_hash(target_bars)
+                == evidence.target_bars_sha256
+                and self._forward_replay_input_hash(target_bars, schedule)
+                == evidence.baseline_input_sha256
+                == evidence.candidate_input_sha256
+                and evidence.seed_session_date is not None
+                and self._forward_source_trace_matches(
+                    payload.get("seed_source_trace"),
+                    bars=seed_bars,
+                    registration=registration,
+                    session_day=evidence.seed_session_date,
+                    known_by=evidence.target_open_at,
+                )
+                and self._forward_source_trace_matches(
+                    payload.get("target_source_trace"),
+                    bars=target_bars,
+                    registration=registration,
+                    session_day=evidence.target_session_date,
+                    known_by=evidence.evaluated_at,
+                    observation_schedule=schedule,
+                )
+                and isinstance(payload.get("target_source_trades"), list)
+                and all(
+                    isinstance(item, dict)
+                    for item in payload.get("target_source_trades", [])
+                )
+            ):
+                return None
+            if capture_mode == "FULL_REPLAY_VERIFIED":
+                if not isinstance(payload.get("baseline_replay"), dict) or not isinstance(
+                    payload.get("candidate_replay"),
+                    dict,
+                ):
+                    return None
+                for replay_key, result_json in (
+                    ("baseline_replay", evidence.baseline_result_json),
+                    ("candidate_replay", evidence.candidate_result_json),
+                ):
+                    replay_payload = payload.get(replay_key)
+                    result_payload = json.loads(result_json)
+                    if not isinstance(replay_payload, dict) or not isinstance(
+                        result_payload,
+                        dict,
+                    ):
+                        return None
+                    replay_trades = replay_payload.get("trades")
+                    expected_trade_pnl = result_payload.get("trade_net_pnl")
+                    if (
+                        replay_payload.get("metrics")
+                        != result_payload.get("metrics")
+                        or not isinstance(replay_trades, list)
+                        or not isinstance(expected_trade_pnl, list)
+                        or any(
+                            not isinstance(item, dict) for item in replay_trades
+                        )
+                        or [
+                            float(item.get("net_pnl", 0.0))
+                            for item in replay_trades
+                            if isinstance(item, dict)
+                        ]
+                        != expected_trade_pnl
+                    ):
+                        return None
+            elif (
+                payload.get("baseline_replay") is not None
+                or payload.get("candidate_replay") is not None
+            ):
+                return None
+            return payload
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            OverflowError,
+            json.JSONDecodeError,
+            ForwardReplayArtifactError,
+        ):
+            return None
 
     @staticmethod
     def _forward_result_json(
@@ -2175,6 +3546,22 @@ class StrategyV2ShadowService:
         )
         return cls._forward_text_hash(encoded)
 
+    @classmethod
+    def _forward_evidence_duplicate_matches(
+        cls,
+        expected: StrategyV2ForwardEvidence,
+        existing: StrategyV2ForwardEvidence,
+    ) -> bool:
+        expected_digest = expected.evidence_digest_sha256
+        existing_digest = existing.evidence_digest_sha256
+        return (
+            cls._is_sha256(expected_digest)
+            and cls._is_sha256(existing_digest)
+            and expected_digest == existing_digest
+            and cls._forward_evidence_digest(expected) == expected_digest
+            and cls._forward_evidence_digest(existing) == existing_digest
+        )
+
     @staticmethod
     def _forward_net_pnl_sequence(
         payload: dict[str, Any],
@@ -2234,6 +3621,7 @@ class StrategyV2ShadowService:
             "TARGET_INPUT_HASH_MISMATCH",
             "SESSION_LOCAL_FEATURE_DRIFT",
             "FORWARD_EVALUATION_FAILED",
+            "REPLAY_ARTIFACT_PERSISTENCE_FAILED",
         }
         expected_structural = row.exclusion_reason in structural
         return (
@@ -2366,6 +3754,15 @@ class StrategyV2ShadowService:
             self.db.commit()
         except IntegrityError:
             self.db.rollback()
+            existing = self.db.query(StrategyV2ForwardEvidence).filter(
+                StrategyV2ForwardEvidence.registration_id == registration.id,
+                StrategyV2ForwardEvidence.target_session_date == target_day,
+            ).first()
+            if (
+                existing is None
+                or not self._forward_evidence_duplicate_matches(row, existing)
+            ):
+                raise
 
     def _record_forward_missed_targets(
         self,
@@ -3693,6 +5090,254 @@ class StrategyV2ShadowService:
             observed_causal_pairs=observed_causal_pairs,
             evaluated_causal_pairs=0,
             blockers=list(dict.fromkeys(blockers)),
+        )
+
+    @staticmethod
+    def _boundary_neutral_candidate_spec() -> (
+        StrategyV2BoundaryNeutralCandidateSpec
+    ):
+        return StrategyV2BoundaryNeutralCandidateSpec(
+            algorithm_version=BOUNDARY_NEUTRAL_PREWARM_ALGORITHM_VERSION,
+        )
+
+    @classmethod
+    def _boundary_neutral_candidate_spec_digest(cls) -> str:
+        encoded = json.dumps(
+            cls._boundary_neutral_candidate_spec().model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _empty_boundary_neutral_diagnostic(
+        cls,
+        *,
+        symbol: str,
+        source_config_version: str,
+        status: Literal[
+            "INSUFFICIENT_EVIDENCE",
+            "READY_FOR_REVIEW",
+            "BLOCKED",
+        ] = "INSUFFICIENT_EVIDENCE",
+        blockers: Sequence[str] = ("MIN_CAUSAL_PAIRS",),
+        observed_causal_pairs: int = 0,
+        evaluated_causal_pairs: int = 0,
+        baseline_replay_match: bool | None = None,
+    ) -> StrategyV2BoundaryNeutralDiagnosticResponse:
+        return StrategyV2BoundaryNeutralDiagnosticResponse(
+            symbol=symbol,
+            source_config_version=source_config_version,
+            candidate_spec=cls._boundary_neutral_candidate_spec(),
+            candidate_spec_sha256=(
+                cls._boundary_neutral_candidate_spec_digest()
+            ),
+            status=status,
+            observed_causal_pairs=observed_causal_pairs,
+            evaluated_causal_pairs=evaluated_causal_pairs,
+            blockers=list(dict.fromkeys(blockers)),
+            baseline_replay_match=baseline_replay_match,
+        )
+
+    def _boundary_neutral_diagnostic(
+        self,
+        *,
+        replay_bars: Sequence[StrategyV2ReplayBar],
+        source_config: StrategyV2ShadowConfig,
+        source_config_version: str,
+        market: str,
+        session_dates: Sequence[date],
+        observation_schedule: Mapping[datetime, datetime],
+    ) -> StrategyV2BoundaryNeutralDiagnosticResponse:
+        strategy_bars = self._strategy_bars_from_replay(
+            replay_bars,
+            symbol=source_config.symbol,
+        )
+        observed_pairs, pairs = self._causal_warmup_pairs(
+            bars=strategy_bars,
+            market=market,
+            session_dates=session_dates,
+            config=source_config,
+        )
+        blockers = (
+            ["MIN_CAUSAL_PAIRS"]
+            if len(pairs) < _MIN_WARMUP_CAUSAL_PAIRS
+            else []
+        )
+        if not pairs:
+            return self._empty_boundary_neutral_diagnostic(
+                symbol=source_config.symbol,
+                source_config_version=source_config_version,
+                blockers=blockers,
+                observed_causal_pairs=observed_pairs,
+                baseline_replay_match=True,
+            )
+
+        arm_decisions: dict[str, list[dict[str, Any]]] = {
+            "baseline": [],
+            "legacy": [],
+            "neutral": [],
+        }
+        arm_trades: dict[str, list[dict[str, Any]]] = {
+            "baseline": [],
+            "legacy": [],
+            "neutral": [],
+        }
+        arm_daily: dict[str, list[StrategyV2WarmupDaily]] = {
+            "baseline": [],
+            "legacy": [],
+            "neutral": [],
+        }
+        domain_config = self._domain_config(source_config, market)
+        target_sessions: list[date] = []
+        try:
+            for seed_day, target_day, seed_bars, target_bars in pairs:
+                target_payload = StrategyV2ShadowReplayRequest(
+                    symbol=source_config.symbol,
+                    market="HK" if market == "HK" else "US",
+                    bars=[
+                        StrategyV2ReplayBar(
+                            timestamp=item.timestamp,
+                            open=item.open,
+                            high=item.high,
+                            low=item.low,
+                            close=item.close,
+                            volume=item.volume,
+                        )
+                        for item in target_bars
+                    ],
+                )
+                frozen_input_hash = self._forward_replay_input_hash(
+                    target_payload.bars,
+                    observation_schedule,
+                )
+                baseline = self._replay_payload(
+                    target_payload,
+                    source_config,
+                    include_feature_evidence=True,
+                    observation_schedule=observation_schedule,
+                )
+                legacy = self._replay_payload(
+                    target_payload,
+                    source_config,
+                    include_feature_evidence=True,
+                    features=CausalTrendPrewarmFeatureEngine(
+                        domain_config.feature_config(),
+                        seed_bars,
+                    ),
+                    observation_schedule=observation_schedule,
+                )
+                neutral = self._replay_payload(
+                    target_payload,
+                    source_config,
+                    include_feature_evidence=True,
+                    features=(
+                        BoundaryNeutralCausalTrendPrewarmFeatureEngine(
+                            domain_config.feature_config(),
+                            seed_bars,
+                        )
+                    ),
+                    observation_schedule=observation_schedule,
+                )
+                if self._forward_replay_input_hash(
+                    target_payload.bars,
+                    observation_schedule,
+                ) != frozen_input_hash:
+                    raise ValueError("three-arm replay mutated its target input")
+                if not (
+                    self._session_local_features_match(baseline, legacy)
+                    and self._session_local_features_match(baseline, neutral)
+                ):
+                    return self._empty_boundary_neutral_diagnostic(
+                        symbol=source_config.symbol,
+                        source_config_version=source_config_version,
+                        status="BLOCKED",
+                        blockers=("SESSION_LOCAL_FEATURE_DRIFT",),
+                        observed_causal_pairs=observed_pairs,
+                        baseline_replay_match=True,
+                    )
+                replays = {
+                    "baseline": baseline,
+                    "legacy": legacy,
+                    "neutral": neutral,
+                }
+                for key, replay in replays.items():
+                    arm_decisions[key].extend(replay.decisions)
+                    arm_trades[key].extend(replay.trades)
+                    arm_daily[key].append(self._warmup_daily_from_replay(
+                        replay=replay,
+                        market=market,
+                        seed_day=seed_day,
+                        target_day=target_day,
+                        seed_bars=seed_bars,
+                        target_bars=target_bars,
+                    ))
+                target_sessions.append(target_day)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return self._empty_boundary_neutral_diagnostic(
+                symbol=source_config.symbol,
+                source_config_version=source_config_version,
+                status="BLOCKED",
+                blockers=("THREE_ARM_REPLAY_FAILED",),
+                observed_causal_pairs=observed_pairs,
+                baseline_replay_match=True,
+            )
+
+        variants = [
+            StrategyV2BoundaryNeutralVariant(
+                label="SESSION_LOCAL_BASELINE",
+                algorithm_version=_ALGORITHM_VERSION,
+                warmup_scope="NONE",
+                source_config_version=source_config_version,
+                metrics=self._metrics_from_replay(
+                    arm_decisions["baseline"],
+                    arm_trades["baseline"],
+                ),
+                daily=arm_daily["baseline"],
+            ),
+            StrategyV2BoundaryNeutralVariant(
+                label="LEGACY_CAUSAL_TREND_PREWARM_V1",
+                algorithm_version=_FORWARD_CANDIDATE_VERSION,
+                warmup_scope="ADX_VOL_ONLY",
+                source_config_version=source_config_version,
+                metrics=self._metrics_from_replay(
+                    arm_decisions["legacy"],
+                    arm_trades["legacy"],
+                ),
+                daily=arm_daily["legacy"],
+            ),
+            StrategyV2BoundaryNeutralVariant(
+                label="BOUNDARY_NEUTRAL_CAUSAL_TREND_PREWARM_V1",
+                algorithm_version=(
+                    BOUNDARY_NEUTRAL_PREWARM_ALGORITHM_VERSION
+                ),
+                warmup_scope="ADX_VOL_ONLY",
+                source_config_version=source_config_version,
+                metrics=self._metrics_from_replay(
+                    arm_decisions["neutral"],
+                    arm_trades["neutral"],
+                ),
+                daily=arm_daily["neutral"],
+            ),
+        ]
+        return StrategyV2BoundaryNeutralDiagnosticResponse(
+            symbol=source_config.symbol,
+            source_config_version=source_config_version,
+            candidate_spec=self._boundary_neutral_candidate_spec(),
+            candidate_spec_sha256=(
+                self._boundary_neutral_candidate_spec_digest()
+            ),
+            status=(
+                "READY_FOR_REVIEW"
+                if len(pairs) >= _MIN_WARMUP_CAUSAL_PAIRS
+                else "INSUFFICIENT_EVIDENCE"
+            ),
+            observed_causal_pairs=observed_pairs,
+            evaluated_causal_pairs=len(pairs),
+            blockers=blockers,
+            baseline_replay_match=True,
+            retrospective_target_sessions=target_sessions,
+            variants=variants,
         )
 
     @staticmethod

@@ -14,6 +14,8 @@ from app.schemas import (
     LiveExitChallengerReport,
     StrategyV2AdxChallengerRequest,
     StrategyV2AdxChallengerResponse,
+    StrategyV2BoundaryNeutralDiagnosticRequest,
+    StrategyV2BoundaryNeutralDiagnosticResponse,
     StrategyV2BracketChallengerReport,
     StrategyV2ExitChallengerReport,
     StrategyV2ForwardRegistrationRequest,
@@ -155,6 +157,22 @@ def compare_shadow_adx_challengers(
 
 
 @router.post(
+    "/prewarm-boundary-neutral",
+    response_model=StrategyV2BoundaryNeutralDiagnosticResponse,
+)
+def compare_prewarm_boundary_neutral(
+    payload: StrategyV2BoundaryNeutralDiagnosticRequest,
+    db: Session = Depends(get_db),
+) -> StrategyV2BoundaryNeutralDiagnosticResponse:
+    try:
+        return StrategyV2ShadowService(db).compare_boundary_neutral_prewarm(
+            payload
+        )
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
+
+
+@router.post(
     "/forward-validation/register",
     response_model=StrategyV2ForwardValidationResponse,
 )
@@ -174,7 +192,10 @@ def register_forward_validation(
     try:
         service = StrategyV2ShadowService(db)
         service.register_forward_validation(payload)
-        return service.get_forward_validation(payload.symbol)
+        return service.get_forward_validation(
+            payload.symbol,
+            candidate_algorithm_version=payload.candidate_algorithm_version,
+        )
     except ValueError as exc:
         result = "FAILED"
         summary["detail"] = str(exc)
@@ -200,10 +221,17 @@ def register_forward_validation(
 )
 def get_forward_validation(
     symbol: str = Query(max_length=50),
+    candidate_algorithm_version: str = Query(
+        default="strategy-v2-causal-trend-prewarm-v1",
+        max_length=100,
+    ),
     db: Session = Depends(get_db),
 ) -> StrategyV2ForwardValidationResponse:
     try:
-        return StrategyV2ShadowService(db).get_forward_validation(symbol)
+        return StrategyV2ShadowService(db).get_forward_validation(
+            symbol,
+            candidate_algorithm_version=candidate_algorithm_version,
+        )
     except ValueError as exc:
         raise _bad_request(exc) from exc
 
