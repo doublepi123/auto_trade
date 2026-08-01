@@ -31,6 +31,34 @@ _LAST_SENT: dict[str, float] = {}
 # service's private regex.
 _PREVIEW_SYMBOL_RE = re.compile(r"^[A-Z0-9\-]{1,12}\.(US|HK)$")
 
+# Strict ASCII target-date shape: exactly four digits, dash, two digits, dash,
+# two digits — full match only. Rejects single-digit month/day, Unicode
+# digits, and any leading/trailing content.
+_TARGET_DATE_RE = re.compile(r"\A[0-9]{4}-[0-9]{2}-[0-9]{2}\Z")
+
+
+def _validate_target_date(target_date: str | None) -> str:
+    """Validate and return the resolved target date string.
+
+    ``None`` defaults to the current UTC date (preserving scheduled/manual
+    behavior). A non-None value must be an ASCII ``YYYY-MM-DD`` string with a
+    real calendar date: full-match shape, no Unicode digits, no leading/
+    trailing content, and a date that actually exists (e.g. rejects
+    ``2026-06-31``). Raises ``ValueError`` otherwise so API callers can map it
+    to HTTP 400.
+    """
+    if target_date is None:
+        return datetime.now(timezone.utc).date().isoformat()
+    # strptime accepts some non-ASCII digit forms on some platforms and is
+    # lenient about trailing content in certain modes; enforce the strict
+    # ASCII shape first, then verify calendar validity.
+    if not _TARGET_DATE_RE.fullmatch(target_date):
+        raise ValueError("target_date must be YYYY-MM-DD")
+    # Calendar validity: rejects impossible dates like 2026-06-31 and
+    # 2026-02-30. strptime with %Y-%m-%d is strict about real dates.
+    datetime.strptime(target_date, "%Y-%m-%d")
+    return target_date
+
 
 @dataclass(frozen=True)
 class ReportScheduleStatus:
@@ -115,23 +143,18 @@ class ReportScheduleService:
         """Return (title, content) for a daily report on *symbol*.
 
         When *target_date* is omitted or ``None`` the current UTC date is used,
-        preserving the original scheduled-report behavior. When provided it must
-        be a ``YYYY-MM-DD`` string; an invalid format raises ``ValueError`` so
-        API callers can map it to HTTP 400 (the underlying report build itself
-        is still guarded and never raises).
+        preserving the original scheduled-report behavior. When provided it is
+        validated through ``_validate_target_date`` (strict ASCII
+        ``YYYY-MM-DD`` + real calendar date); an invalid value raises
+        ``ValueError`` so API callers can map it to HTTP 400 (the underlying
+        report build itself is still guarded and never raises).
 
         Never raises for report-build failures: if the report cannot be built,
         returns a short 'no data' message so the notification still sends
         something useful.
         """
         title = f"交易日报 · {symbol}"
-        if target_date is None:
-            target = datetime.now(timezone.utc).date().isoformat()
-        else:
-            # Validate the shape explicitly so preview callers get a clear
-            # error rather than a downstream strptime traceback.
-            datetime.strptime(target_date, "%Y-%m-%d")
-            target = target_date
+        target = _validate_target_date(target_date)
         try:
             report = ReportService(self._db).get_daily_report(symbol, target)
         except Exception:
@@ -174,10 +197,16 @@ class ReportScheduleService:
         *symbol_override* is supplied, in which case it is normalized/validated
         and used directly. *target_date* defaults to UTC today.
 
+        Only an explicit *symbol_override* is market-validated; a
+        configured/fallback symbol is passed straight to ``build_summary`` so
+        that an invalid legacy configured symbol produces the same fallback
+        title/content as manual/scheduled send rather than a preview 400. This
+        keeps preview parity with the actual send path.
+
         This method never calls the notifier, never writes audit rows, and never
         mutates the process-local ``_LAST_SENT`` throttle. Raises
-        ``ValueError`` when no effective symbol can be resolved or when an
-        override/date is invalid.
+        ``ValueError`` when no effective symbol can be resolved, when an
+        override is invalid, or when the target date is invalid.
         """
         if symbol_override is not None and symbol_override.strip():
             symbol = normalize_preview_symbol(symbol_override)
@@ -188,15 +217,12 @@ class ReportScheduleService:
             symbol = self.resolve_effective_symbol(cfg)
             if not symbol:
                 raise ValueError("no effective report symbol configured")
-            # Validate the configured/fallback symbol too so preview cannot
-            # silently diverge from what the report service would accept.
-            symbol = normalize_preview_symbol(symbol)
+            # Deliberately do NOT market-validate the configured/fallback
+            # symbol here: pass it straight to build_summary so an invalid
+            # legacy configured symbol yields the same fallback title/content
+            # as manual/scheduled send (parity), not a preview 400.
 
-        if target_date is None:
-            resolved_target = datetime.now(timezone.utc).date().isoformat()
-        else:
-            datetime.strptime(target_date, "%Y-%m-%d")
-            resolved_target = target_date
+        resolved_target = _validate_target_date(target_date)
 
         title, content = self.build_summary(symbol, target_date=resolved_target)
         return symbol, resolved_target, title, content
@@ -207,8 +233,16 @@ class ReportScheduleService:
         Read-only: does not call the notifier, mutate ``_LAST_SENT``, write
         DB/audit rows, or change config. Reuses the same effective-symbol and
         interval resolution as ``maybe_send`` so status cannot drift from the
-        actual send decision. Negative elapsed/remaining values (clock
-        rollback) are clamped to zero.
+        actual send decision.
+
+        ``last_sent_age_seconds`` is the elapsed time since the last send,
+        clamped to ``max(0, raw_elapsed)`` so a clock rollback never reports a
+        negative age. ``next_eligible_in_seconds`` and ``eligible_now`` use the
+        *raw* elapsed exactly like ``maybe_send``'s throttle gate
+        (``raw_elapsed < window``), so with a clock rollback the reported
+        remaining wait may exceed the configured interval and ``eligible_now``
+        stays False until the rollback is resolved — mirroring the point at
+        which ``maybe_send`` would actually dispatch.
         """
         cfg = self._db.query(StrategyConfig).order_by(
             StrategyConfig.id.desc()
@@ -228,27 +262,27 @@ class ReportScheduleService:
         last = self._state.get(effective_symbol) if effective_symbol else None
         has_history = last is not None
 
+        window_seconds = interval_hours * 3600
         if has_history:
-            # Clamp negative elapsed (clock rollback) to zero.
-            elapsed = max(0.0, now - last)
-            last_sent_age_seconds: float | None = elapsed
-            window_seconds = interval_hours * 3600
-            remaining = window_seconds - elapsed
+            raw_elapsed = now - last
+            # Exposed age is clamped to zero so rollback never shows a negative
+            # age to operators.
+            last_sent_age_seconds: float | None = max(0.0, raw_elapsed)
+            # Remaining wait and eligibility use the RAW elapsed exactly like
+            # maybe_send's gate (raw_elapsed < window). With a rollback
+            # (negative raw_elapsed) the remaining wait exceeds the window and
+            # eligible_now stays False, matching when maybe_send would dispatch.
+            remaining = window_seconds - raw_elapsed
             next_eligible_in_seconds: float | None = max(0.0, remaining)
         else:
             last_sent_age_seconds = None
             next_eligible_in_seconds = None
 
         # eligible_now mirrors maybe_send's gate: enabled + effective symbol +
-        # throttle elapsed (or no prior send). Computed from clamped values so
-        # a rolled-back clock cannot make a recently-sent report appear
-        # eligible again.
-        throttle_elapsed = (
-            (last is None) or (max(0.0, now - last) >= interval_hours * 3600)
-        )
-        eligible_now = bool(
-            enabled and effective_symbol and throttle_elapsed
-        )
+        # (no prior send OR raw_elapsed >= window). Uses raw elapsed so a
+        # rolled-back clock cannot make a recently-sent report appear eligible.
+        throttle_elapsed = (last is None) or ((now - last) >= window_seconds)
+        eligible_now = bool(enabled and effective_symbol and throttle_elapsed)
 
         return ReportScheduleStatus(
             enabled=enabled,

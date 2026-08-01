@@ -11,7 +11,6 @@ import json
 import os
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from unittest import mock
 
@@ -25,6 +24,11 @@ from app.cli.validate_config import (
     validate_settings,
 )
 from app.config import Settings
+
+
+# Backend root derived from this test file's location so the suite is portable
+# across checkout paths (no hard-coded workstation paths).
+_BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +130,48 @@ class TestValidateSettings:
         s = Settings()
         report = validate_settings(s)
         assert not any(i.code == "NON_SQLITE_DATABASE" for i in report.issues)
+
+    def test_sqlite_pysqlite_driver_no_error(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AUTO_TRADE_DATABASE_URL", "sqlite+pysqlite:///./data/auto_trade.db")
+        s = Settings()
+        report = validate_settings(s)
+        assert not any(i.code == "NON_SQLITE_DATABASE" for i in report.issues)
+
+    @pytest.mark.parametrize(
+        "bad_url",
+        [
+            "sqliteevil://x/y",  # lookalike dialect
+            "sqlite+evil:///./data.db",  # unsupported driver
+            "sqlite",  # bare dialect, no URL
+            "sqlitefoo",  # prefix lookalike
+            "sqlite:/relative.db",  # malformed (single slash)
+            "postgresql://user:pass@host/db",  # different dialect
+            "mysql+pymysql://user:pass@host/db",  # different dialect
+            "",  # empty
+        ],
+    )
+    def test_non_sqlite_lookalikes_are_error(self, monkeypatch, tmp_path, bad_url) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("AUTO_TRADE_DATABASE_URL", bad_url)
+        s = Settings()
+        report = validate_settings(s)
+        assert any(i.code == "NON_SQLITE_DATABASE" and i.severity == "ERROR" for i in report.issues)
+        # The URL value must never appear in any issue message (skip the empty
+        # case since the empty string is trivially "in" any message).
+        if bad_url:
+            for i in report.issues:
+                assert bad_url not in i.message
+
+    def test_non_sqlite_lookalike_subprocess_exit_one(self, tmp_path) -> None:
+        for bad_url in ("sqliteevil://x/y", "sqlite+evil:///./data.db", "sqlite", "sqlitefoo"):
+            code, out, _err = _run_cli_subprocess(
+                {"AUTO_TRADE_DATABASE_URL": bad_url},
+                cwd=tmp_path,
+            )
+            assert code == 1, f"expected exit 1 for {bad_url}, got {code}: {out}"
+            assert "NON_SQLITE_DATABASE" in out
+            assert bad_url not in out
 
     def test_p0_short_entries_violation_is_error(self, monkeypatch, tmp_path) -> None:
         # Settings clamps allow_short_entries to False, so we patch the
@@ -276,13 +322,23 @@ class TestRunValidation:
 # ---------------------------------------------------------------------------
 
 
-def _run_cli_subprocess(env: dict[str, str], as_json: bool = False) -> tuple[int, str, str]:
+def _run_cli_subprocess(
+    env: dict[str, str],
+    as_json: bool = False,
+    *,
+    cwd: Path | None = None,
+) -> tuple[int, str, str]:
     """Run the CLI as a subprocess with the given environment overrides.
 
-    Uses a clean temp cwd so the developer .env is not picked up, and sets
-    PYTHONPATH to the backend dir so ``app`` is importable.
+    Uses a clean temp cwd (so the developer .env is not picked up) and sets
+    PYTHONPATH to the backend root derived from this test file's location so
+    the suite is portable across checkout paths. The caller may pass an
+    explicit ``cwd`` (e.g. a pytest ``tmp_path``) when directory side effects
+    matter.
     """
-    cwd = tempfile.mkdtemp()
+    if cwd is None:
+        cwd = Path(__file__).resolve().parent / "_cli_subprocess_tmp"
+        cwd.mkdir(parents=True, exist_ok=True)
     full_env = os.environ.copy()
     # Strip developer-local secrets so they don't leak into the subprocess.
     for k in (
@@ -293,25 +349,29 @@ def _run_cli_subprocess(env: dict[str, str], as_json: bool = False) -> tuple[int
         "AUTO_TRADE_MINIMAX_API_KEY",
     ):
         full_env.pop(k, None)
+    # The old validation-mode env name must not affect behavior; ensure it is
+    # unset so tests prove the guard is gone.
+    full_env.pop("AUTO_TRADE_CONFIG_VALIDATION_MODE", None)
     full_env.update(env)
+    full_env["PYTHONPATH"] = str(_BACKEND_ROOT)
     cmd = [sys.executable, "-m", "app.cli.validate_config"]
     if as_json:
         cmd.append("--json")
     proc = subprocess.run(
         cmd,
-        cwd=cwd,
+        cwd=str(cwd),
         env=full_env,
         capture_output=True,
         text=True,
-        # The CLI sets validation mode itself, but be explicit for the subprocess.
     )
     return proc.returncode, proc.stdout, proc.stderr
 
 
 class TestSubprocessAndImportFailures:
-    def test_invalid_prod_config_no_traceback(self) -> None:
+    def test_invalid_prod_config_no_traceback(self, tmp_path) -> None:
         code, out, err = _run_cli_subprocess(
-            {"AUTO_TRADE_ENV": "prod", "AUTO_TRADE_API_KEY": "", "PYTHONPATH": "/Users/lcy/code/auto_trade/backend"}
+            {"AUTO_TRADE_ENV": "prod", "AUTO_TRADE_API_KEY": ""},
+            cwd=tmp_path,
         )
         assert code == 1
         # No traceback in stdout or stderr.
@@ -320,10 +380,11 @@ class TestSubprocessAndImportFailures:
         assert "CONFIG_LOAD_FAILED" in out
         assert "settings" in out
 
-    def test_invalid_prod_config_json_no_traceback(self) -> None:
+    def test_invalid_prod_config_json_no_traceback(self, tmp_path) -> None:
         code, out, err = _run_cli_subprocess(
-            {"AUTO_TRADE_ENV": "prod", "AUTO_TRADE_API_KEY": "", "PYTHONPATH": "/Users/lcy/code/auto_trade/backend"},
+            {"AUTO_TRADE_ENV": "prod", "AUTO_TRADE_API_KEY": ""},
             as_json=True,
+            cwd=tmp_path,
         )
         assert code == 1
         assert "Traceback" not in out
@@ -332,37 +393,73 @@ class TestSubprocessAndImportFailures:
         assert data["has_errors"] is True
         assert any(i["code"] == "CONFIG_LOAD_FAILED" for i in data["issues"])
 
-    def test_valid_config_subprocess_exit_zero(self) -> None:
+    def test_valid_config_subprocess_exit_zero(self, tmp_path) -> None:
         code, out, _err = _run_cli_subprocess(
-            {"AUTO_TRADE_ENV": "dev", "AUTO_TRADE_API_KEY": "", "PYTHONPATH": "/Users/lcy/code/auto_trade/backend"}
+            {"AUTO_TRADE_ENV": "dev", "AUTO_TRADE_API_KEY": ""},
+            cwd=tmp_path,
         )
         assert code == 0
         assert "OK" in out or "0 error" in out
 
-    def test_non_sqlite_error_subprocess_exit_one(self) -> None:
+    def test_non_sqlite_error_subprocess_exit_one(self, tmp_path) -> None:
         code, out, _err = _run_cli_subprocess(
-            {
-                "AUTO_TRADE_DATABASE_URL": "postgresql://user:pass@host/db",
-                "PYTHONPATH": "/Users/lcy/code/auto_trade/backend",
-            }
+            {"AUTO_TRADE_DATABASE_URL": "postgresql://user:pass@host/db"},
+            cwd=tmp_path,
         )
         assert code == 1
         assert "NON_SQLITE_DATABASE" in out
         # The URL must not appear in output.
         assert "postgresql://user:pass@host/db" not in out
 
-    def test_unsafe_override_warning_subprocess(self) -> None:
+    def test_unsafe_override_warning_subprocess(self, tmp_path) -> None:
         code, out, _err = _run_cli_subprocess(
             {
                 "AUTO_TRADE_ALLOW_SHORT_ENTRIES": "true",
                 "AUTO_TRADE_LLM_SHADOW_MODE": "false",
-                "PYTHONPATH": "/Users/lcy/code/auto_trade/backend",
-            }
+            },
+            cwd=tmp_path,
         )
         # Warnings only -> exit 0.
         assert code == 0
         assert "UNSAFE_OVERRIDE_SHORT_ENTRIES_IGNORED" in out
         assert "UNSAFE_OVERRIDE_LLM_SHADOW_IGNORED" in out
+
+    def test_cli_does_not_create_data_dir(self, tmp_path) -> None:
+        # Running the CLI in a fresh cwd must not create a data directory.
+        code, _out, _err = _run_cli_subprocess(
+            {"AUTO_TRADE_ENV": "dev", "AUTO_TRADE_API_KEY": ""},
+            cwd=tmp_path,
+        )
+        assert code == 0
+        assert not (tmp_path / "data").exists()
+
+    def test_cli_valid_json_exit_zero(self, tmp_path) -> None:
+        code, out, _err = _run_cli_subprocess(
+            {"AUTO_TRADE_ENV": "dev", "AUTO_TRADE_API_KEY": ""},
+            as_json=True,
+            cwd=tmp_path,
+        )
+        assert code == 0
+        data = json.loads(out)
+        assert data["has_errors"] is False
+
+    def test_cli_no_secret_or_path_leakage(self, tmp_path) -> None:
+        # Even with secrets in env, the CLI output must not echo them or the
+        # backend path.
+        code, out, err = _run_cli_subprocess(
+            {
+                "AUTO_TRADE_ENV": "dev",
+                "AUTO_TRADE_API_KEY": "",
+                "AUTO_TRADE_DATABASE_URL": "postgresql://user:supersecret@host/db",
+                "DEEPSEEK_API_KEY": "sk-leak-test",
+            },
+            cwd=tmp_path,
+        )
+        assert code == 1  # non-SQLite is an ERROR
+        combined = out + err
+        assert "supersecret" not in combined
+        assert "sk-leak-test" not in combined
+        assert str(_BACKEND_ROOT) not in combined
 
 
 # ---------------------------------------------------------------------------
@@ -371,23 +468,56 @@ class TestSubprocessAndImportFailures:
 
 
 class TestNoDataDirMutation:
-    def test_validation_mode_does_not_create_data_dir(self, monkeypatch, tmp_path) -> None:
-        # Run from a fresh tmp dir; validation mode must not create ./data.
+    def test_config_import_does_not_create_data_dir(self, tmp_path) -> None:
+        # Importing app.config alone in a clean cwd must not create data/.
+        # Use a subprocess so the already-cached app.config in this test
+        # process does not mask the result.
+        code, out, err = _run_python_subprocess(
+            tmp_path,
+            "import app.config; import pathlib; "
+            "print('DATA_EXISTS=' + str(pathlib.Path('data').exists()))",
+        )
+        assert code == 0, err
+        assert "DATA_EXISTS=False" in out
+
+    def test_database_import_creates_data_dir(self, tmp_path) -> None:
+        # Importing app.database in normal mode must create data/.
+        code, out, err = _run_python_subprocess(
+            tmp_path,
+            "import app.database; import pathlib; "
+            "print('DATA_EXISTS=' + str(pathlib.Path('data').exists()))",
+        )
+        assert code == 0, err
+        assert "DATA_EXISTS=True" in out
+
+    def test_old_validation_env_cannot_suppress_database_init(self, tmp_path) -> None:
+        # Externally setting the old AUTO_TRADE_CONFIG_VALIDATION_MODE name must
+        # NOT suppress normal database initialization (the guard is gone).
+        code, out, err = _run_python_subprocess(
+            tmp_path,
+            "import app.database; import pathlib; "
+            "print('DATA_EXISTS=' + str(pathlib.Path('data').exists()))",
+            extra_env={"AUTO_TRADE_CONFIG_VALIDATION_MODE": "1"},
+        )
+        assert code == 0, err
+        assert "DATA_EXISTS=True" in out
+
+    def test_run_validation_does_not_create_data_dir(self, monkeypatch, tmp_path) -> None:
+        # In-process: run_validation imports app.config (not app.database) and
+        # must not create data/.
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("AUTO_TRADE_CONFIG_VALIDATION_MODE", "1")
         from app.cli.validate_config import run_validation
 
         report, _code = run_validation()
-        # No data directory should have been created in tmp_path.
         assert not (tmp_path / "data").exists()
 
-    def test_load_for_validation_sets_and_clears_guard(self, monkeypatch, tmp_path) -> None:
+    def test_load_for_validation_does_not_mutate_env(self, monkeypatch, tmp_path) -> None:
         monkeypatch.chdir(tmp_path)
         from app.cli.validate_config import load_for_validation
 
         assert "AUTO_TRADE_CONFIG_VALIDATION_MODE" not in os.environ
         load_for_validation()
-        # The guard must be cleared after loading.
+        # No ambient guard is set or cleared anymore.
         assert "AUTO_TRADE_CONFIG_VALIDATION_MODE" not in os.environ
 
     def test_normal_config_still_creates_data_dir(self, monkeypatch, tmp_path) -> None:
@@ -397,3 +527,33 @@ class TestNoDataDirMutation:
         s = Settings()
         s.ensure_data_dir()
         assert (tmp_path / "data").exists()
+
+
+def _run_python_subprocess(
+    cwd: Path,
+    code: str,
+    *,
+    extra_env: dict[str, str] | None = None,
+) -> tuple[int, str, str]:
+    """Run a Python one-liner in a clean subprocess with backend on PYTHONPATH."""
+    full_env = os.environ.copy()
+    for k in (
+        "AUTO_TRADE_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "MINIMAX_API_KEY",
+        "AUTO_TRADE_DEEPSEEK_API_KEY",
+        "AUTO_TRADE_MINIMAX_API_KEY",
+    ):
+        full_env.pop(k, None)
+    full_env.pop("AUTO_TRADE_CONFIG_VALIDATION_MODE", None)
+    full_env["PYTHONPATH"] = str(_BACKEND_ROOT)
+    if extra_env:
+        full_env.update(extra_env)
+    proc = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=str(cwd),
+        env=full_env,
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode, proc.stdout, proc.stderr

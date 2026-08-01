@@ -12,6 +12,14 @@ from app.config import settings
 
 logger = logging.getLogger("auto_trade.database")
 
+# Ensure the data directory exists before the SQLite engine opens the DB file.
+# This was previously done at ``app.config`` import time, which made config
+# validation (and any config-only import) create directories as a side effect.
+# It now lives here, in the narrowest normal startup module the validation CLI
+# does not import, so importing ``app.config`` alone is side-effect-free while
+# normal backend startup (which imports ``app.database``) still ensures it.
+settings.ensure_data_dir()
+
 _connect_args: dict[str, object] = {}
 if settings.database_url.startswith("sqlite"):
     _connect_args["check_same_thread"] = False

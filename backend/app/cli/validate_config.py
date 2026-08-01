@@ -15,16 +15,14 @@ Exit code is 0 when no ERROR issues are present (warnings allowed) and 1 when
 any ERROR issue exists. Import-time/Pydantic configuration failures are caught
 and reported as a sanitized ERROR rather than surfacing a traceback.
 
-This CLI runs in a validation-only mode that does not create the data directory
-or otherwise mutate runtime state (see ``AUTO_TRADE_CONFIG_VALIDATION_MODE`` in
-``app.config``).
+This CLI imports ``app.config`` (which is side-effect-free) but does NOT import
+``app.database``, so no data directory or engine is created during validation.
 """
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import sys
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
@@ -85,6 +83,27 @@ class ValidationReport:
         self.issues.append(issue)
 
 
+def _is_supported_sqlite_url(db_url: str) -> bool:
+    """Return True iff *db_url* is a supported SQLite URL.
+
+    Uses SQLAlchemy ``make_url`` for real URL parsing (not a prefix check) and
+    an explicit driver allowlist so lookalikes (``sqliteevil://``,
+    ``sqlite+evil://``, bare ``sqlite``, ``sqlitefoo``) are rejected. Does not
+    import ``app.database``. Never echoes the URL value.
+    """
+    from sqlalchemy.engine import make_url  # noqa: PLC0415 — local import keeps the helper pure/testable
+
+    supported_drivers = {"sqlite", "sqlite+pysqlite"}
+    try:
+        url = make_url(db_url)
+    except Exception:
+        # Malformed URLs are not supported SQLite URLs.
+        return False
+    # drivername is the full "dialect+driver" or bare "dialect"; compare against
+    # the explicit allowlist so lookalikes cannot slip through.
+    return url.drivername in supported_drivers
+
+
 def validate_settings(settings: Any) -> ValidationReport:
     """Run all validation checks against a loaded ``Settings`` instance.
 
@@ -98,11 +117,10 @@ def validate_settings(settings: Any) -> ValidationReport:
     report = ValidationReport()
 
     # --- SQLite-only database -------------------------------------------------
-    # Derive the scheme without printing the URL. We only check the prefix.
+    # Real URL parsing with an explicit driver allowlist; the URL value is
+    # never emitted, only the boolean result is used.
     db_url = getattr(settings, "database_url", "") or ""
-    # Normalize for the scheme check without emitting the URL.
-    is_sqlite = db_url.startswith("sqlite")
-    if not is_sqlite:
+    if not _is_supported_sqlite_url(db_url):
         report.add(
             ValidationIssue(
                 code=CODE_NON_SQLITE_DATABASE,
@@ -254,7 +272,7 @@ def format_json(report: ValidationReport) -> str:
 
 
 def load_for_validation() -> tuple[ValidationReport | None, Any | None]:
-    """Load ``Settings`` in validation-only mode.
+    """Load ``Settings`` for validation without filesystem side effects.
 
     Returns ``(report, settings)``. When the import or Settings construction
     fails (Pydantic ValidationError or import-time configuration error),
@@ -262,11 +280,10 @@ def load_for_validation() -> tuple[ValidationReport | None, Any | None]:
     describing the failure without a traceback or secret values. When load
     succeeds, ``report`` is ``None`` and ``settings`` is the instance.
 
-    Sets ``AUTO_TRADE_CONFIG_VALIDATION_MODE=1`` before importing
-    ``app.config`` so the module-level ``ensure_data_dir()`` is skipped and no
-    data directory is created.
+    Imports ``app.config`` (which no longer creates directories at import time)
+    but deliberately does NOT import ``app.database``, so no data directory or
+    engine is created. No ambient environment guard is mutated.
     """
-    os.environ["AUTO_TRADE_CONFIG_VALIDATION_MODE"] = "1"
     try:
         from app.config import Settings  # noqa: PLC0415 — deferred import is intentional
 
@@ -288,10 +305,6 @@ def load_for_validation() -> tuple[ValidationReport | None, Any | None]:
             ),
             None,
         )
-    finally:
-        # Restore the environment so the CLI does not leak validation mode into
-        # any downstream process it might spawn.
-        os.environ.pop("AUTO_TRADE_CONFIG_VALIDATION_MODE", None)
 
     return None, settings
 

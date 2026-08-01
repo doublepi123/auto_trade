@@ -290,6 +290,105 @@ class TestReportSchedulePreviewService(_Base):
         assert title_default == title_explicit
         assert content_default == content_explicit
 
+    def test_preview_invalid_configured_symbol_parity_with_build_summary(self) -> None:
+        # An invalid legacy configured symbol must produce the SAME fallback
+        # title/content as build_summary (and thus manual/scheduled send),
+        # NOT a preview 400. Only explicit overrides are validated.
+        self._cfg(report_schedule_enabled=True, report_schedule_symbol="BOGUS.X")
+        svc = ReportScheduleService(self._db(), state={})
+        symbol, _target, title, content = svc.preview()
+        assert symbol == "BOGUS.X"
+        direct_title, direct_content = svc.build_summary("BOGUS.X")
+        assert title == direct_title
+        assert content == direct_content
+        # build_summary returns a fallback "report generation failed" message
+        # for an invalid symbol, not a raise — preview must match that.
+        assert "BOGUS.X" in title
+
+    def test_preview_invalid_configured_symbol_parity_with_manual_send(self) -> None:
+        # The manual run endpoint calls build_summary(symbol) directly with no
+        # validation; preview with the same configured symbol must return the
+        # same title/content (parity), not 400.
+        self._cfg(report_schedule_enabled=True, report_schedule_symbol="BAD.SUFFIX")
+        svc = ReportScheduleService(self._db(), state={})
+        symbol, _target, title, content = svc.preview()
+        # Manual send path resolves the same symbol and calls build_summary.
+        manual_title, manual_content = svc.build_summary(
+            ReportScheduleService.resolve_effective_symbol(
+                self._db().query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
+            )
+        )
+        assert title == manual_title
+        assert content == manual_content
+
+    def test_preview_explicit_invalid_override_still_returns_400(self) -> None:
+        # Explicit overrides ARE validated even though configured symbols are not.
+        self._cfg(report_schedule_enabled=True, report_schedule_symbol="AAPL.US")
+        svc = ReportScheduleService(self._db(), state={})
+        with pytest.raises(ValueError, match="symbol market must be US or HK"):
+            svc.preview(symbol_override="BOGUS.X")
+
+    def test_preview_strict_date_rejects_single_digit_month(self) -> None:
+        self._cfg(symbol="AAPL.US")
+        svc = ReportScheduleService(self._db(), state={})
+        with pytest.raises(ValueError):
+            svc.preview(target_date="2026-6-01")
+
+    def test_preview_strict_date_rejects_single_digit_day(self) -> None:
+        self._cfg(symbol="AAPL.US")
+        svc = ReportScheduleService(self._db(), state={})
+        with pytest.raises(ValueError):
+            svc.preview(target_date="2026-06-1")
+
+    def test_preview_strict_date_rejects_impossible_date(self) -> None:
+        self._cfg(symbol="AAPL.US")
+        svc = ReportScheduleService(self._db(), state={})
+        with pytest.raises(ValueError):
+            svc.preview(target_date="2026-06-31")
+
+    def test_preview_strict_date_rejects_trailing_content(self) -> None:
+        self._cfg(symbol="AAPL.US")
+        svc = ReportScheduleService(self._db(), state={})
+        with pytest.raises(ValueError):
+            svc.preview(target_date="2026-06-01T00:00:00")
+
+    def test_preview_strict_date_rejects_leading_content(self) -> None:
+        self._cfg(symbol="AAPL.US")
+        svc = ReportScheduleService(self._db(), state={})
+        with pytest.raises(ValueError):
+            svc.preview(target_date=" 2026-06-01")
+
+    def test_preview_strict_date_rejects_unicode_digits(self) -> None:
+        self._cfg(symbol="AAPL.US")
+        svc = ReportScheduleService(self._db(), state={})
+        # Full-width Unicode digits that look like ASCII but are not.
+        with pytest.raises(ValueError):
+            svc.preview(target_date="２０２６-０６-０１")
+
+    def test_preview_strict_date_accepts_valid_leap_day(self) -> None:
+        self._cfg(symbol="AAPL.US")
+        svc = ReportScheduleService(self._db(), state={})
+        symbol, target, _title, _content = svc.preview(target_date="2024-02-29")
+        assert target == "2024-02-29"
+
+    def test_preview_strict_date_rejects_non_leap_day(self) -> None:
+        self._cfg(symbol="AAPL.US")
+        svc = ReportScheduleService(self._db(), state={})
+        with pytest.raises(ValueError):
+            svc.preview(target_date="2026-02-29")
+
+    def test_build_summary_strict_date_rejects_impossible_date(self) -> None:
+        self._cfg(symbol="AAPL.US")
+        svc = ReportScheduleService(self._db(), state={})
+        with pytest.raises(ValueError):
+            svc.build_summary("AAPL.US", target_date="2026-06-31")
+
+    def test_build_summary_strict_date_rejects_trailing_content(self) -> None:
+        self._cfg(symbol="AAPL.US")
+        svc = ReportScheduleService(self._db(), state={})
+        with pytest.raises(ValueError):
+            svc.build_summary("AAPL.US", target_date="2026-06-01 ")
+
 
 class TestReportSchedulePreviewAPI(_Base):
     """GET /api/reports/schedule/preview — read-only, authenticated, no side effects."""
@@ -366,6 +465,49 @@ class TestReportSchedulePreviewAPI(_Base):
         resp = self.client.get(
             "/api/reports/schedule/preview",
             params={"date": "2026/06/01"},
+        )
+        assert resp.status_code == 400
+
+    def test_preview_impossible_date_returns_400(self) -> None:
+        self._cfg(symbol="AAPL.US")
+        resp = self.client.get(
+            "/api/reports/schedule/preview",
+            params={"date": "2026-06-31"},
+        )
+        assert resp.status_code == 400
+
+    def test_preview_single_digit_month_returns_400(self) -> None:
+        self._cfg(symbol="AAPL.US")
+        resp = self.client.get(
+            "/api/reports/schedule/preview",
+            params={"date": "2026-6-01"},
+        )
+        assert resp.status_code == 400
+
+    def test_preview_trailing_content_date_returns_400(self) -> None:
+        self._cfg(symbol="AAPL.US")
+        resp = self.client.get(
+            "/api/reports/schedule/preview",
+            params={"date": "2026-06-01T00:00:00"},
+        )
+        assert resp.status_code == 400
+
+    def test_preview_invalid_configured_symbol_returns_200_not_400(self) -> None:
+        # Parity: an invalid configured symbol produces the same fallback
+        # title/content as manual/scheduled send, NOT a 400.
+        self._cfg(report_schedule_enabled=True, report_schedule_symbol="BOGUS.X")
+        resp = self.client.get("/api/reports/schedule/preview")
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["symbol"] == "BOGUS.X"
+        assert "BOGUS.X" in data["title"]
+
+    def test_preview_explicit_invalid_override_returns_400(self) -> None:
+        # Explicit overrides are still validated.
+        self._cfg(report_schedule_enabled=True, report_schedule_symbol="AAPL.US")
+        resp = self.client.get(
+            "/api/reports/schedule/preview",
+            params={"symbol": "BOGUS.X"},
         )
         assert resp.status_code == 400
 
@@ -507,30 +649,34 @@ class TestReportScheduleStatusService(_Base):
             report_schedule_symbol="AAPL.US",
             report_schedule_interval_hours=1,
         )
-        # last recorded at 2000, clock now reads 1000 (rollback).
+        # last recorded at 2000, clock now reads 1000 (rollback of 1000s).
         state = {"AAPL.US": 2000.0}
         svc = ReportScheduleService(self._db(), clock=lambda: 1000.0, state=state)
         st = svc.status()
-        # elapsed clamped to 0, not negative.
+        # Exposed age is clamped to 0, not negative.
         assert st.last_sent_age_seconds == 0.0
-        # remaining = window - 0 = full window.
-        assert st.next_eligible_in_seconds == 3600.0
+        # next_eligible uses RAW elapsed (now - last = -1000), so the remaining
+        # wait EXCEEDS the window: 3600 - (-1000) = 4600. This mirrors
+        # maybe_send, which stays throttled until the rollback is resolved.
+        assert st.next_eligible_in_seconds == 4600.0
         assert st.eligible_now is False
 
     def test_status_clock_rollback_clamps_remaining_to_zero_when_over_elapsed(self) -> None:
-        # Even if (unclamped) elapsed would exceed the window, a rollback that
-        # produces a negative raw elapsed must still clamp to 0 -> not eligible.
+        # When raw elapsed exceeds the window (no rollback), remaining clamps
+        # to zero and the report is eligible.
         self._cfg(
             report_schedule_enabled=True,
             report_schedule_symbol="AAPL.US",
             report_schedule_interval_hours=1,
         )
         state = {"AAPL.US": 1000.0}
-        # Clock rolled back below last: raw elapsed negative -> clamp to 0.
-        svc = ReportScheduleService(self._db(), clock=lambda: 500.0, state=state)
+        svc = ReportScheduleService(
+            self._db(), clock=lambda: 1000.0 + 3600.0 + 1.0, state=state
+        )
         st = svc.status()
-        assert st.last_sent_age_seconds == 0.0
-        assert st.eligible_now is False
+        assert st.last_sent_age_seconds == 3601.0
+        assert st.next_eligible_in_seconds == 0.0
+        assert st.eligible_now is True
 
     def test_status_process_semantics_fields(self) -> None:
         self._cfg(report_schedule_enabled=True, report_schedule_symbol="AAPL.US")
@@ -597,6 +743,49 @@ class TestReportScheduleStatusService(_Base):
         st = svc.status()
         assert st.configured_symbol == ""
         assert st.effective_symbol == "MSFT.US"
+
+    def test_status_eligible_now_boundary_matches_maybe_send(self) -> None:
+        # The point at which status reports eligible_now=True must be the
+        # exact point at which maybe_send actually dispatches. Sweep the clock
+        # across the window boundary and confirm both agree at every step.
+        self._cfg(
+            report_schedule_enabled=True,
+            report_schedule_symbol="AAPL.US",
+            report_schedule_interval_hours=1,
+        )
+        state = {"AAPL.US": 1000.0}
+        notifier = FakeNotifier()
+        for offset in (0.0, 60.0, 3599.0, 3600.0, 3600.0 - 0.001, 3600.0 + 0.001, 7200.0):
+            svc = ReportScheduleService(
+                self._db(), clock=lambda o=offset: 1000.0 + o, state=state
+            )
+            st = svc.status()
+            # maybe_send's gate: last is not None and (now - last) < window.
+            raw_elapsed = (1000.0 + offset) - 1000.0
+            send_eligible = not (raw_elapsed < 3600.0)
+            assert st.eligible_now is send_eligible, (
+                f"mismatch at offset={offset}: status={st.eligible_now} maybe_send={send_eligible}"
+            )
+
+    def test_status_clock_rollback_eligible_now_matches_maybe_send(self) -> None:
+        # With a clock rollback (raw_elapsed negative), maybe_send stays
+        # throttled and status must report eligible_now=False with a remaining
+        # wait exceeding the window.
+        self._cfg(
+            report_schedule_enabled=True,
+            report_schedule_symbol="AAPL.US",
+            report_schedule_interval_hours=1,
+        )
+        state = {"AAPL.US": 2000.0}
+        svc = ReportScheduleService(self._db(), clock=lambda: 1000.0, state=state)
+        st = svc.status()
+        # maybe_send with the same clock would be throttled (raw -1000 < 3600).
+        send_svc = ReportScheduleService(
+            self._db(), clock=lambda: 1000.0, state=state
+        )
+        assert send_svc.maybe_send(FakeRunner(FakeNotifier())) is False
+        assert st.eligible_now is False
+        assert st.next_eligible_in_seconds == 4600.0  # 3600 - (-1000)
 
 
 class TestReportScheduleStatusAPI(_Base):

@@ -796,13 +796,8 @@ class Settings(BaseSettings):
         return self
 
     def ensure_data_dir(self) -> None:
-        # Validation-only mode (set by the validate_config CLI) must not create
-        # directories or mutate runtime state. Normal app behavior is unchanged.
-        if os.environ.get("AUTO_TRADE_CONFIG_VALIDATION_MODE") == "1":
-            return
         data_dir = Path("data")
         data_dir.mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()
-settings.ensure_data_dir()
