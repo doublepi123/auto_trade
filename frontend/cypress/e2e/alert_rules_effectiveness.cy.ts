@@ -73,7 +73,7 @@ describe('Alert rule effectiveness overview', () => {
     cy.get('[data-testid="alert-effectiveness-empty"]').should('be.visible')
   })
 
-  it('shows an error state and recovers via explicit reload', () => {
+  it('shows an error state without rendering false zero totals, then recovers', () => {
     cy.stubApi()
     cy.intercept('GET', '/api/alert-rules/effectiveness*', {
       statusCode: 500,
@@ -83,6 +83,11 @@ describe('Alert rule effectiveness overview', () => {
     cy.visit('/#/alerts')
     cy.wait('@effectivenessError')
     cy.get('[data-testid="alert-effectiveness-detail-error"]').should('be.visible')
+    // Never loaded: cards must show unloaded '—' / error, not fabricated zeros.
+    cy.get('[data-testid="alert-effectiveness-summary"]').should('not.contain', '规则总数')
+    cy.get('[data-testid="alert-effectiveness-empty"]').should('not.exist')
+    cy.get('[data-testid="alert-rule-health"]').should('contain', '有触发记录 —')
+    cy.get('[data-testid="alert-rule-health"]').should('contain', '从未触发 —')
 
     cy.intercept('GET', '/api/alert-rules/effectiveness*', {
       body: populatedEffectiveness,
@@ -92,7 +97,33 @@ describe('Alert rule effectiveness overview', () => {
     cy.get('[data-testid="alert-effectiveness-table"]').should('contain', 'AAPL 高点')
   })
 
-  it('refetches with the selected window when the date range changes', () => {
+  it('keeps previously loaded stats on screen when a refetch fails', () => {
+    cy.stubApi()
+    cy.intercept('GET', '/api/alert-rules/effectiveness*', {
+      body: populatedEffectiveness,
+    }).as('effectiveness')
+
+    cy.visit('/#/alerts')
+    cy.wait('@effectiveness')
+    cy.get('[data-testid="alert-effectiveness-summary"]').should('contain', '规则总数 2')
+
+    cy.intercept('GET', '/api/alert-rules/effectiveness*', {
+      statusCode: 500,
+      body: { detail: 'aggregate failed' },
+    }).as('effectivenessFail')
+    cy.get('[data-testid="alert-effectiveness-reload"]').click()
+    cy.wait('@effectivenessFail')
+
+    // Previous results stay visible (still labelled by the applied window)
+    // alongside the error — never collapsed to zeros.
+    cy.get('[data-testid="alert-effectiveness-error"]').should('be.visible')
+    cy.get('[data-testid="alert-effectiveness-summary"]').should('contain', '规则总数 2')
+    cy.get('[data-testid="alert-effectiveness-summary"]').should('contain', '窗口内触发 3 次')
+    cy.get('[data-testid="alert-effectiveness-table"]').should('contain', 'AAPL 高点')
+    cy.get('[data-testid="alert-rule-health"]').should('contain', '有触发记录 1')
+  })
+
+  it('refetches with the selected window and relabels only after success', () => {
     cy.stubApi()
     const queries: Array<Record<string, string>> = []
     cy.intercept('GET', '/api/alert-rules/effectiveness*', (req) => {
@@ -106,6 +137,10 @@ describe('Alert rule effectiveness overview', () => {
     cy.get('[data-testid="alert-effectiveness-range"] input[placeholder="开始日期"]').clear().type('2026-06-01')
     cy.get('[data-testid="alert-effectiveness-range"] input[placeholder="结束日期"]').clear().type('2026-06-15')
     cy.get('h3').click()
+
+    // Draft edits alone must not relabel the on-screen results window.
+    cy.get('[data-testid="alert-effectiveness-window"]').should('not.contain', '2026-06-01')
+
     cy.get('[data-testid="alert-effectiveness-reload"]').click()
     cy.wait('@effectivenessQuery')
 
@@ -115,6 +150,52 @@ describe('Alert rule effectiveness overview', () => {
       expect(last.from_date).to.equal('2026-06-01')
       expect(last.to_date).to.equal('2026-06-15')
     })
+    cy.get('[data-testid="alert-effectiveness-window"]').should('contain', '2026-06-01 至 2026-06-15')
+  })
+
+  it('shows the server all-time fallback last-fired time in the main table', () => {
+    cy.stubApi()
+    cy.intercept('GET', '/api/alert-rules', {
+      body: {
+        items: [
+          {
+            id: 41,
+            name: '旧规则',
+            symbol: 'AAPL.US',
+            rule_type: 'price_above',
+            threshold: 150,
+            severity: 'WARNING',
+            enabled: true,
+            cooldown_seconds: 300,
+            last_fired_at: null,
+            created_at: '2026-06-15T00:00:00Z',
+          },
+        ],
+        total: 1,
+      },
+    }).as('rules')
+    cy.intercept('GET', '/api/alert-rules/effectiveness*', {
+      body: {
+        items: [
+          effectivenessItem({
+            id: 41, name: '旧规则', firing_count: 2,
+            last_fired_at: '2026-06-10T08:30:00Z', never_fired: false,
+          }),
+        ],
+        total: 1,
+      },
+    }).as('effectiveness')
+
+    cy.visit('/#/alerts')
+    cy.wait('@rules')
+    cy.wait('@effectiveness')
+
+    // The rule row's own last_fired_at is null (legacy), but the server
+    // aggregate supplies the all-time latest firing — the main table must not
+    // render '—' while summaries classify the rule as fired.
+    cy.contains('.el-table__body tr', '旧规则').should('not.contain', '—')
+    cy.contains('.el-table__body tr', '旧规则').invoke('text').should('match', /\d{2}\/\d{2}/)
+    cy.get('[data-testid="alert-rule-health"]').should('contain', '有触发记录 1')
   })
 
   it('keeps the effectiveness section usable on a mobile viewport', () => {

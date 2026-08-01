@@ -39,7 +39,7 @@ describe('Dashboard database storage health', () => {
     cy.visit('/')
     cy.wait('@dbHealthMemory')
     cy.get('[data-testid="db-health-journal"]').should('contain', 'MEMORY')
-    cy.get('[data-testid="db-health-wal"]').should('contain', '不适用')
+    cy.get('[data-testid="db-health-wal"]').should('contain', '不适用或未知')
     cy.get('[data-testid="db-health-usage-label"]').should('contain', '40 / 40（100%）')
   })
 
@@ -98,6 +98,35 @@ describe('Dashboard database storage health', () => {
     cy.get('[data-testid="dash-diagnostics-refresh"]').click()
     cy.wait('@dbHealthRetry')
     cy.get('[data-testid="db-health-journal"]').should('contain', 'WAL')
+  })
+
+  it('ages the checked-at freshness label without a data refresh', () => {
+    const now = new Date('2026-08-02T12:00:00Z').getTime()
+    cy.clock(now, ['Date', 'setInterval', 'clearInterval'])
+    cy.stubApi()
+    cy.intercept('GET', '/api/database-health', {
+      body: {
+        checked_at: '2026-08-02T12:00:00Z',
+        dialect: 'sqlite',
+        journal_mode: 'wal',
+        page_size_bytes: 4096,
+        page_count: 1200,
+        freelist_count: 120,
+        used_page_count: 1080,
+        database_size_bytes: 4915200,
+        free_space_bytes: 491520,
+        wal_size_bytes: 204800,
+      },
+    }).as('dbHealthClock')
+
+    cy.visit('/')
+    cy.wait('@dbHealthClock')
+    cy.get('[data-testid="db-health-checked-at"]').should('contain', '刚刚')
+
+    // Advance the clock: the label must age via the 1s tick alone (no refetch).
+    cy.tick(5000)
+    cy.get('[data-testid="db-health-checked-at"]').should('contain', '5s前')
+    cy.get('@dbHealthClock.all').should('have.length', 1)
   })
 
   it('shows checked-at freshness relative to an older probe time', () => {

@@ -53,7 +53,7 @@
           {{ effectivenessError }}
           <el-button link size="small" type="primary" @click="loadEffectiveness">重试</el-button>
         </div>
-        <template v-else-if="effectivenessLoaded">
+        <template v-if="effectivenessLoaded">
           <div class="summary-items">
             <span>规则总数 {{ effectivenessTotal }}</span>
             <span>窗口内触发 {{ windowFiringTotal }} 次</span>
@@ -62,7 +62,7 @@
           </div>
           <div class="summary-empty" data-testid="alert-effectiveness-window">{{ effectivenessWindowLabel }}</div>
         </template>
-        <div v-else class="summary-empty" data-testid="alert-effectiveness-placeholder">
+        <div v-else-if="!effectivenessError" class="summary-empty" data-testid="alert-effectiveness-placeholder">
           {{ effectivenessLoading ? '加载中…' : '尚未加载触发统计' }}
         </div>
       </div>
@@ -107,7 +107,7 @@
         <template #default="{ row }">{{ row.cooldown_seconds }}</template>
       </el-table-column>
       <el-table-column label="上次触发" min-width="140">
-        <template #default="{ row }">{{ row.last_fired_at ? formatDateTime(row.last_fired_at) : '—' }}</template>
+        <template #default="{ row }">{{ ruleLastFiredAt(row) ? formatDateTime(ruleLastFiredAt(row) ?? '') : '—' }}</template>
       </el-table-column>
       <el-table-column label="" width="160">
         <template #default="{ row }">
@@ -129,7 +129,7 @@
         <el-alert type="error" :title="effectivenessError" :closable="false" show-icon />
         <el-button size="small" style="margin-top: 8px" data-testid="alert-effectiveness-retry" @click="loadEffectiveness">重新加载</el-button>
       </div>
-      <div v-else-if="effectivenessLoading" class="effectiveness-state" data-testid="alert-effectiveness-loading">加载中…</div>
+      <div v-if="effectivenessLoading && effectivenessItems.length === 0" class="effectiveness-state" data-testid="alert-effectiveness-loading">加载中…</div>
       <el-table v-else-if="effectivenessItems.length" :data="effectivenessItems" size="small" class="responsive-table" data-testid="alert-effectiveness-table">
         <el-table-column prop="name" label="名称" min-width="120" />
         <el-table-column label="标的" min-width="90">
@@ -156,7 +156,7 @@
           </template>
         </el-table-column>
       </el-table>
-      <div v-else class="effectiveness-state" data-testid="alert-effectiveness-empty">暂无规则触发统计数据</div>
+      <div v-else-if="effectivenessLoaded && !effectivenessError" class="effectiveness-state" data-testid="alert-effectiveness-empty">暂无规则触发统计数据</div>
     </div>
 
     <el-dialog v-model="dialog.visible" :title="dialog.id ? '编辑规则' : '新建规则'" width="480px" data-testid="alert-dialog">
@@ -322,7 +322,12 @@ function defaultEffectivenessRange(): [string, string] {
   const from = new Date(to.getTime() - 29 * 24 * 60 * 60 * 1000)
   return [from.toISOString().slice(0, 10), to.toISOString().slice(0, 10)]
 }
+// Draft picker value — user edits never affect labels or requests until 查询
+// succeeds. `appliedEffectivenessRange` is the window of the data actually on
+// screen, updated only after a successful fetch so a failed/stale request can
+// never mislabel results.
 const effectivenessRange = ref<string[]>(defaultEffectivenessRange())
+const appliedEffectivenessRange = ref<string[]>([...effectivenessRange.value])
 
 const effectivenessById = computed(() => {
   const map = new Map<number, AlertRuleEffectiveness>()
@@ -344,8 +349,8 @@ const firedRuleCount = computed(() =>
 )
 
 const effectivenessWindowLabel = computed(() => {
-  const from = effectivenessRange.value?.[0]
-  const to = effectivenessRange.value?.[1]
+  const from = appliedEffectivenessRange.value?.[0]
+  const to = appliedEffectivenessRange.value?.[1]
   if (from || to) {
     return `统计窗口：${from || '最早'} 至 ${to || '最新'}（窗口触发次数按窗口计；从未触发为全量口径）`
   }
@@ -497,10 +502,14 @@ async function loadEffectiveness() {
     effectivenessItems.value = page.items
     effectivenessTotal.value = page.total
     effectivenessLoaded.value = true
+    // Only now does the draft picker range become the applied/results range.
+    appliedEffectivenessRange.value = [...(range ?? [])]
   } catch (e) {
     effectivenessError.value = resolveErrorMessage(e, '加载触发统计失败')
-    effectivenessItems.value = []
-    effectivenessTotal.value = 0
+    // Keep any previously loaded data on screen (labelled by the previously
+    // applied window) instead of clearing to false zero counts. When nothing
+    // has ever loaded, `effectivenessLoaded` stays false so cards render '—'
+    // and the section shows the error state rather than fake zeros.
   } finally {
     effectivenessLoading.value = false
   }

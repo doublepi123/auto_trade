@@ -936,8 +936,11 @@ function refreshDiagnostics() {
 
 const walSizeLabel = computed(() => {
   const wal = dbHealth.value?.wal_size_bytes
-  // null = in-memory database or WAL size undeterminable; 0 = no WAL sidecar.
-  if (wal === null || wal === undefined) return '不适用'
+  // The backend contract deliberately merges two meanings into null: WAL not
+  // applicable (in-memory database) AND WAL size undeterminable (permission
+  // or I/O failure). Asserting "不适用" alone would overstate certainty, so
+  // the label carries both possibilities. 0 = file-backed, no WAL sidecar.
+  if (wal === null || wal === undefined) return '不适用或未知'
   return formatBytes(wal)
 })
 
@@ -953,12 +956,18 @@ const dbUsageLabel = computed(() => {
   return `页使用 ${h.used_page_count} / ${h.page_count}（${dbUsagePct.value}%）· 空闲页 ${h.freelist_count ?? '—'}`
 })
 
+// 1s clock tick for freshness labels (same pattern as SessionClockPanel's
+// countdown). Lifecycle-safe: created on mount, cleared on unmount.
+const nowTick = ref(Date.now())
+let freshnessTimer: number | undefined
+
 const dbHealthCheckedLabel = computed(() => {
   const at = dbHealth.value?.checked_at
   if (!at) return ''
   const time = new Date(at)
   if (Number.isNaN(time.getTime())) return at
-  const ageSeconds = Math.max(0, Math.floor((Date.now() - time.getTime()) / 1000))
+  // Tick-driven so the freshness text ages on its own without a data refresh.
+  const ageSeconds = Math.max(0, Math.floor((nowTick.value - time.getTime()) / 1000))
   const clock = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
   return `${clock} · ${relativeAgeLabel(ageSeconds)}`
 })
@@ -1394,6 +1403,7 @@ onMounted(() => {
   loadMetrics()
   loadDiagnostics()
   loadDatabaseHealth()
+  freshnessTimer = window.setInterval(() => { nowTick.value = Date.now() }, 1000)
   startMultiSymbols()
   llmStatusTimer = setInterval(() => {
     if (pollLoading.value) return
@@ -1426,6 +1436,10 @@ onUnmounted(() => {
   if (llmStatusTimer) {
     clearInterval(llmStatusTimer)
     llmStatusTimer = null
+  }
+  if (freshnessTimer !== undefined) {
+    clearInterval(freshnessTimer)
+    freshnessTimer = undefined
   }
   window.removeEventListener('resize', handleResize)
 })
