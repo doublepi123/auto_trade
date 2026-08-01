@@ -2376,12 +2376,33 @@ class NotificationLogPage(BaseModel):
 
 
 class NotificationStatsBucket(BaseModel):
-    """One aggregate bucket (per severity / per channel) in the delivery stats."""
+    """One aggregate bucket (per severity) in the delivery stats.
+
+    Carries total/success/failed because severity is a stored column, so every
+    row — successful or not — can be attributed.
+    """
 
     key: str
     total: int
     success: int
     failed: int
+
+
+class NotificationFailureCount(BaseModel):
+    """Count of failed deliveries attributed to one channel.
+
+    Failure-only: successful rows are excluded entirely because the
+    ``NotificationLog`` table does not persist channel attribution for
+    successful sends (``MultiChannelNotifier`` only records a channel in the
+    ``error`` column when that channel raises). ``key`` is therefore a
+    *failure attribution* — ``serverchan`` / ``webhook`` / ``telegram`` for
+    failures whose ``error`` begins with the matching ``ClassName: `` prefix,
+    or ``unknown`` for failed rows with no recognized prefix. The sum of these
+    counts equals the response's ``failed`` total.
+    """
+
+    key: str
+    count: int
 
 
 class NotificationDailyPoint(BaseModel):
@@ -2397,9 +2418,17 @@ class NotificationStatsResponse(BaseModel):
     """Read-only notification delivery statistics.
 
     Aggregations only — never carries title/content/error payloads. ``success_rate``
-    is a percentage in [0, 100]. ``by_channel`` attributes only the channel that the
-    log can identify (a failing channel recorded in ``error``); everything else is
-    bucketed under ``unknown``.
+    is a percentage in [0, 100].
+
+    ``failures_by_channel`` is a *failure-only* attribution. The
+    ``NotificationLog`` table does not persist which channel carried a
+    successful send, so a per-channel total/success/failed bucket would be
+    misleading (every successful row would have to be filed under
+    ``unknown``). Instead this field counts only failed rows: known notifier
+    class prefixes in ``error`` are attributed to ``serverchan`` / ``webhook``
+    / ``telegram``; failed rows with no recognized prefix are ``unknown``.
+    Successful rows are excluded entirely. The sum of all
+    ``failures_by_channel`` counts equals the response's ``failed`` total.
     """
 
     from_date: Optional[str] = None
@@ -2409,7 +2438,7 @@ class NotificationStatsResponse(BaseModel):
     failed: int
     success_rate: float
     by_severity: list[NotificationStatsBucket] = Field(default_factory=list)
-    by_channel: list[NotificationStatsBucket] = Field(default_factory=list)
+    failures_by_channel: list[NotificationFailureCount] = Field(default_factory=list)
     daily: list[NotificationDailyPoint] = Field(default_factory=list)
 
 

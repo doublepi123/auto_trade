@@ -188,33 +188,68 @@ class AlertRuleService:
     ) -> list[AlertRuleEffectiveness]:
         """Read-only per-rule firing effectiveness. No notification side effects.
 
-        ``firing_count`` is the number of ``AlertFiring`` rows within the optional
-        ``[from_dt, to_dt]`` window. ``last_fired_at`` is the evaluator-maintained
-        ``AlertRule.last_fired_at`` (the most recent successful fire) falling back
-        to the newest firing within the window; ``never_fired`` is True only when a
-        rule has no record of ever firing. Deterministic ordering: rule id desc.
+        ``firing_count`` is the number of ``AlertFiring`` rows within the
+        optional ``[from_dt, to_dt]`` window (scoped to the requested window).
+
+        ``last_fired_at`` / ``never_fired`` are *all-time* semantics, not
+        window-scoped:
+
+        - If ``AlertRule.last_fired_at`` is set, it is used and
+          ``never_fired`` is False.
+        - Otherwise the all-time latest ``AlertFiring`` (ignoring the window)
+          is used as ``last_fired_at``; ``never_fired`` is True only when the
+          rule has no ``AlertFiring`` row at all (in any window).
+
+        This means a rule that fired only *outside* the requested window still
+        reports ``never_fired=False`` with the all-time latest fire as
+        ``last_fired_at`` and ``firing_count=0`` for the window. Deterministic
+        ordering: rule id desc.
         """
         rules = list(self._db.scalars(select(AlertRule).order_by(AlertRule.id.desc())))
         if not rules:
             return []
-        agg = select(
+        # Window-scoped aggregation: firing_count + latest firing within window.
+        window_agg = select(
             AlertFiring.rule_id,
             func.count(AlertFiring.id),
             func.max(AlertFiring.fired_at),
         )
         if from_dt is not None:
-            agg = agg.where(AlertFiring.fired_at >= from_dt)
+            window_agg = window_agg.where(AlertFiring.fired_at >= from_dt)
         if to_dt is not None:
-            agg = agg.where(AlertFiring.fired_at <= to_dt)
-        agg = agg.group_by(AlertFiring.rule_id)
-        firing_stats: dict[int, tuple[int, datetime | None]] = {
+            window_agg = window_agg.where(AlertFiring.fired_at <= to_dt)
+        window_agg = window_agg.group_by(AlertFiring.rule_id)
+        window_stats: dict[int, tuple[int, datetime | None]] = {
             rule_id: (int(count), latest)
-            for rule_id, count, latest in self._db.execute(agg)
+            for rule_id, count, latest in self._db.execute(window_agg)
         }
+        # All-time aggregation: latest firing across all windows, used only to
+        # resolve never_fired / last_fired_at when AlertRule.last_fired_at is
+        # null (e.g. legacy rules whose last_fired_at was never populated, or
+        # rules whose last_fired_at was lost). Scoped to rule ids present.
+        rule_ids = [r.id for r in rules]
+        alltime_latest: dict[int, datetime] = {}
+        if rule_ids:
+            alltime_agg = (
+                select(AlertFiring.rule_id, func.max(AlertFiring.fired_at))
+                .where(AlertFiring.rule_id.in_(rule_ids))
+                .group_by(AlertFiring.rule_id)
+            )
+            alltime_latest = {
+                int(rid): latest
+                for rid, latest in self._db.execute(alltime_agg)
+                if latest is not None
+            }
         out: list[AlertRuleEffectiveness] = []
         for rule in rules:
-            count, window_latest = firing_stats.get(rule.id, (0, None))
-            last = rule.last_fired_at if rule.last_fired_at is not None else window_latest
+            count, _window_latest = window_stats.get(rule.id, (0, None))
+            if rule.last_fired_at is not None:
+                last = rule.last_fired_at
+            else:
+                # Fall back to the all-time latest firing (across all windows)
+                # so a rule that fired only outside the window still reports
+                # never_fired=False with a real last_fired_at.
+                last = alltime_latest.get(rule.id)
             out.append(AlertRuleEffectiveness(
                 id=rule.id,
                 name=rule.name,

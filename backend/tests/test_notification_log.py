@@ -320,7 +320,10 @@ class TestNotificationStats(_Base):
         assert stats.success == 2
         assert stats.failed == 1
         assert stats.success_rate == 66.67
-        assert sum(b.total for b in stats.by_channel) == stats.total
+        # failures_by_channel is failure-only: only the one failed row is
+        # counted (attributed to ``unknown`` because "boom" has no recognized
+        # notifier-class prefix). Successful rows are excluded entirely.
+        assert sum(b.count for b in stats.failures_by_channel) == stats.failed
         assert sum(b.total for b in stats.by_severity) == stats.total
 
     def test_service_empty_log(self) -> None:
@@ -330,7 +333,7 @@ class TestNotificationStats(_Base):
         assert stats.failed == 0
         assert stats.success_rate == 0.0
         assert stats.by_severity == []
-        assert stats.by_channel == []
+        assert stats.failures_by_channel == []
         assert stats.daily == []
 
     def test_service_severity_breakdown(self) -> None:
@@ -346,20 +349,61 @@ class TestNotificationStats(_Base):
         assert sev["CRITICAL"].total == 1
         assert sev["CRITICAL"].success == 1
 
-    def test_service_channel_breakdown_from_error(self) -> None:
+    def test_service_failures_by_channel_excludes_successes(self) -> None:
+        # Successful rows carry no channel attribution in the log, so they must
+        # be excluded from failures_by_channel entirely (not bucketed under
+        # ``unknown``). Only failed rows are counted.
         sink = NotificationLogSink(self._factory())
-        sink.record("ok", "", "INFO", True)  # no error -> unknown
+        sink.record("ok1", "", "INFO", True)  # success -> excluded
+        sink.record("ok2", "", "INFO", True, "")  # success, empty error -> excluded
         sink.record("bad1", "", "CRITICAL", False, "ServerChanNotifier: http 500")
         sink.record("bad2", "", "CRITICAL", False, "TelegramNotifier: timeout")
         sink.record("bad3", "", "CRITICAL", False, "SomethingElse: boom")
         stats = NotificationLogService(self._db()).statistics()
-        chan = {b.key: b for b in stats.by_channel}
-        assert chan["serverchan"].total == 1
-        assert chan["serverchan"].failed == 1
-        assert chan["telegram"].total == 1
-        # success + unrecognized failure prefix both bucket under unknown
-        assert chan["unknown"].total == 2
-        assert sum(b.total for b in stats.by_channel) == stats.total
+        chan = {b.key: b for b in stats.failures_by_channel}
+        assert chan["serverchan"].count == 1
+        assert chan["telegram"].count == 1
+        # unrecognized failure prefix -> unknown; successes are NOT counted here
+        assert chan["unknown"].count == 1
+        # sum of failure attributions equals the failed total (3), not total (5)
+        assert sum(b.count for b in stats.failures_by_channel) == stats.failed
+        assert stats.failed == 3
+
+    def test_service_failures_by_channel_known_failure_counted(self) -> None:
+        sink = NotificationLogSink(self._factory())
+        sink.record("ok", "", "INFO", True)
+        sink.record("bad1", "", "CRITICAL", False, "ServerChanNotifier: http 500")
+        sink.record("bad2", "", "CRITICAL", False, "WebhookNotifier: 500")
+        sink.record("bad3", "", "CRITICAL", False, "TelegramNotifier: timeout")
+        stats = NotificationLogService(self._db()).statistics()
+        chan = {b.key: b for b in stats.failures_by_channel}
+        assert chan["serverchan"].count == 1
+        assert chan["webhook"].count == 1
+        assert chan["telegram"].count == 1
+        # no unknowns: every failure has a recognized prefix
+        assert "unknown" not in chan
+        assert sum(b.count for b in stats.failures_by_channel) == 3
+
+    def test_service_failures_by_channel_unknown_failure_counted(self) -> None:
+        sink = NotificationLogSink(self._factory())
+        sink.record("ok", "", "INFO", True)
+        sink.record("bad1", "", "CRITICAL", False, "SomethingElse: boom")
+        sink.record("bad2", "", "CRITICAL", False, "")  # empty error -> unknown
+        stats = NotificationLogService(self._db()).statistics()
+        chan = {b.key: b for b in stats.failures_by_channel}
+        assert chan["unknown"].count == 2
+        assert sum(b.count for b in stats.failures_by_channel) == 2
+
+    def test_service_failures_by_channel_prefix_is_anchored(self) -> None:
+        # The match is anchored to the exact ``ClassName: `` prefix, so a
+        # string like ``ServerChanNotifierXYZ: foo`` is NOT mis-attributed to
+        # ``serverchan``.
+        sink = NotificationLogSink(self._factory())
+        sink.record("bad", "", "CRITICAL", False, "ServerChanNotifierXYZ: foo")
+        stats = NotificationLogService(self._db()).statistics()
+        chan = {b.key: b for b in stats.failures_by_channel}
+        assert chan["unknown"].count == 1
+        assert "serverchan" not in chan
 
     def test_service_daily_trend_deterministic(self) -> None:
         from datetime import datetime, timezone
@@ -382,6 +426,14 @@ class TestNotificationStats(_Base):
             NotificationDailyPoint(date="2026-06-16", total=1, success=1, failed=0)
         ]
 
+    def test_service_inverted_date_range_raises(self) -> None:
+        import pytest
+
+        with pytest.raises(ValueError):
+            NotificationLogService(self._db()).statistics(
+                from_date="2026-06-17", to_date="2026-06-16"
+            )
+
     def test_api_stats(self) -> None:
         sink = NotificationLogSink(self._factory())
         sink.record("api ok", "body", "INFO", True)
@@ -396,9 +448,11 @@ class TestNotificationStats(_Base):
         # stats must not leak payload/content/error
         for forbidden in ("title", "content", "error"):
             assert forbidden not in data
-        chan = {b["key"]: b for b in data["by_channel"]}
-        assert chan["webhook"]["total"] == 1
-        assert chan["webhook"]["failed"] == 1
+        chan = {b["key"]: b for b in data["failures_by_channel"]}
+        assert chan["webhook"]["count"] == 1
+        # successes are excluded from failures_by_channel
+        assert "unknown" not in chan or chan["unknown"]["count"] == 0
+        assert sum(b["count"] for b in data["failures_by_channel"]) == data["failed"]
 
     def test_api_stats_respects_date_filter(self) -> None:
         from datetime import datetime, timezone
@@ -420,4 +474,25 @@ class TestNotificationStats(_Base):
 
     def test_api_stats_invalid_date_returns_422(self) -> None:
         resp = self.client.get("/api/notifications/stats", params={"to_date": "nope"})
+        assert resp.status_code == 422
+
+    def test_api_stats_inverted_date_range_returns_422(self) -> None:
+        resp = self.client.get(
+            "/api/notifications/stats",
+            params={"from_date": "2026-06-17", "to_date": "2026-06-16"},
+        )
+        assert resp.status_code == 422
+
+    def test_api_list_inverted_date_range_returns_422(self) -> None:
+        resp = self.client.get(
+            "/api/notifications",
+            params={"from_date": "2026-06-17", "to_date": "2026-06-16"},
+        )
+        assert resp.status_code == 422
+
+    def test_api_export_inverted_date_range_returns_422(self) -> None:
+        resp = self.client.get(
+            "/api/notifications/export",
+            params={"from_date": "2026-06-17", "to_date": "2026-06-16"},
+        )
         assert resp.status_code == 422

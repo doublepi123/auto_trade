@@ -289,6 +289,28 @@ class TestAlertFiringHistory(_Base):
         # The 23:59 fire is within to_date=2026-06-16 (inclusive end-of-day).
         assert resp.json()["total"] == 1
 
+    def test_history_to_date_excludes_next_midnight_fire(self) -> None:
+        # A firing exactly at the following day's 00:00:00 must be EXCLUDED
+        # when to_date is the previous day. The end-of-day boundary is the
+        # last instant of the selected day (time.max), not the first instant
+        # of the next day.
+        rid = self._make_rule(threshold=150.0, cooldown_seconds=0)
+        fire_time = datetime(2026, 6, 17, 0, 0, 0, tzinfo=timezone.utc)
+        AlertRuleService(self._db()).evaluate(
+            FakeRunner(FakeBroker({"AAPL.US": 160.0}), FakeNotifier()), now=fire_time,
+        )
+        resp = self.client.get(f"/api/alert-rules/{rid}/history", params={"to_date": "2026-06-16"})
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 0  # 2026-06-17 00:00:00 is outside 2026-06-16
+
+    def test_history_inverted_date_range_returns_422(self) -> None:
+        rid = self._make_rule(threshold=150.0, cooldown_seconds=0)
+        resp = self.client.get(
+            f"/api/alert-rules/{rid}/history",
+            params={"from_date": "2026-06-17", "to_date": "2026-06-16"},
+        )
+        assert resp.status_code == 422
+
 
 class TestAlertRuleEffectiveness(_Base):
     def _make_rule(self, **kw) -> int:
@@ -400,4 +422,82 @@ class TestAlertRuleEffectiveness(_Base):
         assert resp.status_code == 200, resp.text
         assert resp.json()["items"][0]["firing_count"] == 0  # fire outside window
         assert resp.json()["items"][0]["never_fired"] is False
+
+    def test_api_effectiveness_inverted_date_range_returns_422(self) -> None:
+        self._make_rule(threshold=150.0, cooldown_seconds=0)
+        resp = self.client.get(
+            "/api/alert-rules/effectiveness",
+            params={"from_date": "2026-06-17", "to_date": "2026-06-16"},
+        )
+        assert resp.status_code == 422
+
+    def test_effectiveness_never_fired_is_all_time(self) -> None:
+        # never_fired must be all-time, not window-scoped. A rule that fired
+        # only OUTSIDE the requested window must report never_fired=False with
+        # the all-time latest firing as last_fired_at and firing_count=0 for
+        # the window. This covers the legacy case where AlertRule.last_fired_at
+        # is null (e.g. never populated) but AlertFiring rows exist.
+        rid = self._make_rule(threshold=150.0, cooldown_seconds=0)
+        # Fire once, well before the requested window.
+        AlertRuleService(self._db()).evaluate(
+            FakeRunner(FakeBroker({"AAPL.US": 160.0}), FakeNotifier()),
+            now=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+        )
+        # Simulate the legacy case: clear AlertRule.last_fired_at so the only
+        # evidence of firing is the AlertFiring row outside the window.
+        db = self._db()
+        rule = db.get(AlertRule, rid)
+        assert rule is not None
+        rule.last_fired_at = None
+        db.commit()
+        db.close()
+        # Request a window that does NOT include the 2026-06-10 fire.
+        eff = AlertRuleService(self._db()).effectiveness(
+            from_dt=datetime(2026, 6, 16, 0, 0, tzinfo=timezone.utc),
+            to_dt=datetime(2026, 6, 17, 23, 59, 59, tzinfo=timezone.utc),
+        )
+        assert len(eff) == 1
+        e = eff[0]
+        assert e.firing_count == 0  # window-scoped: no fires in [06-16, 06-17]
+        assert e.never_fired is False  # all-time: a firing exists outside window
+        assert e.last_fired_at is not None  # falls back to all-time latest firing
+        # The all-time latest firing is 2026-06-10 12:00 (SQLite naive datetime).
+        assert e.last_fired_at >= datetime(2026, 6, 10, 12, 0)
+
+    def test_api_effectiveness_never_fired_is_all_time(self) -> None:
+        # Same as above but through the API, with date-string bounds.
+        rid = self._make_rule(threshold=150.0, cooldown_seconds=0)
+        AlertRuleService(self._db()).evaluate(
+            FakeRunner(FakeBroker({"AAPL.US": 160.0}), FakeNotifier()),
+            now=datetime(2026, 6, 10, 12, 0, tzinfo=timezone.utc),
+        )
+        db = self._db()
+        rule = db.get(AlertRule, rid)
+        assert rule is not None
+        rule.last_fired_at = None
+        db.commit()
+        db.close()
+        resp = self.client.get(
+            "/api/alert-rules/effectiveness",
+            params={"from_date": "2026-06-16", "to_date": "2026-06-17"},
+        )
+        assert resp.status_code == 200, resp.text
+        item = resp.json()["items"][0]
+        assert item["firing_count"] == 0
+        assert item["never_fired"] is False
+        assert item["last_fired_at"] is not None
+
+    def test_effectiveness_never_fired_when_truly_no_firings(self) -> None:
+        # A rule with no AlertFiring rows at all (and no last_fired_at) must
+        # still report never_fired=True.
+        self._make_rule(name="quiet", threshold=500.0)
+        eff = AlertRuleService(self._db()).effectiveness(
+            from_dt=datetime(2026, 6, 16, 0, 0, tzinfo=timezone.utc),
+            to_dt=datetime(2026, 6, 17, 23, 59, 59, tzinfo=timezone.utc),
+        )
+        assert len(eff) == 1
+        e = eff[0]
+        assert e.firing_count == 0
+        assert e.never_fired is True
+        assert e.last_fired_at is None
 

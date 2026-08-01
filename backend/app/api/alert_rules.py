@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, time, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 
@@ -43,13 +43,30 @@ def _day_start(value: str | None) -> datetime | None:
 
 
 def _day_end(value: str | None) -> datetime | None:
-    """Inclusive upper bound: midnight UTC of the day AFTER ``value``.
+    """Inclusive upper bound: ``time.max`` of the selected day (UTC).
 
-    A naive ``_day_start(to_date)`` (midnight) would exclude every firing later
-    that same day, so 'history up to 2026-06-16' silently dropped the 15:00 fire.
+    Using ``time.max`` (23:59:59.999999) of ``to_date`` means a firing exactly
+    at the *following* day's 00:00:00 is excluded — the boundary is the last
+    instant of the selected day, not the first instant of the next. A naive
+    ``_day_start(to_date)`` (midnight) would exclude every firing later that
+    same day; ``start + timedelta(days=1)`` would include the next day's
+    00:00:00 fire under a ``<=`` comparison. ``time.max`` is the correct
+    inclusive end-of-day boundary.
     """
     start = _day_start(value)
-    return start + timedelta(days=1) if start is not None else None
+    if start is None:
+        return None
+    return datetime.combine(start.date(), time.max, tzinfo=timezone.utc)
+
+
+def _validate_date_range(from_date: str | None, to_date: str | None) -> None:
+    """Reject an inverted ``[from_date, to_date]`` range with HTTP 422."""
+    if from_date is None or to_date is None:
+        return
+    start = _day_start(from_date)
+    end = _day_start(to_date)
+    if start is not None and end is not None and start > end:
+        raise HTTPException(status_code=422, detail="from_date must be on or before to_date")
 
 
 @router.post("", response_model=AlertRuleOut)
@@ -89,6 +106,7 @@ def alert_rule_effectiveness(
 ) -> AlertRuleEffectivenessPage:
     """Read-only per-rule firing effectiveness: firing counts, last fired time
     and never-fired visibility. Never fires notifications."""
+    _validate_date_range(from_date, to_date)
     items = AlertRuleService(db).effectiveness(
         from_dt=_day_start(from_date),
         to_dt=_day_end(to_date),
@@ -174,6 +192,7 @@ def alert_rule_firing_history(
     ``AlertRule.last_fired_at`` only keeps the latest fire; this returns the
     full history so a trader can see how often a rule actually fires.
     """
+    _validate_date_range(from_date, to_date)
     items = AlertRuleService(db).history(
         rule_id,
         from_dt=_day_start(from_date),

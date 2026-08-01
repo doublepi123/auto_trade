@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from app.models import NotificationLog
 from app.schemas import (
     NotificationDailyPoint,
+    NotificationFailureCount,
     NotificationLogOut,
     NotificationLogPage,
     NotificationStatsBucket,
@@ -31,6 +32,19 @@ NotificationSink = Callable[[str, str, str, bool, str], None]
 def _parse_date(value: str) -> datetime:
     """Parse a YYYY-MM-DD string into a UTC datetime."""
     return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+
+def _validate_date_range(from_date: str | None, to_date: str | None) -> None:
+    """Reject an inverted ``[from_date, to_date]`` range consistently.
+
+    Both bounds, when present, are YYYY-MM-DD strings; ``from_date > to_date``
+    is a client error (HTTP 422). Raises ``ValueError`` so the API layer can
+    translate it to a 422 exactly like an unparseable date.
+    """
+    if from_date is None or to_date is None:
+        return
+    if _parse_date(from_date) > _parse_date(to_date):
+        raise ValueError("from_date must be on or before to_date")
 
 
 def _apply_filters(
@@ -65,20 +79,26 @@ def _apply_filters(
     return s
 
 
-# Channel labels MultiChannelNotifier records in ``error`` as a "{ClassName}: {detail}"
-# prefix when a channel fails. Only these known labels are surfaced in the channel
-# breakdown; anything else (including all successful rows, which carry no channel
-# attribution) is bucketed under ``unknown``.
+# Channel labels MultiChannelNotifier records in ``error`` as a
+# "{ClassName}: {detail}" prefix when a channel fails. Only these known labels
+# are surfaced in the failure attribution; failed rows with any other (or
+# empty) error prefix are bucketed under ``unknown``. Successful rows are never
+# attributed — the log does not persist which channel carried them — so they
+# are excluded from ``failures_by_channel`` entirely.
+#
+# The match is anchored to the exact ``ClassName: `` prefix (note the colon and
+# space) so a string like ``ServerChanNotifierXYZ: foo`` is NOT mis-attributed
+# to ``serverchan``.
 _NOTIFIER_CLASS_CHANNELS: dict[str, str] = {
-    "ServerChanNotifier": "serverchan",
-    "WebhookNotifier": "webhook",
-    "TelegramNotifier": "telegram",
+    "ServerChanNotifier: ": "serverchan",
+    "WebhookNotifier: ": "webhook",
+    "TelegramNotifier: ": "telegram",
 }
 
 _CHANNEL_CASE = case(
     *[
-        (NotificationLog.error.like(f"{cls}%"), label)
-        for cls, label in _NOTIFIER_CLASS_CHANNELS.items()
+        (NotificationLog.error.like(f"{prefix}%"), label)
+        for prefix, label in _NOTIFIER_CLASS_CHANNELS.items()
     ],
     else_="unknown",
 )
@@ -99,6 +119,7 @@ class NotificationLogService:
         page: int = 1,
         page_size: int = 50,
     ) -> NotificationLogPage:
+        _validate_date_range(from_date, to_date)
         page = max(1, page)
         page_size = max(1, min(page_size, 200))
         stmt = _apply_filters(
@@ -142,6 +163,7 @@ class NotificationLogService:
         to_date: str | None = None,
     ) -> list[NotificationLogOut]:
         """Return all matching notification rows for export (no pagination)."""
+        _validate_date_range(from_date, to_date)
         stmt = _apply_filters(
             select(NotificationLog),
             severity=severity,
@@ -163,12 +185,20 @@ class NotificationLogService:
     ) -> NotificationStatsResponse:
         """Bounded, date-filtered delivery statistics over the notification log.
 
-        Read-only aggregation — never exposes title/content/error payloads. The
-        ``by_channel`` breakdown is derived from the only channel signal the log
-        retains: the notifier class name MultiChannelNotifier prefixes into the
-        ``error`` column when a channel fails. Successful rows (and unrecognized
-        failures) are attributed to ``unknown``.
+        Read-only aggregation — never exposes title/content/error payloads.
+
+        ``failures_by_channel`` is a *failure-only* attribution. The
+        ``NotificationLog`` table does not persist which channel carried a
+        successful send, so a per-channel total/success/failed bucket would be
+        misleading. Instead this counts only failed rows: known notifier class
+        prefixes in ``error`` (``ServerChanNotifier: ``, ``WebhookNotifier: ``,
+        ``TelegramNotifier: ``) are attributed to ``serverchan`` / ``webhook`` /
+        ``telegram``; failed rows with no recognized prefix are ``unknown``.
+        Successful rows are excluded entirely. The sum of all
+        ``failures_by_channel`` counts equals the response's ``failed`` total.
         """
+        _validate_date_range(from_date, to_date)
+
         def _filtered(select_stmt):  # noqa: ANN001
             return _apply_filters(
                 select_stmt,
@@ -216,6 +246,21 @@ class NotificationLogService:
                 for key, count, ok in rows
             ]
 
+        # Failure-only channel attribution: count failed rows grouped by the
+        # recognized notifier-class prefix in ``error`` (or ``unknown``).
+        # Successful rows are excluded entirely — the log does not persist
+        # which channel carried them, so attributing them would be misleading.
+        failure_rows = self._db.execute(
+            _filtered(
+                select(_CHANNEL_CASE, func.count(NotificationLog.id))
+                .where(NotificationLog.success.is_(False))
+            ).group_by(_CHANNEL_CASE).order_by(_CHANNEL_CASE)
+        )
+        failures_by_channel = [
+            NotificationFailureCount(key=str(key), count=int(count))
+            for key, count in failure_rows
+        ]
+
         day = func.date(NotificationLog.created_at)
         daily_rows = self._db.execute(
             _filtered(
@@ -237,7 +282,7 @@ class NotificationLogService:
             failed=failed,
             success_rate=success_rate,
             by_severity=_buckets(NotificationLog.severity),
-            by_channel=_buckets(_CHANNEL_CASE),
+            failures_by_channel=failures_by_channel,
             daily=[
                 NotificationDailyPoint(
                     date=str(date),

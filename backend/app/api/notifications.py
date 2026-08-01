@@ -59,8 +59,17 @@ def notification_stats(
     to_date: str | None = Query(default=None, description="End date (YYYY-MM-DD)"),
     db=Depends(get_db),
 ) -> NotificationStatsResponse:
-    """Read-only delivery statistics: totals, success rate, severity/channel
-    breakdowns and a deterministic daily trend. Never returns payloads."""
+    """Read-only delivery statistics: totals, success rate, severity breakdown,
+    a failure-only channel attribution (``failures_by_channel``) and a
+    deterministic daily trend. Never returns payloads.
+
+    ``failures_by_channel`` counts only failed rows: known notifier-class
+    prefixes in ``error`` are attributed to ``serverchan`` / ``webhook`` /
+    ``telegram``; failed rows with no recognized prefix are ``unknown``.
+    Successful rows are excluded entirely because the log does not persist
+    which channel carried a successful send. An inverted ``from_date`` /
+    ``to_date`` range is rejected with HTTP 422.
+    """
     normalized = severity.strip().upper() if severity else None
     try:
         return NotificationLogService(db).statistics(
