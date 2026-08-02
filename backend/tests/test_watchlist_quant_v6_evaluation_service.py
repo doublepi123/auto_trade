@@ -9,6 +9,7 @@ from functools import cache
 
 import pytest
 
+import app.domain.watchlist_quant_v6.assessment as assessment_module
 from app.domain.universe_selection import (
     INDEX_MEMBERSHIP_HISTORY,
     ROTATION_RESEARCH_CANDIDATE_CATALOG,
@@ -228,6 +229,34 @@ def test_complete_zero_event_sessions_still_bind_every_session_input() -> None:
     assert roles.count(EVENT_ROLE) == 0
     assert len({binding.binding_sha256 for binding in result.bindings}) == 31
     assert len(provider.calls) == 1
+
+
+def test_candidate_fused_assessment_runs_one_complete_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _one_member_plan()
+    replay_calls = 0
+    original = assessment_module._assess_bar_next_open_stressed_window_core
+
+    def _track_replay(**kwargs):
+        nonlocal replay_calls
+        replay_calls += 1
+        return original(**kwargs)
+
+    monkeypatch.setattr(
+        assessment_module,
+        "_assess_bar_next_open_stressed_window_core",
+        _track_replay,
+    )
+
+    result = evaluate_quant_v6_candidate(
+        registration=plan,
+        member=plan.members[0],
+        provider=_Provider(()),
+    )
+
+    assert result.covered_sessions == 0
+    assert replay_calls == 1
 
 
 def test_one_missing_training_bar_keeps_denominator_and_omits_inputs() -> None:

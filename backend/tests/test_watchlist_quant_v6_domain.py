@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import zlib
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, fields, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_EVEN, localcontext
@@ -946,6 +946,482 @@ def test_assessment_noop_checkpoint_preserves_canonical_bytes_and_digest() -> No
     assert checkpoint_bytes == baseline_bytes
     assert checkpoint_artifact.digest_sha256 == baseline_artifact.digest_sha256
     assert checkpoint_artifact.payload == baseline_artifact.payload
+
+
+def test_private_fused_assessment_encoding_matches_strict_public_golden() -> None:
+    leaves = _strong_leaves(
+        missing=29,
+        event_session_counts=(2,),
+    )
+    assessment, fused = (
+        assessment_module._assess_and_encode_bar_next_open_stressed_window(
+            symbol=_SYMBOL,
+            market=_MARKET,
+            leaves=leaves,
+            checkpoint=lambda: None,
+        )
+    )
+    strict = assessment.encoded_artifact(checkpoint=lambda: None)
+
+    assert fused == strict
+    assert zlib.decompress(fused.payload) == canonical_quant_v6_json(
+        assessment.canonical_payload()
+    )
+    assert fused.digest_sha256 == hashlib.sha256(
+        zlib.decompress(fused.payload)
+    ).hexdigest()
+
+
+def test_private_fused_reuses_full_session_event_replay_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leaves = _strong_leaves(
+        missing=29,
+        event_session_counts=(2,),
+    )
+    locally_validated: list[BarNextOpenStressedEvent] = []
+    original = assessment_module._validated_event_payload
+
+    def _track_local_validation(
+        event: BarNextOpenStressedEvent,
+        *,
+        checkpoint: Callable[[], None] | None = None,
+    ) -> dict[str, object]:
+        locally_validated.append(event)
+        return original(event, checkpoint=checkpoint)
+
+    monkeypatch.setattr(
+        assessment_module,
+        "_validated_event_payload",
+        _track_local_validation,
+    )
+
+    fused, _artifact = (
+        assessment_module._assess_and_encode_bar_next_open_stressed_window(
+            symbol=_SYMBOL,
+            market=_MARKET,
+            leaves=leaves,
+        )
+    )
+    assert fused.event_count == 2
+    assert locally_validated == []
+
+    strict = assess_bar_next_open_stressed_window(
+        symbol=_SYMBOL,
+        market=_MARKET,
+        leaves=leaves,
+    )
+    assert strict.event_count == 2
+    assert locally_validated == list(leaves[0].events)
+
+
+@pytest.mark.parametrize("tamper", ("event-field", "event-threshold", "omission"))
+def test_private_fused_full_session_bytes_reject_event_tamper(
+    tamper: str,
+) -> None:
+    leaves = list(_strong_leaves(
+        missing=29,
+        event_session_counts=(1,),
+    ))
+    first = leaves[0]
+    event = first.events[0]
+    if tamper == "event-field":
+        events = (replace(
+            event,
+            net_return_bps=event.net_return_bps + Decimal("1"),
+        ),)
+    elif tamper == "event-threshold":
+        events = (replace(
+            event,
+            threshold_evidence=replace(
+                event.threshold_evidence,
+                preimage_digest_sha256="f" * 64,
+            ),
+        ),)
+    else:
+        events = ()
+    leaves[0] = replace(first, events=events)
+
+    with pytest.raises(
+        QuantV6AssessmentError,
+        match="complete replay event set",
+    ):
+        assessment_module._assess_and_encode_bar_next_open_stressed_window(
+            symbol=_SYMBOL,
+            market=_MARKET,
+            leaves=leaves,
+        )
+
+
+def test_private_fused_rejects_malformed_event_canonical_type() -> None:
+    leaves = list(_strong_leaves(
+        missing=29,
+        event_session_counts=(1,),
+    ))
+    first = leaves[0]
+    malformed_event = replace(
+        first.events[0],
+        net_return_bps=cast(Decimal, True),
+    )
+    leaves[0] = replace(first, events=(malformed_event,))
+
+    with pytest.raises(
+        QuantV6AssessmentError,
+        match="event failed canonical replay validation",
+    ):
+        assessment_module._assess_and_encode_bar_next_open_stressed_window(
+            symbol=_SYMBOL,
+            market=_MARKET,
+            leaves=leaves,
+        )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    (
+        "event-symbol",
+        "event-market",
+        "event-session-date",
+        "threshold-symbol",
+        "threshold-market",
+        "threshold-target-date",
+        "training-session-date",
+    ),
+)
+def test_private_fused_exact_type_guard_matches_public_validator(
+    tamper: str,
+) -> None:
+    class _TextSubclass(str):
+        pass
+
+    class _DateSubclass(date):
+        pass
+
+    def _subclass_date(value: date) -> date:
+        return _DateSubclass(value.year, value.month, value.day)
+
+    leaves = list(_strong_leaves(
+        missing=29,
+        event_session_counts=(1,),
+    ))
+    first = leaves[0]
+    event = first.events[0]
+    evidence = event.threshold_evidence
+    if tamper == "event-symbol":
+        forged = replace(event, symbol=_TextSubclass(event.symbol))
+    elif tamper == "event-market":
+        forged = replace(event, market=_TextSubclass(event.market))
+    elif tamper == "event-session-date":
+        forged = replace(
+            event,
+            session_date=_subclass_date(event.session_date),
+        )
+    elif tamper == "threshold-symbol":
+        forged = replace(
+            event,
+            threshold_evidence=replace(
+                evidence,
+                symbol=_TextSubclass(evidence.symbol),
+            ),
+        )
+    elif tamper == "threshold-market":
+        forged = replace(
+            event,
+            threshold_evidence=replace(
+                evidence,
+                market=_TextSubclass(evidence.market),
+            ),
+        )
+    elif tamper == "threshold-target-date":
+        forged = replace(
+            event,
+            threshold_evidence=replace(
+                evidence,
+                target_session_date=_subclass_date(
+                    evidence.target_session_date
+                ),
+            ),
+        )
+    else:
+        training_sessions = list(evidence.training_sessions)
+        forged_training_session = replace(training_sessions[0])
+        object.__setattr__(
+            forged_training_session,
+            "session_date",
+            _subclass_date(forged_training_session.session_date),
+        )
+        training_sessions[0] = forged_training_session
+        forged = replace(
+            event,
+            threshold_evidence=replace(
+                evidence,
+                training_sessions=tuple(training_sessions),
+            ),
+        )
+
+    with pytest.raises(QuantV6SemanticError):
+        validate_bar_next_open_stressed_event(forged)
+
+    leaves[0] = replace(first, events=(forged,))
+    with pytest.raises(
+        QuantV6AssessmentError,
+        match="event failed canonical replay validation",
+    ):
+        assessment_module._assess_and_encode_bar_next_open_stressed_window(
+            symbol=_SYMBOL,
+            market=_MARKET,
+            leaves=leaves,
+        )
+
+
+def test_private_fused_event_checkpoint_exception_propagates_exactly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leaves = _strong_leaves(
+        missing=29,
+        event_session_counts=(1,),
+    )
+    sentinel = QuantV6ArtifactError("checkpoint sentinel")
+    actual_payload_built = False
+    original = BarNextOpenStressedEvent.canonical_payload
+
+    def _track_payload(event: BarNextOpenStressedEvent) -> dict[str, object]:
+        nonlocal actual_payload_built
+        payload = original(event)
+        actual_payload_built = True
+        return payload
+
+    def _checkpoint() -> None:
+        if actual_payload_built:
+            raise sentinel
+
+    monkeypatch.setattr(
+        BarNextOpenStressedEvent,
+        "canonical_payload",
+        _track_payload,
+    )
+
+    with pytest.raises(QuantV6ArtifactError) as caught:
+        assessment_module._assess_and_encode_bar_next_open_stressed_window(
+            symbol=_SYMBOL,
+            market=_MARKET,
+            leaves=leaves,
+            checkpoint=_checkpoint,
+        )
+
+    assert caught.value is sentinel
+
+
+def test_verified_assessment_memo_rejects_an_equal_clone() -> None:
+    memo = assessment_module._VerifiedArtifactMemo.create()
+    assessment = assessment_module.assess_bar_next_open_stressed_window(
+        symbol=_SYMBOL,
+        market=_MARKET,
+        leaves=_strong_leaves(
+            missing=29,
+            event_session_counts=(0,),
+        ),
+        _verified_artifacts=memo,
+    )
+    equal_clone = replace(assessment)
+
+    assert equal_clone == assessment
+    assert equal_clone is not assessment
+    memo.require_assessment(assessment, checkpoint=lambda: None)
+    with pytest.raises(QuantV6AssessmentError, match="replay identity"):
+        memo.require_assessment(equal_clone, checkpoint=lambda: None)
+
+
+def test_private_fused_path_cannot_be_replaced_by_public_replay_wrapper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leaves = _strong_leaves(
+        missing=29,
+        event_session_counts=(0,),
+    )
+    public_calls = 0
+    original = assessment_module.assess_bar_next_open_stressed_window
+
+    def _poison_public_wrapper(**kwargs):
+        nonlocal public_calls
+        public_calls += 1
+        forged = original(**kwargs)
+        object.__setattr__(forged, "event_count", forged.event_count + 1)
+        return forged
+
+    monkeypatch.setattr(
+        assessment_module,
+        "assess_bar_next_open_stressed_window",
+        _poison_public_wrapper,
+    )
+    assessment, artifact = (
+        assessment_module._assess_and_encode_bar_next_open_stressed_window(
+            symbol=_SYMBOL,
+            market=_MARKET,
+            leaves=leaves,
+        )
+    )
+
+    assert public_calls == 0
+    assert assessment.event_count == 0
+    payload = decode_quant_v6_artifact(**asdict(artifact))
+    aggregates = cast(dict[str, object], payload["aggregates"])
+    assert aggregates["event_count"] == 0
+    assert public_calls == 0
+
+
+def test_private_fused_path_rejects_core_result_with_equal_assessment_clone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leaves = _strong_leaves(
+        missing=29,
+        event_session_counts=(0,),
+    )
+    original = assessment_module._assess_bar_next_open_stressed_window_core
+
+    def _replace_verified_result(**kwargs):
+        replay = original(**kwargs)
+        return replace(replay, assessment=replace(replay.assessment))
+
+    monkeypatch.setattr(
+        assessment_module,
+        "_assess_bar_next_open_stressed_window_core",
+        _replace_verified_result,
+    )
+
+    with pytest.raises(QuantV6AssessmentError, match="replay identity"):
+        assessment_module._assess_and_encode_bar_next_open_stressed_window(
+            symbol=_SYMBOL,
+            market=_MARKET,
+            leaves=leaves,
+        )
+
+
+def test_private_fused_replay_isolated_from_checkpoint_object_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline_leaves = _strong_leaves(
+        missing=29,
+        event_session_counts=(1,),
+    )
+    _, baseline_artifact = (
+        assessment_module._assess_and_encode_bar_next_open_stressed_window(
+            symbol=_SYMBOL,
+            market=_MARKET,
+            leaves=baseline_leaves,
+        )
+    )
+    leaves = _strong_leaves(
+        missing=29,
+        event_session_counts=(1,),
+    )
+    caller_event = leaves[0].events[0]
+    original_net_return = caller_event.net_return_bps
+    first_leaf_isolated = False
+    mutated = False
+    original_deepcopy = assessment_module.deepcopy
+
+    def _track_deepcopy(value: object, memo: dict[int, object]):
+        nonlocal first_leaf_isolated
+        result = original_deepcopy(value, memo)
+        if value is leaves[0]:
+            first_leaf_isolated = True
+        return result
+
+    def _mutating_checkpoint() -> None:
+        nonlocal mutated
+        if first_leaf_isolated and not mutated:
+            object.__setattr__(
+                caller_event,
+                "net_return_bps",
+                original_net_return + Decimal("999"),
+            )
+            mutated = True
+
+    monkeypatch.setattr(assessment_module, "deepcopy", _track_deepcopy)
+    assessment, artifact = (
+        assessment_module._assess_and_encode_bar_next_open_stressed_window(
+            symbol=_SYMBOL,
+            market=_MARKET,
+            leaves=leaves,
+            checkpoint=_mutating_checkpoint,
+        )
+    )
+
+    assert mutated is True
+    assert caller_event.net_return_bps != original_net_return
+    assert assessment.leaves[0].events[0] is not caller_event
+    assert assessment.leaves[0].events[0].net_return_bps == original_net_return
+    assert artifact == baseline_artifact
+
+
+@pytest.mark.parametrize("phase", ("canonical", "compression"))
+def test_private_fused_assessment_checkpoints_before_and_after_encoding_phase(
+    phase: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leaves = _strong_leaves(
+        missing=29,
+        event_session_counts=(0,),
+    )
+    sentinel = RuntimeError(f"{phase} checkpoint sentinel")
+    phase_completed = False
+    checkpoint_immediately_before_phase = False
+    checkpoint_seen = False
+
+    def _checkpoint() -> None:
+        nonlocal checkpoint_seen
+        checkpoint_seen = True
+        if phase_completed:
+            raise sentinel
+
+    if phase == "canonical":
+        original_canonical = assessment_module.canonical_quant_v6_json
+
+        def _tracked_canonical(value: Mapping[str, object]) -> bytes:
+            nonlocal phase_completed, checkpoint_immediately_before_phase
+            checkpoint_immediately_before_phase = checkpoint_seen
+            result = original_canonical(value)
+            phase_completed = True
+            return result
+
+        monkeypatch.setattr(
+            assessment_module,
+            "canonical_quant_v6_json",
+            _tracked_canonical,
+        )
+    else:
+        original_encode = assessment_module._encode_quant_v6_canonical_bytes
+
+        def _tracked_encode(
+            *,
+            value: Mapping[str, object],
+            raw: bytes,
+            kind: str,
+        ) -> assessment_module.EncodedQuantV6Artifact:
+            nonlocal phase_completed, checkpoint_immediately_before_phase
+            checkpoint_immediately_before_phase = checkpoint_seen
+            result = original_encode(value=value, raw=raw, kind=kind)
+            phase_completed = True
+            return result
+
+        monkeypatch.setattr(
+            assessment_module,
+            "_encode_quant_v6_canonical_bytes",
+            _tracked_encode,
+        )
+
+    with pytest.raises(RuntimeError) as caught:
+        assessment_module._assess_and_encode_bar_next_open_stressed_window(
+            symbol=_SYMBOL,
+            market=_MARKET,
+            leaves=leaves,
+            checkpoint=_checkpoint,
+        )
+
+    assert caught.value is sentinel
+    assert phase_completed is True
+    assert checkpoint_immediately_before_phase is True
 
 
 def test_verified_event_digest_memo_is_exact_instance_local_and_cooperative(

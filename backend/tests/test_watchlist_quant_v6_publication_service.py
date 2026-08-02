@@ -20,6 +20,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app import database
+import app.domain.watchlist_quant_v6.assessment as assessment_module
 from app.domain.universe_selection import (
     INDEX_MEMBERSHIP_HISTORY,
     ROTATION_RESEARCH_CANDIDATE_CATALOG,
@@ -282,6 +283,78 @@ def test_publication_artifact_verification_still_requires_exact_level9_bytes(
             alternate,
             label="non-canonical compression",
         )
+
+
+def test_candidate_closure_fused_assessment_runs_one_complete_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evaluations = _missing_evaluations()
+    replay_calls = 0
+    original = assessment_module._assess_bar_next_open_stressed_window_core
+
+    def _track_replay(**kwargs):
+        nonlocal replay_calls
+        replay_calls += 1
+        return original(**kwargs)
+
+    monkeypatch.setattr(
+        assessment_module,
+        "_assess_bar_next_open_stressed_window_core",
+        _track_replay,
+    )
+
+    prepared = service_module._prepare_publication(
+        plan=_one_member_plan(),
+        evaluations=evaluations,
+    )
+
+    assert prepared.assessment_count == 1
+    assert replay_calls == 1
+
+
+def test_deadline_after_fused_assessment_compression_writes_no_artifacts(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine(tmp_path)
+    service = WatchlistQuantV6PublicationService(
+        _factory(engine),
+        clock=lambda: _NOW,
+    )
+    plan = _one_member_plan()
+    evaluations = _missing_evaluations()
+    service.register_plan(plan)
+    deadline = QuantV6EvaluationDeadline(60)
+    original = assessment_module._encode_quant_v6_canonical_bytes
+    compression_calls = 0
+
+    def _expire_after_compression(
+        *,
+        value: Mapping[str, object],
+        raw: bytes,
+        kind: str,
+    ):
+        nonlocal compression_calls
+        artifact = original(value=value, raw=raw, kind=kind)
+        compression_calls += 1
+        deadline.expire()
+        return artifact
+
+    monkeypatch.setattr(
+        assessment_module,
+        "_encode_quant_v6_canonical_bytes",
+        _expire_after_compression,
+    )
+
+    with pytest.raises(QuantV6EvaluationDeadlineExceededError):
+        service.publish_registration(
+            plan=plan,
+            evaluations=evaluations,
+            evaluation_deadline=deadline,
+        )
+
+    assert compression_calls == 1
+    assert _counts(engine) == (1, 0, 0, 0)
 
 
 def _object_mapping(value: object) -> dict[str, object]:

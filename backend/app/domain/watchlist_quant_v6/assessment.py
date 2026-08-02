@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Callable, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
@@ -11,6 +12,8 @@ from app.domain.watchlist_quant_v6.artifact import (
     QUANT_V6_ASSESSMENT_ARTIFACT_KIND,
     QUANT_V6_SESSION_INPUT_ARTIFACT_KIND,
     EncodedQuantV6Artifact,
+    QuantV6ArtifactError,
+    _encode_quant_v6_canonical_bytes,
     canonical_decimal,
     canonical_quant_v6_json,
     encode_quant_v6_artifact,
@@ -35,6 +38,7 @@ from app.domain.watchlist_quant_v6.semantics import (
     QuantV6Bar,
     QuantV6SemanticError,
     QuantV6ThresholdEvidence,
+    QuantV6TrainingSession,
     build_bar_next_open_stressed_session_events,
     quant_v6_consecutive_trading_session_dates,
     quant_v6_fee_rate,
@@ -71,10 +75,47 @@ class _VerifiedArtifactMemo:
     """Reuse evidence only after one full replay of the exact frozen object."""
 
     event_digests: dict[int, _VerifiedEventArtifactDigest]
+    assessment: QuantV6Assessment | None
 
     @classmethod
     def create(cls) -> _VerifiedArtifactMemo:
-        return cls(event_digests={})
+        return cls(event_digests={}, assessment=None)
+
+    def _remember_replayed_assessment(
+        self,
+        assessment: QuantV6Assessment,
+        *,
+        checkpoint: Callable[[], None] | None,
+    ) -> None:
+        """Bind one memo to the exact freshly replayed frozen assessment."""
+        _cooperate(checkpoint)
+        if type(assessment) is not QuantV6Assessment:
+            raise QuantV6AssessmentError(
+                "verified assessment memo received an unsupported type"
+            )
+        if self.assessment is not None and self.assessment is not assessment:
+            raise QuantV6AssessmentError(
+                "verified assessment memo conflicts with replay identity"
+            )
+        self.assessment = assessment
+        _cooperate(checkpoint)
+
+    def require_assessment(
+        self,
+        assessment: QuantV6Assessment,
+        *,
+        checkpoint: Callable[[], None] | None,
+    ) -> None:
+        """Reject equal clones and any assessment outside this replay."""
+        _cooperate(checkpoint)
+        if (
+            type(assessment) is not QuantV6Assessment
+            or self.assessment is not assessment
+        ):
+            raise QuantV6AssessmentError(
+                "assessment is outside the verified replay identity"
+            )
+        _cooperate(checkpoint)
 
     def lookup_event_digest(
         self,
@@ -138,6 +179,44 @@ def _validated_event_payload(
     payload = BarNextOpenStressedEvent.canonical_payload(event)
     _cooperate(checkpoint)
     return payload
+
+
+def _validate_full_session_event_replay_types(
+    event: BarNextOpenStressedEvent,
+    *,
+    checkpoint: Callable[[], None] | None = None,
+) -> None:
+    """Preserve exact input-type checks skipped by fused local replay."""
+    _cooperate(checkpoint)
+    try:
+        validate_quant_v6_symbol_market(event.symbol, event.market)
+        evidence = event.threshold_evidence
+        if type(evidence) is not QuantV6ThresholdEvidence:
+            raise QuantV6SemanticError(
+                "threshold evidence has an unsupported type"
+            )
+        validate_quant_v6_symbol_market(evidence.symbol, evidence.market)
+    except QuantV6SemanticError as exc:
+        raise QuantV6AssessmentError(
+            "event failed canonical replay validation"
+        ) from exc
+    if (
+        type(event.session_date) is not date
+        or type(evidence.target_session_date) is not date
+    ):
+        raise QuantV6AssessmentError(
+            "event failed canonical replay validation"
+        )
+    for training_session in evidence.training_sessions:
+        _cooperate(checkpoint)
+        if (
+            type(training_session) is not QuantV6TrainingSession
+            or type(training_session.session_date) is not date
+        ):
+            raise QuantV6AssessmentError(
+                "event failed canonical replay validation"
+            )
+    _cooperate(checkpoint)
 
 
 def _validated_event_artifact_digest(
@@ -678,14 +757,22 @@ def _canonical_assessment_payload(
         }
 
 
-def assess_bar_next_open_stressed_window(
+@dataclass(frozen=True)
+class _AssessedWindowReplay:
+    assessment: QuantV6Assessment
+    artifact: EncodedQuantV6Artifact | None
+
+
+def _assess_bar_next_open_stressed_window_core(
     *,
     symbol: str,
     market: str,
     leaves: Sequence[QuantV6SessionLeaf],
     checkpoint: Callable[[], None] | None = None,
     _verified_artifacts: _VerifiedArtifactMemo | None = None,
-) -> QuantV6Assessment:
+    _isolate_replay_inputs: bool = False,
+    _encode_verified_artifact: bool = False,
+) -> _AssessedWindowReplay:
     """Assess exactly 30 ordered leaves without shrinking missing sessions."""
     _cooperate(checkpoint)
     try:
@@ -701,6 +788,28 @@ def assess_bar_next_open_stressed_window(
         raise QuantV6AssessmentError(
             "assessment leaves contain an unsupported type"
         )
+    if _isolate_replay_inputs:
+        # Capture each leaf around cooperative boundaries while sharing one
+        # deepcopy memo across the complete graph. Shared bars/evidence are
+        # therefore snapshotted once, and later callbacks can mutate only the
+        # caller-owned graph. System/deadline exceptions deliberately propagate.
+        isolation_memo: dict[int, object] = {}
+        isolated_leaves: list[QuantV6SessionLeaf] = []
+        for leaf in normalized_leaves:
+            _cooperate(checkpoint)
+            isolated = deepcopy(leaf, isolation_memo)
+            _cooperate(checkpoint)
+            if type(isolated) is not QuantV6SessionLeaf:
+                raise QuantV6AssessmentError(
+                    "isolated assessment leaf has an unsupported type"
+                )
+            isolated_leaves.append(isolated)
+        normalized_leaves = tuple(isolated_leaves)
+    reuse_full_session_event_replay = (
+        _isolate_replay_inputs
+        and _encode_verified_artifact
+        and type(_verified_artifacts) is _VerifiedArtifactMemo
+    )
     try:
         rebuilt_leaves: list[QuantV6SessionLeaf] = []
         for leaf in normalized_leaves:
@@ -768,12 +877,39 @@ def assess_bar_next_open_stressed_window(
         actual_event_bytes: list[bytes] = []
         for event in leaf.events:
             _cooperate(checkpoint)
-            actual_payload = _validated_event_payload(
-                event,
-                checkpoint=checkpoint,
-            )
-            _cooperate(checkpoint)
-            actual_event_bytes.append(canonical_quant_v6_json(actual_payload))
+            if reuse_full_session_event_replay:
+                # ``expected_events`` above is a complete typed replay from the
+                # isolated session input. Keep the canonical expected/actual
+                # byte comparison below, but do not rebuild the same actual
+                # event a second time from its local bars in this fused-only
+                # path. Public assessment and event validation remain strict.
+                _validate_full_session_event_replay_types(
+                    event,
+                    checkpoint=checkpoint,
+                )
+                try:
+                    actual_payload = (
+                        BarNextOpenStressedEvent.canonical_payload(event)
+                    )
+                except (QuantV6ArtifactError, QuantV6SemanticError) as exc:
+                    raise QuantV6AssessmentError(
+                        "event failed canonical replay validation"
+                    ) from exc
+                _cooperate(checkpoint)
+                try:
+                    actual_bytes = canonical_quant_v6_json(actual_payload)
+                except QuantV6ArtifactError as exc:
+                    raise QuantV6AssessmentError(
+                        "event failed canonical replay validation"
+                    ) from exc
+            else:
+                actual_payload = _validated_event_payload(
+                    event,
+                    checkpoint=checkpoint,
+                )
+                _cooperate(checkpoint)
+                actual_bytes = canonical_quant_v6_json(actual_payload)
+            actual_event_bytes.append(actual_bytes)
         expected_event_payloads: list[dict[str, object]] = []
         for event in expected_events:
             _cooperate(checkpoint)
@@ -880,7 +1016,7 @@ def assess_bar_next_open_stressed_window(
         "window_digest_sha256": window_digest,
     })
     _cooperate(checkpoint)
-    return QuantV6Assessment(
+    assessment = QuantV6Assessment(
         symbol=symbol,
         market=market,
         leaves=normalized_leaves,
@@ -898,6 +1034,101 @@ def assess_bar_next_open_stressed_window(
         recommended_action=recommended_action,
         blockers=tuple(blockers),
     )
+    if _verified_artifacts is not None:
+        # Provenance is issued only here, after the complete typed replay and
+        # aggregate construction have succeeded.  The fused consumer may check
+        # this identity but cannot grant it to an arbitrary assessment itself.
+        _verified_artifacts._remember_replayed_assessment(
+            assessment,
+            checkpoint=checkpoint,
+        )
+    artifact: EncodedQuantV6Artifact | None = None
+    if _encode_verified_artifact:
+        if _verified_artifacts is None:
+            raise QuantV6AssessmentError(
+                "verified assessment encoding requires replay provenance"
+            )
+        _verified_artifacts.require_assessment(
+            assessment,
+            checkpoint=checkpoint,
+        )
+        payload = _canonical_assessment_payload(
+            assessment,
+            checkpoint=checkpoint,
+            verified_artifacts=_verified_artifacts,
+        )
+        _cooperate(checkpoint)
+        canonical_raw = canonical_quant_v6_json(payload)
+        _cooperate(checkpoint)
+        artifact = _encode_quant_v6_canonical_bytes(
+            value=payload,
+            raw=canonical_raw,
+            kind=QUANT_V6_ASSESSMENT_ARTIFACT_KIND,
+        )
+        _cooperate(checkpoint)
+    return _AssessedWindowReplay(
+        assessment=assessment,
+        artifact=artifact,
+    )
+
+
+def assess_bar_next_open_stressed_window(
+    *,
+    symbol: str,
+    market: str,
+    leaves: Sequence[QuantV6SessionLeaf],
+    checkpoint: Callable[[], None] | None = None,
+    _verified_artifacts: _VerifiedArtifactMemo | None = None,
+) -> QuantV6Assessment:
+    """Assess exactly 30 ordered leaves without shrinking missing sessions."""
+    return _assess_bar_next_open_stressed_window_core(
+        symbol=symbol,
+        market=market,
+        leaves=leaves,
+        checkpoint=checkpoint,
+        _verified_artifacts=_verified_artifacts,
+    ).assessment
+
+
+def _assess_and_encode_bar_next_open_stressed_window(
+    *,
+    symbol: str,
+    market: str,
+    leaves: Sequence[QuantV6SessionLeaf],
+    checkpoint: Callable[[], None] | None = None,
+) -> tuple[QuantV6Assessment, EncodedQuantV6Artifact]:
+    """Replay and encode one freshly built assessment without a second replay.
+
+    The public ``QuantV6Assessment`` encoding methods intentionally distrust an
+    arbitrary caller-owned instance and retain their independent replay.  This
+    private path is narrower: it creates the assessment itself, keeps the
+    exact-instance replay memo alive, and encodes only that freshly replayed
+    frozen object before returning it to the caller.
+    """
+    verified_artifacts = _VerifiedArtifactMemo.create()
+    replay = _assess_bar_next_open_stressed_window_core(
+        symbol=symbol,
+        market=market,
+        leaves=leaves,
+        checkpoint=checkpoint,
+        _verified_artifacts=verified_artifacts,
+        _isolate_replay_inputs=True,
+        _encode_verified_artifact=True,
+    )
+    if (
+        type(replay) is not _AssessedWindowReplay
+        or type(replay.assessment) is not QuantV6Assessment
+        or type(replay.artifact) is not EncodedQuantV6Artifact
+    ):
+        raise QuantV6AssessmentError(
+            "verified assessment replay did not produce an artifact"
+        )
+    verified_artifacts.require_assessment(
+        replay.assessment,
+        checkpoint=checkpoint,
+    )
+    assert replay.artifact is not None
+    return replay.assessment, replay.artifact
 
 
 def session_cluster_one_sided_90_lcb(

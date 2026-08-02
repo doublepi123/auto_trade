@@ -44,7 +44,6 @@ from app.domain.watchlist_quant_v6 import (
     QuantV6SemanticError,
     QuantV6SessionLeaf,
     QuantV6TrainingSession,
-    assess_bar_next_open_stressed_window,
     build_bar_next_open_stressed_session_events,
     build_quant_v6_threshold_evidence,
     canonical_quant_v6_json,
@@ -56,6 +55,9 @@ from app.domain.watchlist_quant_v6 import (
     quant_v6_payload_sha256,
     quant_v6_previous_trading_session_dates,
     quant_v6_fee_rate,
+)
+from app.domain.watchlist_quant_v6.assessment import (
+    _assess_and_encode_bar_next_open_stressed_window,
 )
 from app.services.watchlist_quant_v6_historical_provider import (
     QuantV6HistoricalBarFetch,
@@ -917,21 +919,16 @@ def evaluate_quant_v6_candidate(
             ))
             event_ordinal += 1
     try:
-        assessment = assess_bar_next_open_stressed_window(
-            symbol=member.symbol,
-            market=member.market,
-            leaves=leaves,
-            checkpoint=(
-                evaluation_deadline.checkpoint
-                if evaluation_deadline is not None
-                else None
-            ),
-        )
-        assessment_artifact = assessment.encoded_artifact(
-            checkpoint=(
-                evaluation_deadline.checkpoint
-                if evaluation_deadline is not None
-                else None
+        assessment, assessment_artifact = (
+            _assess_and_encode_bar_next_open_stressed_window(
+                symbol=member.symbol,
+                market=member.market,
+                leaves=leaves,
+                checkpoint=(
+                    evaluation_deadline.checkpoint
+                    if evaluation_deadline is not None
+                    else None
+                ),
             )
         )
     except QuantV6AssessmentError as exc:

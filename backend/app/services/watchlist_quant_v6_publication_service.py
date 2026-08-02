@@ -35,7 +35,6 @@ from app.domain.watchlist_quant_v6 import (
     QuantV6SessionLeaf,
     QuantV6ThresholdEvidence,
     QuantV6TrainingSession,
-    assess_bar_next_open_stressed_window,
     build_bar_next_open_stressed_session_events,
     build_quant_v6_threshold_evidence,
     canonical_decimal,
@@ -49,6 +48,9 @@ from app.domain.watchlist_quant_v6 import (
 from app.domain.watchlist_quant_v6.artifact import (
     _decode_quant_v6_artifact_verified,
     _reencode_verified_quant_v6_artifact,
+)
+from app.domain.watchlist_quant_v6.assessment import (
+    _assess_and_encode_bar_next_open_stressed_window,
 )
 from app.models import (
     WatchlistQuantV6Artifact,
@@ -1651,21 +1653,16 @@ def _validate_candidate_closure(
         )
     try:
         _evaluation_checkpoint(evaluation_deadline)
-        rebuilt_assessment = assess_bar_next_open_stressed_window(
-            symbol=evaluation.member.symbol,
-            market=evaluation.member.market,
-            leaves=replayed_leaves,
-            checkpoint=(
-                evaluation_deadline.checkpoint
-                if evaluation_deadline is not None
-                else None
-            ),
-        )
-        rebuilt_assessment_artifact = rebuilt_assessment.encoded_artifact(
-            checkpoint=(
-                evaluation_deadline.checkpoint
-                if evaluation_deadline is not None
-                else None
+        rebuilt_assessment, rebuilt_assessment_artifact = (
+            _assess_and_encode_bar_next_open_stressed_window(
+                symbol=evaluation.member.symbol,
+                market=evaluation.member.market,
+                leaves=replayed_leaves,
+                checkpoint=(
+                    evaluation_deadline.checkpoint
+                    if evaluation_deadline is not None
+                    else None
+                ),
             )
         )
     except QuantV6AssessmentError as exc:
