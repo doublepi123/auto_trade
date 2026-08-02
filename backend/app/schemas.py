@@ -3049,13 +3049,25 @@ class BacktestRunPage(BaseModel):
     page_size: int
 
 
+class BacktestRunDocumentMeta(BaseModel):
+    """Per-run document validity metadata for raw ``metrics_json``.
+
+    Classifies the stored document as ``VALID`` (parseable JSON object),
+    ``INVALID_JSON`` (unparseable), or ``NON_OBJECT`` (valid JSON but not a
+    dict). Uses a safe fixed status code — never raw parser exception text.
+    """
+
+    run_id: int
+    document_status: Literal["VALID", "INVALID_JSON", "NON_OBJECT"]
+
+
 class BacktestMetricClassification(BaseModel):
     """One run's classification for one metric name."""
 
     run_id: int
     classification: Literal["NUMERIC", "MISSING", "NON_NUMERIC"]
     raw_value: Any = None
-    delta: Optional[float] = None
+    delta: Optional[float] = Field(default=None, allow_inf_nan=False)
 
 
 class BacktestMetricComparisonRow(BaseModel):
@@ -3073,6 +3085,7 @@ class BacktestRunCompare(BaseModel):
     runs: list[BacktestRunOut]
     baseline_id: Optional[int] = None
     missing_run_ids: list[int] = Field(default_factory=list)
+    document_metadata: list[BacktestRunDocumentMeta] = Field(default_factory=list)
     metric_comparison: list[BacktestMetricComparisonRow] = Field(default_factory=list)
 
 

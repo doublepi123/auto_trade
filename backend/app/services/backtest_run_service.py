@@ -117,6 +117,7 @@ class BacktestRunService:
                 "runs": [],
                 "baseline_id": None,
                 "missing_run_ids": [],
+                "document_metadata": [],
                 "metric_comparison": [],
             }
 
@@ -152,7 +153,7 @@ class BacktestRunService:
             effective_baseline = None
 
         runs_out = [self._to_out(by_id[i]) for i in existing_ids]
-        metric_comparison = self._build_metric_comparison(
+        document_metadata, metric_comparison = self._build_metric_comparison(
             by_id, existing_ids, effective_baseline
         )
 
@@ -160,6 +161,7 @@ class BacktestRunService:
             "runs": runs_out,
             "baseline_id": effective_baseline,
             "missing_run_ids": missing_run_ids,
+            "document_metadata": document_metadata,
             "metric_comparison": metric_comparison,
         }
 
@@ -168,25 +170,46 @@ class BacktestRunService:
         by_id: dict[int, BacktestRun],
         existing_ids: list[int],
         baseline_id: int | None,
-    ) -> list[dict[str, Any]]:
-        """Build deterministic metric comparison from raw metrics_json."""
-        raw_metrics: dict[int, dict[str, Any]] = {}
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Build per-run document metadata and deterministic metric comparison.
+
+        Returns ``(document_metadata, metric_comparison_rows)``. Each run's raw
+        ``metrics_json`` is classified as VALID / INVALID_JSON / NON_OBJECT.
+        Metric names are collected from VALID documents only (preserving all
+        keys including ``__``-prefixed). For any invalid document, every
+        comparison cell is NON_NUMERIC with no delta.
+        """
+        # Parse and classify each run's raw metrics document.
+        doc_status: dict[int, str] = {}
+        valid_metrics: dict[int, dict[str, Any]] = {}
+        document_metadata: list[dict[str, Any]] = []
         for rid in existing_ids:
             run = by_id[rid]
             try:
                 parsed = json.loads(run.metrics_json)
-                if not isinstance(parsed, dict):
-                    parsed = {"__invalid__": True}
             except (json.JSONDecodeError, TypeError):
-                parsed = {"__invalid__": True}
-            raw_metrics[rid] = parsed
+                status = "INVALID_JSON"
+                parsed = None
+            else:
+                if isinstance(parsed, dict):
+                    status = "VALID"
+                else:
+                    status = "NON_OBJECT"
+                    parsed = None
+            doc_status[rid] = status
+            document_metadata.append({"run_id": rid, "document_status": status})
+            if status == "VALID" and isinstance(parsed, dict):
+                valid_metrics[rid] = parsed
 
-        baseline_metrics = raw_metrics.get(baseline_id, {}) if baseline_id else {}
-
+        # Build metric-name union from valid object documents only.
         all_names: set[str] = set()
-        for metrics in raw_metrics.values():
-            all_names.update(k for k in metrics if not k.startswith("__"))
+        for metrics in valid_metrics.values():
+            all_names.update(metrics.keys())
         sorted_names = sorted(all_names)
+
+        baseline_metrics = (
+            valid_metrics.get(baseline_id, {}) if baseline_id else {}
+        )
 
         rows: list[dict[str, Any]] = []
         for name in sorted_names:
@@ -195,12 +218,26 @@ class BacktestRunService:
 
             run_entries: list[dict[str, Any]] = []
             for rid in existing_ids:
-                run_raw = raw_metrics[rid].get(name)
+                # Invalid documents classify every cell as NON_NUMERIC.
+                if doc_status[rid] != "VALID":
+                    run_entries.append(
+                        {
+                            "run_id": rid,
+                            "classification": "NON_NUMERIC",
+                            "raw_value": None,
+                            "delta": None,
+                        }
+                    )
+                    continue
+                run_raw = valid_metrics[rid].get(name)
                 run_cls, run_num = _classify_value(run_raw)
                 delta: float | None = None
                 if run_cls == "NUMERIC" and baseline_cls == "NUMERIC":
                     assert run_num is not None and baseline_num is not None
-                    delta = run_num - baseline_num
+                    candidate = run_num - baseline_num
+                    # Reject overflow/non-finite deltas.
+                    if math.isfinite(candidate):
+                        delta = candidate
                 run_entries.append(
                     {
                         "run_id": rid,
@@ -218,7 +255,7 @@ class BacktestRunService:
                     "runs": run_entries,
                 }
             )
-        return rows
+        return document_metadata, rows
 
     @staticmethod
     def _to_out(run: BacktestRun) -> BacktestRunOut:

@@ -276,3 +276,98 @@ class TestStrategyVersionDiff:
             assert len(result["changed"]) == 1
         finally:
             db.close()
+
+    # ---- Blocker 4: missing decisive negative evidence ----
+
+    def test_type_only_change_int_to_float(self) -> None:
+        """int 1 vs float 1.0 is a real type-only change."""
+        db = database.SessionLocal()
+        try:
+            from_id = _seed_version(db, _base_params(max_consecutive_losses=1))
+            to_id = _seed_version(db, _base_params(max_consecutive_losses=1.0))
+        finally:
+            db.close()
+        resp = client.get(
+            "/api/strategy/versions/diff",
+            params={"from_version_id": from_id, "to_version_id": to_id},
+        )
+        assert resp.status_code == 200
+        changed = resp.json()["changed"]
+        assert len(changed) == 1
+        assert changed[0]["field"] == "max_consecutive_losses"
+        assert changed[0]["from_value"] == 1
+        assert changed[0]["to_value"] == 1.0
+        assert type(changed[0]["from_value"]) is int
+        assert type(changed[0]["to_value"]) is float
+
+    def test_exact_side_specific_missing_from(self) -> None:
+        """Missing from version produces exact side-specific detail."""
+        db = database.SessionLocal()
+        try:
+            to_id = _seed_version(db, _base_params())
+        finally:
+            db.close()
+        resp = client.get(
+            "/api/strategy/versions/diff",
+            params={"from_version_id": 99997, "to_version_id": to_id},
+        )
+        assert resp.status_code == 404
+        detail = resp.json()["detail"]
+        assert "99997" in detail
+        assert "from" in detail.lower()
+
+    def test_exact_side_specific_missing_to(self) -> None:
+        """Missing to version produces exact side-specific detail."""
+        db = database.SessionLocal()
+        try:
+            from_id = _seed_version(db, _base_params())
+        finally:
+            db.close()
+        resp = client.get(
+            "/api/strategy/versions/diff",
+            params={"from_version_id": from_id, "to_version_id": 99996},
+        )
+        assert resp.status_code == 404
+        detail = resp.json()["detail"]
+        assert "99996" in detail
+        assert "to" in detail.lower()
+
+    def test_mutation_and_runner_paths_not_reached(self, monkeypatch) -> None:
+        """Diff must never call record_version, update config, or access runner."""
+        db = database.SessionLocal()
+        try:
+            from_id = _seed_version(db, _base_params(buy_low=100.0))
+            to_id = _seed_version(db, _base_params(buy_low=105.0))
+        finally:
+            db.close()
+
+        # Fail-fast: record_version must not be called.
+        from app.services import strategy_version_service as svc_module
+
+        monkeypatch.setattr(
+            svc_module.StrategyVersionService,
+            "record_version",
+            lambda self, *a, **kw: (_ for _ in ()).throw(
+                AssertionError("diff must not call record_version")
+            ),
+        )
+
+        # Fail-fast: StrategyService.update must not be called.
+        from app.services import strategy_service as strat_svc_module
+
+        original_update = getattr(strat_svc_module.StrategyService, "update", None)
+        if original_update is not None:
+            monkeypatch.setattr(
+                strat_svc_module.StrategyService,
+                "update",
+                lambda self, *a, **kw: (_ for _ in ()).throw(
+                    AssertionError("diff must not call StrategyService.update")
+                ),
+            )
+
+        resp = client.get(
+            "/api/strategy/versions/diff",
+            params={"from_version_id": from_id, "to_version_id": to_id},
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()["changed"]) == 1

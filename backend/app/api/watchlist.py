@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -354,13 +354,34 @@ def get_watchlist_score_history(
     ``(created_at DESC, id DESC)``. Never scores, calls the LLM/provider/broker,
     refreshes TTLs, prunes, adds, flushes, or commits.
     """
-    if from_ is not None and to is not None and from_ >= to:
+    # Normalize symbol before validation/query.
+    normalized_symbol = symbol.strip().upper()
+    if not normalized_symbol:
+        raise HTTPException(status_code=422, detail="symbol must not be blank")
+
+    # Require timezone-aware datetimes; normalize to UTC.
+    from_dt: datetime | None = None
+    to_dt: datetime | None = None
+    for label, value in (("from", from_), ("to", to)):
+        if value is not None:
+            if value.utcoffset() is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"{label} must be timezone-aware",
+                )
+            normalized = value.astimezone(timezone.utc)
+            if label == "from":
+                from_dt = normalized
+            else:
+                to_dt = normalized
+
+    if from_dt is not None and to_dt is not None and from_dt >= to_dt:
         raise HTTPException(status_code=422, detail="from must be before to")
     svc = WatchlistScoreService(db)
     rows, total, observed_at = svc.list_history(
-        symbol,
-        from_dt=from_,
-        to_dt=to,
+        normalized_symbol,
+        from_dt=from_dt,
+        to_dt=to_dt,
         limit=limit,
     )
     items = []

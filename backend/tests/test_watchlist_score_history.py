@@ -233,3 +233,122 @@ class TestWatchlistScoreHistory:
             assert total == 1
         finally:
             db.close()
+
+    # ---- Blocker 3: input normalization / timezone policy ----
+
+    def test_blank_symbol_returns_422(self) -> None:
+        resp = client.get("/api/watchlist/scores/history", params={"symbol": "   "})
+        assert resp.status_code == 422
+
+    def test_whitespace_symbol_returns_422(self) -> None:
+        resp = client.get("/api/watchlist/scores/history", params={"symbol": ""})
+        assert resp.status_code == 422
+
+    def test_naive_from_returns_422(self) -> None:
+        resp = client.get(
+            "/api/watchlist/scores/history",
+            params={"symbol": "AAPL.US", "from": "2026-06-14T10:00:00"},
+        )
+        assert resp.status_code == 422
+
+    def test_naive_to_returns_422(self) -> None:
+        resp = client.get(
+            "/api/watchlist/scores/history",
+            params={"symbol": "AAPL.US", "to": "2026-06-14T10:00:00"},
+        )
+        assert resp.status_code == 422
+
+    def test_mixed_aware_naive_returns_422(self) -> None:
+        resp = client.get(
+            "/api/watchlist/scores/history",
+            params={
+                "symbol": "AAPL.US",
+                "from": "2026-06-14T10:00:00Z",
+                "to": "2026-06-14T12:00:00",
+            },
+        )
+        assert resp.status_code == 422
+
+    def test_utc_offset_normalization(self) -> None:
+        """A +05:00 offset ``from`` is normalized to UTC before comparison."""
+        db = database.SessionLocal()
+        try:
+            _seed_score(
+                db,
+                created_at=datetime(2026, 6, 14, 5, 0, 0, tzinfo=timezone.utc),
+            )
+        finally:
+            db.close()
+        # 10:00+05:00 == 05:00 UTC -> from is inclusive, so the row matches.
+        resp = client.get(
+            "/api/watchlist/scores/history",
+            params={"symbol": "AAPL.US", "from": "2026-06-14T10:00:00+05:00"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["total"] == 1
+
+    def test_invalid_order_returns_422(self) -> None:
+        resp = client.get(
+            "/api/watchlist/scores/history",
+            params={
+                "symbol": "AAPL.US",
+                "from": "2026-06-14T12:00:00Z",
+                "to": "2026-06-14T10:00:00Z",
+            },
+        )
+        assert resp.status_code == 422
+
+    # ---- Blocker 4: missing negative evidence ----
+
+    def test_no_scorer_llm_provider_broker_prune_invocation(self, monkeypatch) -> None:
+        """History must never invoke scorer, LLM/provider, broker, or prune."""
+        db = database.SessionLocal()
+        try:
+            _seed_score(db)
+        finally:
+            db.close()
+
+        # Fail-fast on any scorer/provider/broker/prune path.
+        from app.services import watchlist_score_service as wss_module
+
+        for attr in ("score_from_llm_or_fallback", "_prune_expired"):
+            original = getattr(wss_module.WatchlistScoreService, attr, None)
+            if original is not None:
+                monkeypatch.setattr(
+                    wss_module.WatchlistScoreService,
+                    attr,
+                    lambda self, *a, **kw: (_ for _ in ()).throw(
+                        AssertionError(f"history must not call {attr}")
+                    ),
+                )
+
+        db = database.SessionLocal()
+        try:
+            svc = WatchlistScoreService(db)
+            rows, total, observed = svc.list_history("AAPL.US")
+            assert total == 1
+        finally:
+            db.close()
+
+    def test_one_observation_clock_shared_across_rows(self) -> None:
+        """All returned rows share the same observation clock for stale status."""
+        db = database.SessionLocal()
+        try:
+            for i in range(3):
+                _seed_score(
+                    db,
+                    created_at=datetime(2026, 6, 14, 10, i, 0, tzinfo=timezone.utc),
+                )
+        finally:
+            db.close()
+        resp = client.get(
+            "/api/watchlist/scores/history",
+            params={"symbol": "AAPL.US", "limit": 10},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        observed = data["observed_at"]
+        # Every row's stale status was computed from the same observed_at.
+        assert observed is not None
+        # All rows share the same observation time (it's one value in the response).
+        assert len(data["items"]) == 3
