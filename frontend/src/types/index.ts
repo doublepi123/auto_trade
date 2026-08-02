@@ -1196,6 +1196,9 @@ export type CronJobStatus =
   | 'pending'
   | 'unknown'
 
+/** Cron tick outcome recorded by the backend: 'success' / 'failure' / '' (no tick yet). */
+export type CronJobOutcome = 'success' | 'failure' | ''
+
 export interface CronJobHealth {
   name: string
   enabled: boolean | null
@@ -1205,9 +1208,9 @@ export interface CronJobHealth {
   last_failure_code: string | null
   tick_count: number
   failure_count: number
-  last_outcome: string
+  last_outcome: CronJobOutcome
   stale: boolean
-  status: string
+  status: CronJobStatus
 }
 
 /** Top-level response for GET /api/cron-health. `as_of` is server time. */
@@ -1243,7 +1246,7 @@ export interface QuoteStreamHealth {
   resubscribe_count: number
   disconnect_retry_count: number
   quotes_subscribed: boolean
-  status: string
+  status: QuoteStreamHealthStatus
   as_of: string
 }
 
@@ -1302,6 +1305,17 @@ export interface InterventionEvidenceSummary {
   paired_duration_seconds: number
 }
 
+/**
+ * Exact echo of the filters the backend applied (InterventionEvidenceResponse.filters).
+ * `limit` is always present (the server-side capped limit); `from_date` /
+ * `to_date` keys exist only when the caller supplied them (YYYY-MM-DD).
+ */
+export interface InterventionEvidenceFilters {
+  limit: number
+  from_date?: string
+  to_date?: string
+}
+
 export interface InterventionEvidenceResponse {
   items: InterventionEvidenceRow[]
   summary: InterventionEvidenceSummary
@@ -1321,8 +1335,8 @@ export interface InterventionEvidenceResponse {
   classification_complete: boolean
   /** Backend-provided human-readable pairing rule (verbatim). */
   pairing_rule: string
-  /** Echo of the applied filters ({ limit, from_date?, to_date? }). */
-  filters: Record<string, unknown>
+  /** Echo of the applied filters; missing keys mean "not applied". */
+  filters: InterventionEvidenceFilters
 }
 
 export interface RiskHistoryPoint {

@@ -174,7 +174,71 @@ describe('Dashboard quote stream health', () => {
     cy.get('[data-testid="quote-health-error"]').should('not.exist')
   })
 
-  it('advances the quote age with the shared ticker without a refetch', () => {
+  it('treats a generic/malformed 503 as an error, not as runner-not-ready, then recovers', () => {
+    cy.stubApi()
+    // Generic proxy-style 503: right HTTP status, wrong body shape.
+    cy.intercept('GET', '/api/quote-health', {
+      statusCode: 503,
+      body: { detail: 'Service Unavailable' },
+    }).as('quoteHealthGeneric503')
+
+    cy.visit('/')
+    cy.wait('@quoteHealthGeneric503')
+    cy.get('[data-testid="quote-health-error"]').should('contain', '行情流健康响应无法识别')
+    cy.get('[data-testid="quote-health-unavailable"]').should('not.exist')
+    cy.get('[data-testid="quote-health-received"]').should('not.exist')
+
+    // Recovery through the same refresh: a schema-validated typed 503 body
+    // regains the special runner-not-ready explanation.
+    cy.intercept('GET', '/api/quote-health', {
+      statusCode: 503,
+      body: {
+        symbol: '',
+        quotes_received: 0,
+        last_quote_timestamp: null,
+        last_quote_age_seconds: null,
+        max_gap_seconds: 0,
+        disconnect_count: 0,
+        resubscribe_count: 0,
+        disconnect_retry_count: 0,
+        quotes_subscribed: false,
+        status: 'unavailable',
+        as_of: new Date().toISOString(),
+      },
+    }).as('quoteHealthTyped503')
+    cy.get('[data-testid="dash-diagnostics-refresh"]').click()
+    cy.wait('@quoteHealthTyped503')
+    cy.get('[data-testid="quote-health-unavailable"]').should('contain', '运行器尚未就绪')
+    cy.get('[data-testid="quote-health-error"]').should('not.exist')
+  })
+
+  it('rejects a 503 whose status field is not the unavailable contract', () => {
+    cy.stubApi()
+    cy.intercept('GET', '/api/quote-health', {
+      statusCode: 503,
+      body: {
+        symbol: 'NVDA.US',
+        quotes_received: 10,
+        last_quote_timestamp: null,
+        last_quote_age_seconds: null,
+        max_gap_seconds: 0,
+        disconnect_count: 0,
+        resubscribe_count: 0,
+        disconnect_retry_count: 0,
+        quotes_subscribed: true,
+        status: 'healthy',
+        as_of: new Date().toISOString(),
+      },
+    }).as('quoteHealthWrongStatus')
+
+    cy.visit('/')
+    cy.wait('@quoteHealthWrongStatus')
+    cy.get('[data-testid="quote-health-error"]').should('contain', '行情流健康响应无法识别')
+    cy.get('[data-testid="quote-health-unavailable"]').should('not.exist')
+    cy.get('[data-testid="quote-health-status"]').should('not.exist')
+  })
+
+  it('advances the quote age past the poll boundary and the stale threshold on one GET', () => {
     const now = new Date('2026-08-02T12:00:00Z').getTime()
     cy.clock(now, ['Date', 'setInterval', 'clearInterval'])
     cy.stubApi()
@@ -198,8 +262,18 @@ describe('Dashboard quote stream health', () => {
     cy.wait('@quoteHealthClock')
     cy.get('[data-testid="quote-health-age"]').should('contain', '5.0s')
 
-    cy.tick(4000)
-    cy.get('[data-testid="quote-health-age"]').should('contain', '9.0s')
+    // Past the 5s dashboard poll boundary: the poll refetches diagnostics etc.
+    // but never quote-health; the age label advances on the shared ticker.
+    cy.tick(6000)
+    cy.get('[data-testid="quote-health-age"]').should('contain', '11.0s')
+    cy.get('@quoteHealthClock.all').should('have.length', 1)
+
+    // Across the displayed stale-age threshold (90s): the label keeps aging
+    // truthfully while the server verdict stays authoritative (健康) — the UI
+    // never reclassifies locally and still issued exactly one GET.
+    cy.tick(80000)
+    cy.get('[data-testid="quote-health-age"]').should('contain', '1m 31s')
+    cy.get('[data-testid="quote-health-status"]').should('contain', '健康')
     cy.get('@quoteHealthClock.all').should('have.length', 1)
   })
 
@@ -207,7 +281,7 @@ describe('Dashboard quote stream health', () => {
     let mutatingCalls = 0
     cy.stubApi()
     for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
-      cy.intercept(method, '/api/quote-health*', (req) => {
+      cy.intercept(method, '/api/**', (req) => {
         mutatingCalls += 1
         req.reply({ statusCode: 404, body: {} })
       })

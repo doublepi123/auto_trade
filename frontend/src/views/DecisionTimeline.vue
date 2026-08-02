@@ -79,11 +79,11 @@
         <el-button size="small" plain data-testid="timeline-bookmarks-export" @click="exportBookmarks">导出书签</el-button>
         <el-button size="small" plain data-testid="timeline-bookmarks-import" @click="triggerImportBookmarks">导入书签</el-button>
         <input ref="bookmarksImportInput" type="file" accept=".json,application/json" style="display: none" data-testid="timeline-bookmarks-input" @change="handleImportBookmarks" />
-        <el-button type="primary" :loading="loading" @click="loadEvents">刷新</el-button>
+        <el-button type="primary" :loading="loading" data-testid="timeline-refresh" @click="refreshAll">刷新</el-button>
       </div>
     </div>
 
-    <InterventionEvidencePanel />
+    <InterventionEvidencePanel ref="evidencePanelRef" />
 
     <div v-if="bookmarks.length" class="timeline-bookmarks" role="region" aria-labelledby="timeline-bookmarks-heading">
       <div class="bookmarks-header">
@@ -476,6 +476,16 @@ async function handleImportBookmarks(event: Event) {
 }
 
 const visibleEvents = computed(() => events.value)
+
+// The single existing 刷新 button reloads both the raw timeline and the
+// curated intervention evidence panel (via its exposed reload) — the evidence
+// surface gains no separate refresh control.
+const evidencePanelRef = ref<InstanceType<typeof InterventionEvidencePanel> | null>(null)
+
+function refreshAll() {
+  void loadEvents()
+  evidencePanelRef.value?.reload()
+}
 
 // Row keyboard navigation: when the events table is focused, ↑/↓ (or j/k)
 // move the highlighted row and Enter opens the LLM detail for llm rows.

@@ -65,7 +65,7 @@
 
     <template v-else>
       <el-alert
-        v-if="data && !data.pairing_complete"
+        v-if="data && data.scan_truncated"
         class="evidence-alert"
         type="warning"
         :closable="false"
@@ -74,7 +74,7 @@
         :title="`配对上下文超出扫描上限：本次配对不完整，所有时长已抑制，依赖上下文的状态显示为「未知」。总数 ${data.total} 条仍为精确值。`"
       />
       <el-alert
-        v-else-if="data && data.truncated"
+        v-if="data && responseLimitTruncated"
         class="evidence-alert"
         type="info"
         :closable="false"
@@ -90,11 +90,11 @@
           <span>证据总数 <strong>{{ data.total }}</strong></span>
           <span>筛选后已扫描 <strong>{{ data.filtered_scanned }}</strong></span>
           <span>配对上下文扫描 <strong>{{ data.pairing_context_scanned }}</strong></span>
-          <span data-testid="evidence-filters-echo">{{ filtersEchoLabel }}</span>
+          <span v-if="filtersEchoLabel" data-testid="evidence-filters-echo">{{ filtersEchoLabel }}</span>
         </div>
 
         <div class="evidence-counts" data-testid="evidence-counts">
-          <el-tag size="small" type="success" effect="plain">已配对 {{ data.summary.paired_count }}</el-tag>
+          <el-tag size="small" type="success" effect="plain">已配对证据 {{ data.summary.paired_count }}</el-tag>
           <el-tag size="small" type="warning" effect="plain">未关闭 {{ data.summary.open_count }}</el-tag>
           <el-tag size="small" type="warning" effect="plain">无配对关闭 {{ data.summary.unmatched_close_count }}</el-tag>
           <el-tag size="small" type="danger" effect="plain">歧义 {{ data.summary.ambiguous_count }}</el-tag>
@@ -226,13 +226,25 @@ function resetFilters() {
 }
 
 const filtersEchoLabel = computed(() => {
-  const filters = data.value?.filters ?? {}
-  const from = typeof filters.from_date === 'string' ? filters.from_date : ''
-  const to = typeof filters.to_date === 'string' ? filters.to_date : ''
-  const limitEcho = typeof filters.limit === 'number' ? filters.limit : limit.value
-  if (!from && !to) return `未设置日期筛选 · 上限 ${limitEcho}`
-  return `筛选 ${from || '…'} 至 ${to || '…'} · 上限 ${limitEcho}`
+  // Render only what the backend echoes. A missing key means "not applied" —
+  // never substitute the local filter inputs, which could diverge from what
+  // the server actually used.
+  const filters = data.value?.filters
+  if (!filters) return ''
+  const parts: string[] = []
+  const from = filters.from_date ?? ''
+  const to = filters.to_date ?? ''
+  parts.push(from || to ? `筛选 ${from || '…'} 至 ${to || '…'}` : '未设置日期筛选')
+  if (typeof filters.limit === 'number') parts.push(`上限 ${filters.limit}`)
+  return parts.join(' · ')
 })
+
+/** Response-limit truncation is its own fact: the bounded response cut rows
+ * that matched the filters. Independent of scan-cap truncation (`scan_truncated`),
+ * and both can be true at once — the two alerts render independently. */
+const responseLimitTruncated = computed(
+  () => (data.value ? data.value.returned < data.value.filtered_scanned : false),
+)
 
 const tableRows = computed<EvidenceRow[]>(() =>
   (data.value?.items ?? []).map((item) => ({
@@ -291,6 +303,10 @@ function formatDateTime(value: string): string {
 onMounted(() => {
   void load()
 })
+
+// The Decision Timeline's existing 刷新 button reloads this panel through
+// this exposed method — no separate control is added.
+defineExpose({ reload: load })
 </script>
 
 <style scoped>

@@ -22,6 +22,13 @@
         <el-tag v-if="statusCounts.pending" size="small" type="info" effect="plain">等待中 {{ statusCounts.pending }}</el-tag>
         <el-tag v-if="statusCounts.disabled" size="small" type="info" effect="plain">已禁用 {{ statusCounts.disabled }}</el-tag>
         <el-tag v-if="statusCounts.unknown" size="small" type="info" effect="plain">未知 {{ statusCounts.unknown }}</el-tag>
+        <el-tag
+          v-if="staleCount"
+          size="small"
+          type="warning"
+          effect="plain"
+          data-testid="cron-health-stale-count"
+        >心跳过期 {{ staleCount }}</el-tag>
       </div>
 
       <ul class="cron-health-jobs">
@@ -83,7 +90,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { CronHealthSnapshot } from '../types'
+import type { CronHealthSnapshot, CronJobOutcome, CronJobStatus } from '../types'
 import { relativeAgeLabel } from '../utils/time'
 
 /**
@@ -108,7 +115,7 @@ const props = withDefaults(
   },
 )
 
-const STATUS_LABELS: Record<string, string> = {
+const STATUS_LABELS: Record<CronJobStatus, string> = {
   healthy: '健康',
   failing: '失败',
   stale: '过期',
@@ -117,7 +124,7 @@ const STATUS_LABELS: Record<string, string> = {
   unknown: '未知',
 }
 
-const STATUS_TAG_TYPES: Record<string, string> = {
+const STATUS_TAG_TYPES: Record<CronJobStatus, string> = {
   healthy: 'success',
   failing: 'danger',
   stale: 'warning',
@@ -126,11 +133,11 @@ const STATUS_TAG_TYPES: Record<string, string> = {
   unknown: 'info',
 }
 
-function statusLabel(status: string): string {
+function statusLabel(status: CronJobStatus): string {
   return STATUS_LABELS[status] ?? status
 }
 
-function statusTagType(status: string): string {
+function statusTagType(status: CronJobStatus): string {
   return STATUS_TAG_TYPES[status] ?? 'info'
 }
 
@@ -139,7 +146,7 @@ function enabledLabel(enabled: boolean | null): string {
   return enabled ? '已启用' : '已禁用'
 }
 
-function outcomeLabel(outcome: string): string {
+function outcomeLabel(outcome: CronJobOutcome): string {
   if (outcome === 'success') return '成功'
   if (outcome === 'failure') return '失败'
   return '暂无'
@@ -176,16 +183,32 @@ const snapshotAsOfLabel = computed(() => {
 })
 
 const statusCounts = computed(() => {
-  const counts = { healthy: 0, failing: 0, stale: 0, pending: 0, disabled: 0, unknown: 0 }
+  const counts: Record<CronJobStatus, number> = {
+    healthy: 0,
+    failing: 0,
+    stale: 0,
+    pending: 0,
+    disabled: 0,
+    unknown: 0,
+  }
   for (const job of props.snapshot?.jobs ?? []) {
     if (job.status in counts) {
-      counts[job.status as keyof typeof counts] += 1
+      counts[job.status] += 1
     } else {
       counts.unknown += 1
     }
   }
   return counts
 })
+
+/**
+ * Staleness is a heartbeat dimension independent of the latest-outcome
+ * verdict: a failing job whose ticks have also stopped arriving counts here
+ * too. Counted from `job.stale`, never inferred from `status`.
+ */
+const staleCount = computed(
+  () => (props.snapshot?.jobs ?? []).filter((job) => job.stale).length,
+)
 </script>
 
 <style scoped>

@@ -83,6 +83,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { QuoteStreamHealthResult } from '../api'
+import type { QuoteStreamHealthStatus } from '../types'
 import { relativeAgeLabel } from '../utils/time'
 
 /**
@@ -114,7 +115,7 @@ const props = withDefaults(
 
 const health = computed(() => props.result?.health ?? null)
 
-const STATUS_LABELS: Record<string, string> = {
+const STATUS_LABELS: Record<QuoteStreamHealthStatus, string> = {
   healthy: '健康',
   stale: '过期',
   waiting: '等待首条报价',
@@ -124,7 +125,8 @@ const STATUS_LABELS: Record<string, string> = {
 const statusLabel = computed(() => {
   if (!props.result) return ''
   if (props.result.http_status === 503) return '不可用'
-  const status = health.value?.status ?? ''
+  const status = health.value?.status
+  if (!status) return '未知'
   if (status === 'unavailable') return '未订阅'
   return STATUS_LABELS[status] ?? status
 })

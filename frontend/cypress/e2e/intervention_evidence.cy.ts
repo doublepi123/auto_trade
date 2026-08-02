@@ -147,8 +147,8 @@ describe('Decision Timeline intervention evidence', () => {
     cy.get('[data-testid="evidence-summary"]').should('contain', '配对上下文扫描 6')
     cy.get('[data-testid="evidence-filters-echo"]').should('contain', '未设置日期筛选 · 上限 500')
 
-    // Per-status counts including unknown/ambiguous.
-    cy.get('[data-testid="evidence-counts"]').should('contain', '已配对 2')
+    // Per-status counts including unknown/ambiguous; 已配对证据 counts rows, not pairs.
+    cy.get('[data-testid="evidence-counts"]').should('contain', '已配对证据 2')
     cy.get('[data-testid="evidence-counts"]').should('contain', '未关闭 1')
     cy.get('[data-testid="evidence-counts"]').should('contain', '无配对关闭 2')
     cy.get('[data-testid="evidence-counts"]').should('contain', '歧义 1')
@@ -181,7 +181,11 @@ describe('Decision Timeline intervention evidence', () => {
     cy.get('[data-testid="timeline-source-filter"]').should('be.visible')
   })
 
-  it('surfaces incomplete pairing context: UNKNOWN rows, suppressed durations, precise total', () => {
+  it('renders scan-cap and response-limit truncation alerts independently when both apply', () => {
+    // Contract-consistent combined case: the global scan cap was exceeded
+    // (pairing incomplete → all rows UNKNOWN, durations suppressed, precise
+    // total kept) AND the bounded response cut filtered rows
+    // (returned 2 < filtered_scanned 3). Both alerts must be visible at once.
     const unknownRows = [
       makeRow({ source_id: 21, pairing_status: 'UNKNOWN' }),
       makeRow({
@@ -190,14 +194,6 @@ describe('Decision Timeline intervention evidence', () => {
         action: 'RESUME',
         direction: 'close',
         reason: 'MANUAL_RESUME',
-        pairing_status: 'UNKNOWN',
-      }),
-      makeRow({
-        source_id: 23,
-        family: 'kill_switch',
-        kind: 'KILL_SWITCH',
-        action: 'KILL_SWITCH',
-        reason: 'MANUAL_KILL_SWITCH',
         pairing_status: 'UNKNOWN',
       }),
     ]
@@ -218,28 +214,66 @@ describe('Decision Timeline intervention evidence', () => {
         total: 5300,
         pairing_context_scanned: 5001,
         filtered_scanned: 3,
-        returned: 3,
+        returned: 2,
         truncated: true,
         pairing_complete: false,
         scan_truncated: true,
         classification_complete: false,
       }),
-    }).as('evidenceIncomplete')
+    }).as('evidenceCombined')
 
     visitTimeline()
-    cy.wait('@evidenceIncomplete')
+    cy.wait('@evidenceCombined')
 
     cy.get('[data-testid="evidence-incomplete-alert"]').should('contain', '配对不完整')
     cy.get('[data-testid="evidence-incomplete-alert"]').should('contain', '时长已抑制')
     cy.get('[data-testid="evidence-incomplete-alert"]').should('contain', '总数 5300 条仍为精确值')
-    cy.get('[data-testid="evidence-truncated-alert"]').should('not.exist')
-    cy.get('[data-testid="evidence-status-tag"]').filter(':contains("未知")').should('have.length', 3)
+    cy.get('[data-testid="evidence-truncated-alert"]').should('contain', '仅显示前 2 条（符合筛选共 5300 条）')
+    // Summary counts describe the scanned population (3), not just returned rows.
+    cy.get('[data-testid="evidence-counts"]').should('contain', '未知 3')
+    cy.get('[data-testid="evidence-status-tag"]').filter(':contains("未知")').should('have.length', 2)
     // No fabricated durations when pairing is incomplete.
     cy.get('[data-testid="evidence-duration"]').each(($cell) => {
       expect($cell.text().trim()).to.equal('—')
     })
     cy.get('[data-testid="evidence-paired-duration"]').should('contain', '—（已抑制）')
     cy.get('[data-testid="evidence-counts-note"]').should('contain', '配对不完整时仅描述该部分')
+  })
+
+  it('shows only the scan-cap alert when the response limit did not cut rows', () => {
+    const unknownRows = [
+      makeRow({ source_id: 31, pairing_status: 'UNKNOWN' }),
+      makeRow({ source_id: 32, family: 'kill_switch', kind: 'KILL_SWITCH', action: 'KILL_SWITCH', reason: 'MANUAL_KILL_SWITCH', pairing_status: 'UNKNOWN' }),
+    ]
+    cy.stubApi()
+    cy.intercept('GET', '/api/intervention-evidence*', {
+      body: makeResponse(unknownRows, {
+        summary: makeSummary({
+          total_evidence: 5100,
+          scanned_evidence: 2,
+          classification_complete: false,
+          paired_count: 0,
+          open_count: 0,
+          unmatched_close_count: 0,
+          ambiguous_count: 0,
+          unknown_count: 2,
+          paired_duration_seconds: 0,
+        }),
+        total: 5100,
+        pairing_context_scanned: 5001,
+        filtered_scanned: 2,
+        returned: 2,
+        truncated: true,
+        pairing_complete: false,
+        scan_truncated: true,
+        classification_complete: false,
+      }),
+    }).as('evidenceScanCapOnly')
+
+    visitTimeline()
+    cy.wait('@evidenceScanCapOnly')
+    cy.get('[data-testid="evidence-incomplete-alert"]').should('contain', '配对不完整')
+    cy.get('[data-testid="evidence-truncated-alert"]').should('not.exist')
   })
 
   it('explains response-limit truncation separately from scan-cap truncation', () => {
@@ -354,11 +388,27 @@ describe('Decision Timeline intervention evidence', () => {
     cy.get('[data-testid="evidence-error"]').should('contain', 'from_date must be on or before to_date')
   })
 
+  it('reloads evidence through the existing timeline refresh button', () => {
+    cy.stubApi()
+    visitTimeline()
+    cy.wait('@getInterventionEvidence')
+    cy.get('@getInterventionEvidence.all').should('have.length', 1)
+
+    // The one existing 刷新 button reloads both surfaces; no new control exists.
+    cy.get('[data-testid="timeline-refresh"]').click()
+    cy.wait('@getInterventionEvidence')
+    cy.get('@getInterventionEvidence.all').should('have.length', 2)
+    cy.get('@getEvents.all').should('have.length.greaterThan', 1)
+    cy.get('[data-testid="intervention-evidence-panel"]').within(() => {
+      cy.contains('button', '刷新').should('not.exist')
+    })
+  })
+
   it('offers no intervention controls and never calls mutating endpoints', () => {
     let mutatingCalls = 0
     cy.stubApi()
     for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
-      cy.intercept(method, '/api/intervention-evidence*', (req) => {
+      cy.intercept(method, '/api/**', (req) => {
         mutatingCalls += 1
         req.reply({ statusCode: 404, body: {} })
       })
@@ -394,7 +444,7 @@ describe('Decision Timeline intervention evidence', () => {
     visitTimeline()
     cy.wait('@evidenceMobile')
     cy.get('[data-testid="intervention-evidence-panel"]').should('be.visible')
-    cy.get('[data-testid="evidence-counts"]').should('contain', '已配对 2')
+    cy.get('[data-testid="evidence-counts"]').should('contain', '已配对证据 2')
     cy.get('body').then(($body) => {
       expect($body[0].scrollWidth).to.be.lte($body[0].clientWidth)
     })

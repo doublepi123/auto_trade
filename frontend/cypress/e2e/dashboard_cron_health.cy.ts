@@ -82,6 +82,8 @@ describe('Dashboard cron job health', () => {
 
     cy.get('[data-testid="cron-health-summary"]').should('contain', '失败 1')
     cy.get('[data-testid="cron-health-summary"]').should('contain', '过期 1')
+    // Stale is its own dimension: both stale=true jobs count, independent of verdict.
+    cy.get('[data-testid="cron-health-stale-count"]').should('contain', '心跳过期 2')
 
     cy.get('[data-testid="cron-health-job-order_reconcile"]').within(() => {
       cy.get('[data-testid="cron-job-status"]').should('contain', '失败')
@@ -186,11 +188,46 @@ describe('Dashboard cron job health', () => {
     cy.get('[data-testid="cron-health-error"]').should('not.exist')
   })
 
+  it('renders a true unknown-status job distinctly from pending and failing', () => {
+    cy.stubApi()
+    cy.intercept('GET', '/api/cron-health', {
+      body: {
+        as_of: new Date().toISOString(),
+        jobs: [
+          {
+            name: 'adhoc_loop',
+            enabled: true,
+            expected_interval_seconds: null,
+            last_success_at: null,
+            last_failure_at: null,
+            last_failure_code: null,
+            tick_count: 0,
+            failure_count: 0,
+            last_outcome: '',
+            stale: false,
+            status: 'unknown',
+          },
+        ],
+      },
+    }).as('cronHealthUnknown')
+
+    cy.visit('/')
+    cy.wait('@cronHealthUnknown')
+    cy.get('[data-testid="cron-health-summary"]').should('contain', '未知 1')
+    cy.get('[data-testid="cron-health-job-adhoc_loop"]').within(() => {
+      cy.get('[data-testid="cron-job-status"]').should('contain', '未知')
+      cy.get('[data-testid="cron-job-interval"]').should('contain', '未知')
+      cy.get('[data-testid="cron-job-outcome"]').should('contain', '暂无')
+      cy.get('[data-testid="cron-job-stale"]').should('not.exist')
+    })
+    cy.get('[data-testid="cron-health-stale-count"]').should('not.exist')
+  })
+
   it('offers no job controls and never calls mutating endpoints', () => {
     let mutatingCalls = 0
     cy.stubApi()
     for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
-      cy.intercept(method, '/api/cron-health*', (req) => {
+      cy.intercept(method, '/api/**', (req) => {
         mutatingCalls += 1
         req.reply({ statusCode: 404, body: {} })
       })
