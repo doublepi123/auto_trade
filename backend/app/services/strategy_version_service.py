@@ -62,3 +62,59 @@ class StrategyVersionService:
         if row is None:
             return None
         return json.loads(row.params_json)
+
+    def load_version_pair(
+        self,
+        from_version_id: int,
+        to_version_id: int,
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        """Load two version snapshots for diffing.
+
+        Returns ``(from_params, to_params)`` or ``None`` if either ID is
+        missing. Read-only: never writes, flushes, or commits. The caller
+        maps a ``None`` result to a side-specific 404.
+        """
+        from_row = self.db.query(StrategyParamVersion).filter_by(id=from_version_id).first()
+        if from_row is None:
+            return None
+        to_row = self.db.query(StrategyParamVersion).filter_by(id=to_version_id).first()
+        if to_row is None:
+            return None
+        return json.loads(from_row.params_json), json.loads(to_row.params_json)
+
+
+def build_version_diff(
+    from_params: dict[str, Any],
+    to_params: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    """Compare two version snapshots over ``_VERSIONED_COLUMNS`` only.
+
+    Unknown stored JSON keys are ignored. Iteration order follows the
+    ``_VERSIONED_COLUMNS`` tuple so output is deterministic.
+
+    - ``added``: missing from source / present in target.
+    - ``removed``: present in source / missing in target.
+    - ``changed``: present in both and unequal. Type is compared first
+      (``1`` vs ``1.0`` differ because ``int`` != ``float``), then value;
+      this preserves JSON type and null transitions.
+    """
+    added: list[dict[str, Any]] = []
+    removed: list[dict[str, Any]] = []
+    changed: list[dict[str, Any]] = []
+
+    for col in _VERSIONED_COLUMNS:
+        in_from = col in from_params
+        in_to = col in to_params
+        if in_from and not in_to:
+            removed.append({"field": col, "from_value": from_params[col], "to_value": None})
+        elif in_to and not in_from:
+            added.append({"field": col, "from_value": None, "to_value": to_params[col]})
+        elif in_from and in_to:
+            from_val = from_params[col]
+            to_val = to_params[col]
+            # bool is a subclass of int in Python; compare exact types so
+            # True != 1, and so int 1 vs float 1.0 are distinct snapshots.
+            if type(from_val) is not type(to_val) or from_val != to_val:
+                changed.append({"field": col, "from_value": from_val, "to_value": to_val})
+
+    return {"added": added, "removed": removed, "changed": changed}

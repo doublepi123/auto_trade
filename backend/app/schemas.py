@@ -271,6 +271,34 @@ class StrategyResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class StrategyVersionDiffEntry(BaseModel):
+    """One field change between two strategy versions.
+
+    ``from_value``/``to_value`` are ``None`` when the field is absent on
+    that side (added entries have ``from_value=None``; removed entries
+    have ``to_value=None``).
+    """
+
+    field: str
+    from_value: Any = None
+    to_value: Any = None
+
+
+class StrategyVersionDiffResponse(BaseModel):
+    """Read-only diff of two strategy parameter versions.
+
+    Compares only the ``_VERSIONED_COLUMNS`` allowlist in stable tuple
+    order. Equal versions return empty lists. Never rollback, update,
+    record, flush, or commit.
+    """
+
+    from_version_id: int
+    to_version_id: int
+    added: list[StrategyVersionDiffEntry]
+    removed: list[StrategyVersionDiffEntry]
+    changed: list[StrategyVersionDiffEntry]
+
+
 class StrategyV2ShadowConfigValues(BaseModel):
     """Validated P2 values shared by API updates and the shadow service."""
 

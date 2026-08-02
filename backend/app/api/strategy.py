@@ -19,11 +19,11 @@ from app.runner import (
     PrimarySwitchCheckError,
     get_runner,
 )
-from app.schemas import DiagnosticsResponse, StatusHistoryPoint, StatusHistoryResponse, StatusResponse, StrategyConfigSchema, StrategyMergedSchema, StrategyResponse, TradeSignalMarker
+from app.schemas import DiagnosticsResponse, StatusHistoryPoint, StatusHistoryResponse, StatusResponse, StrategyConfigSchema, StrategyMergedSchema, StrategyResponse, StrategyVersionDiffEntry, StrategyVersionDiffResponse, TradeSignalMarker
 from app.services.daily_pnl_service import DailyPnlService
 from app.services.runtime_state_service import RuntimeStateService
 from app.services.strategy_service import StrategyService, validate_strategy_consistency
-from app.services.strategy_version_service import StrategyVersionService
+from app.services.strategy_version_service import StrategyVersionService, build_version_diff
 
 logger = logging.getLogger("auto_trade.strategy")
 
@@ -215,6 +215,59 @@ def put_strategy(
 @router.get("/strategy/versions", dependencies=[Depends(require_api_key())])
 def list_strategy_versions(db: Session = Depends(get_db)) -> list[dict[str, Any]]:
     return StrategyVersionService(db).list_versions()
+
+
+@router.get(
+    "/strategy/versions/diff",
+    response_model=StrategyVersionDiffResponse,
+    dependencies=[Depends(require_api_key())],
+)
+def diff_strategy_versions(
+    from_version_id: int = Query(..., ge=1),
+    to_version_id: int = Query(..., ge=1),
+    db: Session = Depends(get_db),
+) -> StrategyVersionDiffResponse:
+    """Read-only diff of two strategy parameter versions.
+
+    Compares only the ``_VERSIONED_COLUMNS`` allowlist in stable tuple order.
+    Never rollback, update, record, flush, or commit.
+    """
+    version_svc = StrategyVersionService(db)
+    pair = version_svc.load_version_pair(from_version_id, to_version_id)
+    if pair is None:
+        from app.models import StrategyParamVersion
+
+        from_exists = (
+            db.query(StrategyParamVersion.id).filter_by(id=from_version_id).first()
+            is not None
+        )
+        to_exists = (
+            db.query(StrategyParamVersion.id).filter_by(id=to_version_id).first()
+            is not None
+        )
+        if not from_exists and not to_exists:
+            raise HTTPException(
+                status_code=404,
+                detail=f"versions {from_version_id} and {to_version_id} not found",
+            )
+        if not from_exists:
+            raise HTTPException(
+                status_code=404,
+                detail=f"from version {from_version_id} not found",
+            )
+        raise HTTPException(
+            status_code=404,
+            detail=f"to version {to_version_id} not found",
+        )
+    from_params, to_params = pair
+    diff = build_version_diff(from_params, to_params)
+    return StrategyVersionDiffResponse(
+        from_version_id=from_version_id,
+        to_version_id=to_version_id,
+        added=[StrategyVersionDiffEntry(**e) for e in diff["added"]],
+        removed=[StrategyVersionDiffEntry(**e) for e in diff["removed"]],
+        changed=[StrategyVersionDiffEntry(**e) for e in diff["changed"]],
+    )
 
 
 @router.post("/strategy/versions/{version_id}/rollback", dependencies=[Depends(require_api_key())])
