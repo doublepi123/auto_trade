@@ -624,20 +624,12 @@ async function handleExport(format: 'csv' | 'json') {
     link.href = url
     link.download = `decision-timeline.${format}`
     document.body.appendChild(link)
-    // Revoke the object URL on click rather than after a 1-second timer to
-    // avoid races when the user fires several exports in quick succession
-    // (each link was previously holding its URL alive for a full second).
-    const cleanup = () => {
-      URL.revokeObjectURL(url)
-      link.removeEventListener('click', cleanup)
-      // Detach the link element so the DOM does not accumulate hidden
-      // <a> nodes (one per export). The previous implementation forgot
-      // link.remove() and left a stale node behind on every export.
-      if (link.parentNode) link.parentNode.removeChild(link)
-    }
-    link.addEventListener('click', cleanup)
     link.click()
-    setTimeout(cleanup, 1000)
+    link.remove()
+    // Keep the object URL alive until the browser has consumed the click's
+    // default download action. Revoking it inside the click event can cancel
+    // the download before it reaches disk.
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
     ElMessage.success('导出已开始')
   } catch (e) {
     console.error('导出决策时间线失败：', e)
