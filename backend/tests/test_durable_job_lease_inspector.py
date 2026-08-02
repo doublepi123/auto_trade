@@ -26,6 +26,37 @@ from app import database
 database.init_db()
 client = TestClient(app)
 
+# Canonical trigger DDL — centralized so setup and teardown stay in sync.
+_DROP_TRIGGER_SQL = "DROP TRIGGER IF EXISTS trg_durable_job_leases_no_delete"
+_CREATE_TRIGGER_SQL = (
+    "CREATE TRIGGER trg_durable_job_leases_no_delete "
+    "BEFORE DELETE ON durable_job_leases "
+    "BEGIN "
+    "SELECT RAISE(ABORT, 'durable_job_leases rows cannot be deleted'); "
+    "END"
+)
+
+
+def _cleanup_lease_rows() -> None:
+    """Drop the no-delete trigger, delete all test rows, recreate the trigger.
+
+    The production ``durable_job_leases`` table has a BEFORE DELETE trigger
+    that aborts all deletes. This helper temporarily drops it, removes test
+    rows, and recreates the exact canonical trigger so the inspector's
+    no-mutation guarantee is still enforced during tests.
+    """
+    db = database.SessionLocal()
+    try:
+        db.execute(text(_DROP_TRIGGER_SQL))
+        db.query(DurableJobLease).delete()
+        db.execute(text(_CREATE_TRIGGER_SQL))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
 
 def _db_now_epoch_ms(db: Session) -> int:
     return int(
@@ -63,24 +94,16 @@ def _seed_lease(
 
 class TestDurableJobLeaseInspector:
     def setup_method(self) -> None:
-        db = database.SessionLocal()
-        # The durable_job_leases table has a BEFORE DELETE trigger that aborts
-        # deletes. Temporarily drop the trigger to clean up test rows.
-        db.execute(text("DROP TRIGGER IF EXISTS trg_durable_job_leases_no_delete"))
-        db.query(DurableJobLease).delete()
-        # Recreate the trigger so the inspector's no-mutation guarantee is
-        # still enforced during the test.
-        db.execute(
-            text(
-                "CREATE TRIGGER trg_durable_job_leases_no_delete "
-                "BEFORE DELETE ON durable_job_leases "
-                "BEGIN "
-                "SELECT RAISE(ABORT, 'durable_job_leases rows cannot be deleted'); "
-                "END"
-            )
-        )
-        db.commit()
-        db.close()
+        _cleanup_lease_rows()
+
+    def teardown_method(self) -> None:
+        """Symmetric cleanup after every test, including the final one.
+
+        Without this, the last test's seeded row remains in the shared per-PID
+        database and triggers an abort when ``test_e2e_restart.py``'s generic
+        cleanup later issues ``DELETE FROM durable_job_leases``.
+        """
+        _cleanup_lease_rows()
 
     def test_empty_state(self) -> None:
         db = database.SessionLocal()
