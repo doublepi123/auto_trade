@@ -366,6 +366,7 @@ def validated_point_in_time_shrinkage_observation_symbols(
         run,
         candidates,
         targets=targets,
+        require_frozen_rotation_match=False,
     )
 
 
@@ -374,6 +375,7 @@ def _validated_rotation_observation_symbols(
     candidates: Sequence[UniverseSelectionCandidate],
     *,
     targets: dict[str, tuple[int, float, float]],
+    require_frozen_rotation_match: bool = True,
 ) -> frozenset[str]:
     if not targets:
         return frozenset()
@@ -386,21 +388,22 @@ def _validated_rotation_observation_symbols(
         candidates_by_symbol[candidate.symbol] = candidate
     if set(candidates_by_symbol) != set(targets):
         return frozenset()
-    for symbol, (target_rank, target_score, _) in targets.items():
-        frozen = parse_frozen_rotation_selection(
-            candidates_by_symbol[symbol].metrics_json
-        )
-        if (
-            frozen is None
-            or frozen[0] != target_rank
-            or not math.isclose(
-                frozen[1],
-                target_score,
-                rel_tol=0.0,
-                abs_tol=1e-9,
+    if require_frozen_rotation_match:
+        for symbol, (target_rank, target_score, _) in targets.items():
+            frozen = parse_frozen_rotation_selection(
+                candidates_by_symbol[symbol].metrics_json
             )
-        ):
-            return frozenset()
+            if (
+                frozen is None
+                or frozen[0] != target_rank
+                or not math.isclose(
+                    frozen[1],
+                    target_score,
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                )
+            ):
+                return frozenset()
     return frozenset(targets)
 
 

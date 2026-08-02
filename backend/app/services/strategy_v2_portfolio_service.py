@@ -183,14 +183,14 @@ _ROUTING_SPECS = (
         policy="PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
         algorithm_version=(
             "strategy-v2-portfolio-rotation-pit-shrinkage-weighted-"
-            "zscore-observed-cost-75bps-v3"
+            "zscore-observed-cost-75bps-v4"
         ),
     ),
     _RoutingSpec(
         policy="PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
         algorithm_version=(
             "strategy-v2-portfolio-rotation-pit-shrinkage-target-net-"
-            "vwap-edge-zscore-observed-cost-75bps-v3"
+            "vwap-edge-zscore-observed-cost-75bps-v4"
         ),
     ),
 )
@@ -669,10 +669,6 @@ class StrategyV2PortfolioService:
         selection_run = self._latest_selection_run(
             observed_at=observed_at,
         )
-        selection = self._selection_rows_for_run(
-            tuple(by_symbol),
-            run=selection_run,
-        )
         session_dates = {
             decision.session_date
             for decision in by_symbol.values()
@@ -687,6 +683,25 @@ class StrategyV2PortfolioService:
             and len(session_dates) == 1
             else {}
         )
+        point_in_time_shrinkage = (
+            rotation_weight_policy
+            in _ROTATION_PIT_SHRINKAGE_TARGET_POLICIES
+        )
+        selection_symbols = set(by_symbol)
+        if point_in_time_shrinkage:
+            selection_symbols.update(rotation_targets)
+        selection = self._selection_rows_for_run(
+            tuple(selection_symbols),
+            run=selection_run,
+        )
+        if (
+            point_in_time_shrinkage
+            and not set(rotation_targets).issubset(selection)
+        ):
+            # The validated PIT registration is authoritative for rank,
+            # score, and weight, but every registered symbol must still be a
+            # member of the exact universe run that published it.
+            rotation_targets = {}
         quant = self._quant_context(
             tuple(by_symbol),
             observed_at=observed_at,
@@ -728,28 +743,40 @@ class StrategyV2PortfolioService:
             relative_adjustment = relative_adjustments.get(
                 decision.id
             )
-            (
-                rotation_selected,
-                rotation_rank,
-                rotation_score,
-            ) = self._rotation_selection_values(selection_row)
             rotation_target = rotation_targets.get(symbol)
-            rotation_target_weight_pct = (
-                rotation_target[2]
-                if (
-                    rotation_target is not None
-                    and rotation_selected
-                    and rotation_rank == rotation_target[0]
-                    and rotation_score is not None
-                    and math.isclose(
-                        rotation_score,
-                        rotation_target[1],
-                        rel_tol=0.0,
-                        abs_tol=_EPSILON,
+            if point_in_time_shrinkage:
+                if rotation_target is None or selection_row is None:
+                    rotation_selected = False
+                    rotation_rank = None
+                    rotation_score = None
+                    rotation_target_weight_pct = None
+                else:
+                    rotation_selected = True
+                    rotation_rank = rotation_target[0]
+                    rotation_score = rotation_target[1]
+                    rotation_target_weight_pct = rotation_target[2]
+            else:
+                (
+                    rotation_selected,
+                    rotation_rank,
+                    rotation_score,
+                ) = self._rotation_selection_values(selection_row)
+                rotation_target_weight_pct = (
+                    rotation_target[2]
+                    if (
+                        rotation_target is not None
+                        and rotation_selected
+                        and rotation_rank == rotation_target[0]
+                        and rotation_score is not None
+                        and math.isclose(
+                            rotation_score,
+                            rotation_target[1],
+                            rel_tol=0.0,
+                            abs_tol=_EPSILON,
+                        )
                     )
+                    else None
                 )
-                else None
-            )
             candidates.append(PortfolioRoutingCandidate(
                 symbol=symbol,
                 signal_decision_id=decision.id,
@@ -1938,18 +1965,24 @@ class StrategyV2PortfolioService:
             }
         elif spec.policy in _ZSCORE_OBSERVED_COST_POLICIES:
             if spec.policy in _ROTATION_ZSCORE_OBSERVED_COST_POLICIES:
+                point_in_time_shrinkage = (
+                    spec.policy
+                    in _ROTATION_PIT_SHRINKAGE_TARGET_POLICIES
+                )
                 payload["candidate_universe"] = (
-                    "ROTATION_SELECTED_TRUE_IN_LATEST_COMPLETED_"
-                    "UNIVERSE_RUN_BEFORE_CONTEXT_CUTOFF"
+                    "PIT_SHRINKAGE_VALIDATED_REGISTRATION_MEMBERS_"
+                    "IN_LATEST_COMPLETED_UNIVERSE_RUN_BEFORE_"
+                    "CONTEXT_CUTOFF"
+                    if point_in_time_shrinkage
+                    else (
+                        "ROTATION_SELECTED_TRUE_IN_LATEST_COMPLETED_"
+                        "UNIVERSE_RUN_BEFORE_CONTEXT_CUTOFF"
+                    )
                 )
                 payload["rotation_algorithm_version"] = (
                     ROTATION_ALGORITHM_VERSION
                 )
                 if spec.policy in _ROTATION_TARGET_WEIGHT_POLICIES:
-                    point_in_time_shrinkage = (
-                        spec.policy
-                        in _ROTATION_PIT_SHRINKAGE_TARGET_POLICIES
-                    )
                     weighting_variant = (
                         DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT
                         if point_in_time_shrinkage
@@ -1985,8 +2018,16 @@ class StrategyV2PortfolioService:
                             weighting_variant.max_position_weight_pct
                         ),
                         "candidate_consistency": (
-                            "FROZEN_ROTATION_RANK_AND_SCORE_MUST_MATCH_"
-                            "WEIGHTED_REGISTRATION"
+                            (
+                                "ALL_REGISTERED_SYMBOLS_MUST_EXIST_IN_"
+                                "SOURCE_UNIVERSE_RUN_WITH_REGISTRATION_"
+                                "RANK_SCORE_AND_WEIGHT_AUTHORITATIVE"
+                            )
+                            if point_in_time_shrinkage
+                            else (
+                                "FROZEN_ROTATION_RANK_AND_SCORE_MUST_"
+                                "MATCH_WEIGHTED_REGISTRATION"
+                            )
                         ),
                         "missing_or_invalid_weight": "FAIL_CLOSED",
                         "execution_scope": (

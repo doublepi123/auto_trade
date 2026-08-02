@@ -270,8 +270,8 @@ class TestStrategyV2PortfolioService:
                 "registered_as_of_date": "2026-07-23",
                 "forward_eligible": False,
                 "target_signals": [
-                    signal("IBM.US", 1, 100, 15),
-                    signal("MSFT.US", 2, 90, 10),
+                    signal("IBM.US", 1, 98, 15),
+                    signal("MSFT.US", 2, 88, 10),
                     signal("CAT.US", 3, 80, 12.5),
                     signal("GS.US", 4, 70, 12.5),
                     signal("AEP.US", 5, 60, 12.5),
@@ -281,6 +281,33 @@ class TestStrategyV2PortfolioService:
                 ],
             },
         })
+        registered_symbols = {
+            "IBM.US",
+            "MSFT.US",
+            "CAT.US",
+            "GS.US",
+            "AEP.US",
+            "ROST.US",
+            "MRK.US",
+            "GOOGL.US",
+        }
+        existing_symbols = {
+            row.symbol
+            for row in db.query(UniverseSelectionCandidate).filter(
+                UniverseSelectionCandidate.run_id == run.id,
+                UniverseSelectionCandidate.symbol.in_(registered_symbols),
+            ).all()
+        }
+        db.add_all([
+            UniverseSelectionCandidate(
+                run_id=run.id,
+                symbol=symbol,
+                sector="Test",
+                selected=False,
+                score=1.0,
+            )
+            for symbol in sorted(registered_symbols - existing_symbols)
+        ])
         db.commit()
 
     @staticmethod
@@ -601,11 +628,15 @@ class TestStrategyV2PortfolioService:
             assert sum(
                 row.algorithm_version.endswith("-v3")
                 for row in report.variants
-            ) == 13
+            ) == 11
             assert sum(
                 row.algorithm_version.endswith("-v2")
                 for row in report.variants
             ) == 7
+            assert sum(
+                row.algorithm_version.endswith("-v4")
+                for row in report.variants
+            ) == 2
             assert any(
                 row.algorithm_version.endswith("-v2")
                 and row.policy
@@ -613,7 +644,7 @@ class TestStrategyV2PortfolioService:
                 for row in report.variants
             )
             assert any(
-                row.algorithm_version.endswith("-v3")
+                row.algorithm_version.endswith("-v4")
                 and row.policy == "PIT_SHRINK_WEIGHTED_ZSCORE_POOL"
                 for row in report.variants
             )
@@ -1687,6 +1718,21 @@ class TestStrategyV2PortfolioService:
             self._register(service)
             self._universe(db)
             self._validated_point_in_time_shrinkage_registration(db)
+            for row in db.query(UniverseSelectionCandidate).filter(
+                UniverseSelectionCandidate.symbol.in_((
+                    "IBM.US",
+                    "MSFT.US",
+                )),
+            ).all():
+                row.metrics_json = json.dumps({
+                    "rotation": {
+                        "algorithm_version": ROTATION_ALGORITHM_VERSION,
+                        "selected": False,
+                        "rank": None,
+                        "score": 1.0,
+                    }
+                })
+            db.commit()
             for symbol in ("IBM.US", "MSFT.US"):
                 self._version(db, symbol)
                 self._quant(
@@ -1754,6 +1800,65 @@ class TestStrategyV2PortfolioService:
             ]
             assert candidates[0]["rotation_target_weight_pct"] == 15
             assert candidates[1]["rotation_target_weight_pct"] == 10
+            assert candidates[0]["rotation_rank"] == 1
+            assert candidates[0]["rotation_score"] == 98
+            assert candidates[1]["rotation_rank"] == 2
+            assert candidates[1]["rotation_score"] == 88
+
+    def test_point_in_time_shrinkage_routes_fail_closed_on_missing_member(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service = StrategyV2PortfolioService(db)
+            self._register(service)
+            self._universe(db)
+            self._validated_point_in_time_shrinkage_registration(db)
+            db.query(UniverseSelectionCandidate).filter(
+                UniverseSelectionCandidate.symbol == "GOOGL.US",
+            ).delete()
+            self._version(db, "IBM.US")
+            self._quant(
+                db,
+                "IBM.US",
+                "WATCH",
+                49,
+                estimated_cost_bps=20,
+            )
+            self._signal(
+                db,
+                "IBM.US",
+                _FIRST_SIGNAL,
+                close_price=99.7,
+                vwap_1m=100,
+                vwap_5m=100,
+                zscore_1m=-2.5,
+                zscore_5m=-2.0,
+            )
+
+            service.advance(
+                now=_FIRST_SIGNAL + timedelta(minutes=3)
+            )
+
+            registration = db.query(
+                StrategyV2PortfolioRegistration
+            ).filter(
+                StrategyV2PortfolioRegistration.policy
+                == "PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
+            ).one()
+            observation = db.query(
+                StrategyV2PortfolioObservation
+            ).filter(
+                StrategyV2PortfolioObservation.registration_id
+                == registration.id,
+            ).one()
+            candidates = json.loads(observation.candidates_json)
+
+            assert observation.status == "NO_ELIGIBLE"
+            assert len(candidates) == 1
+            assert candidates[0]["symbol"] == "IBM.US"
+            assert candidates[0]["rotation_selected"] is False
+            assert candidates[0]["rotation_rank"] is None
+            assert candidates[0]["rotation_target_weight_pct"] is None
 
     def test_point_in_time_shrinkage_targets_fail_closed(self) -> None:
         with self._db() as db:

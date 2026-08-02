@@ -43,6 +43,8 @@ from app.services.universe_selection_service import (
     minimum_peer_observation_dollar_volume,
     observation_pool_overrides,
     select_exploration_candidates,
+    validated_inverse_volatility_observation_symbols,
+    validated_point_in_time_shrinkage_observation_symbols,
 )
 from app.services.durable_job_lease_service import (
     DurableJobLeaseService,
@@ -2575,9 +2577,19 @@ def test_reconcile_keeps_validated_rotation_targets_shadow_only(
                             "algorithm_version": (
                                 ROTATION_ALGORITHM_VERSION
                             ),
-                            "selected": True,
-                            "rank": rank,
-                            "score": score,
+                            "selected": (
+                                not point_in_time_shrinkage
+                            ),
+                            "rank": (
+                                None
+                                if point_in_time_shrinkage
+                                else rank
+                            ),
+                            "score": (
+                                score + 1
+                                if point_in_time_shrinkage
+                                else score
+                            ),
                         }
                     }),
                     exclusion_reasons_json=json.dumps([
@@ -2623,6 +2635,82 @@ def test_reconcile_keeps_validated_rotation_targets_shadow_only(
         )
     finally:
         db.close()
+
+
+def test_rotation_observation_validation_is_variant_aware_and_fail_closed(
+) -> None:
+    targets = (
+        ("INTC.US", 100.0),
+        ("CAT.US", 90.0),
+        ("GS.US", 80.0),
+        ("AEP.US", 70.0),
+    )
+    run = UniverseSelectionRun(
+        id=17,
+        as_of_date=_NOW.date() - timedelta(days=1),
+        algorithm_version="selector-v1",
+        source_version="catalog-v1",
+        status="COMPLETE",
+        parameters_json=_validated_rotation_parameters(targets),
+    )
+    candidates = [
+        UniverseSelectionCandidate(
+            run_id=run.id,
+            symbol=symbol,
+            metrics_json=json.dumps({
+                "rotation": {
+                    "algorithm_version": ROTATION_ALGORITHM_VERSION,
+                    "selected": True,
+                    "rank": rank,
+                    "score": score,
+                }
+            }),
+        )
+        for rank, (symbol, score) in enumerate(targets, start=1)
+    ]
+    candidates[0].metrics_json = json.dumps({
+        "rotation": {
+            "algorithm_version": ROTATION_ALGORITHM_VERSION,
+            "selected": False,
+            "rank": None,
+            "score": 1.0,
+        }
+    })
+
+    assert validated_inverse_volatility_observation_symbols(
+        run,
+        candidates,
+        session_date=_NOW.date(),
+    ) == frozenset()
+
+    pit_targets = targets + (
+        ("ROST.US", 60.0),
+        ("MRK.US", 50.0),
+        ("GOOGL.US", 40.0),
+        ("FANG.US", 30.0),
+    )
+    pit_candidates = candidates + [
+        UniverseSelectionCandidate(
+            run_id=run.id,
+            symbol=symbol,
+            metrics_json="{}",
+        )
+        for symbol, _ in pit_targets[len(targets):]
+    ]
+    run.parameters_json = _validated_rotation_parameters(
+        pit_targets,
+        point_in_time_shrinkage=True,
+    )
+    assert validated_point_in_time_shrinkage_observation_symbols(
+        run,
+        pit_candidates,
+        session_date=_NOW.date(),
+    ) == frozenset(symbol for symbol, _ in pit_targets)
+    assert validated_point_in_time_shrinkage_observation_symbols(
+        run,
+        pit_candidates[:-1],
+        session_date=_NOW.date(),
+    ) == frozenset()
 
 
 def test_reconcile_never_disables_manually_enabled_shadow() -> None:
