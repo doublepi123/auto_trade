@@ -135,6 +135,28 @@ def get_strategy(db: Session = Depends(get_db)) -> StrategyResponse:
     return StrategyResponse.model_validate(config)
 
 
+@router.get(
+    "/strategy/hard-bound-projections",
+    dependencies=[Depends(require_api_key())],
+)
+def get_hard_bound_projections(
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Read-only load-time hard-bound projections.
+
+    Reports configured value, bound type, hard bound, projected value, and
+    constrained boolean for the seven numeric fields supported by the existing
+    ``hard_ceiling_*`` / ``hard_floor_*`` helpers. This is a LOAD-TIME
+    projection from the persisted config and deployment settings — NOT runtime
+    state. Never accesses, constructs, reloads, or mutates the runner.
+    """
+    from app.services.hard_bound_projection_service import (
+        HardBoundProjectionService,
+    )
+
+    return HardBoundProjectionService(db).build()
+
+
 @router.put("/strategy", dependencies=[Depends(require_api_key())])
 def put_strategy(
     request: Request,
