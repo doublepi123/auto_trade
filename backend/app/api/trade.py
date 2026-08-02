@@ -454,11 +454,13 @@ def export_trade_events(
         query=q,
         max_merged_fetch=limit,
     )
-    rows = [item.model_dump() for item in items]
+    # Serialize with the same JSON-mode normalization as the list response so
+    # ``created_at`` and all fields match exactly between list and export.
+    rows = [item.model_dump(mode="json") for item in items]
     filename = f"decision-timeline-{datetime.now().strftime('%Y%m%d-%H%M%S')}.{format}"
     if format == "json":
         return Response(
-            content=json.dumps(rows, ensure_ascii=False, default=str),
+            content=json.dumps(rows, ensure_ascii=False),
             media_type="application/json",
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )

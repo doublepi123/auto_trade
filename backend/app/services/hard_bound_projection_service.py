@@ -112,26 +112,26 @@ class HardBoundProjectionService:
         )
         fields.append(self._row("flatten_minutes_before_close", cfg_val, c, bt, hb, con))
 
-        # 5. hard_max_position_quantity — ceiling (settings-level, config has no equivalent)
-        fields.append(
-            self._settings_ceiling_int_row(
-                "hard_max_position_quantity", settings.hard_max_position_quantity
-            )
+        # 5. max_position_quantity — ceiling (from StrategyConfig, bounded by Settings)
+        cfg_val = getattr(config, "max_position_quantity", None) if config else None
+        c, bt, hb, con = _project_int_ceiling(
+            cfg_val, settings.hard_max_position_quantity
         )
+        fields.append(self._row("max_position_quantity", cfg_val, c, bt, hb, con))
 
-        # 6. hard_max_position_notional — ceiling
-        fields.append(
-            self._settings_ceiling_float_row(
-                "hard_max_position_notional", settings.hard_max_position_notional
-            )
+        # 6. max_position_notional — ceiling (from StrategyConfig, bounded by Settings)
+        cfg_val = getattr(config, "max_position_notional", None) if config else None
+        c, bt, hb, con = _project_float_ceiling(
+            cfg_val, settings.hard_max_position_notional
         )
+        fields.append(self._row("max_position_notional", cfg_val, c, bt, hb, con))
 
-        # 7. hard_max_risk_per_trade — ceiling
-        fields.append(
-            self._settings_ceiling_float_row(
-                "hard_max_risk_per_trade", settings.hard_max_risk_per_trade
-            )
+        # 7. max_risk_per_trade — ceiling (from StrategyConfig, bounded by Settings)
+        cfg_val = getattr(config, "max_risk_per_trade", None) if config else None
+        c, bt, hb, con = _project_float_ceiling(
+            cfg_val, settings.hard_max_risk_per_trade
         )
+        fields.append(self._row("max_risk_per_trade", cfg_val, c, bt, hb, con))
 
         return {
             "semantics": PROJECTION_SEMANTICS_LABEL,
@@ -164,28 +164,4 @@ class HardBoundProjectionService:
                 else hard_floor_int(configured_raw, int(hard_bound))
             ),
             "constrained": constrained,
-        }
-
-    @staticmethod
-    def _settings_ceiling_int_row(name: str, value: int) -> dict[str, Any]:
-        return {
-            "field": name,
-            "configured_value": value,
-            "configured_present": True,
-            "bound_type": "ceiling",
-            "hard_bound": value,
-            "projected_value": value,
-            "constrained": False,
-        }
-
-    @staticmethod
-    def _settings_ceiling_float_row(name: str, value: float) -> dict[str, Any]:
-        return {
-            "field": name,
-            "configured_value": value,
-            "configured_present": True,
-            "bound_type": "ceiling",
-            "hard_bound": value,
-            "projected_value": value,
-            "constrained": False,
         }

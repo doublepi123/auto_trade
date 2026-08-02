@@ -17,6 +17,7 @@ from app.main import app
 from app.models import DurableJobLease
 from app.services.durable_job_lease_inspector import (
     DurableJobLeaseInspector,
+    _DB_NOW_EPOCH_MS,
     _holder_fingerprint,
 )
 from app import database
@@ -113,30 +114,69 @@ class TestDurableJobLeaseInspector:
         assert result["items"][0]["status"] == "EXPIRED"
         assert result["expired_count"] == 1
 
-    def test_equality_is_reclaimable(self) -> None:
-        """expires_at == SQLite now is RECLAIMABLE, not ACTIVE."""
+    def test_equality_is_reclaimable_deterministic(self) -> None:
+        """expires_at == observed clock is exactly RECLAIMABLE.
+
+        Inserts a lease whose ``expires_at_epoch_ms`` is computed by the SAME
+        SQLite clock expression the inspector uses, within one SQL statement.
+        Because the inspector's clock CTE and this insert run within the same
+        second (SQLite ``julianday('now')`` has ~1ms resolution), the observed
+        clock in the inspect call will be >= the inserted expiry. When they
+        match exactly, the status is RECLAIMABLE. When the clock ticks past,
+        it is EXPIRED. Either way it must NOT be ACTIVE.
+
+        To prove the equality boundary directly, we also test the classifier
+        with a fixed clock value.
+        """
+        # Direct classifier test: equality is RECLAIMABLE.
+        assert DurableJobLeaseInspector._classify(1000, 1000) == "RECLAIMABLE"
+        assert DurableJobLeaseInspector._classify(1001, 1000) == "ACTIVE"
+        assert DurableJobLeaseInspector._classify(999, 1000) == "EXPIRED"
+
+        # Integrated test: insert with the SQLite clock, then inspect.
         db = database.SessionLocal()
         try:
-            now_ms = _db_now_epoch_ms(db)
-            row = DurableJobLease(
-                lease_key="job-eq",
-                holder_id="worker-1",
-                fencing_token=1,
-                acquired_at_epoch_ms=now_ms - 1000,
-                renewed_at_epoch_ms=now_ms,
-                expires_at_epoch_ms=now_ms,  # exactly now
+            db.execute(
+                text(
+                    "INSERT INTO durable_job_leases "
+                    "(lease_key, holder_id, fencing_token, "
+                    " acquired_at_epoch_ms, renewed_at_epoch_ms, "
+                    " expires_at_epoch_ms) "
+                    "VALUES ('job-eq', 'worker-1', 1, "
+                    f"  {_DB_NOW_EPOCH_MS} - 1000, {_DB_NOW_EPOCH_MS}, "
+                    f"  {_DB_NOW_EPOCH_MS})"
+                )
             )
-            db.add(row)
             db.commit()
-            # The SQLite clock may tick between the seed and the inspect, so
-            # we verify the classification logic directly.
             result = DurableJobLeaseInspector(db).inspect()
         finally:
             db.close()
-        # If the clock hasn't ticked, status is RECLAIMABLE. If it ticked
-        # past, it's EXPIRED. Either way it must NOT be ACTIVE.
         assert result["items"][0]["status"] in ("RECLAIMABLE", "EXPIRED")
         assert result["items"][0]["status"] != "ACTIVE"
+
+    def test_one_snapshot_no_split(self) -> None:
+        """Observation time and rows come from one SQL statement (clock CTE).
+
+        The ``observed_at_epoch_ms`` must equal the clock value used to
+        classify every row, proving a single snapshot.
+        """
+        db = database.SessionLocal()
+        try:
+            _seed_lease(db, lease_key="job-1", ttl_ms=60_000)
+            _seed_lease(db, lease_key="job-2", ttl_ms=-1000)
+            result = DurableJobLeaseInspector(db).inspect()
+        finally:
+            db.close()
+        observed = result["observed_at_epoch_ms"]
+        assert observed > 0
+        # Every row's status is consistent with the single observed clock.
+        for item in result["items"]:
+            if item["expires_at_epoch_ms"] > observed:
+                assert item["status"] == "ACTIVE"
+            elif item["expires_at_epoch_ms"] == observed:
+                assert item["status"] == "RECLAIMABLE"
+            else:
+                assert item["status"] == "EXPIRED"
 
     def test_deterministic_ordering(self) -> None:
         db = database.SessionLocal()
@@ -210,3 +250,35 @@ class TestDurableJobLeaseInspector:
     def test_auth_enforced(self, monkeypatch) -> None:
         monkeypatch.setattr(settings, "api_key", "secret-key")
         assert client.get("/api/durable-job-leases").status_code == 401
+
+    def test_no_sql_writes_interception(self, monkeypatch) -> None:
+        """The inspector must never issue INSERT/UPDATE/DELETE.
+
+        Intercept the session's execute to fail on any DML, proving the
+        inspector is read-only at the SQL level.
+        """
+        db = database.SessionLocal()
+        try:
+            _seed_lease(db, lease_key="job-1", ttl_ms=60_000)
+        finally:
+            db.close()
+
+        db = database.SessionLocal()
+        try:
+            original_execute = db.execute
+
+            def _guard_execute(stmt, *args, **kwargs):
+                sql_text = str(stmt)
+                upper = sql_text.upper()
+                for keyword in ("INSERT", "UPDATE", "DELETE", "REPLACE"):
+                    if keyword in upper:
+                        raise AssertionError(
+                            f"inspector must not issue {keyword}: {sql_text[:80]}"
+                        )
+                return original_execute(stmt, *args, **kwargs)
+
+            monkeypatch.setattr(db, "execute", _guard_execute)
+            result = DurableJobLeaseInspector(db).inspect()
+            assert result["total"] == 1
+        finally:
+            db.close()

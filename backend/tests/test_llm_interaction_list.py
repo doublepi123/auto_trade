@@ -33,6 +33,8 @@ def _seed(
     interaction_type: str = "analyze",
     order_action: str = "NONE",
     applied: bool = False,
+    error: str = "",
+    order_id: str | None = None,
     created_at: datetime | None = None,
 ) -> int:
     row = LLMInteraction(
@@ -44,8 +46,9 @@ def _seed(
         parsed_response=parsed_response,
         context_snapshot=context_snapshot,
         success=success,
-        error="",
+        error=error,
         order_action=order_action,
+        order_id=order_id,
         applied=applied,
         created_at=created_at or datetime(2026, 6, 14, 10, 0, 0, tzinfo=timezone.utc),
     )
@@ -156,7 +159,8 @@ class TestLLMInteractionList:
         assert ids == sorted([id1, id2], reverse=True)
 
     def test_safe_projection_no_secrets(self) -> None:
-        """Prompt, raw_response, parsed_response, context_snapshot must NOT escape."""
+        """Prompt, raw_response, parsed_response, context_snapshot, error, and
+        order_id must NOT escape the paginated list projection."""
         db = database.SessionLocal()
         try:
             _seed(
@@ -165,6 +169,8 @@ class TestLLMInteractionList:
                 raw_response="SECRET_RAW_RESPONSE",
                 parsed_response='{"secret": "parsed"}',
                 context_snapshot='{"secret": "context"}',
+                error="SECRET_PROVIDER_ERROR_DETAIL",
+                order_id="SECRET_BROKER_ORDER_123",
             )
         finally:
             db.close()
@@ -174,6 +180,8 @@ class TestLLMInteractionList:
         dumped = json.dumps(data)
         assert "SECRET_PROMPT_CONTENT" not in dumped
         assert "SECRET_RAW_RESPONSE" not in dumped
+        assert "SECRET_PROVIDER_ERROR_DETAIL" not in dumped
+        assert "SECRET_BROKER_ORDER_123" not in dumped
         assert '"secret"' not in dumped
         item = data["items"][0]
         # The safe list projection must not have these fields
@@ -181,6 +189,8 @@ class TestLLMInteractionList:
         assert "raw_response" not in item
         assert "parsed_response" not in item
         assert "context_snapshot" not in item
+        assert "error" not in item
+        assert "order_id" not in item
 
     def test_detail_route_not_broken(self) -> None:
         """The /{id} route must still work alongside the list route."""

@@ -38,6 +38,9 @@ def _make_config(
     max_holding_minutes: int = 30,
     entry_cutoff_minutes_before_close: int = 60,
     flatten_minutes_before_close: int = 20,
+    max_position_quantity: int = 50,
+    max_position_notional: float = 3000.0,
+    max_risk_per_trade: float = 200.0,
 ) -> StrategyConfig:
     db.query(StrategyConfig).delete()
     db.commit()
@@ -50,6 +53,9 @@ def _make_config(
         max_holding_minutes=max_holding_minutes,
         entry_cutoff_minutes_before_close=entry_cutoff_minutes_before_close,
         flatten_minutes_before_close=flatten_minutes_before_close,
+        max_position_quantity=max_position_quantity,
+        max_position_notional=max_position_notional,
+        max_risk_per_trade=max_risk_per_trade,
     )
     db.add(config)
     db.commit()
@@ -133,35 +139,81 @@ class TestHardBoundProjections:
         )
 
     def test_cross_check_against_helpers(self) -> None:
-        """Every projected value must match the existing helper output."""
+        """Every projected value must match the existing helper output for all
+        seven fields."""
         db = database.SessionLocal()
         try:
             _make_config(db)
             result = HardBoundProjectionService(db).build()
         finally:
             db.close()
+        expected_map = {
+            "stop_loss_pct": lambda v: hard_ceiling_float(
+                v, settings.hard_stop_loss_pct
+            ),
+            "max_holding_minutes": lambda v: hard_ceiling_int(
+                v, settings.hard_max_holding_minutes
+            ),
+            "entry_cutoff_minutes_before_close": lambda v: hard_floor_int(
+                v, settings.hard_entry_cutoff_minutes_before_close
+            ),
+            "flatten_minutes_before_close": lambda v: hard_floor_int(
+                v, settings.hard_flatten_minutes_before_close
+            ),
+            "max_position_quantity": lambda v: hard_ceiling_int(
+                v, settings.hard_max_position_quantity
+            ),
+            "max_position_notional": lambda v: hard_ceiling_float(
+                v, settings.hard_max_position_notional
+            ),
+            "max_risk_per_trade": lambda v: hard_ceiling_float(
+                v, settings.hard_max_risk_per_trade
+            ),
+        }
         for field in result["fields"]:
-            if field["field"] == "stop_loss_pct":
-                expected = hard_ceiling_float(
-                    field["configured_value"], settings.hard_stop_loss_pct
-                )
-            elif field["field"] == "max_holding_minutes":
-                expected = hard_ceiling_int(
-                    field["configured_value"], settings.hard_max_holding_minutes
-                )
-            elif field["field"] == "entry_cutoff_minutes_before_close":
-                expected = hard_floor_int(
-                    field["configured_value"],
-                    settings.hard_entry_cutoff_minutes_before_close,
-                )
-            elif field["field"] == "flatten_minutes_before_close":
-                expected = hard_floor_int(
-                    field["configured_value"],
-                    settings.hard_flatten_minutes_before_close,
-                )
-            else:
-                continue
+            fn = expected_map.get(field["field"])
+            assert fn is not None, f"unexpected field: {field['field']}"
+            expected = fn(field["configured_value"])
             assert field["projected_value"] == expected, field["field"]
+
+    def test_sizing_fields_use_config_not_settings(self) -> None:
+        """The three sizing fields must project StrategyConfig values through
+        the hard-ceiling helpers, not echo Settings values directly."""
+        db = database.SessionLocal()
+        try:
+            _make_config(
+                db,
+                max_position_quantity=50,
+                max_position_notional=3000.0,
+                max_risk_per_trade=200.0,
+            )
+            result = HardBoundProjectionService(db).build()
+        finally:
+            db.close()
+        qty = next(f for f in result["fields"] if f["field"] == "max_position_quantity")
+        assert qty["configured_value"] == 50
+        assert qty["hard_bound"] == settings.hard_max_position_quantity
+        assert qty["projected_value"] == hard_ceiling_int(
+            50, settings.hard_max_position_quantity
+        )
+
+        notional = next(
+            f for f in result["fields"] if f["field"] == "max_position_notional"
+        )
+        assert notional["configured_value"] == 3000.0
+        assert notional["hard_bound"] == settings.hard_max_position_notional
+        assert notional["projected_value"] == hard_ceiling_float(
+            3000.0, settings.hard_max_position_notional
+        )
+
+        risk = next(
+            f for f in result["fields"] if f["field"] == "max_risk_per_trade"
+        )
+        assert risk["configured_value"] == 200.0
+        assert risk["hard_bound"] == settings.hard_max_risk_per_trade
+        assert risk["projected_value"] == hard_ceiling_float(
+            200.0, settings.hard_max_risk_per_trade
+        )
 
     def test_full_buying_power_bypass_flag(self) -> None:
         db = database.SessionLocal()
@@ -228,9 +280,9 @@ class TestHardBoundProjections:
         assert "max_holding_minutes" in field_names
         assert "entry_cutoff_minutes_before_close" in field_names
         assert "flatten_minutes_before_close" in field_names
-        assert "hard_max_position_quantity" in field_names
-        assert "hard_max_position_notional" in field_names
-        assert "hard_max_risk_per_trade" in field_names
+        assert "max_position_quantity" in field_names
+        assert "max_position_notional" in field_names
+        assert "max_risk_per_trade" in field_names
 
     def test_auth_enforced(self, monkeypatch) -> None:
         monkeypatch.setattr(settings, "api_key", "secret-key")

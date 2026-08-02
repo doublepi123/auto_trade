@@ -3574,13 +3574,38 @@ class LLMInteractionResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class LLMInteractionListItem(BaseModel):
+    """Dedicated allowlisted list-item schema for the paginated endpoint.
+
+    Excludes raw ``error``, ``order_id``, prompt, raw/parsed response, and
+    context snapshot — none of the raw stored content can escape the list view.
+    The legacy ``LLMInteractionResponse`` and detail endpoint are unchanged.
+    """
+
+    id: int
+    interaction_type: str
+    symbol: str
+    market: str
+    success: bool
+    order_action: str
+    order_status: Optional[str] = None
+    applied: bool
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
 class LLMInteractionPage(BaseModel):
     """Paginated safe list projection of LLM interactions.
 
-    Never includes prompt, raw_response, parsed_response, or context_snapshot.
+    Never includes prompt, raw_response, parsed_response, context_snapshot,
+    error, or order_id.
     """
 
-    items: list[LLMInteractionResponse]
+    items: list[LLMInteractionListItem]
     total: int
     page: int
     page_size: int

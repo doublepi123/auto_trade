@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models import ExperimentResult, LLMInteraction
-from app.schemas import LLMInteractionDetail, LLMInteractionResponse
+from app.schemas import LLMInteractionDetail, LLMInteractionListItem
 
 
 LLM_STORAGE_MAINTENANCE_LEASE_KEY = "llm_storage_maintenance"
@@ -754,13 +754,14 @@ class LLMInteractionService:
         success: bool | None = None,
         from_dt: datetime | None = None,
         to_dt: datetime | None = None,
-    ) -> tuple[list[LLMInteractionResponse], int]:
+    ) -> tuple[list[LLMInteractionListItem], int]:
         """Paginated, filtered LLM interaction list with a SAFE projection.
 
-        Returns ``(items, total)`` where items use ``LLMInteractionResponse``
-        (never prompt / raw_response / parsed_response / context_snapshot).
-        Stable newest-first ordering is ``(created_at DESC, id DESC)``.
-        ``[from_dt, to_dt)`` is a half-open datetime range.
+        Returns ``(items, total)`` where items use ``LLMInteractionListItem``
+        (never prompt / raw_response / parsed_response / context_snapshot /
+        error / order_id). Stable newest-first ordering is
+        ``(created_at DESC, id DESC)``. ``[from_dt, to_dt)`` is a half-open
+        datetime range.
         """
         bounded_page = max(1, int(page))
         bounded_size = max(1, min(int(page_size), 200))
@@ -783,7 +784,7 @@ class LLMInteractionService:
             .limit(bounded_size)
             .all()
         )
-        items = [LLMInteractionResponse.model_validate(r) for r in rows]
+        items = [LLMInteractionListItem.model_validate(r) for r in rows]
         return items, total
 
     def get_detail(self, interaction_id: int) -> LLMInteractionDetail | None:

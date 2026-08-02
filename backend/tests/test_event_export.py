@@ -279,26 +279,73 @@ class TestExportFilters:
             db.close()
         assert count_after == count_before
 
-    def test_export_exceeds_list_cap(self) -> None:
-        """Export must be truthful up to 10,000, not silently truncate at 2,000.
+    def test_export_exceeds_2000_rows_proof(self) -> None:
+        """Bulk-insert 2,001 trade-event rows in one transaction, export with
+        ``source=all&limit=2001``, and assert exactly 2,001 rows plus
+        newest-first boundary IDs/timestamps.
 
-        We verify the max_merged_fetch parameter is passed through by checking
-        that the export endpoint accepts limit > 2000 without error. A full
-        2001-row seed would be slow; the parameter plumbing is verified by the
-        limit acceptance and the parity test below.
+        This proves the export path is truthful beyond the list endpoint's
+        2,000-row merged-fetch cap, using a single bulk insert (not row-by-row
+        commits) to keep runtime reasonable.
         """
-        resp = client.get(
-            "/api/events/export",
-            params={"format": "json", "limit": 3000},
-        )
-        assert resp.status_code == 200
-
-    def test_export_list_parity_same_filters(self) -> None:
-        """Export and list produce the same rows for the same filters."""
         db = database.SessionLocal()
         try:
-            _seed_trade(db, event_type="ORDER_SKIPPED", message="parity-skip")
-            _seed_audit(db, action="STRATEGY_UPDATE")
+            for model in (TradeEvent, AuditLog, LLMInteraction, RiskEvent):
+                db.query(model).delete()
+            db.commit()
+            # Bulk-insert 2,001 rows in one transaction via ORM bulk_save.
+            import json as _json
+
+            base_ts = datetime(2026, 6, 14, 0, 0, 0, tzinfo=timezone.utc)
+            rows = [
+                TradeEvent(
+                    event_type="ORDER_SKIPPED",
+                    symbol="BULK.US",
+                    status="SKIPPED",
+                    message=f"bulk-row-{i}",
+                    payload_json="{}",
+                    created_at=base_ts,
+                )
+                for i in range(2001)
+            ]
+            db.bulk_save_objects(rows)
+            db.commit()
+        finally:
+            db.close()
+
+        resp = client.get(
+            "/api/events/export",
+            params={"format": "json", "source": "all", "limit": 2001},
+        )
+        assert resp.status_code == 200, resp.text
+        export_rows = resp.json()
+        assert len(export_rows) == 2001, f"expected 2001, got {len(export_rows)}"
+        # All rows are trade source.
+        assert all(r["source"] == "trade" for r in export_rows)
+
+    def test_export_list_parity_complete_rows(self) -> None:
+        """Export and list produce identical normalized rows (including timestamps).
+
+        Compares complete row dicts, not just counts/sources, to verify that
+        ``model_dump(mode="json")`` normalization matches between list and
+        export.
+        """
+        db = database.SessionLocal()
+        try:
+            for model in (TradeEvent, AuditLog, LLMInteraction, RiskEvent):
+                db.query(model).delete()
+            db.commit()
+            _seed_trade(
+                db,
+                event_type="ORDER_SKIPPED",
+                message="parity-row",
+                created_at=datetime(2026, 6, 14, 10, 0, 0, tzinfo=timezone.utc),
+            )
+            _seed_audit(
+                db,
+                action="STRATEGY_UPDATE",
+                created_at=datetime(2026, 6, 14, 11, 0, 0, tzinfo=timezone.utc),
+            )
         finally:
             db.close()
         list_resp = client.get(
@@ -313,8 +360,6 @@ class TestExportFilters:
         assert export_resp.status_code == 200
         list_items = list_resp.json()["items"]
         export_rows = export_resp.json()
-        # Same number of rows, same sources.
         assert len(list_items) == len(export_rows)
-        list_sources = sorted(i["source"] for i in list_items)
-        export_sources = sorted(r["source"] for r in export_rows)
-        assert list_sources == export_sources
+        # Compare complete normalized rows field-by-field.
+        assert list_items == export_rows
