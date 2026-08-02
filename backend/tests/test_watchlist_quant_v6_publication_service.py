@@ -4,7 +4,8 @@ import inspect
 import hashlib
 import json
 import threading
-from collections.abc import Callable, Sequence
+import zlib
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import replace
@@ -33,6 +34,7 @@ from app.domain.watchlist_quant_v6 import (
     quant_v6_expected_rth_bar_starts,
     quant_v6_payload_sha256,
 )
+from app.domain.watchlist_quant_v6 import artifact as artifact_module
 from app.models import (
     WatchlistQuantV6Artifact,
     WatchlistQuantV6Publication,
@@ -230,6 +232,56 @@ def _decoded_binding_payload(
         compressed_size=artifact.compressed_size,
         payload=artifact.payload,
     )
+
+
+def test_publication_artifact_verification_reuses_verified_canonical_raw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _missing_evaluations()[0].bindings[0].artifact
+    canonical_calls = 0
+    original = artifact_module.canonical_quant_v6_json
+
+    def _count_canonical(value: Mapping[str, object]) -> bytes:
+        nonlocal canonical_calls
+        canonical_calls += 1
+        return original(value)
+
+    monkeypatch.setattr(
+        artifact_module,
+        "canonical_quant_v6_json",
+        _count_canonical,
+    )
+    decoded = service_module._decode_and_verify_artifact(
+        artifact,
+        label="verified canonical raw",
+    )
+
+    assert decoded["contract"] == "watchlist-quant-v6-assessment-v1"
+    assert canonical_calls == 1
+
+
+def test_publication_artifact_verification_still_requires_exact_level9_bytes(
+) -> None:
+    artifact = _missing_evaluations()[0].bindings[0].artifact
+    alternate_payload = zlib.compress(
+        zlib.decompress(artifact.payload),
+        level=1,
+    )
+    assert alternate_payload != artifact.payload
+    alternate = replace(
+        artifact,
+        compressed_size=len(alternate_payload),
+        payload=alternate_payload,
+    )
+
+    with pytest.raises(
+        QuantV6PublicationConflictError,
+        match="canonical bytes",
+    ):
+        service_module._decode_and_verify_artifact(
+            alternate,
+            label="non-canonical compression",
+        )
 
 
 def _object_mapping(value: object) -> dict[str, object]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -59,6 +60,68 @@ def _cooperate(checkpoint: Callable[[], None] | None) -> None:
         checkpoint()
 
 
+@dataclass(frozen=True)
+class _VerifiedEventArtifactDigest:
+    event: BarNextOpenStressedEvent
+    digest_sha256: str
+
+
+@dataclass
+class _VerifiedArtifactMemo:
+    """Reuse evidence only after one full replay of the exact frozen object."""
+
+    event_digests: dict[int, _VerifiedEventArtifactDigest]
+
+    @classmethod
+    def create(cls) -> _VerifiedArtifactMemo:
+        return cls(event_digests={})
+
+    def lookup_event_digest(
+        self,
+        event: BarNextOpenStressedEvent,
+        *,
+        checkpoint: Callable[[], None] | None,
+    ) -> str | None:
+        _cooperate(checkpoint)
+        cached = self.event_digests.get(id(event))
+        if cached is None or cached.event is not event:
+            _cooperate(checkpoint)
+            return None
+        _cooperate(checkpoint)
+        return cached.digest_sha256
+
+    def remember_event_digest(
+        self,
+        event: BarNextOpenStressedEvent,
+        digest_sha256: str,
+        *,
+        checkpoint: Callable[[], None] | None,
+    ) -> None:
+        _cooperate(checkpoint)
+        if (
+            type(event) is not BarNextOpenStressedEvent
+            or type(digest_sha256) is not str
+            or _SHA256_PATTERN.fullmatch(digest_sha256) is None
+        ):
+            raise QuantV6AssessmentError(
+                "verified event artifact memo received invalid evidence"
+            )
+        key = id(event)
+        existing = self.event_digests.get(key)
+        if existing is not None and (
+            existing.event is not event
+            or existing.digest_sha256 != digest_sha256
+        ):
+            raise QuantV6AssessmentError(
+                "verified event artifact memo conflicts with replay evidence"
+            )
+        self.event_digests[key] = _VerifiedEventArtifactDigest(
+            event=event,
+            digest_sha256=digest_sha256,
+        )
+        _cooperate(checkpoint)
+
+
 def _validated_event_payload(
     event: BarNextOpenStressedEvent,
     *,
@@ -81,11 +144,25 @@ def _validated_event_artifact_digest(
     event: BarNextOpenStressedEvent,
     *,
     checkpoint: Callable[[], None] | None = None,
+    verified_artifacts: _VerifiedArtifactMemo | None = None,
 ) -> str:
+    if verified_artifacts is not None:
+        cached = verified_artifacts.lookup_event_digest(
+            event,
+            checkpoint=checkpoint,
+        )
+        if cached is not None:
+            return cached
     payload = _validated_event_payload(event, checkpoint=checkpoint)
     _cooperate(checkpoint)
     digest = quant_v6_payload_sha256(payload)
     _cooperate(checkpoint)
+    if verified_artifacts is not None:
+        verified_artifacts.remember_event_digest(
+            event,
+            digest,
+            checkpoint=checkpoint,
+        )
     return digest
 
 
@@ -280,6 +357,7 @@ class QuantV6SessionLeaf:
         symbol: str,
         market: str,
         checkpoint: Callable[[], None] | None = None,
+        _verified_artifacts: _VerifiedArtifactMemo | None = None,
     ) -> dict[str, object]:
         _cooperate(checkpoint)
         if type(self) is not QuantV6SessionLeaf:
@@ -300,12 +378,18 @@ class QuantV6SessionLeaf:
         event_artifact_digests: list[str] = []
         for event in self.events:
             _cooperate(checkpoint)
-            event_artifact_digests.append(
-                _validated_event_artifact_digest(
+            if _verified_artifacts is None:
+                event_digest = _validated_event_artifact_digest(
                     event,
                     checkpoint=checkpoint,
                 )
-            )
+            else:
+                event_digest = _validated_event_artifact_digest(
+                    event,
+                    checkpoint=checkpoint,
+                    verified_artifacts=_verified_artifacts,
+                )
+            event_artifact_digests.append(event_digest)
         payload = {
             "bar_input_sha256": bar_digest,
             "blockers": list(self.blockers),
@@ -428,29 +512,30 @@ class QuantV6Assessment:
         _cooperate(checkpoint)
         if type(self) is not QuantV6Assessment:
             raise QuantV6AssessmentError("assessment has an unsupported type")
+        verified_artifacts = _VerifiedArtifactMemo.create()
         expected = assess_bar_next_open_stressed_window(
             symbol=self.symbol,
             market=self.market,
             leaves=self.leaves,
             checkpoint=checkpoint,
+            _verified_artifacts=verified_artifacts,
         )
         _cooperate(checkpoint)
-        expected_payload = _canonical_assessment_payload(
-            expected,
-            checkpoint=checkpoint,
-        )
-        actual_payload = _canonical_assessment_payload(
-            self,
-            checkpoint=checkpoint,
-        )
-        _cooperate(checkpoint)
-        expected_bytes = canonical_quant_v6_json(expected_payload)
-        _cooperate(checkpoint)
-        actual_bytes = canonical_quant_v6_json(actual_payload)
-        if expected_bytes != actual_bytes:
+        if _assessment_replay_state(expected) != _assessment_replay_state(self):
             raise QuantV6AssessmentError(
                 "assessment aggregates or digests failed canonical replay"
             )
+        _cooperate(checkpoint)
+        actual_payload = _canonical_assessment_payload(
+            self,
+            checkpoint=checkpoint,
+            verified_artifacts=verified_artifacts,
+        )
+        _cooperate(checkpoint)
+        # Preserve the public canonical-payload contract even when the caller
+        # does not immediately encode an artifact.  Artifact encoding performs
+        # the same bounded canonicalization again to obtain its exact bytes.
+        canonical_quant_v6_json(actual_payload)
         _cooperate(checkpoint)
         return actual_payload
 
@@ -482,10 +567,40 @@ class QuantV6Assessment:
         return artifact
 
 
+def _assessment_replay_state(
+    assessment: QuantV6Assessment,
+) -> tuple[object, ...]:
+    """Return every typed field covered by canonical assessment replay."""
+    if type(assessment) is not QuantV6Assessment:
+        raise QuantV6AssessmentError("assessment has an unsupported type")
+    return (
+        assessment.symbol,
+        assessment.market,
+        assessment.leaves,
+        assessment.window_digest_sha256,
+        assessment.event_set_digest_sha256,
+        assessment.covered_sessions,
+        assessment.event_count,
+        assessment.event_sessions,
+        assessment.median_gross_edge_bps,
+        assessment.median_cost_bps,
+        assessment.median_net_return_bps,
+        assessment.gross_edge_to_cost_ratio,
+        assessment.session_cluster_lcb_90_bps,
+        assessment.candidate_thresholds_met,
+        assessment.recommended_action,
+        assessment.blockers,
+        assessment.promotion_eligible,
+        assessment.automatic_promotion_allowed,
+        assessment.order_submission_allowed,
+    )
+
+
 def _canonical_assessment_payload(
     assessment: QuantV6Assessment,
     *,
     checkpoint: Callable[[], None] | None = None,
+    verified_artifacts: _VerifiedArtifactMemo | None = None,
 ) -> dict[str, object]:
     leaves: list[dict[str, object]] = []
     for leaf in assessment.leaves:
@@ -495,6 +610,7 @@ def _canonical_assessment_payload(
             symbol=assessment.symbol,
             market=assessment.market,
             checkpoint=checkpoint,
+            _verified_artifacts=verified_artifacts,
         ))
     _cooperate(checkpoint)
     return {
@@ -568,6 +684,7 @@ def assess_bar_next_open_stressed_window(
     market: str,
     leaves: Sequence[QuantV6SessionLeaf],
     checkpoint: Callable[[], None] | None = None,
+    _verified_artifacts: _VerifiedArtifactMemo | None = None,
 ) -> QuantV6Assessment:
     """Assess exactly 30 ordered leaves without shrinking missing sessions."""
     _cooperate(checkpoint)
@@ -648,32 +765,32 @@ def assess_bar_next_open_stressed_window(
                 "covered leaf failed canonical session replay"
             ) from exc
         _cooperate(checkpoint)
-        actual_event_payloads: list[dict[str, object]] = []
+        actual_event_bytes: list[bytes] = []
         for event in leaf.events:
             _cooperate(checkpoint)
-            actual_event_payloads.append(_validated_event_payload(
+            actual_payload = _validated_event_payload(
                 event,
                 checkpoint=checkpoint,
-            ))
+            )
+            _cooperate(checkpoint)
+            actual_event_bytes.append(canonical_quant_v6_json(actual_payload))
         expected_event_payloads: list[dict[str, object]] = []
         for event in expected_events:
             _cooperate(checkpoint)
             expected_event_payloads.append(
                 BarNextOpenStressedEvent.canonical_payload(event)
             )
-        if len(expected_event_payloads) != len(actual_event_payloads):
+        if len(expected_event_payloads) != len(actual_event_bytes):
             raise QuantV6AssessmentError(
                 "covered leaf events do not equal the complete replay event set"
             )
-        for expected_payload, actual_payload in zip(
+        for expected_payload, actual_bytes in zip(
             expected_event_payloads,
-            actual_event_payloads,
+            actual_event_bytes,
             strict=True,
         ):
             _cooperate(checkpoint)
             expected_bytes = canonical_quant_v6_json(expected_payload)
-            _cooperate(checkpoint)
-            actual_bytes = canonical_quant_v6_json(actual_payload)
             if expected_bytes != actual_bytes:
                 raise QuantV6AssessmentError(
                     "covered leaf events do not equal the complete replay event set"
@@ -681,9 +798,9 @@ def assess_bar_next_open_stressed_window(
         if leaf.events:
             event_sessions += 1
         previous_event: BarNextOpenStressedEvent | None = None
-        for event, event_payload in zip(
+        for event, event_bytes in zip(
             leaf.events,
-            actual_event_payloads,
+            actual_event_bytes,
             strict=True,
         ):
             _cooperate(checkpoint)
@@ -705,7 +822,14 @@ def assess_bar_next_open_stressed_window(
                     "events must be ordered and non-overlapping within a session"
                 )
             event_keys.add(event.event_key_sha256)
-            artifact_digests.append(quant_v6_payload_sha256(event_payload))
+            event_digest = hashlib.sha256(event_bytes).hexdigest()
+            artifact_digests.append(event_digest)
+            if _verified_artifacts is not None:
+                _verified_artifacts.remember_event_digest(
+                    event,
+                    event_digest,
+                    checkpoint=checkpoint,
+                )
             covered_events.append(event)
             previous_event = event
         session_returns.append(

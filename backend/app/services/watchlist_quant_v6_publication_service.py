@@ -41,12 +41,14 @@ from app.domain.watchlist_quant_v6 import (
     canonical_decimal,
     canonical_quant_v6_json,
     canonical_utc_timestamp,
-    decode_quant_v6_artifact,
-    encode_quant_v6_artifact,
     quant_v6_expected_rth_bar_starts,
     quant_v6_fee_rate,
     quant_v6_payload_sha256,
     quant_v6_previous_trading_session_dates,
+)
+from app.domain.watchlist_quant_v6.artifact import (
+    _decode_quant_v6_artifact_verified,
+    _reencode_verified_quant_v6_artifact,
 )
 from app.models import (
     WatchlistQuantV6Artifact,
@@ -450,7 +452,7 @@ def _decode_and_verify_artifact(
             f"{label} artifact envelope has unsupported field types"
         )
     try:
-        decoded = decode_quant_v6_artifact(
+        verified = _decode_quant_v6_artifact_verified(
             digest_sha256=artifact.digest_sha256,
             schema_version=artifact.schema_version,
             kind=artifact.kind,
@@ -459,7 +461,10 @@ def _decode_and_verify_artifact(
             compressed_size=artifact.compressed_size,
             payload=artifact.payload,
         )
-        canonical = encode_quant_v6_artifact(decoded, kind=artifact.kind)
+        canonical = _reencode_verified_quant_v6_artifact(
+            verified,
+            kind=artifact.kind,
+        )
     except Exception as exc:
         raise QuantV6PublicationError(
             f"{label} artifact failed bounded canonical decode"
@@ -469,7 +474,7 @@ def _decode_and_verify_artifact(
         canonical,
         label=label,
     )
-    return decoded
+    return verified.decoded
 
 
 def _require_dict(value: object, *, label: str) -> dict[str, Any]:
@@ -1834,6 +1839,7 @@ def _prepare_publication(
             tuple[str, int], QuantV6PendingArtifactBinding
         ] = {}
         decoded_by_key: dict[tuple[str, int], dict[str, Any]] = {}
+        decoded_artifacts_by_digest: dict[str, dict[str, Any]] = {}
         for binding in evaluation.bindings:
             _evaluation_checkpoint(evaluation_deadline)
             if type(binding) is not QuantV6PendingArtifactBinding:
@@ -1910,10 +1916,6 @@ def _prepare_publication(
                 raise QuantV6PublicationError(
                     "binding digest failed canonical replay"
                 )
-            decoded = _decode_and_verify_artifact(
-                binding.artifact,
-                label=f"{expected_member.symbol} {binding.role}",
-            )
             existing_artifact = artifacts.get(binding.artifact.digest_sha256)
             if existing_artifact is not None:
                 _compare_encoded_artifacts(
@@ -1921,13 +1923,35 @@ def _prepare_publication(
                     binding.artifact,
                     label="reused in-memory",
                 )
+                _evaluation_checkpoint(evaluation_deadline)
             else:
+                decoded = _decode_and_verify_artifact(
+                    binding.artifact,
+                    label=f"{expected_member.symbol} {binding.role}",
+                )
+                _evaluation_checkpoint(evaluation_deadline)
                 artifacts[binding.artifact.digest_sha256] = binding.artifact
+                if binding.role != EVENT_ROLE:
+                    decoded_artifacts_by_digest[
+                        binding.artifact.digest_sha256
+                    ] = decoded
             binding_by_key[key] = binding
             # Event payloads are compared against regenerated canonical
             # artifacts below, so retaining every decoded event would multiply
             # peak cohort memory without adding validation strength.
             if binding.role != EVENT_ROLE:
+                decoded = decoded_artifacts_by_digest.get(
+                    binding.artifact.digest_sha256
+                )
+                if decoded is None:
+                    decoded = _decode_and_verify_artifact(
+                        binding.artifact,
+                        label=f"{expected_member.symbol} {binding.role}",
+                    )
+                    _evaluation_checkpoint(evaluation_deadline)
+                    decoded_artifacts_by_digest[
+                        binding.artifact.digest_sha256
+                    ] = decoded
                 decoded_by_key[key] = decoded
             seen_binding_digests.add(binding.binding_sha256)
             all_bindings.append(binding)

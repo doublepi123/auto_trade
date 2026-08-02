@@ -63,6 +63,12 @@ class EncodedQuantV6Artifact:
     payload: bytes
 
 
+@dataclass(frozen=True)
+class _VerifiedDecodedQuantV6Artifact:
+    decoded: dict[str, Any]
+    canonical_raw: bytes
+
+
 @dataclass
 class _CanonicalJsonBudget:
     nodes: int = 0
@@ -178,6 +184,30 @@ def encode_quant_v6_artifact(
     _validate_kind(kind)
     _validate_payload_contract(value, kind=kind)
     raw = canonical_quant_v6_json(value)
+    return _encode_quant_v6_canonical_bytes(
+        value=value,
+        raw=raw,
+        kind=kind,
+    )
+
+
+def _encode_quant_v6_canonical_bytes(
+    *,
+    value: Mapping[str, object],
+    raw: bytes,
+    kind: str,
+) -> EncodedQuantV6Artifact:
+    """Encode bytes already proven canonical for ``value`` and ``kind``."""
+    _validate_kind(kind)
+    _validate_payload_contract(value, kind=kind)
+    if (
+        type(raw) is not bytes
+        or not raw
+        or len(raw) > MAX_QUANT_V6_ARTIFACT_RAW_BYTES
+    ):
+        raise QuantV6ArtifactError(
+            "verified quant-v6 canonical bytes are outside the raw size limit"
+        )
     compressed = zlib.compress(
         raw,
         level=QUANT_V6_ARTIFACT_COMPRESSION_LEVEL,
@@ -199,7 +229,7 @@ def encode_quant_v6_artifact(
     )
 
 
-def decode_quant_v6_artifact(
+def _decode_quant_v6_artifact_verified(
     *,
     digest_sha256: str,
     schema_version: int,
@@ -208,7 +238,7 @@ def decode_quant_v6_artifact(
     raw_size: int,
     compressed_size: int,
     payload: bytes,
-) -> dict[str, Any]:
+) -> _VerifiedDecodedQuantV6Artifact:
     """Bounded-decompress, digest-check, and canonical-check one artifact."""
     _validate_sha256(digest_sha256)
     if (
@@ -287,7 +317,49 @@ def decode_quant_v6_artifact(
     if canonical_quant_v6_json(normalized) != raw:
         raise QuantV6ArtifactError("quant-v6 artifact payload is not canonical JSON")
     _validate_payload_contract(normalized, kind=kind)
-    return normalized
+    return _VerifiedDecodedQuantV6Artifact(
+        decoded=normalized,
+        canonical_raw=raw,
+    )
+
+
+def _reencode_verified_quant_v6_artifact(
+    verified: _VerifiedDecodedQuantV6Artifact,
+    *,
+    kind: str,
+) -> EncodedQuantV6Artifact:
+    """Reproduce the deterministic envelope without re-canonicalizing JSON."""
+    if type(verified) is not _VerifiedDecodedQuantV6Artifact:
+        raise QuantV6ArtifactError(
+            "quant-v6 verified decode result has an unsupported type"
+        )
+    return _encode_quant_v6_canonical_bytes(
+        value=verified.decoded,
+        raw=verified.canonical_raw,
+        kind=kind,
+    )
+
+
+def decode_quant_v6_artifact(
+    *,
+    digest_sha256: str,
+    schema_version: int,
+    kind: str,
+    codec: str,
+    raw_size: int,
+    compressed_size: int,
+    payload: bytes,
+) -> dict[str, Any]:
+    """Bounded-decompress, digest-check, and canonical-check one artifact."""
+    return _decode_quant_v6_artifact_verified(
+        digest_sha256=digest_sha256,
+        schema_version=schema_version,
+        kind=kind,
+        codec=codec,
+        raw_size=raw_size,
+        compressed_size=compressed_size,
+        payload=payload,
+    ).decoded
 
 
 def _validate_sha256(value: str) -> None:

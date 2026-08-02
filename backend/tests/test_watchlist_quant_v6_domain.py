@@ -948,6 +948,102 @@ def test_assessment_noop_checkpoint_preserves_canonical_bytes_and_digest() -> No
     assert checkpoint_artifact.payload == baseline_artifact.payload
 
 
+def test_verified_event_digest_memo_is_exact_instance_local_and_cooperative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event = _single_event()
+    equal_clone = replace(event)
+    memo = assessment_module._VerifiedArtifactMemo.create()
+    validated: list[BarNextOpenStressedEvent] = []
+    checkpoint_calls = 0
+    original = assessment_module._validated_event_payload
+
+    def _track_validation(
+        value: BarNextOpenStressedEvent,
+        *,
+        checkpoint: Callable[[], None] | None = None,
+    ) -> dict[str, object]:
+        validated.append(value)
+        return original(value, checkpoint=checkpoint)
+
+    def _checkpoint() -> None:
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+
+    monkeypatch.setattr(
+        assessment_module,
+        "_validated_event_payload",
+        _track_validation,
+    )
+    first = assessment_module._validated_event_artifact_digest(
+        event,
+        checkpoint=_checkpoint,
+        verified_artifacts=memo,
+    )
+    second = assessment_module._validated_event_artifact_digest(
+        event,
+        checkpoint=_checkpoint,
+        verified_artifacts=memo,
+    )
+    clone_digest = assessment_module._validated_event_artifact_digest(
+        equal_clone,
+        checkpoint=_checkpoint,
+        verified_artifacts=memo,
+    )
+
+    assert first == second == clone_digest
+    assert validated == [event, equal_clone]
+    assert checkpoint_calls > 2
+
+    sentinel = RuntimeError("memo checkpoint sentinel")
+
+    def _cancelled() -> None:
+        raise sentinel
+
+    with pytest.raises(RuntimeError) as caught:
+        assessment_module._validated_event_artifact_digest(
+            event,
+            checkpoint=_cancelled,
+            verified_artifacts=memo,
+        )
+    assert caught.value is sentinel
+
+
+def test_assessment_verified_event_memo_is_scoped_to_one_replay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leaves = _strong_leaves(
+        missing=29,
+        event_session_counts=(2,),
+    )
+    assessment = assess_bar_next_open_stressed_window(
+        symbol=_SYMBOL,
+        market=_MARKET,
+        leaves=leaves,
+    )
+    validated: list[BarNextOpenStressedEvent] = []
+    original = assessment_module._validated_event_payload
+
+    def _track_validation(
+        value: BarNextOpenStressedEvent,
+        *,
+        checkpoint: Callable[[], None] | None = None,
+    ) -> dict[str, object]:
+        validated.append(value)
+        return original(value, checkpoint=checkpoint)
+
+    monkeypatch.setattr(
+        assessment_module,
+        "_validated_event_payload",
+        _track_validation,
+    )
+    first = canonical_quant_v6_json(assessment.canonical_payload())
+    second = canonical_quant_v6_json(assessment.canonical_payload())
+
+    assert first == second
+    assert validated == [*leaves[0].events, *leaves[0].events]
+
+
 def test_checkpoint_sentinel_propagates_from_second_event(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

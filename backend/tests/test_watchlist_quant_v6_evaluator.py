@@ -65,7 +65,7 @@ def test_evaluator_digest_is_cached_canonical_manifest_digest() -> None:
 
 def test_evaluator_manifest_golden_digest() -> None:
     assert quant_v6_evaluator_digest_sha256() == (
-        "f06a142012e243fabddd8e549b10e65c9ce67b9576d86c445905811b49f1796e"
+        "c24dcbd3b09b1241836f43cc3d75e8ef952e69ee98e8b0fb7f0a58fd88507ffb"
     )
 
 
