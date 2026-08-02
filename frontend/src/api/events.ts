@@ -50,9 +50,29 @@ export async function getTradeEvents(params: GetTradeEventsParams = {}): Promise
   return resp.data
 }
 
-export async function exportTradeEvents(format: 'csv' | 'json'): Promise<Blob | unknown> {
-  const resp = await api.get('/api/events/export', {
-    params: { format },
+export async function exportTradeEvents(
+  format: 'csv' | 'json',
+  params: GetTradeEventsParams = {},
+): Promise<Blob | unknown> {
+  const sp = new URLSearchParams()
+  sp.set('format', format)
+  if (params.symbol) sp.set('symbol', params.symbol)
+  if (params.source && params.source !== 'all') sp.set('source', params.source)
+  if (params.skip_category) sp.set('skip_category', params.skip_category)
+  if (params.q && params.q.trim()) sp.set('q', params.q.trim().slice(0, 200))
+
+  const et = params.event_type
+  if (Array.isArray(et)) {
+    et.forEach((t) => {
+      const s = String(t).trim()
+      if (s) sp.append('event_type', s)
+    })
+  }
+  else if (typeof et === 'string' && et.trim()) {
+    sp.append('event_type', et.trim())
+  }
+
+  const resp = await api.get(`/api/events/export?${sp.toString()}`, {
     responseType: format === 'csv' ? 'blob' : 'json',
   })
   return resp.data

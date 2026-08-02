@@ -426,29 +426,36 @@ def get_trade_events(
 def export_trade_events(
     format: str = Query(default="csv", pattern="^(csv|json)$"),
     limit: int = Query(default=1000, ge=1, le=10000),
+    symbol: Optional[str] = Query(default=None, max_length=50),
+    event_type: Optional[List[str]] = Query(default=None, max_length=50),
+    source: str = Query(default="all", pattern="^(trade|audit|llm|risk|all)$"),
+    skip_category: Optional[str] = Query(default=None, max_length=20),
+    q: Optional[str] = Query(default=None, max_length=100, description="Substring search over message, symbol, action"),
     db: Session = Depends(get_db),
 ) -> Response:
-    events = (
-        db.query(TradeEvent)
-        .order_by(TradeEvent.created_at.desc(), TradeEvent.id.desc())
-        .limit(limit)
-        .all()
+    """Export unified timeline rows (trade + audit + llm + risk) with the same
+    filters as ``/api/events``.
+
+    Reuses ``list_timeline_events`` so filter/order/normalization semantics are
+    identical to the list endpoint. The list path's merged-fetch cap is 2,000
+    while export allows up to 10,000; the higher cap is passed through
+    ``max_merged_fetch`` so exports are truthful up to their accepted limit
+    without changing list endpoint bounds.
+    """
+    # Fetch up to ``limit`` rows in a single page via the shared helper.
+    items, _total = list_timeline_events(
+        db,
+        source=source,  # pyright: ignore
+        event_types=event_type,
+        symbol=symbol,
+        skip_category=skip_category,
+        page=1,
+        page_size=limit,
+        query=q,
+        max_merged_fetch=limit,
     )
-    rows = [
-        {
-            "id": event.id,
-            "event_type": event.event_type,
-            "symbol": event.symbol,
-            "broker_order_id": event.broker_order_id,
-            "side": event.side,
-            "status": event.status,
-            "message": event.message,
-            "payload": decode_event_payload(event.payload_json),
-            "created_at": event.created_at.isoformat(),
-        }
-        for event in events
-    ]
-    filename = f"trade-events-{datetime.now().strftime('%Y%m%d-%H%M%S')}.{format}"
+    rows = [item.model_dump() for item in items]
+    filename = f"decision-timeline-{datetime.now().strftime('%Y%m%d-%H%M%S')}.{format}"
     if format == "json":
         return Response(
             content=json.dumps(rows, ensure_ascii=False, default=str),
@@ -457,7 +464,8 @@ def export_trade_events(
         )
 
     output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=[
+    fieldnames = [
+        "source",
         "id",
         "event_type",
         "symbol",
@@ -467,10 +475,18 @@ def export_trade_events(
         "message",
         "payload",
         "created_at",
-    ])
+        "actor_hash",
+        "source_ip",
+        "severity",
+        "result",
+    ]
+    writer = csv.DictWriter(output, fieldnames=fieldnames)
     writer.writeheader()
     for row in rows:
-        csv_row = {**row, "payload": json.dumps(row["payload"], ensure_ascii=False, default=str)}
+        csv_row = {
+            **row,
+            "payload": json.dumps(row.get("payload") or {}, ensure_ascii=False, default=str),
+        }
         writer.writerow(csv_row)
     return Response(
         content=output.getvalue(),

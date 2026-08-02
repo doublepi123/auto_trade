@@ -159,6 +159,7 @@ def list_timeline_events(
     query: str | None = None,
     from_dt: datetime | None = None,
     to_dt: datetime | None = None,
+    max_merged_fetch: int = _MAX_MERGED_FETCH,
 ) -> tuple[list[TimelineEventResponse], int]:
     """Merge trade_events and audit_logs for the timeline API (spec §5.2).
 
@@ -166,6 +167,11 @@ def list_timeline_events(
     text columns (TradeEvent.message, AuditLog.action, both sides' symbol).
     It is intentionally a narrow OR-of-columns search so it stays cheap on
     SQLite and easy to reason about for the UI.
+
+    ``max_merged_fetch`` bounds the per-source fetch. The list endpoint uses
+    the default ``_MAX_MERGED_FETCH`` (2,000); the export endpoint may pass a
+    higher cap (up to 10,000) so exports are truthful up to their accepted
+    limit without changing list endpoint bounds.
     """
     et = [e.strip() for e in (event_types or []) if e and e.strip()]
     query_term = (query or "").strip()
@@ -255,7 +261,7 @@ def list_timeline_events(
     trade_rows: list[TradeEvent] = []
     audit_rows: list[AuditLog] = []
 
-    fetch_n = min(page * page_size, _MAX_MERGED_FETCH)
+    fetch_n = min(page * page_size, max_merged_fetch)
 
     tq = db.query(TradeEvent)
     if symbol:

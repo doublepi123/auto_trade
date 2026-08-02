@@ -607,7 +607,12 @@ function handlePageSizeChange(nextPageSize: number) {
 async function handleExport(format: 'csv' | 'json') {
   exporting.value = format
   try {
-    const data = await exportTradeEvents(format)
+    const data = await exportTradeEvents(format, {
+      source: sourceFilter.value,
+      event_type: selectedEventTypes.value.length ? [...selectedEventTypes.value] : undefined,
+      skip_category: selectedSkipCategory.value || undefined,
+      q: searchTerm.value.trim() || undefined,
+    })
     let blob: Blob
     if (data instanceof Blob) {
       blob = data
@@ -617,7 +622,7 @@ async function handleExport(format: 'csv' | 'json') {
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
     link.href = url
-    link.download = `trade-events.${format}`
+    link.download = `decision-timeline.${format}`
     document.body.appendChild(link)
     // Revoke the object URL on click rather than after a 1-second timer to
     // avoid races when the user fires several exports in quick succession
@@ -633,7 +638,7 @@ async function handleExport(format: 'csv' | 'json') {
     link.addEventListener('click', cleanup)
     link.click()
     setTimeout(cleanup, 1000)
-    ElMessage.success('导出已开始（仅包含交易事件）')
+    ElMessage.success('导出已开始')
   } catch (e) {
     console.error('导出决策时间线失败：', e)
     ElMessage.error('导出失败')
