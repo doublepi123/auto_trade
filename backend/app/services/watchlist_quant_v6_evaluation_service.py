@@ -908,12 +908,7 @@ def _evaluate_candidate_from_fetch(
     if evaluation_deadline is not None:
         evaluation_deadline.checkpoint()
     leaves: list[QuantV6SessionLeaf] = []
-    session_artifacts: list[tuple[int, date, EncodedQuantV6Artifact]] = []
-    event_artifacts: list[tuple[int, date, EncodedQuantV6Artifact]] = []
-    event_ordinal = 0
-    for target_ordinal, target_date in enumerate(
-        registration.target_session_dates
-    ):
+    for target_date in registration.target_session_dates:
         if evaluation_deadline is not None:
             evaluation_deadline.checkpoint()
         prior_dates = quant_v6_previous_trading_session_dates(
@@ -989,30 +984,8 @@ def _evaluate_candidate_from_fetch(
                 "candidate canonical replay input is invalid"
             ) from exc
         leaves.append(leaf)
-        session_artifacts.append((
-            target_ordinal,
-            target_date,
-            leaf.encoded_replay_input(
-                symbol=member.symbol,
-                market=member.market,
-                checkpoint=(
-                    evaluation_deadline.checkpoint
-                    if evaluation_deadline is not None
-                    else None
-                ),
-            ),
-        ))
-        for event in events:
-            if evaluation_deadline is not None:
-                evaluation_deadline.checkpoint()
-            event_artifacts.append((
-                event_ordinal,
-                target_date,
-                event.encoded_artifact(),
-            ))
-            event_ordinal += 1
     try:
-        assessment, assessment_artifact = (
+        encoded_replay = (
             _assess_and_encode_bar_next_open_stressed_window(
                 symbol=member.symbol,
                 market=member.market,
@@ -1022,12 +995,15 @@ def _evaluate_candidate_from_fetch(
                     if evaluation_deadline is not None
                     else None
                 ),
+                _include_replay_artifacts=True,
             )
         )
     except QuantV6AssessmentError as exc:
         raise QuantV6HistoricalEvaluationError(
             "candidate assessment failed canonical replay"
         ) from exc
+    assessment = encoded_replay.assessment
+    assessment_artifact = encoded_replay.assessment_artifact
     bindings = [
         _binding(
             registration_identity_sha256=registration.identity_sha256,
@@ -1038,27 +1014,27 @@ def _evaluate_candidate_from_fetch(
             artifact=assessment_artifact,
         )
     ]
-    for ordinal, session_date, artifact in session_artifacts:
+    for item in encoded_replay.session_input_artifacts:
         if evaluation_deadline is not None:
             evaluation_deadline.checkpoint()
         bindings.append(_binding(
             registration_identity_sha256=registration.identity_sha256,
             member=member,
             role=SESSION_INPUT_ROLE,
-            artifact_ordinal=ordinal,
-            session_date=session_date,
-            artifact=artifact,
+            artifact_ordinal=item.artifact_ordinal,
+            session_date=item.session_date,
+            artifact=item.artifact,
         ))
-    for ordinal, session_date, artifact in event_artifacts:
+    for item in encoded_replay.event_artifacts:
         if evaluation_deadline is not None:
             evaluation_deadline.checkpoint()
         bindings.append(_binding(
             registration_identity_sha256=registration.identity_sha256,
             member=member,
             role=EVENT_ROLE,
-            artifact_ordinal=ordinal,
-            session_date=session_date,
-            artifact=artifact,
+            artifact_ordinal=item.artifact_ordinal,
+            session_date=item.session_date,
+            artifact=item.artifact,
         ))
     ordered_bindings = tuple(sorted(
         bindings,

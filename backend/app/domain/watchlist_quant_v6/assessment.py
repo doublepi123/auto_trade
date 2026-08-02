@@ -10,6 +10,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 
 from app.domain.watchlist_quant_v6.artifact import (
     QUANT_V6_ASSESSMENT_ARTIFACT_KIND,
+    QUANT_V6_EVENT_ARTIFACT_KIND,
     QUANT_V6_SESSION_INPUT_ARTIFACT_KIND,
     EncodedQuantV6Artifact,
     QuantV6ArtifactError,
@@ -68,18 +69,40 @@ def _cooperate(checkpoint: Callable[[], None] | None) -> None:
 class _VerifiedEventArtifactDigest:
     event: BarNextOpenStressedEvent
     digest_sha256: str
+    artifact: EncodedQuantV6Artifact | None
+
+
+@dataclass(frozen=True)
+class _VerifiedSessionInputArtifact:
+    leaf: QuantV6SessionLeaf
+    artifact: EncodedQuantV6Artifact
 
 
 @dataclass
 class _VerifiedArtifactMemo:
     """Reuse evidence only after one full replay of the exact frozen object."""
 
+    capture_replay_artifacts: bool
     event_digests: dict[int, _VerifiedEventArtifactDigest]
+    session_input_artifacts: dict[int, _VerifiedSessionInputArtifact]
     assessment: QuantV6Assessment | None
 
     @classmethod
-    def create(cls) -> _VerifiedArtifactMemo:
-        return cls(event_digests={}, assessment=None)
+    def create(
+        cls,
+        *,
+        capture_replay_artifacts: bool = False,
+    ) -> _VerifiedArtifactMemo:
+        if type(capture_replay_artifacts) is not bool:
+            raise QuantV6AssessmentError(
+                "replay artifact capture flag must be boolean"
+            )
+        return cls(
+            capture_replay_artifacts=capture_replay_artifacts,
+            event_digests={},
+            session_input_artifacts={},
+            assessment=None,
+        )
 
     def _remember_replayed_assessment(
         self,
@@ -136,6 +159,7 @@ class _VerifiedArtifactMemo:
         event: BarNextOpenStressedEvent,
         digest_sha256: str,
         *,
+        artifact: EncodedQuantV6Artifact | None = None,
         checkpoint: Callable[[], None] | None,
     ) -> None:
         _cooperate(checkpoint)
@@ -143,6 +167,15 @@ class _VerifiedArtifactMemo:
             type(event) is not BarNextOpenStressedEvent
             or type(digest_sha256) is not str
             or _SHA256_PATTERN.fullmatch(digest_sha256) is None
+            or (
+                artifact is not None
+                and (
+                    not self.capture_replay_artifacts
+                    or type(artifact) is not EncodedQuantV6Artifact
+                    or artifact.kind != QUANT_V6_EVENT_ARTIFACT_KIND
+                    or artifact.digest_sha256 != digest_sha256
+                )
+            )
         ):
             raise QuantV6AssessmentError(
                 "verified event artifact memo received invalid evidence"
@@ -152,6 +185,7 @@ class _VerifiedArtifactMemo:
         if existing is not None and (
             existing.event is not event
             or existing.digest_sha256 != digest_sha256
+            or existing.artifact != artifact
         ):
             raise QuantV6AssessmentError(
                 "verified event artifact memo conflicts with replay evidence"
@@ -159,8 +193,81 @@ class _VerifiedArtifactMemo:
         self.event_digests[key] = _VerifiedEventArtifactDigest(
             event=event,
             digest_sha256=digest_sha256,
+            artifact=artifact,
         )
         _cooperate(checkpoint)
+
+    def require_event_artifact(
+        self,
+        event: BarNextOpenStressedEvent,
+        *,
+        checkpoint: Callable[[], None] | None,
+    ) -> EncodedQuantV6Artifact:
+        _cooperate(checkpoint)
+        cached = self.event_digests.get(id(event))
+        if (
+            not self.capture_replay_artifacts
+            or cached is None
+            or cached.event is not event
+            or type(cached.artifact) is not EncodedQuantV6Artifact
+        ):
+            raise QuantV6AssessmentError(
+                "event artifact is outside the verified replay identity"
+            )
+        _cooperate(checkpoint)
+        return cached.artifact
+
+    def remember_session_input_artifact(
+        self,
+        leaf: QuantV6SessionLeaf,
+        artifact: EncodedQuantV6Artifact,
+        *,
+        checkpoint: Callable[[], None] | None,
+    ) -> None:
+        _cooperate(checkpoint)
+        if (
+            not self.capture_replay_artifacts
+            or type(leaf) is not QuantV6SessionLeaf
+            or type(artifact) is not EncodedQuantV6Artifact
+            or artifact.kind != QUANT_V6_SESSION_INPUT_ARTIFACT_KIND
+        ):
+            raise QuantV6AssessmentError(
+                "verified session input memo received invalid evidence"
+            )
+        key = id(leaf)
+        existing = self.session_input_artifacts.get(key)
+        if existing is not None and (
+            existing.leaf is not leaf
+            or existing.artifact != artifact
+        ):
+            raise QuantV6AssessmentError(
+                "verified session input memo conflicts with replay evidence"
+            )
+        self.session_input_artifacts[key] = _VerifiedSessionInputArtifact(
+            leaf=leaf,
+            artifact=artifact,
+        )
+        _cooperate(checkpoint)
+
+    def require_session_input_artifact(
+        self,
+        leaf: QuantV6SessionLeaf,
+        *,
+        checkpoint: Callable[[], None] | None,
+    ) -> EncodedQuantV6Artifact:
+        _cooperate(checkpoint)
+        cached = self.session_input_artifacts.get(id(leaf))
+        if (
+            not self.capture_replay_artifacts
+            or cached is None
+            or cached.leaf is not leaf
+            or type(cached.artifact) is not EncodedQuantV6Artifact
+        ):
+            raise QuantV6AssessmentError(
+                "session input artifact is outside the verified replay identity"
+            )
+        _cooperate(checkpoint)
+        return cached.artifact
 
 
 def _validated_event_payload(
@@ -452,7 +559,26 @@ class QuantV6SessionLeaf:
             )
             bar_digest = replay_input["bar_input_sha256"]
             _cooperate(checkpoint)
-            replay_input_digest = quant_v6_payload_sha256(replay_input)
+            if (
+                _verified_artifacts is not None
+                and _verified_artifacts.capture_replay_artifacts
+            ):
+                replay_input_raw = canonical_quant_v6_json(replay_input)
+                _cooperate(checkpoint)
+                replay_input_artifact = _encode_quant_v6_canonical_bytes(
+                    value=replay_input,
+                    raw=replay_input_raw,
+                    kind=QUANT_V6_SESSION_INPUT_ARTIFACT_KIND,
+                )
+                _cooperate(checkpoint)
+                _verified_artifacts.remember_session_input_artifact(
+                    self,
+                    replay_input_artifact,
+                    checkpoint=checkpoint,
+                )
+                replay_input_digest = replay_input_artifact.digest_sha256
+            else:
+                replay_input_digest = quant_v6_payload_sha256(replay_input)
             _cooperate(checkpoint)
         event_artifact_digests: list[str] = []
         for event in self.events:
@@ -761,6 +887,23 @@ def _canonical_assessment_payload(
 class _AssessedWindowReplay:
     assessment: QuantV6Assessment
     artifact: EncodedQuantV6Artifact | None
+    session_input_artifacts: tuple[_EncodedReplayArtifact, ...] = ()
+    event_artifacts: tuple[_EncodedReplayArtifact, ...] = ()
+
+
+@dataclass(frozen=True)
+class _EncodedReplayArtifact:
+    artifact_ordinal: int
+    session_date: date
+    artifact: EncodedQuantV6Artifact
+
+
+@dataclass(frozen=True)
+class _EncodedAssessedWindowReplay:
+    assessment: QuantV6Assessment
+    assessment_artifact: EncodedQuantV6Artifact
+    session_input_artifacts: tuple[_EncodedReplayArtifact, ...]
+    event_artifacts: tuple[_EncodedReplayArtifact, ...]
 
 
 def _assess_bar_next_open_stressed_window_core(
@@ -772,6 +915,7 @@ def _assess_bar_next_open_stressed_window_core(
     _verified_artifacts: _VerifiedArtifactMemo | None = None,
     _isolate_replay_inputs: bool = False,
     _encode_verified_artifact: bool = False,
+    _capture_replay_artifacts: bool = False,
 ) -> _AssessedWindowReplay:
     """Assess exactly 30 ordered leaves without shrinking missing sessions."""
     _cooperate(checkpoint)
@@ -810,6 +954,14 @@ def _assess_bar_next_open_stressed_window_core(
         and _encode_verified_artifact
         and type(_verified_artifacts) is _VerifiedArtifactMemo
     )
+    if _capture_replay_artifacts and (
+        not reuse_full_session_event_replay
+        or type(_verified_artifacts) is not _VerifiedArtifactMemo
+        or not _verified_artifacts.capture_replay_artifacts
+    ):
+        raise QuantV6AssessmentError(
+            "replay artifact capture requires isolated replay provenance"
+        )
     try:
         rebuilt_leaves: list[QuantV6SessionLeaf] = []
         for leaf in normalized_leaves:
@@ -874,7 +1026,9 @@ def _assess_bar_next_open_stressed_window_core(
                 "covered leaf failed canonical session replay"
             ) from exc
         _cooperate(checkpoint)
-        actual_event_bytes: list[bytes] = []
+        actual_event_payloads_and_bytes: list[
+            tuple[dict[str, object], bytes]
+        ] = []
         for event in leaf.events:
             _cooperate(checkpoint)
             if reuse_full_session_event_replay:
@@ -909,20 +1063,26 @@ def _assess_bar_next_open_stressed_window_core(
                 )
                 _cooperate(checkpoint)
                 actual_bytes = canonical_quant_v6_json(actual_payload)
-            actual_event_bytes.append(actual_bytes)
+            actual_event_payloads_and_bytes.append((
+                actual_payload,
+                actual_bytes,
+            ))
         expected_event_payloads: list[dict[str, object]] = []
         for event in expected_events:
             _cooperate(checkpoint)
             expected_event_payloads.append(
                 BarNextOpenStressedEvent.canonical_payload(event)
             )
-        if len(expected_event_payloads) != len(actual_event_bytes):
+        if (
+            len(expected_event_payloads)
+            != len(actual_event_payloads_and_bytes)
+        ):
             raise QuantV6AssessmentError(
                 "covered leaf events do not equal the complete replay event set"
             )
-        for expected_payload, actual_bytes in zip(
+        for expected_payload, (_actual_payload, actual_bytes) in zip(
             expected_event_payloads,
-            actual_event_bytes,
+            actual_event_payloads_and_bytes,
             strict=True,
         ):
             _cooperate(checkpoint)
@@ -934,9 +1094,9 @@ def _assess_bar_next_open_stressed_window_core(
         if leaf.events:
             event_sessions += 1
         previous_event: BarNextOpenStressedEvent | None = None
-        for event, event_bytes in zip(
+        for event, (event_payload, event_bytes) in zip(
             leaf.events,
-            actual_event_bytes,
+            actual_event_payloads_and_bytes,
             strict=True,
         ):
             _cooperate(checkpoint)
@@ -958,12 +1118,24 @@ def _assess_bar_next_open_stressed_window_core(
                     "events must be ordered and non-overlapping within a session"
                 )
             event_keys.add(event.event_key_sha256)
-            event_digest = hashlib.sha256(event_bytes).hexdigest()
+            event_artifact: EncodedQuantV6Artifact | None = None
+            if _capture_replay_artifacts:
+                _cooperate(checkpoint)
+                event_artifact = _encode_quant_v6_canonical_bytes(
+                    value=event_payload,
+                    raw=event_bytes,
+                    kind=QUANT_V6_EVENT_ARTIFACT_KIND,
+                )
+                _cooperate(checkpoint)
+                event_digest = event_artifact.digest_sha256
+            else:
+                event_digest = hashlib.sha256(event_bytes).hexdigest()
             artifact_digests.append(event_digest)
             if _verified_artifacts is not None:
                 _verified_artifacts.remember_event_digest(
                     event,
                     event_digest,
+                    artifact=event_artifact,
                     checkpoint=checkpoint,
                 )
             covered_events.append(event)
@@ -1066,9 +1238,48 @@ def _assess_bar_next_open_stressed_window_core(
             kind=QUANT_V6_ASSESSMENT_ARTIFACT_KIND,
         )
         _cooperate(checkpoint)
+    session_input_artifacts: list[_EncodedReplayArtifact] = []
+    event_artifacts: list[_EncodedReplayArtifact] = []
+    if _capture_replay_artifacts:
+        assert _verified_artifacts is not None
+        event_ordinal = 0
+        for leaf_ordinal, leaf in enumerate(assessment.leaves):
+            _cooperate(checkpoint)
+            if leaf.status == SESSION_COVERED:
+                session_input_artifacts.append(_EncodedReplayArtifact(
+                    artifact_ordinal=leaf_ordinal,
+                    session_date=leaf.session_date,
+                    artifact=(
+                        _verified_artifacts.require_session_input_artifact(
+                            leaf,
+                            checkpoint=checkpoint,
+                        )
+                    ),
+                ))
+            for event in leaf.events:
+                _cooperate(checkpoint)
+                event_artifacts.append(_EncodedReplayArtifact(
+                    artifact_ordinal=event_ordinal,
+                    session_date=leaf.session_date,
+                    artifact=_verified_artifacts.require_event_artifact(
+                        event,
+                        checkpoint=checkpoint,
+                    ),
+                ))
+                event_ordinal += 1
+        if (
+            len(session_input_artifacts) != assessment.covered_sessions
+            or len(event_artifacts) != assessment.event_count
+        ):
+            raise QuantV6AssessmentError(
+                "verified replay artifact closure is incomplete"
+            )
+        _cooperate(checkpoint)
     return _AssessedWindowReplay(
         assessment=assessment,
         artifact=artifact,
+        session_input_artifacts=tuple(session_input_artifacts),
+        event_artifacts=tuple(event_artifacts),
     )
 
 
@@ -1096,16 +1307,24 @@ def _assess_and_encode_bar_next_open_stressed_window(
     market: str,
     leaves: Sequence[QuantV6SessionLeaf],
     checkpoint: Callable[[], None] | None = None,
-) -> tuple[QuantV6Assessment, EncodedQuantV6Artifact]:
+    _include_replay_artifacts: bool = False,
+) -> _EncodedAssessedWindowReplay:
     """Replay and encode one freshly built assessment without a second replay.
 
     The public ``QuantV6Assessment`` encoding methods intentionally distrust an
     arbitrary caller-owned instance and retain their independent replay.  This
-    private path is narrower: it creates the assessment itself, keeps the
-    exact-instance replay memo alive, and encodes only that freshly replayed
-    frozen object before returning it to the caller.
+    private path is narrower: it creates the assessment itself and keeps the
+    exact-instance replay memo alive.  Its opt-in child artifacts reuse only
+    canonical bytes produced inside that isolated complete replay; public
+    session, event, and assessment encoders retain independent replay.
     """
-    verified_artifacts = _VerifiedArtifactMemo.create()
+    if type(_include_replay_artifacts) is not bool:
+        raise QuantV6AssessmentError(
+            "replay artifact inclusion flag must be boolean"
+        )
+    verified_artifacts = _VerifiedArtifactMemo.create(
+        capture_replay_artifacts=_include_replay_artifacts,
+    )
     replay = _assess_bar_next_open_stressed_window_core(
         symbol=symbol,
         market=market,
@@ -1114,6 +1333,7 @@ def _assess_and_encode_bar_next_open_stressed_window(
         _verified_artifacts=verified_artifacts,
         _isolate_replay_inputs=True,
         _encode_verified_artifact=True,
+        _capture_replay_artifacts=_include_replay_artifacts,
     )
     if (
         type(replay) is not _AssessedWindowReplay
@@ -1128,7 +1348,12 @@ def _assess_and_encode_bar_next_open_stressed_window(
         checkpoint=checkpoint,
     )
     assert replay.artifact is not None
-    return replay.assessment, replay.artifact
+    return _EncodedAssessedWindowReplay(
+        assessment=replay.assessment,
+        assessment_artifact=replay.artifact,
+        session_input_artifacts=replay.session_input_artifacts,
+        event_artifacts=replay.event_artifacts,
+    )
 
 
 def session_cluster_one_sided_90_lcb(

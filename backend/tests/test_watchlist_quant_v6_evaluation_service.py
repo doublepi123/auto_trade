@@ -25,6 +25,7 @@ from app.domain.watchlist_quant_v6 import (
     QUANT_V6_ACQUISITION_SPEC_DIGEST,
     BarNextOpenStressedEvent,
     QuantV6Bar,
+    QuantV6SessionLeaf,
     QuantV6ThresholdEvidence,
     QuantV6TrainingSession,
     quant_v6_expected_rth_bar_starts,
@@ -205,7 +206,7 @@ def test_historical_evaluator_manifest_has_exact_source_closure() -> None:
 
 def test_historical_evaluator_manifest_golden_digest() -> None:
     assert quant_v6_historical_evaluator_digest_sha256() == (
-        "d6d40e3ba570e9305a86a179b6e94e29278c49e74e4a951e047733f2e0467337"
+        "b77335f7ec480fe000330a2c533c04ebcf44d6fb5a3797805c50ed55b635c4ac"
     )
 
 
@@ -291,6 +292,84 @@ def test_candidate_fused_assessment_runs_one_complete_replay(
 
     assert result.covered_sessions == 0
     assert replay_calls == 1
+
+
+def test_candidate_fused_child_artifacts_match_without_public_encoders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _one_member_plan()
+    bars = list(_all_bars(plan))
+    target_starts = quant_v6_expected_rth_bar_starts(
+        plan.market,
+        plan.target_session_dates[0],
+    )
+    by_start = {bar.start_at: index for index, bar in enumerate(bars)}
+    signal_at = target_starts[1]
+    exit_at = target_starts[8]
+    bars[by_start[signal_at]] = QuantV6Bar(
+        start_at=signal_at,
+        open=Decimal("100"),
+        high=Decimal("101"),
+        low=Decimal("89"),
+        close=Decimal("90"),
+        volume=Decimal("1000"),
+    )
+    bars[by_start[exit_at]] = QuantV6Bar(
+        start_at=exit_at,
+        open=Decimal("102"),
+        high=Decimal("103"),
+        low=Decimal("99"),
+        close=Decimal("100"),
+        volume=Decimal("1000"),
+    )
+    frozen_bars = tuple(bars)
+    baseline = evaluate_quant_v6_candidate(
+        registration=plan,
+        member=plan.members[0],
+        provider=_Provider(frozen_bars),
+    )
+    assert baseline.event_count > 0
+
+    def _reject_session_encoder(
+        _leaf: QuantV6SessionLeaf,
+        *,
+        symbol: str,
+        market: str,
+        checkpoint: Any = None,
+    ) -> Any:
+        del symbol, market, checkpoint
+        raise AssertionError("evaluation called the public session encoder")
+
+    def _reject_event_encoder(
+        _event: BarNextOpenStressedEvent,
+    ) -> Any:
+        raise AssertionError("evaluation called the public event encoder")
+
+    monkeypatch.setattr(
+        service_module.QuantV6SessionLeaf,
+        "encoded_replay_input",
+        _reject_session_encoder,
+    )
+    monkeypatch.setattr(
+        BarNextOpenStressedEvent,
+        "encoded_artifact",
+        _reject_event_encoder,
+    )
+
+    fused = evaluate_quant_v6_candidate(
+        registration=plan,
+        member=plan.members[0],
+        provider=_Provider(frozen_bars),
+    )
+
+    assert fused == baseline
+    assert [
+        (binding.role, binding.artifact_ordinal, binding.session_date)
+        for binding in fused.bindings
+    ] == [
+        (binding.role, binding.artifact_ordinal, binding.session_date)
+        for binding in baseline.bindings
+    ]
 
 
 def test_one_missing_training_bar_keeps_denominator_and_omits_inputs() -> None:
