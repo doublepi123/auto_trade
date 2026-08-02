@@ -3049,8 +3049,31 @@ class BacktestRunPage(BaseModel):
     page_size: int
 
 
+class BacktestMetricClassification(BaseModel):
+    """One run's classification for one metric name."""
+
+    run_id: int
+    classification: Literal["NUMERIC", "MISSING", "NON_NUMERIC"]
+    raw_value: Any = None
+    delta: Optional[float] = None
+
+
+class BacktestMetricComparisonRow(BaseModel):
+    """One metric name across all runs with per-run classifications."""
+
+    metric: str
+    baseline_value: Any = None
+    baseline_classification: Literal["NUMERIC", "MISSING", "NON_NUMERIC"] = "MISSING"
+    runs: list[BacktestMetricClassification]
+
+
 class BacktestRunCompare(BaseModel):
+    """Enhanced compare response preserving the legacy ``runs`` field."""
+
     runs: list[BacktestRunOut]
+    baseline_id: Optional[int] = None
+    missing_run_ids: list[int] = Field(default_factory=list)
+    metric_comparison: list[BacktestMetricComparisonRow] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

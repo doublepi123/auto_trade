@@ -346,9 +346,16 @@ def list_backtest_runs(
 )
 def compare_backtest_runs(
     ids: list[int] = Query(..., min_length=1, max_length=8),
+    baseline_id: int | None = Query(default=None),
     db=Depends(get_db),
 ) -> BacktestRunCompare:
-    return BacktestRunCompare(runs=BacktestRunService(db).compare(ids))
+    try:
+        result = BacktestRunService(db).compare_with_metrics(
+            ids, baseline_id=baseline_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return BacktestRunCompare(**result)
 
 
 @router.get("/runs/{run_id}", response_model=BacktestRunOut, dependencies=[Depends(require_api_key())])
