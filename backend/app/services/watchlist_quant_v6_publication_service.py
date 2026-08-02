@@ -2476,9 +2476,11 @@ class WatchlistQuantV6PublicationService:
         session_factory: Callable[[], Session],
         *,
         clock: Callable[[], datetime] = _utc_now,
+        transaction_fence: Callable[[Session], None] | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._clock = clock
+        self._transaction_fence = transaction_fence
 
     def _now(self) -> datetime:
         return _aware_utc(self._clock(), label="server clock")
@@ -2513,6 +2515,35 @@ class WatchlistQuantV6PublicationService:
                     identity_sha256=existing.identity_sha256,
                     created=False,
                 )
+            if self._transaction_fence is not None:
+                # End the registration lookup's WAL snapshot before taking
+                # the durable writer fence.  The fence must be the first DML
+                # in the fresh transaction so a stale owner cannot insert a
+                # registration after another process has taken over.
+                session.rollback()
+                _evaluation_checkpoint(evaluation_deadline)
+                self._transaction_fence(session)
+                _evaluation_checkpoint(evaluation_deadline)
+
+                # A completed owner may have inserted the immutable row
+                # between our initial lookup and the fenced transaction.
+                # Re-read while holding the SQLite writer lock instead of
+                # relying on an avoidable uniqueness failure.
+                existing = session.scalar(
+                    select(WatchlistQuantV6Registration).where(
+                        WatchlistQuantV6Registration.identity_sha256
+                        == plan.identity_sha256
+                    )
+                )
+                if existing is not None:
+                    _verify_registration_row(existing, plan)
+                    _evaluation_checkpoint(evaluation_deadline)
+                    session.commit()
+                    return QuantV6RegistrationReceipt(
+                        registration_id=existing.id,
+                        identity_sha256=existing.identity_sha256,
+                        created=False,
+                    )
             row = WatchlistQuantV6Registration(
                 **fields,
                 registered_at=registered_at,
@@ -2855,9 +2886,10 @@ class WatchlistQuantV6PublicationService:
                         "cohort must be committed before publication"
                     )
                 _verify_registration_row(registration, plan)
+                registration_id = registration.id
                 existing = session.scalar(select(WatchlistQuantV6Publication).where(
                     WatchlistQuantV6Publication.registration_id
-                    == registration.id
+                    == registration_id
                 ))
                 if existing is not None:
                     return self._verify_complete_publication(
@@ -2910,14 +2942,27 @@ class WatchlistQuantV6PublicationService:
                         payload=artifact.payload,
                         created_at=published_at,
                     ))
-                session.add_all(artifact_rows_to_add)
+                # Validate the durable writer lease inside this same SQLite
+                # write transaction *before* any publication DML.  The fence
+                # obtains the database writer lock, so a stale owner cannot
+                # race a takeover between a separate lease check and the
+                # immutable artifact/publication/binding inserts below.
                 _evaluation_checkpoint(evaluation_deadline)
+                if self._transaction_fence is not None:
+                    # The reads above may have opened a WAL snapshot that
+                    # cannot safely be upgraded after a concurrent heartbeat.
+                    # End that snapshot, then make the lease fence the first
+                    # statement in the new SQLite write transaction.
+                    session.rollback()
+                    self._transaction_fence(session)
+                _evaluation_checkpoint(evaluation_deadline)
+                session.add_all(artifact_rows_to_add)
                 session.flush()
 
                 _evaluation_checkpoint(evaluation_deadline)
                 publication = WatchlistQuantV6Publication(
                     **_publication_row_fields(
-                        registration_id=registration.id,
+                        registration_id=registration_id,
                         registration_identity_sha256=plan.identity_sha256,
                         member_count=len(plan.members),
                         prepared=prepared,

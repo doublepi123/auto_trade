@@ -70,6 +70,12 @@ from app.models import (
     WatchlistScore,
 )
 from app.schemas import StrategyV2ShadowConfigUpdate
+from app.services.durable_job_lease_service import (
+    DurableJobLeaseService,
+    LeaseBackendError,
+    LeaseKeepalive,
+    LeaseLostError,
+)
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 
 logger = logging.getLogger("auto_trade.universe_selection_service")
@@ -87,6 +93,7 @@ _RUN_WAIT_POLL_SECONDS = 0.05
 _RUN_CLAIM_LEASE_SECONDS = 300.0
 _RUN_WAIT_TIMEOUT_SECONDS = _RUN_CLAIM_LEASE_SECONDS + 30.0
 _CLAIM_PREFIX = "refresh-claim:"
+_UNIVERSE_SELECTION_LEASE_KEY = "universe_selection"
 _EXPLORATION_ALGORITHM_VERSION = (
     "risk-group-refined-sector-and-top-score-challenger-v4"
 )
@@ -111,6 +118,10 @@ class UniverseMarketDataProvider(Protocol):
         period: str,
         count: int,
     ) -> list[BrokerCandle]: ...
+
+
+class UniverseSelectionLeaseBusyError(RuntimeError):
+    """Another process currently owns the universe refresh lease."""
 
 
 def _research_candlesticks(
@@ -842,6 +853,7 @@ class UniverseSelectionService:
         apply_to_watchlist: bool | None = None,
         enable_shadow: bool | None = None,
         now: datetime | None = None,
+        lease_service: DurableJobLeaseService | None = None,
     ) -> None:
         if not catalog:
             raise ValueError("universe catalog must not be empty")
@@ -931,6 +943,7 @@ class UniverseSelectionService:
             if enable_shadow is None
             else enable_shadow
         )
+        self.lease_service = lease_service
         observed_at = now or datetime.now(timezone.utc)
         if observed_at.tzinfo is None:
             raise ValueError("now must be timezone-aware")
@@ -1140,15 +1153,40 @@ class UniverseSelectionService:
         apply_to_watchlist: bool | None = None,
     ) -> UniverseRefreshResult:
         with _REFRESH_LOCK:
-            return self._refresh_locked(
-                apply_to_watchlist=apply_to_watchlist,
+            if self.lease_service is None:
+                return self._refresh_locked(
+                    apply_to_watchlist=apply_to_watchlist,
+                    lease_guard=None,
+                )
+            handle = self.lease_service.try_acquire(
+                _UNIVERSE_SELECTION_LEASE_KEY
             )
+            if handle is None:
+                raise UniverseSelectionLeaseBusyError(
+                    "universe selection refresh is already running"
+                )
+            with self.lease_service.keepalive(handle) as lease_guard:
+                result = self._refresh_locked(
+                    apply_to_watchlist=apply_to_watchlist,
+                    lease_guard=lease_guard,
+                )
+                lease_guard.checkpoint()
+            return result
+
+    @staticmethod
+    def _checkpoint_lease(
+        lease_guard: LeaseKeepalive | None,
+    ) -> None:
+        if lease_guard is not None:
+            lease_guard.checkpoint()
 
     def _refresh_locked(
         self,
         *,
         apply_to_watchlist: bool | None,
+        lease_guard: LeaseKeepalive | None,
     ) -> UniverseRefreshResult:
+        self._checkpoint_lease(lease_guard)
         should_apply = (
             self.apply_to_watchlist
             if apply_to_watchlist is None
@@ -1167,18 +1205,21 @@ class UniverseSelectionService:
                 existing,
                 items,
                 should_apply=should_apply,
+                lease_guard=lease_guard,
             )
 
         claim = self._claim_run(
             as_of_date=expected_as_of_date,
             algorithm_version=algorithm_version,
             parameters=parameters,
+            lease_guard=lease_guard,
         )
         if claim is None:
             resolution = self._wait_for_winner(
                 as_of_date=expected_as_of_date,
                 algorithm_version=algorithm_version,
                 parameters=parameters,
+                lease_guard=lease_guard,
             )
             if isinstance(resolution, _RunClaim):
                 claim = resolution
@@ -1188,6 +1229,7 @@ class UniverseSelectionService:
                     winner,
                     items,
                     should_apply=should_apply,
+                    lease_guard=lease_guard,
                 )
 
         try:
@@ -1197,7 +1239,9 @@ class UniverseSelectionService:
                 rotation_parameters,
             ) = self._evaluate_catalog(
                 expected_as_of_date=expected_as_of_date,
+                lease_guard=lease_guard,
             )
+            self._checkpoint_lease(lease_guard)
             published_parameters = {
                 **parameters,
                 **rotation_parameters,
@@ -1231,15 +1275,21 @@ class UniverseSelectionService:
                 coverage_ratio=coverage_ratio,
                 parameters=published_parameters,
                 error="; ".join(errors),
+                lease_guard=lease_guard,
             )
         except Exception as exc:
-            self._release_failed_claim(claim, exc)
+            self._release_failed_claim(
+                claim,
+                exc,
+                lease_guard=lease_guard,
+            )
             raise
         if published is None:
             resolution = self._wait_for_winner(
                 as_of_date=as_of_date,
                 algorithm_version=algorithm_version,
                 parameters=parameters,
+                lease_guard=lease_guard,
             )
             if isinstance(resolution, _RunClaim):
                 # The original owner lost its lease and the intervening owner
@@ -1255,6 +1305,7 @@ class UniverseSelectionService:
                     coverage_ratio=coverage_ratio,
                     parameters=published_parameters,
                     error="; ".join(errors),
+                    lease_guard=lease_guard,
                 )
                 if published is None:
                     raise RuntimeError(
@@ -1266,6 +1317,7 @@ class UniverseSelectionService:
                     winner,
                     items,
                     should_apply=should_apply,
+                    lease_guard=lease_guard,
                 )
         run, rows = published
 
@@ -1279,6 +1331,7 @@ class UniverseSelectionService:
             run,
             rows,
             should_apply=should_apply,
+            lease_guard=lease_guard,
         )
 
     def _run_for_identity(
@@ -1305,11 +1358,14 @@ class UniverseSelectionService:
         as_of_date: date,
         algorithm_version: str,
         parameters: dict[str, object],
+        lease_guard: LeaseKeepalive | None = None,
     ) -> _RunClaim | None:
         # A preceding identity read may hold a WAL snapshot. End it before
         # the atomic UPSERT so SQLite never has to upgrade a stale reader into
         # the single writer (which can fail with SQLITE_BUSY_SNAPSHOT).
         self.db.rollback()
+        if lease_guard is not None:
+            lease_guard.fence_in_transaction(self.db)
         token = f"{_CLAIM_PREFIX}{uuid.uuid4().hex}"
         parameters_json = json.dumps(
             parameters,
@@ -1376,6 +1432,7 @@ class UniverseSelectionService:
         as_of_date: date,
         algorithm_version: str,
         parameters: dict[str, object],
+        lease_guard: LeaseKeepalive | None = None,
     ) -> (
         tuple[
             UniverseSelectionRun,
@@ -1385,6 +1442,7 @@ class UniverseSelectionService:
     ):
         deadline = time.monotonic() + _RUN_WAIT_TIMEOUT_SECONDS
         while True:
+            self._checkpoint_lease(lease_guard)
             self.db.rollback()
             self.db.expire_all()
             run = self._run_for_identity(
@@ -1398,6 +1456,7 @@ class UniverseSelectionService:
                     as_of_date=as_of_date,
                     algorithm_version=algorithm_version,
                     parameters=parameters,
+                    lease_guard=lease_guard,
                 )
                 if takeover is not None:
                     return takeover
@@ -1429,10 +1488,14 @@ class UniverseSelectionService:
         coverage_ratio: float,
         parameters: dict[str, object],
         error: str,
+        lease_guard: LeaseKeepalive | None = None,
     ) -> tuple[
         UniverseSelectionRun,
         list[UniverseSelectionCandidate],
     ] | None:
+        self.db.rollback()
+        if lease_guard is not None:
+            lease_guard.fence_in_transaction(self.db)
         completed_at = max(
             datetime.now(timezone.utc),
             claim.started_at,
@@ -1486,9 +1549,13 @@ class UniverseSelectionService:
         self,
         claim: _RunClaim,
         exc: Exception,
+        *,
+        lease_guard: LeaseKeepalive | None = None,
     ) -> None:
         self.db.rollback()
         try:
+            if lease_guard is not None:
+                lease_guard.fence_in_transaction(self.db)
             self.db.execute(
                 update(UniverseSelectionRun)
                 .where(
@@ -1518,6 +1585,7 @@ class UniverseSelectionService:
         self,
         *,
         expected_as_of_date: date,
+        lease_guard: LeaseKeepalive | None = None,
     ) -> tuple[
         list[CandidateSelection],
         date,
@@ -1537,6 +1605,7 @@ class UniverseSelectionService:
             ),
         )
         for candidate in self.rotation_research_catalog:
+            self._checkpoint_lease(lease_guard)
             data_errors: list[str] = []
             try:
                 raw_bars = (
@@ -1599,6 +1668,7 @@ class UniverseSelectionService:
                 )
             complete_by_symbol[candidate.symbol] = bars
             errors_by_symbol[candidate.symbol] = data_errors
+        self._checkpoint_lease(lease_guard)
 
         inputs: list[CandidateInput] = []
         for candidate in self.catalog:
@@ -1627,6 +1697,7 @@ class UniverseSelectionService:
         benchmark_bars: dict[str, Sequence[DailyBar]] = {}
         benchmark_errors: list[str] = []
         for symbol in ROTATION_BENCHMARK_SYMBOLS:
+            self._checkpoint_lease(lease_guard)
             try:
                 raw_bars = _research_candlesticks(
                     self.broker,
@@ -1660,6 +1731,7 @@ class UniverseSelectionService:
                     exc,
                     exc_info=True,
                 )
+        self._checkpoint_lease(lease_guard)
         membership_history_metadata = (
             INDEX_MEMBERSHIP_HISTORY.metadata(
                 self.rotation_research_catalog
@@ -2406,7 +2478,9 @@ class UniverseSelectionService:
         items: Sequence[UniverseSelectionCandidate],
         *,
         should_apply: bool,
+        lease_guard: LeaseKeepalive | None = None,
     ) -> UniverseRefreshResult:
+        self._checkpoint_lease(lease_guard)
         if run.status != "COMPLETE":
             return UniverseRefreshResult(
                 run=run,
@@ -2452,6 +2526,7 @@ class UniverseSelectionService:
             )
         )
         if not should_apply:
+            self._checkpoint_lease(lease_guard)
             return UniverseRefreshResult(
                 run=run,
                 items=tuple(items),
@@ -2465,7 +2540,11 @@ class UniverseSelectionService:
         observed = [
             item for item in items if item.symbol in observed_symbols
         ]
-        added, removed, retained = self._reconcile_watchlist(observed)
+        added, removed, retained = self._reconcile_watchlist(
+            observed,
+            lease_guard=lease_guard,
+        )
+        self._checkpoint_lease(lease_guard)
         shadow_enabled, shadow_disabled, shadow_failures = (
             self._sync_observation_shadows(
                 observed_symbols=(
@@ -2475,8 +2554,10 @@ class UniverseSelectionService:
                         observation_overrides.durable_observed_symbols
                     )
                 ),
+                lease_guard=lease_guard,
             )
         )
+        self._checkpoint_lease(lease_guard)
         reason = "candidate and exploration watchlist reconciled"
         if shadow_failures:
             reason += "; shadow sync failed for " + ", ".join(
@@ -2499,6 +2580,8 @@ class UniverseSelectionService:
     def _reconcile_watchlist(
         self,
         selected: Sequence[UniverseSelectionCandidate],
+        *,
+        lease_guard: LeaseKeepalive | None = None,
     ) -> tuple[list[str], list[str], list[str]]:
         existing_rows = self.db.query(WatchlistItem).all()
         existing = {row.symbol: row for row in existing_rows}
@@ -2509,6 +2592,23 @@ class UniverseSelectionService:
         )
         primary_symbol = primary.symbol if primary is not None else ""
         selected_symbols = {item.symbol for item in selected}
+        if lease_guard is not None:
+            # End the read snapshot so the lease renewal is the first DML in
+            # the protected watchlist transaction. The lease row update takes
+            # SQLite's writer lock through the business commit below. Re-read
+            # both mutable inputs under that lock so a concurrent operator
+            # watchlist edit or primary-symbol switch cannot be overwritten by
+            # values cached before the fence.
+            self.db.rollback()
+            lease_guard.fence_in_transaction(self.db)
+            existing_rows = self.db.query(WatchlistItem).all()
+            existing = {row.symbol: row for row in existing_rows}
+            primary = (
+                self.db.query(StrategyConfig)
+                .order_by(StrategyConfig.id.desc())
+                .first()
+            )
+            primary_symbol = primary.symbol if primary is not None else ""
         added: list[str] = []
         retained: list[str] = []
         for candidate in selected:
@@ -2573,6 +2673,7 @@ class UniverseSelectionService:
             ).delete(synchronize_session=False)
             self.db.delete(row)
         self.db.commit()
+        self._checkpoint_lease(lease_guard)
         return (
             sorted(added),
             sorted(removed),
@@ -2604,14 +2705,30 @@ class UniverseSelectionService:
         self,
         *,
         observed_symbols: set[str],
+        lease_guard: LeaseKeepalive | None = None,
     ) -> tuple[list[str], list[str], list[str]]:
+        self._checkpoint_lease(lease_guard)
         if not self.enable_shadow:
             return [], [], []
         enabled: list[str] = []
         disabled: list[str] = []
         failures: list[str] = []
-        service = StrategyV2ShadowService(self.db)
+        service = StrategyV2ShadowService(
+            self.db,
+            transaction_fence=(
+                lease_guard.fence_in_transaction
+                if lease_guard is not None
+                else None
+            ),
+            operation_checkpoint=(
+                lease_guard.checkpoint
+                if lease_guard is not None
+                else None
+            ),
+        )
         for symbol in sorted(observed_symbols):
+            self._checkpoint_lease(lease_guard)
+            created_for_universe = False
             try:
                 row = (
                     self.db.query(StrategyV2ShadowConfig)
@@ -2626,8 +2743,18 @@ class UniverseSelectionService:
                         .filter(StrategyV2ShadowConfig.symbol == symbol)
                         .one()
                     )
+                if lease_guard is not None:
+                    self.db.rollback()
+                    lease_guard.fence_in_transaction(self.db)
+                    row = (
+                        self.db.query(StrategyV2ShadowConfig)
+                        .filter(StrategyV2ShadowConfig.symbol == symbol)
+                        .one()
+                    )
                 was_enabled = row.enabled
                 if row.enabled and not row.universe_managed:
+                    if lease_guard is not None:
+                        self.db.commit()
                     continue
                 if (
                     not row.enabled
@@ -2636,6 +2763,8 @@ class UniverseSelectionService:
                 ):
                     # Existing disabled unmanaged configs are explicit
                     # operator opt-outs. Never silently re-enable them.
+                    if lease_guard is not None:
+                        self.db.commit()
                     continue
                 row.universe_managed = True
                 if not was_enabled:
@@ -2643,11 +2772,37 @@ class UniverseSelectionService:
                     # evidence before they can join live opening execution.
                     row.opening_momentum_execution_eligible = False
                 self.db.add(row)
+                if lease_guard is not None:
+                    # Ownership is its own fenced transaction. The enable
+                    # operation below starts a second fresh fenced transaction
+                    # and therefore cannot accidentally commit an unfenced
+                    # pending ORM mutation.
+                    self.db.commit()
+                    self._checkpoint_lease(lease_guard)
                 service.ensure_universe_managed_enabled(symbol)
                 if not was_enabled:
                     enabled.append(symbol)
+            except (LeaseLostError, LeaseBackendError):
+                self.db.rollback()
+                raise
             except Exception:
                 self.db.rollback()
+                if lease_guard is not None and created_for_universe:
+                    try:
+                        self._release_created_shadow_ownership(
+                            symbol,
+                            lease_guard=lease_guard,
+                        )
+                    except (LeaseLostError, LeaseBackendError):
+                        self.db.rollback()
+                        raise
+                    except Exception:
+                        self.db.rollback()
+                        logger.exception(
+                            "failed to release new Strategy v2 shadow "
+                            "ownership for %s",
+                            symbol,
+                        )
                 logger.exception(
                     "failed to enable Strategy v2 shadow for %s",
                     symbol,
@@ -2659,17 +2814,22 @@ class UniverseSelectionService:
             .all()
         )
         for managed in managed_rows:
+            self._checkpoint_lease(lease_guard)
             symbol = managed.symbol
             if symbol in observed_symbols:
                 continue
             try:
-                if managed.enabled:
+                managed_enabled = managed.enabled
+                if managed_enabled:
                     service.update_config(
                         StrategyV2ShadowConfigUpdate(enabled=False),
                         symbol=symbol,
                         preserve_universe_management=True,
                     )
                     disabled.append(symbol)
+            except (LeaseLostError, LeaseBackendError):
+                self.db.rollback()
+                raise
             except Exception:
                 self.db.rollback()
                 logger.exception(
@@ -2677,7 +2837,28 @@ class UniverseSelectionService:
                     symbol,
                 )
                 failures.append(f"disable:{symbol}")
+        self._checkpoint_lease(lease_guard)
         return enabled, disabled, failures
+
+    def _release_created_shadow_ownership(
+        self,
+        symbol: str,
+        *,
+        lease_guard: LeaseKeepalive,
+    ) -> None:
+        """Undo ownership when a freshly created observer cannot be enabled."""
+        self.db.rollback()
+        lease_guard.fence_in_transaction(self.db)
+        row = (
+            self.db.query(StrategyV2ShadowConfig)
+            .filter(StrategyV2ShadowConfig.symbol == symbol)
+            .one_or_none()
+        )
+        if row is not None and not row.enabled and row.universe_managed:
+            row.universe_managed = False
+            self.db.add(row)
+        self.db.commit()
+        self._checkpoint_lease(lease_guard)
 
     def _parameters(self) -> dict[str, object]:
         membership_history_metadata = (

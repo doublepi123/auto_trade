@@ -117,12 +117,17 @@ from app.config import settings
 from app.database import init_db
 from app.runner import get_runner
 from app.services.interval_application_service import IntervalApplicationService
+from app.services.llm_interaction_service import (
+    LLM_STORAGE_MAINTENANCE_LEASE_KEY,
+)
 from app.services.llm_symbol_state_service import LLMSymbolStateService
 from app.services.cron_health_service import get_cron_health_service
 from app.services.trade_event_service import record_trade_event
 from app import __version__ as APP_VERSION
 
 if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
     from app.services.watchlist_quant_v6_deadline import (
         QuantV6EvaluationDeadline,
     )
@@ -150,6 +155,14 @@ _OPENING_MOMENTUM_POLL_SECONDS = 15
 _OPENING_MOMENTUM_PRIORITY_POLL_SECONDS = 5
 _OPENING_RESEARCH_DEFER_RETRY_SECONDS = 60
 _OPENING_RESEARCH_DEFERRED = object()
+_JOB_LEASE_RETRY_SECONDS = 60
+_JOB_LEASE_BUSY_DEFERRED = object()
+_LLM_STORAGE_MAINTENANCE_LEASE_KEY = (
+    LLM_STORAGE_MAINTENANCE_LEASE_KEY
+)
+_WATCHLIST_QUANT_V6_EVALUATION_LEASE_KEY = (
+    "watchlist_quant_v6_evaluation"
+)
 _LLM_SECONDARY_ACTION_PRIORITY = {
     "CANDIDATE": 0,
     "WATCH": 1,
@@ -996,64 +1009,116 @@ def _llm_storage_maintenance_tick_sync() -> object | None:
         )
         return _OPENING_RESEARCH_DEFERRED
     from app.services.llm_interaction_service import LLMInteractionService
+    from app.services.durable_job_lease_service import (
+        DurableJobLeaseService,
+    )
     from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 
-    db = SessionLocal()
-    try:
-        service = LLMInteractionService(db)
-        pruned = service.prune_expired(
-            retention_days=settings.llm_interaction_retention_days,
-            no_action_retention_days=settings.llm_no_action_retention_days,
-            batch_size=settings.llm_storage_maintenance_batch_size,
-            max_batches=8,
+    lease_service = DurableJobLeaseService(
+        session_factory=SessionLocal,
+        default_ttl_seconds=settings.job_lease_ttl_seconds,
+    )
+    lease = lease_service.try_acquire(
+        _LLM_STORAGE_MAINTENANCE_LEASE_KEY
+    )
+    if lease is None:
+        logger.debug(
+            "storage maintenance deferred because another process owns "
+            "the durable job lease"
         )
-        compacted = service.compact_oversized_contexts(
-            max_bytes=settings.llm_context_snapshot_max_bytes,
-            batch_size=min(25, settings.llm_storage_maintenance_batch_size),
-            max_rows=settings.llm_storage_maintenance_batch_size,
-        )
-        shadow_pruned = StrategyV2ShadowService(db).prune_expired_wait_decisions(
-            retention_days=settings.strategy_v2_wait_retention_days,
-            batch_size=settings.strategy_v2_wait_maintenance_batch_size,
-            max_batches=8,
-        )
-        if pruned.deleted or compacted.compacted:
-            logger.info(
-                "LLM storage maintenance: deleted=%d delete_batches=%d "
-                "compacted=%d inspected=%d compact_batches=%d",
-                pruned.deleted,
-                pruned.batches,
-                compacted.compacted,
-                compacted.inspected,
-                compacted.batches,
+        return _JOB_LEASE_BUSY_DEFERRED
+
+    with lease_service.keepalive(
+        lease,
+        interval_seconds=settings.job_lease_heartbeat_seconds,
+    ) as lease_guard:
+        db = SessionLocal()
+        try:
+            service = LLMInteractionService(db)
+            pruned = service.prune_expired(
+                retention_days=settings.llm_interaction_retention_days,
+                no_action_retention_days=settings.llm_no_action_retention_days,
+                batch_size=settings.llm_storage_maintenance_batch_size,
+                max_batches=8,
+                transaction_fence=lease_guard.fence_in_transaction,
+                operation_checkpoint=lease_guard.checkpoint,
             )
-        if shadow_pruned.deleted:
-            logger.info(
-                "Strategy v2 WAIT storage maintenance: deleted=%d batches=%d",
-                shadow_pruned.deleted,
-                shadow_pruned.batches,
+            compacted = service.compact_oversized_contexts(
+                max_bytes=settings.llm_context_snapshot_max_bytes,
+                batch_size=min(
+                    25,
+                    settings.llm_storage_maintenance_batch_size,
+                ),
+                max_rows=settings.llm_storage_maintenance_batch_size,
+                transaction_fence=lease_guard.fence_in_transaction,
+                operation_checkpoint=lease_guard.checkpoint,
             )
-    finally:
-        db.close()
+            shadow_pruned = StrategyV2ShadowService(
+                db,
+                transaction_fence=lease_guard.fence_in_transaction,
+                operation_checkpoint=lease_guard.checkpoint,
+            ).prune_expired_wait_decisions(
+                retention_days=settings.strategy_v2_wait_retention_days,
+                batch_size=settings.strategy_v2_wait_maintenance_batch_size,
+                max_batches=8,
+            )
+            lease_guard.checkpoint()
+            if pruned.deleted or compacted.compacted:
+                logger.info(
+                    "LLM storage maintenance: deleted=%d delete_batches=%d "
+                    "compacted=%d inspected=%d compact_batches=%d",
+                    pruned.deleted,
+                    pruned.batches,
+                    compacted.compacted,
+                    compacted.inspected,
+                    compacted.batches,
+                )
+            if shadow_pruned.deleted:
+                logger.info(
+                    "Strategy v2 WAIT storage maintenance: "
+                    "deleted=%d batches=%d",
+                    shadow_pruned.deleted,
+                    shadow_pruned.batches,
+                )
+        finally:
+            db.close()
 
 
 async def _llm_storage_maintenance_cron() -> None:
     """Run bounded observation maintenance; VACUUM remains offline-only."""
+    from app.services.durable_job_lease_service import (
+        LeaseBackendError,
+        LeaseLostError,
+    )
+
     await asyncio.sleep(60)
     while True:
         deferred = False
+        lease_failed = False
         try:
             outcome = await _run_llm_storage_maintenance_tick()
-            deferred = outcome is _OPENING_RESEARCH_DEFERRED
+            deferred = (
+                outcome is _OPENING_RESEARCH_DEFERRED
+                or outcome is _JOB_LEASE_BUSY_DEFERRED
+            )
             _cron_record_success(_CRON_LLM_STORAGE_MAINTENANCE)
         except asyncio.CancelledError:
             raise
+        except (LeaseBackendError, LeaseLostError):
+            lease_failed = True
+            logger.exception(
+                "observational storage maintenance durable lease failed"
+            )
+            _cron_record_failure(
+                _CRON_LLM_STORAGE_MAINTENANCE,
+                sys.exc_info()[1],  # type: ignore[arg-type]
+            )
         except Exception:
             logger.exception("observational storage maintenance failed")
             _cron_record_failure(_CRON_LLM_STORAGE_MAINTENANCE, sys.exc_info()[1])  # type: ignore[arg-type]
         delay_seconds = (
-            _OPENING_RESEARCH_DEFER_RETRY_SECONDS
-            if deferred
+            _JOB_LEASE_RETRY_SECONDS
+            if deferred or lease_failed
             else settings.llm_storage_maintenance_interval_minutes * 60
         )
         await asyncio.sleep(delay_seconds)
@@ -1075,12 +1140,24 @@ async def _run_llm_storage_maintenance_tick() -> object | None:
         # Cancelling the asyncio waiter does not stop ``to_thread``. Waiting
         # here keeps SQLite commits from racing application/container teardown.
         try:
-            await worker
+            await _join_storage_worker_cancellation_resistant(worker)
         except Exception:
             logger.exception(
                 "observational storage maintenance failed during shutdown"
             )
         raise
+
+
+async def _join_storage_worker_cancellation_resistant(
+    worker: asyncio.Task[object | None],
+) -> object | None:
+    """Join storage work even when shutdown cancellation is repeated."""
+    while True:
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            if worker.done():
+                return worker.result()
 
 
 def _strategy_v2_shadow_tick_sync() -> None:
@@ -1386,6 +1463,10 @@ def _watchlist_quant_v6_evaluation_tick_sync(
         return _OPENING_RESEARCH_DEFERRED
     from app.services.watchlist_quant_v6_deadline import (
         QuantV6EvaluationDeadline,
+        QuantV6EvaluationStoppedError,
+    )
+    from app.services.durable_job_lease_service import (
+        DurableJobLeaseService,
     )
     from app.services.watchlist_quant_v6_evaluation_service import (
         build_latest_quant_v6_registration_plan,
@@ -1415,35 +1496,67 @@ def _watchlist_quant_v6_evaluation_tick_sync(
                 "quant-v6 evaluation deferred during opening research quiet window"
             )
             return _OPENING_RESEARCH_DEFERRED
-        deadline.checkpoint()
-        plan = build_latest_quant_v6_registration_plan(
-            observed_at=datetime.now(timezone.utc),
+        lease_service = DurableJobLeaseService(
+            session_factory=SessionLocal,
+            default_ttl_seconds=settings.job_lease_ttl_seconds,
         )
-        deadline.checkpoint()
-        provider = QuantV6HistoricalBarProvider(
-            evaluation_deadline=deadline,
+        lease = lease_service.try_acquire(
+            _WATCHLIST_QUANT_V6_EVALUATION_LEASE_KEY,
         )
-        try:
-            receipt = WatchlistQuantV6PublicationService(
-                SessionLocal,
-            ).register_provider_evaluate_publish(
-                plan=plan,
-                provider=provider,
-                evaluation_deadline=deadline,
+        if lease is None:
+            logger.debug(
+                "quant-v6 evaluation deferred because another process owns "
+                "the durable job lease"
             )
-            logger.info(
-                "quant-v6 historical publication id=%d registration=%d "
-                "members=%d bindings=%d created=%s manifest=%s",
-                receipt.publication_id,
-                receipt.registration_id,
-                len(plan.members),
-                receipt.binding_count,
-                receipt.created,
-                receipt.manifest_sha256,
-            )
-            return receipt
-        finally:
-            provider.close()
+            return _JOB_LEASE_BUSY_DEFERRED
+        with lease_service.keepalive(
+            lease,
+            interval_seconds=settings.job_lease_heartbeat_seconds,
+            on_lost=lambda _exc: deadline.cancel(),
+        ) as lease_guard:
+            try:
+                lease_guard.checkpoint()
+                deadline.checkpoint()
+                plan = build_latest_quant_v6_registration_plan(
+                    observed_at=datetime.now(timezone.utc),
+                )
+                lease_guard.checkpoint()
+                deadline.checkpoint()
+                provider = QuantV6HistoricalBarProvider(
+                    evaluation_deadline=deadline,
+                )
+                try:
+                    def _fence_publication(session: Session) -> None:
+                        lease_guard.fence_in_transaction(session)
+
+                    receipt = WatchlistQuantV6PublicationService(
+                        SessionLocal,
+                        transaction_fence=_fence_publication,
+                    ).register_provider_evaluate_publish(
+                        plan=plan,
+                        provider=provider,
+                        evaluation_deadline=deadline,
+                    )
+                    logger.info(
+                        "quant-v6 historical publication id=%d "
+                        "registration=%d members=%d bindings=%d "
+                        "created=%s manifest=%s",
+                        receipt.publication_id,
+                        receipt.registration_id,
+                        len(plan.members),
+                        receipt.binding_count,
+                        receipt.created,
+                        receipt.manifest_sha256,
+                    )
+                    return receipt
+                finally:
+                    provider.close()
+            except QuantV6EvaluationStoppedError:
+                # A failed heartbeat cancels provider I/O immediately. Prefer
+                # the durable lease error when cancellation was lease-driven,
+                # while preserving operator/deadline cancellation otherwise.
+                lease_guard.checkpoint()
+                raise
     finally:
         _watchlist_quant_v6_evaluation_sync_lock.release()
 
@@ -1532,6 +1645,11 @@ async def _watchlist_quant_v6_evaluation_cron() -> None:
     """Run the independent, default-disabled historical evidence publisher."""
     if not settings.watchlist_quant_v6_evaluation_enabled:
         return
+    from app.services.durable_job_lease_service import (
+        LeaseBackendError,
+        LeaseLostError,
+    )
+
     logger.info(
         "quant-v6 historical evaluation enabled: interval=%dm retry=%dm "
         "deadline=%ds",
@@ -1543,13 +1661,28 @@ async def _watchlist_quant_v6_evaluation_cron() -> None:
     while True:
         failed = False
         deferred = False
+        lease_failed = False
         async with _watchlist_quant_v6_evaluation_lock:
             try:
                 outcome = await _run_watchlist_quant_v6_evaluation_tick()
-                deferred = outcome is _OPENING_RESEARCH_DEFERRED
+                deferred = (
+                    outcome is _OPENING_RESEARCH_DEFERRED
+                    or outcome is _JOB_LEASE_BUSY_DEFERRED
+                )
                 _cron_record_success(_CRON_WATCHLIST_QUANT_V6_EVALUATION)
             except asyncio.CancelledError:
                 raise
+            except (LeaseBackendError, LeaseLostError):
+                failed = True
+                lease_failed = True
+                logger.exception(
+                    "quant-v6 durable lease failed; retrying in %ds",
+                    _JOB_LEASE_RETRY_SECONDS,
+                )
+                _cron_record_failure(
+                    _CRON_WATCHLIST_QUANT_V6_EVALUATION,
+                    sys.exc_info()[1],  # type: ignore[arg-type]
+                )
             except Exception:
                 failed = True
                 logger.exception(
@@ -1560,8 +1693,8 @@ async def _watchlist_quant_v6_evaluation_cron() -> None:
                     _CRON_WATCHLIST_QUANT_V6_EVALUATION,
                     sys.exc_info()[1],  # type: ignore[arg-type]
                 )
-        if deferred:
-            delay_seconds = _OPENING_RESEARCH_DEFER_RETRY_SECONDS
+        if deferred or lease_failed:
+            delay_seconds = _JOB_LEASE_RETRY_SECONDS
         else:
             delay_minutes = (
                 settings.watchlist_quant_v6_evaluation_retry_interval_minutes
@@ -1582,6 +1715,9 @@ def _universe_selection_tick_sync() -> object | None:
         )
         return _OPENING_RESEARCH_DEFERRED
     from app.api.universe import build_universe_selection_service
+    from app.services.universe_selection_service import (
+        UniverseSelectionLeaseBusyError,
+    )
     from app.services.watchlist_quant_service import (
         QuantScoringOutsideRTHError,
         WatchlistQuantService,
@@ -1590,7 +1726,14 @@ def _universe_selection_tick_sync() -> object | None:
 
     db = SessionLocal()
     try:
-        response = build_universe_selection_service(db).refresh()
+        try:
+            response = build_universe_selection_service(db).refresh()
+        except UniverseSelectionLeaseBusyError:
+            logger.debug(
+                "universe selection deferred because another process owns "
+                "the durable job lease"
+            )
+            return _JOB_LEASE_BUSY_DEFERRED
         logger.info(
             "universe selection run=%d as_of=%s status=%s coverage=%.3f "
             "selected=%d exploration=%d applied=%s",
@@ -1653,7 +1796,7 @@ async def _run_universe_selection_tick() -> object | None:
         return await asyncio.shield(worker)
     except asyncio.CancelledError:
         try:
-            await worker
+            await _join_universe_worker_cancellation_resistant(worker)
         except Exception:
             logger.exception(
                 "universe selection failed during shutdown"
@@ -1661,26 +1804,56 @@ async def _run_universe_selection_tick() -> object | None:
         raise
 
 
+async def _join_universe_worker_cancellation_resistant(
+    worker: asyncio.Task[object | None],
+) -> object | None:
+    """Join universe work even when shutdown cancellation is repeated."""
+    while True:
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            if worker.done():
+                return worker.result()
+
+
 async def _universe_selection_cron() -> None:
     """Refresh at a bounded interval; daily run identity makes this idempotent."""
     if not settings.universe_selection_enabled:
         return
+    from app.services.durable_job_lease_service import (
+        LeaseBackendError,
+        LeaseLostError,
+    )
+
     await asyncio.sleep(30)
     while True:
         deferred = False
+        lease_failed = False
         async with _universe_selection_lock:
             try:
                 outcome = await _run_universe_selection_tick()
-                deferred = outcome is _OPENING_RESEARCH_DEFERRED
+                deferred = (
+                    outcome is _OPENING_RESEARCH_DEFERRED
+                    or outcome is _JOB_LEASE_BUSY_DEFERRED
+                )
                 _cron_record_success(_CRON_UNIVERSE_SELECTION)
             except asyncio.CancelledError:
                 raise
+            except (LeaseBackendError, LeaseLostError):
+                lease_failed = True
+                logger.exception(
+                    "universe selection durable lease failed"
+                )
+                _cron_record_failure(
+                    _CRON_UNIVERSE_SELECTION,
+                    sys.exc_info()[1],  # type: ignore[arg-type]
+                )
             except Exception:
                 logger.exception("universe selection cron failed")
                 _cron_record_failure(_CRON_UNIVERSE_SELECTION, sys.exc_info()[1])  # type: ignore[arg-type]
         delay_seconds = (
-            _OPENING_RESEARCH_DEFER_RETRY_SECONDS
-            if deferred
+            _JOB_LEASE_RETRY_SECONDS
+            if deferred or lease_failed
             else settings.universe_selection_interval_minutes * 60
         )
         await asyncio.sleep(delay_seconds)

@@ -7,7 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
@@ -68,6 +68,7 @@ from app.schemas import (
     StrategyV2ShadowReplayResponse,
 )
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
+from app.services.durable_job_lease_service import LeaseLostError
 
 
 _SESSION_OPEN = datetime(2026, 7, 10, 13, 30, tzinfo=timezone.utc)
@@ -5004,3 +5005,385 @@ class TestStrategyV2ShadowService:
                 service.compare_adx_challengers(
                     StrategyV2AdxChallengerRequest(symbol="AAPL.US")
                 )
+
+    def test_config_create_fence_runs_before_config_insert(self) -> None:
+        with self._db() as db:
+            events_seen: list[str] = []
+
+            def _fence(session: Session) -> object:
+                assert session is db
+                events_seen.append("fence")
+                return object()
+
+            def _record_dml(
+                _connection,
+                _cursor,
+                statement: str,
+                _parameters,
+                _context,
+                _executemany,
+            ) -> None:
+                normalized = " ".join(statement.upper().split())
+                if (
+                    normalized.startswith("INSERT INTO")
+                    and "STRATEGY_V2_SHADOW_CONFIG" in normalized
+                ):
+                    events_seen.append("config_insert")
+
+            event.listen(
+                self.engine,
+                "before_cursor_execute",
+                _record_dml,
+            )
+            try:
+                response = StrategyV2ShadowService(
+                    db,
+                    transaction_fence=_fence,
+                ).get_config("MSFT.US")
+            finally:
+                event.remove(
+                    self.engine,
+                    "before_cursor_execute",
+                    _record_dml,
+                )
+
+            assert response.symbol == "MSFT.US"
+            assert events_seen.index("fence") < events_seen.index(
+                "config_insert"
+            )
+
+    def test_version_snapshot_fence_runs_before_snapshot_insert(self) -> None:
+        with self._db() as db:
+            config = StrategyV2ShadowConfig(symbol="AAPL.US")
+            db.add(config)
+            db.commit()
+            events_seen: list[str] = []
+
+            def _fence(session: Session) -> object:
+                assert session is db
+                events_seen.append("fence")
+                return object()
+
+            def _record_dml(
+                _connection,
+                _cursor,
+                statement: str,
+                _parameters,
+                _context,
+                _executemany,
+            ) -> None:
+                normalized = " ".join(statement.upper().split())
+                if normalized.startswith(
+                    "INSERT INTO STRATEGY_V2_SHADOW_VERSIONS"
+                ):
+                    events_seen.append("snapshot_insert")
+
+            event.listen(
+                self.engine,
+                "before_cursor_execute",
+                _record_dml,
+            )
+            try:
+                StrategyV2ShadowService(
+                    db,
+                    transaction_fence=_fence,
+                )._ensure_version_snapshot(config)
+            finally:
+                event.remove(
+                    self.engine,
+                    "before_cursor_execute",
+                    _record_dml,
+                )
+
+            assert events_seen == ["fence", "snapshot_insert"]
+
+    def test_update_config_fence_runs_before_flush_and_commit(self) -> None:
+        with self._db() as db:
+            initial = StrategyV2ShadowService(db)
+            initial.get_config("AAPL.US")
+            events_seen: list[str] = []
+
+            def _fence(session: Session) -> object:
+                assert session is db
+                events_seen.append("fence")
+                return object()
+
+            def _record_dml(
+                _connection,
+                _cursor,
+                statement: str,
+                _parameters,
+                _context,
+                _executemany,
+            ) -> None:
+                normalized = " ".join(statement.upper().split())
+                if (
+                    normalized.startswith("UPDATE")
+                    and "STRATEGY_V2_SHADOW_CONFIG" in normalized
+                ):
+                    events_seen.append("config_update")
+
+            event.listen(
+                self.engine,
+                "before_cursor_execute",
+                _record_dml,
+            )
+            try:
+                response = StrategyV2ShadowService(
+                    db,
+                    transaction_fence=_fence,
+                ).update_config(
+                    StrategyV2ShadowConfigUpdate(enabled=True),
+                    symbol="AAPL.US",
+                )
+            finally:
+                event.remove(
+                    self.engine,
+                    "before_cursor_execute",
+                    _record_dml,
+                )
+
+            assert response.enabled is True
+            assert events_seen.index("fence") < events_seen.index(
+                "config_update"
+            )
+
+    def test_fence_failure_propagates_without_committing_config_write(
+        self,
+    ) -> None:
+        with self._db() as db:
+            StrategyV2ShadowService(db).get_config("AAPL.US")
+
+            def _lose_lease(_session: Session) -> object:
+                raise LeaseLostError("injected config fence loss")
+
+            service = StrategyV2ShadowService(
+                db,
+                transaction_fence=_lose_lease,
+            )
+            with pytest.raises(LeaseLostError):
+                service.update_config(
+                    StrategyV2ShadowConfigUpdate(enabled=True),
+                    symbol="AAPL.US",
+                )
+            db.rollback()
+
+        with self._db() as verify_db:
+            config = verify_db.query(StrategyV2ShadowConfig).filter_by(
+                symbol="AAPL.US"
+            ).one()
+            assert config.enabled is False
+
+    def test_checkpoint_failure_propagates_before_config_access(self) -> None:
+        with self._db() as db:
+            checkpoints = 0
+
+            def _lose_checkpoint() -> object:
+                nonlocal checkpoints
+                checkpoints += 1
+                raise LeaseLostError("injected operation checkpoint loss")
+
+            service = StrategyV2ShadowService(
+                db,
+                operation_checkpoint=_lose_checkpoint,
+            )
+            with pytest.raises(LeaseLostError):
+                service.get_config("MSFT.US")
+
+            assert checkpoints == 1
+            assert (
+                db.query(StrategyV2ShadowConfig)
+                .filter_by(symbol="MSFT.US")
+                .first()
+                is None
+            )
+
+    def test_wait_prune_fence_runs_before_delete(self) -> None:
+        with self._db() as db:
+            old_bar = _SESSION_OPEN - timedelta(days=60)
+            db.add_all([
+                StrategyV2ShadowDecision(
+                    idempotency_key=f"old-wait-for-fence-{index}",
+                    symbol="AAPL.US",
+                    config_version="a" * 64,
+                    session_date=old_bar.date(),
+                    bar_at=old_bar + timedelta(minutes=index),
+                    action=StrategyV2Action.WAIT.value,
+                    reason="NO_SIGNAL",
+                    state_before="FLAT",
+                    state_after="FLAT",
+                    gate_passed=False,
+                    breach_armed=False,
+                )
+                for index in range(2)
+            ])
+            db.commit()
+            events_seen: list[str] = []
+
+            def _fence(session: Session) -> object:
+                assert session is db
+                assert session.in_transaction() is False
+                events_seen.append("fence")
+                return object()
+
+            def _record_dml(
+                _connection,
+                _cursor,
+                statement: str,
+                _parameters,
+                _context,
+                _executemany,
+            ) -> None:
+                normalized = " ".join(statement.upper().split())
+                if (
+                    normalized.startswith("DELETE FROM")
+                    and "STRATEGY_V2_SHADOW_DECISIONS" in normalized
+                ):
+                    events_seen.append("decision_delete")
+
+            event.listen(
+                self.engine,
+                "before_cursor_execute",
+                _record_dml,
+            )
+            try:
+                pruned = StrategyV2ShadowService(
+                    db,
+                    transaction_fence=_fence,
+                ).prune_expired_wait_decisions(
+                    retention_days=45,
+                    batch_size=1,
+                    max_batches=None,
+                    now=_SESSION_OPEN,
+                )
+            finally:
+                event.remove(
+                    self.engine,
+                    "before_cursor_execute",
+                    _record_dml,
+                )
+
+            assert pruned.deleted == 2
+            assert pruned.batches == 2
+            assert events_seen == [
+                "fence",
+                "decision_delete",
+                "fence",
+                "decision_delete",
+            ]
+
+    def test_second_wait_prune_fence_failure_keeps_unowned_batch(self) -> None:
+        with self._db() as db:
+            old_bar = _SESSION_OPEN - timedelta(days=60)
+            db.add_all([
+                StrategyV2ShadowDecision(
+                    idempotency_key=f"old-wait-second-fence-{index}",
+                    symbol="AAPL.US",
+                    config_version="a" * 64,
+                    session_date=old_bar.date(),
+                    bar_at=old_bar + timedelta(minutes=index),
+                    action=StrategyV2Action.WAIT.value,
+                    reason="NO_SIGNAL",
+                    state_before="FLAT",
+                    state_after="FLAT",
+                    gate_passed=False,
+                    breach_armed=False,
+                )
+                for index in range(2)
+            ])
+            db.commit()
+            fence_calls = 0
+
+            def _lose_second_fence(session: Session) -> object:
+                nonlocal fence_calls
+                assert session is db
+                assert session.in_transaction() is False
+                fence_calls += 1
+                if fence_calls == 2:
+                    raise LeaseLostError(
+                        "injected second wait-prune fence loss"
+                    )
+                return object()
+
+            with pytest.raises(
+                LeaseLostError,
+                match="second wait-prune fence loss",
+            ):
+                StrategyV2ShadowService(
+                    db,
+                    transaction_fence=_lose_second_fence,
+                ).prune_expired_wait_decisions(
+                    retention_days=45,
+                    batch_size=1,
+                    max_batches=None,
+                    now=_SESSION_OPEN,
+                )
+            db.rollback()
+
+            assert fence_calls == 2
+            assert db.query(StrategyV2ShadowDecision).count() == 1
+
+    def test_wait_prune_fence_failure_keeps_decisions(self) -> None:
+        with self._db() as db:
+            old_bar = _SESSION_OPEN - timedelta(days=60)
+            db.add(
+                StrategyV2ShadowDecision(
+                    idempotency_key="old-wait-lost-fence",
+                    symbol="AAPL.US",
+                    config_version="a" * 64,
+                    session_date=old_bar.date(),
+                    bar_at=old_bar,
+                    action=StrategyV2Action.WAIT.value,
+                    reason="NO_SIGNAL",
+                    state_before="FLAT",
+                    state_after="FLAT",
+                    gate_passed=False,
+                    breach_armed=False,
+                )
+            )
+            db.commit()
+
+            def _lose_lease(_session: Session) -> object:
+                raise LeaseLostError("injected wait-prune fence loss")
+
+            with pytest.raises(LeaseLostError):
+                StrategyV2ShadowService(
+                    db,
+                    transaction_fence=_lose_lease,
+                ).prune_expired_wait_decisions(
+                    retention_days=45,
+                    batch_size=10,
+                    now=_SESSION_OPEN,
+                )
+            db.rollback()
+
+            assert db.query(StrategyV2ShadowDecision).count() == 1
+
+    def test_universe_preserving_update_rejects_operator_owned_config(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service = StrategyV2ShadowService(db)
+            service.get_config("AAPL.US")
+            config = (
+                db.query(StrategyV2ShadowConfig)
+                .filter_by(symbol="AAPL.US")
+                .one()
+            )
+            assert config.universe_managed is False
+
+            with pytest.raises(ValueError, match="no longer universe managed"):
+                service.update_config(
+                    StrategyV2ShadowConfigUpdate(enabled=True),
+                    symbol="AAPL.US",
+                    preserve_universe_management=True,
+                )
+            db.rollback()
+
+            stored = (
+                db.query(StrategyV2ShadowConfig)
+                .filter_by(symbol="AAPL.US")
+                .one()
+            )
+            assert stored.enabled is False
+            assert stored.universe_managed is False

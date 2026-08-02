@@ -6,7 +6,17 @@ import sys
 
 from app.config import settings
 from app.database import SessionLocal, engine
-from app.services.llm_interaction_service import LLMInteractionService
+from app.services.durable_job_lease_service import (
+    DurableJobLeaseError,
+    DurableJobLeaseService,
+)
+from app.services.llm_interaction_service import (
+    LLM_STORAGE_MAINTENANCE_LEASE_KEY,
+    LLMInteractionService,
+)
+
+
+_STORAGE_MAINTENANCE_LEASE_KEY = LLM_STORAGE_MAINTENANCE_LEASE_KEY
 
 
 def _vacuum_sqlite() -> None:
@@ -85,22 +95,53 @@ def main() -> int:
     if args.vacuum and engine.dialect.name != "sqlite":
         parser.error("--vacuum is supported only for SQLite")
 
-    db = SessionLocal()
     try:
-        service = LLMInteractionService(db)
-        pruned = service.prune_expired(
-            retention_days=args.retention_days,
-            no_action_retention_days=args.no_action_retention_days,
-            batch_size=args.batch_size,
-            max_batches=None,
+        lease_service = DurableJobLeaseService(
+            session_factory=SessionLocal,
+            default_ttl_seconds=settings.job_lease_ttl_seconds,
         )
-        compacted = service.compact_oversized_contexts(
-            max_bytes=args.context_max_bytes,
-            batch_size=min(25, args.batch_size),
-            max_rows=None,
+        lease = lease_service.try_acquire(
+            _STORAGE_MAINTENANCE_LEASE_KEY
         )
-    finally:
-        db.close()
+    except DurableJobLeaseError as exc:
+        print(f"error: durable storage lease failed: {exc}", file=sys.stderr)
+        return 2
+    if lease is None:
+        print(
+            "error: storage maintenance is already running in another process",
+            file=sys.stderr,
+        )
+        return 3
+
+    try:
+        with lease_service.keepalive(
+            lease,
+            interval_seconds=settings.job_lease_heartbeat_seconds,
+        ) as lease_guard:
+            db = SessionLocal()
+            try:
+                service = LLMInteractionService(db)
+                pruned = service.prune_expired(
+                    retention_days=args.retention_days,
+                    no_action_retention_days=args.no_action_retention_days,
+                    batch_size=args.batch_size,
+                    max_batches=None,
+                    transaction_fence=lease_guard.fence_in_transaction,
+                    operation_checkpoint=lease_guard.checkpoint,
+                )
+                compacted = service.compact_oversized_contexts(
+                    max_bytes=args.context_max_bytes,
+                    batch_size=min(25, args.batch_size),
+                    max_rows=None,
+                    transaction_fence=lease_guard.fence_in_transaction,
+                    operation_checkpoint=lease_guard.checkpoint,
+                )
+                lease_guard.checkpoint()
+            finally:
+                db.close()
+    except DurableJobLeaseError as exc:
+        print(f"error: durable storage lease failed: {exc}", file=sys.stderr)
+        return 2
 
     vacuumed = False
     if args.vacuum:

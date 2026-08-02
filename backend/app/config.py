@@ -44,6 +44,18 @@ class Settings(BaseSettings):
             )
         return self
     database_url: str = "sqlite:///./data/auto_trade.db"
+    job_lease_ttl_seconds: int = Field(
+        default=120,
+        ge=3,
+        le=3600,
+        validation_alias="AUTO_TRADE_JOB_LEASE_TTL_SECONDS",
+    )
+    job_lease_heartbeat_seconds: int = Field(
+        default=30,
+        ge=1,
+        le=1200,
+        validation_alias="AUTO_TRADE_JOB_LEASE_HEARTBEAT_SECONDS",
+    )
 
     longbridge_app_key: str = ""
     longbridge_app_secret: str = ""
@@ -799,6 +811,10 @@ class Settings(BaseSettings):
             raise ValueError(
                 "watchlist quant-v6 evaluation retry interval must not "
                 "exceed its regular interval"
+            )
+        if self.job_lease_heartbeat_seconds >= self.job_lease_ttl_seconds:
+            raise ValueError(
+                "job lease heartbeat interval must be shorter than its TTL"
             )
         self.llm_min_confidence = max(self.llm_min_confidence, 0.7)
         self.llm_max_stripe_width_pct = min(self.llm_max_stripe_width_pct, 8.0)

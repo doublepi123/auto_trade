@@ -17,6 +17,7 @@ from app.models import Base
 from app.services import watchlist_quant_v6_evaluation_service
 from app.services import watchlist_quant_v6_historical_provider
 from app.services import watchlist_quant_v6_publication_service
+from app.services import durable_job_lease_service
 from app.services.watchlist_quant_v6_deadline import (
     QuantV6EvaluationCancelledError,
     QuantV6EvaluationDeadline,
@@ -38,8 +39,87 @@ def _outside_opening_research_quiet_window(
     )
 
 
+@pytest.fixture(autouse=True)
+def _successful_durable_job_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> SimpleNamespace:
+    state = SimpleNamespace(
+        services=[],
+        acquired_keys=[],
+        keepalives=[],
+        guards=[],
+        fences=[],
+        events=[],
+    )
+    handle = object()
+
+    class _Guard:
+        def __init__(self) -> None:
+            self.on_lost: object | None = None
+
+        def __enter__(self) -> _Guard:
+            state.events.append("keepalive-enter")
+            return self
+
+        def __exit__(self, *_args: object) -> bool:
+            state.events.append("keepalive-exit")
+            return False
+
+        def checkpoint(self) -> object:
+            state.events.append("lease-checkpoint")
+            return handle
+
+        def fence_in_transaction(self, session: object) -> object:
+            self.checkpoint()
+            state.fences.append(session)
+            return handle
+
+    class _Service:
+        def __init__(
+            self,
+            session_factory: object,
+            *,
+            default_ttl_seconds: object,
+        ) -> None:
+            state.services.append((session_factory, default_ttl_seconds))
+
+        def try_acquire(self, lease_key: str) -> object:
+            state.acquired_keys.append(lease_key)
+            return handle
+
+        def keepalive(
+            self,
+            acquired: object,
+            *,
+            interval_seconds: object,
+            on_lost: object,
+        ) -> _Guard:
+            assert acquired is handle
+            guard = _Guard()
+            guard.on_lost = on_lost
+            state.keepalives.append((interval_seconds, on_lost))
+            state.guards.append(guard)
+            return guard
+
+        def fence_in_transaction(
+            self,
+            session: object,
+            acquired: object,
+        ) -> None:
+            assert acquired is handle
+            state.fences.append(session)
+
+    monkeypatch.setattr(
+        durable_job_lease_service,
+        "DurableJobLeaseService",
+        _Service,
+    )
+    return state
+
+
 def test_quant_v6_cron_is_default_disabled_without_io(
     monkeypatch: pytest.MonkeyPatch,
+    _successful_durable_job_lease: SimpleNamespace,
 ) -> None:
     session_factory = pytest.fail
     monkeypatch.setattr(
@@ -60,10 +140,12 @@ def test_quant_v6_cron_is_default_disabled_without_io(
     )
 
     main_module._watchlist_quant_v6_evaluation_tick_sync()
+    assert _successful_durable_job_lease.services == []
 
 
 def test_quant_v6_quiet_window_skips_before_plan_or_provider(
     monkeypatch: pytest.MonkeyPatch,
+    _successful_durable_job_lease: SimpleNamespace,
 ) -> None:
     monkeypatch.setattr(
         main_module.settings,
@@ -90,6 +172,7 @@ def test_quant_v6_quiet_window_skips_before_plan_or_provider(
         main_module._watchlist_quant_v6_evaluation_tick_sync()
         is main_module._OPENING_RESEARCH_DEFERRED
     )
+    assert _successful_durable_job_lease.services == []
 
 
 def test_quant_v6_rechecks_quiet_window_after_sync_lock(
@@ -117,6 +200,74 @@ def test_quant_v6_rechecks_quiet_window_after_sync_lock(
         main_module._watchlist_quant_v6_evaluation_tick_sync(deadline)
         is main_module._OPENING_RESEARCH_DEFERRED
     )
+    assert main_module._watchlist_quant_v6_evaluation_sync_lock.acquire(
+        blocking=False
+    )
+    main_module._watchlist_quant_v6_evaluation_sync_lock.release()
+
+
+def test_quant_v6_busy_lease_defers_before_plan_provider_or_business_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = pytest.fail
+    acquired_keys: list[str] = []
+
+    class _BusyLeaseService:
+        def __init__(
+            self,
+            session_factory: object,
+            *,
+            default_ttl_seconds: object,
+        ) -> None:
+            assert session_factory is pytest.fail
+            assert default_ttl_seconds == (
+                main_module.settings.job_lease_ttl_seconds
+            )
+
+        def try_acquire(self, lease_key: str) -> None:
+            acquired_keys.append(lease_key)
+            return None
+
+        def keepalive(self, *_args: object, **_kwargs: object) -> object:
+            pytest.fail("busy lease started keepalive")
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(main_module, "SessionLocal", session_factory)
+    monkeypatch.setattr(
+        durable_job_lease_service,
+        "DurableJobLeaseService",
+        _BusyLeaseService,
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_evaluation_service,
+        "build_latest_quant_v6_registration_plan",
+        lambda **_kwargs: pytest.fail("busy lease built a plan"),
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_historical_provider,
+        "QuantV6HistoricalBarProvider",
+        lambda **_kwargs: pytest.fail("busy lease created a provider"),
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_publication_service,
+        "WatchlistQuantV6PublicationService",
+        lambda *_args, **_kwargs: pytest.fail(
+            "busy lease created a publication service"
+        ),
+    )
+
+    outcome = main_module._watchlist_quant_v6_evaluation_tick_sync(
+        QuantV6EvaluationDeadline(30)
+    )
+
+    assert outcome is main_module._JOB_LEASE_BUSY_DEFERRED
+    assert acquired_keys == [
+        main_module._WATCHLIST_QUANT_V6_EVALUATION_LEASE_KEY
+    ]
     assert main_module._watchlist_quant_v6_evaluation_sync_lock.acquire(
         blocking=False
     )
@@ -151,6 +302,7 @@ async def test_quant_v6_disabled_cron_does_not_sleep_or_start_worker(
 
 def test_quant_v6_tick_orchestrates_once_and_closes_provider(
     monkeypatch: pytest.MonkeyPatch,
+    _successful_durable_job_lease: SimpleNamespace,
 ) -> None:
     plan = SimpleNamespace(members=(object(), object()))
     provider = SimpleNamespace(closed=False)
@@ -164,8 +316,14 @@ def test_quant_v6_tick_orchestrates_once_and_closes_provider(
     provider.close = close_provider
 
     class FakePublicationService:
-        def __init__(self, session_factory: object) -> None:
+        def __init__(
+            self,
+            session_factory: object,
+            *,
+            transaction_fence: object,
+        ) -> None:
             assert session_factory is main_module.SessionLocal
+            self.transaction_fence = transaction_fence
 
         def register_provider_evaluate_publish(
             self,
@@ -174,6 +332,8 @@ def test_quant_v6_tick_orchestrates_once_and_closes_provider(
             provider: object,
             evaluation_deadline: object,
         ) -> object:
+            assert callable(self.transaction_fence)
+            self.transaction_fence(object())
             calls.append((plan, provider, evaluation_deadline))
             return SimpleNamespace(
                 publication_id=7,
@@ -222,6 +382,11 @@ def test_quant_v6_tick_orchestrates_once_and_closes_provider(
     assert provider_deadlines == [deadline]
     assert calls == [(plan, provider, deadline)]
     assert provider.closed is True
+    assert _successful_durable_job_lease.acquired_keys == [
+        main_module._WATCHLIST_QUANT_V6_EVALUATION_LEASE_KEY
+    ]
+    assert len(_successful_durable_job_lease.fences) == 1
+    assert _successful_durable_job_lease.events[-1] == "keepalive-exit"
 
 
 def test_quant_v6_tick_closes_provider_when_publication_fails(
@@ -231,7 +396,13 @@ def test_quant_v6_tick_closes_provider_when_publication_fails(
     provider.close = lambda: setattr(provider, "closed", True)
 
     class FailingPublicationService:
-        def __init__(self, _session_factory: object) -> None:
+        def __init__(
+            self,
+            _session_factory: object,
+            *,
+            transaction_fence: object,
+        ) -> None:
+            del transaction_fence
             pass
 
         def register_provider_evaluate_publish(self, **_kwargs: object) -> object:
@@ -262,6 +433,246 @@ def test_quant_v6_tick_closes_provider_when_publication_fails(
         main_module._watchlist_quant_v6_evaluation_tick_sync()
 
     assert provider.closed is True
+
+
+def test_quant_v6_heartbeat_loss_cancels_deadline_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    provider = SimpleNamespace(closed=False)
+    provider.close = lambda: (
+        events.append("provider-close"),
+        setattr(provider, "closed", True),
+    )
+    handle = object()
+    lost = durable_job_lease_service.LeaseLostError(
+        "quant-v6 lease heartbeat was lost"
+    )
+    guard: object | None = None
+
+    class _LostGuard:
+        def __init__(self, on_lost: object) -> None:
+            self.on_lost = on_lost
+            self.failure: Exception | None = None
+
+        def __enter__(self) -> _LostGuard:
+            events.append("keepalive-enter")
+            return self
+
+        def __exit__(self, *_args: object) -> bool:
+            events.append("keepalive-exit")
+            return False
+
+        def checkpoint(self) -> object:
+            if self.failure is not None:
+                raise self.failure
+            return handle
+
+        def fence_in_transaction(self, _session: object) -> object:
+            return self.checkpoint()
+
+        def lose(self) -> None:
+            self.failure = lost
+            assert callable(self.on_lost)
+            self.on_lost(lost)
+
+    class _LeaseService:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def try_acquire(self, _lease_key: str) -> object:
+            return handle
+
+        def keepalive(
+            self,
+            _handle: object,
+            *,
+            interval_seconds: object,
+            on_lost: object,
+        ) -> _LostGuard:
+            nonlocal guard
+            assert interval_seconds == (
+                main_module.settings.job_lease_heartbeat_seconds
+            )
+            guard = _LostGuard(on_lost)
+            return guard
+
+    class _PublicationService:
+        def __init__(
+            self,
+            _session_factory: object,
+            *,
+            transaction_fence: object,
+        ) -> None:
+            del transaction_fence
+
+        def register_provider_evaluate_publish(
+            self,
+            *,
+            evaluation_deadline: QuantV6EvaluationDeadline,
+            **_kwargs: object,
+        ) -> object:
+            events.append("heartbeat-loss")
+            assert isinstance(guard, _LostGuard)
+            guard.lose()
+            assert evaluation_deadline.cancel_event.is_set()
+            evaluation_deadline.checkpoint()
+            pytest.fail("cancelled deadline continued publication")
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        durable_job_lease_service,
+        "DurableJobLeaseService",
+        _LeaseService,
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_evaluation_service,
+        "build_latest_quant_v6_registration_plan",
+        lambda **_kwargs: SimpleNamespace(members=()),
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_historical_provider,
+        "QuantV6HistoricalBarProvider",
+        lambda **_kwargs: provider,
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_publication_service,
+        "WatchlistQuantV6PublicationService",
+        _PublicationService,
+    )
+
+    with pytest.raises(
+        durable_job_lease_service.LeaseLostError,
+        match="heartbeat was lost",
+    ):
+        main_module._watchlist_quant_v6_evaluation_tick_sync(
+            QuantV6EvaluationDeadline(30)
+        )
+
+    assert provider.closed is True
+    assert events == [
+        "keepalive-enter",
+        "heartbeat-loss",
+        "provider-close",
+        "keepalive-exit",
+    ]
+
+
+def test_quant_v6_release_failure_wins_over_normal_return_after_provider_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    provider = SimpleNamespace(closed=False)
+
+    def _close_provider() -> None:
+        provider.closed = True
+        events.append("provider-close")
+
+    provider.close = _close_provider
+    handle = object()
+
+    class _ReleaseFailingGuard:
+        def __enter__(self) -> _ReleaseFailingGuard:
+            events.append("keepalive-enter")
+            return self
+
+        def __exit__(
+            self,
+            exc_type: object,
+            _exc_value: object,
+            _traceback: object,
+        ) -> bool:
+            assert exc_type is None
+            assert provider.closed is True
+            events.append("keepalive-exit")
+            raise durable_job_lease_service.LeaseBackendError(
+                "quant-v6 lease release failed"
+            )
+
+        def checkpoint(self) -> object:
+            return handle
+
+        def fence_in_transaction(self, _session: object) -> object:
+            events.append("publication-fence")
+            return handle
+
+    class _LeaseService:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            pass
+
+        def try_acquire(self, _lease_key: str) -> object:
+            return handle
+
+        def keepalive(self, *_args: object, **_kwargs: object) -> object:
+            return _ReleaseFailingGuard()
+
+    class _PublicationService:
+        def __init__(
+            self,
+            _session_factory: object,
+            *,
+            transaction_fence: object,
+        ) -> None:
+            self.transaction_fence = transaction_fence
+
+        def register_provider_evaluate_publish(
+            self,
+            **_kwargs: object,
+        ) -> object:
+            assert callable(self.transaction_fence)
+            self.transaction_fence(object())
+            return SimpleNamespace(
+                publication_id=7,
+                registration_id=3,
+                binding_count=0,
+                created=True,
+                manifest_sha256="a" * 64,
+            )
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        durable_job_lease_service,
+        "DurableJobLeaseService",
+        _LeaseService,
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_evaluation_service,
+        "build_latest_quant_v6_registration_plan",
+        lambda **_kwargs: SimpleNamespace(members=()),
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_historical_provider,
+        "QuantV6HistoricalBarProvider",
+        lambda **_kwargs: provider,
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_publication_service,
+        "WatchlistQuantV6PublicationService",
+        _PublicationService,
+    )
+
+    with pytest.raises(
+        durable_job_lease_service.LeaseBackendError,
+        match="release failed",
+    ):
+        main_module._watchlist_quant_v6_evaluation_tick_sync(
+            QuantV6EvaluationDeadline(30)
+        )
+
+    assert events == [
+        "keepalive-enter",
+        "publication-fence",
+        "provider-close",
+        "keepalive-exit",
+    ]
 
 
 def test_quant_v6_tick_only_mutates_immutable_evidence_tables(
@@ -811,6 +1222,96 @@ async def test_quant_v6_cron_rechecks_after_quiet_window_defer(
     ]
 
 
+@pytest.mark.asyncio
+async def test_quant_v6_cron_rechecks_busy_lease_after_sixty_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    outcomes = iter((main_module._JOB_LEASE_BUSY_DEFERRED, object()))
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) == 3:
+            raise asyncio.CancelledError
+
+    async def next_outcome() -> object:
+        return next(outcomes)
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_interval_minutes",
+        1_440,
+    )
+    monkeypatch.setattr(main_module.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(
+        main_module,
+        "_run_watchlist_quant_v6_evaluation_tick",
+        next_outcome,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await main_module._watchlist_quant_v6_evaluation_cron()
+
+    assert sleeps == [
+        main_module._WATCHLIST_QUANT_V6_INITIAL_DELAY_SECONDS,
+        main_module._JOB_LEASE_RETRY_SECONDS,
+        1_440 * 60,
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "lease_error",
+    [
+        durable_job_lease_service.LeaseBackendError("lease database failed"),
+        durable_job_lease_service.LeaseLostError("lease ownership was lost"),
+    ],
+)
+async def test_quant_v6_cron_retries_lease_failures_after_sixty_seconds(
+    monkeypatch: pytest.MonkeyPatch,
+    lease_error: Exception,
+) -> None:
+    sleeps: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) == 2:
+            raise asyncio.CancelledError
+
+    async def fail_lease() -> None:
+        raise lease_error
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_retry_interval_minutes",
+        30,
+    )
+    monkeypatch.setattr(main_module.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(
+        main_module,
+        "_run_watchlist_quant_v6_evaluation_tick",
+        fail_lease,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await main_module._watchlist_quant_v6_evaluation_cron()
+
+    assert sleeps == [
+        main_module._WATCHLIST_QUANT_V6_INITIAL_DELAY_SECONDS,
+        main_module._JOB_LEASE_RETRY_SECONDS,
+    ]
+
+
 def test_quant_v6_tick_is_statically_isolated_from_live_paths() -> None:
     source = inspect.getsource(
         main_module._watchlist_quant_v6_evaluation_tick_sync
@@ -883,9 +1384,9 @@ async def test_quant_v6_cron_records_success_when_tick_returns_normally(
         main_module._register_cron_health_jobs()
         main_module._activate_cron_health_jobs()
 
-        # The tick returns normally (legitimate no-due-work no-op counts).
-        async def noop_tick() -> None:
-            return
+        # Lease contention is a legitimate no-work result, not a job failure.
+        async def noop_tick() -> object:
+            return main_module._JOB_LEASE_BUSY_DEFERRED
 
         monkeypatch.setattr(
             main_module,

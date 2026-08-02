@@ -9,7 +9,7 @@ from app.api.auth import require_api_key
 from app.api.deps import extract_actor, get_audit_logger
 from app.config import settings
 from app.core.audit import AuditLogger
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.domain.universe_selection.catalog import INDEX_CANDIDATE_CATALOG
 from app.models import (
     StrategyConfig,
@@ -28,6 +28,11 @@ from app.schemas import (
     UniverseSelectionRunPage,
     UniverseSelectionRunResponse,
 )
+from app.services.durable_job_lease_service import (
+    DurableJobLeaseService,
+    LeaseBackendError,
+    LeaseLostError,
+)
 from app.services.universe_promotion_service import UniversePromotionService
 from app.services.rotation_forward_scorecard_service import (
     RotationForwardScorecardService,
@@ -38,6 +43,7 @@ from app.services.research_observation_health_service import (
 from app.services.universe_run_history_service import UniverseRunHistoryService
 from app.services.universe_selection_service import (
     UniverseRefreshResult,
+    UniverseSelectionLeaseBusyError,
     UniverseSelectionService,
     minimum_peer_observation_dollar_volume,
     observation_pool_overrides,
@@ -67,6 +73,10 @@ def build_universe_selection_service(
             settings.universe_selection_apply_to_watchlist
         ),
         enable_shadow=settings.universe_selection_enable_shadow,
+        lease_service=DurableJobLeaseService(
+            session_factory=SessionLocal,
+            default_ttl_seconds=settings.job_lease_ttl_seconds,
+        ),
     )
 
 
@@ -306,6 +316,30 @@ def refresh_universe(
                     ),
                 ) from exc
         return response
+    except UniverseSelectionLeaseBusyError as exc:
+        result = "FAILED"
+        summary = {"detail": type(exc).__name__}
+        raise HTTPException(
+            status_code=409,
+            detail="universe selection refresh is already running",
+            headers={
+                "Retry-After": str(
+                    settings.job_lease_heartbeat_seconds
+                )
+            },
+        ) from exc
+    except (LeaseBackendError, LeaseLostError) as exc:
+        result = "FAILED"
+        summary = {"detail": type(exc).__name__}
+        raise HTTPException(
+            status_code=503,
+            detail="universe selection lease is temporarily unavailable",
+            headers={
+                "Retry-After": str(
+                    settings.job_lease_heartbeat_seconds
+                )
+            },
+        ) from exc
     except Exception as exc:
         result = "FAILED"
         summary = {"detail": type(exc).__name__}

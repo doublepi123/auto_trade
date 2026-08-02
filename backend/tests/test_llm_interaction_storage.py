@@ -323,6 +323,74 @@ def test_prune_limits_each_online_run_to_bounded_batches() -> None:
     assert db.query(LLMInteraction).count() == 3
 
 
+def test_prune_fences_each_batch_and_stops_after_lease_loss() -> None:
+    db = _session()
+    now = datetime(2026, 7, 16, tzinfo=timezone.utc)
+    db.add_all(
+        [_interaction(created_at=now - timedelta(days=20)) for _ in range(2)]
+    )
+    db.commit()
+    fence_calls = 0
+
+    def fence_batch(session: Session) -> None:
+        nonlocal fence_calls
+        # The preceding ID scan must have been rolled back so fencing starts
+        # a fresh transaction instead of upgrading a stale WAL snapshot.
+        assert session.in_transaction() is False
+        fence_calls += 1
+        if fence_calls == 2:
+            raise RuntimeError("storage lease lost before batch two")
+
+    with pytest.raises(RuntimeError, match="lease lost"):
+        LLMInteractionService(db).prune_expired(
+            retention_days=90,
+            no_action_retention_days=14,
+            batch_size=1,
+            now=now,
+            transaction_fence=fence_batch,
+        )
+
+    assert fence_calls == 2
+    assert db.query(LLMInteraction).count() == 1
+
+
+def test_prune_fenced_delete_rechecks_rows_changed_after_scan() -> None:
+    db = _session()
+    now = datetime(2026, 7, 16, tzinfo=timezone.utc)
+    target = _interaction(created_at=now - timedelta(days=20))
+    db.add(target)
+    db.commit()
+    target_id = target.id
+
+    def mutate_before_fence(session: Session) -> None:
+        # ``prune_expired`` must end its ID-scan snapshot before invoking the
+        # fence. Simulate a writer that committed in that hand-off window;
+        # the protected DELETE still has to recheck the expiration predicate.
+        assert session.in_transaction() is False
+        with Session(bind=session.get_bind()) as concurrent:
+            concurrent.query(LLMInteraction).filter(
+                LLMInteraction.id == target_id,
+            ).update(
+                {LLMInteraction.applied: True},
+                synchronize_session=False,
+            )
+            concurrent.commit()
+
+    result = LLMInteractionService(db).prune_expired(
+        retention_days=90,
+        no_action_retention_days=14,
+        batch_size=1,
+        now=now,
+        transaction_fence=mutate_before_fence,
+    )
+
+    assert result.deleted == 0
+    assert result.batches == 1
+    preserved = db.get(LLMInteraction, target_id)
+    assert preserved is not None
+    assert preserved.applied is True
+
+
 def test_prune_rechecks_expiration_predicate_before_delete(
     monkeypatch,
 ) -> None:
@@ -394,6 +462,82 @@ def test_compact_oversized_contexts_rewrites_legacy_rows_in_batches() -> None:
         53.0,
         79.0,
     ]
+
+
+def test_compaction_fences_each_batch_and_stops_after_lease_loss() -> None:
+    db = _session()
+    now = datetime(2026, 7, 16, tzinfo=timezone.utc)
+    oversized = json.dumps({"padding": "x" * 3_000})
+    db.add_all(
+        [
+            _interaction(created_at=now, context_snapshot=oversized),
+            _interaction(created_at=now, context_snapshot=oversized),
+        ]
+    )
+    db.commit()
+    fence_calls = 0
+
+    def fence_batch(session: Session) -> None:
+        nonlocal fence_calls
+        assert session.in_transaction() is False
+        fence_calls += 1
+        if fence_calls == 2:
+            raise RuntimeError("storage lease lost before compaction batch two")
+
+    with pytest.raises(RuntimeError, match="lease lost"):
+        LLMInteractionService(db).compact_oversized_contexts(
+            max_bytes=2048,
+            batch_size=1,
+            transaction_fence=fence_batch,
+        )
+
+    stored = [
+        row.context_snapshot
+        for row in db.query(LLMInteraction)
+        .order_by(LLMInteraction.id.asc())
+        .all()
+    ]
+    assert fence_calls == 2
+    assert len(stored[0].encode("utf-8")) <= 2048
+    assert len(stored[1].encode("utf-8")) > 2048
+
+
+def test_compaction_fenced_update_preserves_row_changed_after_scan() -> None:
+    db = _session()
+    now = datetime(2026, 7, 16, tzinfo=timezone.utc)
+    original = json.dumps({"padding": "x" * 3_000})
+    concurrent_value = json.dumps({"padding": "y" * 3_000})
+    target = _interaction(
+        created_at=now,
+        context_snapshot=original,
+    )
+    db.add(target)
+    db.commit()
+    target_id = target.id
+
+    def mutate_before_fence(session: Session) -> None:
+        assert session.in_transaction() is False
+        with Session(bind=session.get_bind()) as concurrent:
+            concurrent.query(LLMInteraction).filter(
+                LLMInteraction.id == target_id,
+            ).update(
+                {LLMInteraction.context_snapshot: concurrent_value},
+                synchronize_session=False,
+            )
+            concurrent.commit()
+
+    result = LLMInteractionService(db).compact_oversized_contexts(
+        max_bytes=2048,
+        batch_size=1,
+        transaction_fence=mutate_before_fence,
+    )
+
+    assert result.inspected == 1
+    assert result.compacted == 0
+    assert result.batches == 1
+    preserved = db.get(LLMInteraction, target_id)
+    assert preserved is not None
+    assert preserved.context_snapshot == concurrent_value
 
 
 def test_compaction_rewrites_bad_prefix_without_starving_later_rows() -> None:

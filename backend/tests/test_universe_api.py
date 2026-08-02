@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Generator
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -19,6 +20,14 @@ from app.domain.universe_selection.selector import UniverseSelectionConfig
 from app.models import Base, StrategyConfig
 from app.schemas import UniverseObservationHealthResponse
 from app.services.universe_selection_service import UniverseSelectionService
+from app.services.durable_job_lease_service import (
+    DurableJobLeaseService,
+    LeaseBackendError,
+    LeaseLostError,
+)
+from app.services.universe_selection_service import (
+    UniverseSelectionLeaseBusyError,
+)
 
 _NOW = datetime(2026, 7, 23, 19, tzinfo=timezone.utc)
 _CATALOG = (
@@ -92,9 +101,11 @@ class _Broker:
 class _Audit:
     def __init__(self) -> None:
         self.actions: list[str] = []
+        self.records: list[dict[str, object]] = []
 
-    def record(self, action: str, **_kwargs: object) -> None:
+    def record(self, action: str, **kwargs: object) -> None:
         self.actions.append(action)
+        self.records.append({"action": action, **kwargs})
 
 
 def _service(db: Session) -> UniverseSelectionService:
@@ -153,6 +164,12 @@ def test_production_builder_uses_active_strategy_costs(
 
         assert service.config.round_trip_fee_bps == 24.0
         assert service.config.round_trip_slippage_bps == 7.5
+        assert isinstance(service.lease_service, DurableJobLeaseService)
+        assert service.lease_service._session_factory is universe_api.SessionLocal
+        assert (
+            service.lease_service.default_ttl_seconds
+            == universe_api.settings.job_lease_ttl_seconds
+        )
         assert not db.dirty
     finally:
         db.close()
@@ -339,3 +356,123 @@ def test_applied_refresh_retries_runtime_reload_after_transient_failure(
     finally:
         client.close()
         db.close()
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_status", "expected_detail"),
+    [
+        (
+            UniverseSelectionLeaseBusyError("internal busy owner"),
+            409,
+            "universe selection refresh is already running",
+        ),
+        (
+            LeaseBackendError("internal database path"),
+            503,
+            "universe selection lease is temporarily unavailable",
+        ),
+        (
+            LeaseLostError("internal fencing token"),
+            503,
+            "universe selection lease is temporarily unavailable",
+        ),
+    ],
+)
+def test_refresh_maps_lease_failures_and_still_audits(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+    expected_status: int,
+    expected_detail: str,
+) -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    audit = _Audit()
+    api = FastAPI()
+    api.include_router(universe_api.router)
+
+    def override_db() -> Generator[Session, None, None]:
+        yield db
+
+    class _FailingService:
+        def refresh(self) -> object:
+            raise failure
+
+    api.dependency_overrides[get_db] = override_db
+    api.dependency_overrides[get_audit_logger] = lambda: audit
+    monkeypatch.setattr(
+        universe_api,
+        "build_universe_selection_service",
+        lambda _db: _FailingService(),
+    )
+    client = TestClient(api)
+    try:
+        response = client.post("/api/universe/refresh")
+
+        assert response.status_code == expected_status
+        assert response.json() == {"detail": expected_detail}
+        assert response.headers["Retry-After"] == str(
+            universe_api.settings.job_lease_heartbeat_seconds
+        )
+        assert str(failure) not in response.text
+        assert audit.actions == ["UNIVERSE_SELECTION_REFRESH"]
+        assert audit.records[-1]["result"] == "FAILED"
+        assert audit.records[-1]["request_summary"] == {
+            "detail": type(failure).__name__
+        }
+    finally:
+        client.close()
+        db.close()
+        engine.dispose()
+
+
+def test_get_latest_builds_service_without_acquiring_durable_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    api = FastAPI()
+    api.include_router(universe_api.router)
+    acquire_calls: list[str] = []
+
+    def override_db() -> Generator[Session, None, None]:
+        yield db
+
+    def _unexpected_acquire(
+        _service: DurableJobLeaseService,
+        lease_key: str,
+        **_kwargs: object,
+    ) -> object:
+        acquire_calls.append(lease_key)
+        raise AssertionError("GET endpoint must not acquire the refresh lease")
+
+    api.dependency_overrides[get_db] = override_db
+    monkeypatch.setattr(
+        universe_api,
+        "get_runner",
+        lambda: SimpleNamespace(broker=_Broker()),
+    )
+    monkeypatch.setattr(
+        DurableJobLeaseService,
+        "try_acquire",
+        _unexpected_acquire,
+    )
+    client = TestClient(api)
+    try:
+        response = client.get("/api/universe/latest")
+
+        assert response.status_code == 404
+        assert acquire_calls == []
+    finally:
+        client.close()
+        db.close()
+        engine.dispose()

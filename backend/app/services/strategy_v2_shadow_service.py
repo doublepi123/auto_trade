@@ -5,6 +5,7 @@ import json
 import math
 import re
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -241,12 +242,34 @@ class StrategyV2ShadowService:
     execution client, order callback, or dependency on ``TradeExecutionService``.
     """
 
-    def __init__(self, db: Session, candle_provider: CandleProvider | None = None) -> None:
+    def __init__(
+        self,
+        db: Session,
+        candle_provider: CandleProvider | None = None,
+        *,
+        transaction_fence: Callable[[Session], object] | None = None,
+        operation_checkpoint: Callable[[], object] | None = None,
+    ) -> None:
         self.db = db
         self.candle_provider = candle_provider
+        self._transaction_fence = transaction_fence
+        self._operation_checkpoint = operation_checkpoint
         self.exit_challengers = StrategyV2ExitChallengerService(db)
         self.bracket_challengers = StrategyV2BracketChallengerService(db)
         self.live_exit_challengers = LiveExitChallengerService(db)
+
+    def _checkpoint_operation(self) -> None:
+        if self._operation_checkpoint is not None:
+            self._operation_checkpoint()
+
+    def _start_fenced_transaction(self) -> bool:
+        """Start a fresh transaction with the lease fence as its first DML."""
+        self._checkpoint_operation()
+        if self._transaction_fence is None:
+            return False
+        self.db.rollback()
+        self._transaction_fence(self.db)
+        return True
 
     def prune_expired_wait_decisions(
         self,
@@ -264,11 +287,13 @@ class StrategyV2ShadowService:
         reuses the freed pages, so online pruning bounds growth without an
         availability-impacting VACUUM.
         """
+        self._checkpoint_operation()
         if retention_days < 0:
             raise ValueError("retention_days must be non-negative")
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
         if retention_days == 0 or (max_batches is not None and max_batches <= 0):
+            self._checkpoint_operation()
             return StrategyV2WaitPruneResult()
 
         cutoff = (now or datetime.now(timezone.utc)) - timedelta(
@@ -289,9 +314,11 @@ class StrategyV2ShadowService:
         cursor_bar_at: datetime | None = None
         cursor_id = 0
         while max_batches is None or batches < max_batches:
+            self._checkpoint_operation()
             ids: list[int] = []
             exhausted = False
             while len(ids) < batch_size:
+                self._checkpoint_operation()
                 scan_limit = batch_size
                 query = self.db.query(
                     StrategyV2ShadowDecision.id,
@@ -335,6 +362,43 @@ class StrategyV2ShadowService:
             if not ids:
                 break
             try:
+                fenced = self._start_fenced_transaction()
+                if fenced:
+                    # A forward registration may have appeared after the
+                    # pre-fence scan. Revalidate protection while holding the
+                    # writer lock before deleting immutable replay sources.
+                    protected_sessions = (
+                        self._forward_sessions_requiring_replay_source()
+                    )
+                    candidates = (
+                        self.db.query(
+                            StrategyV2ShadowDecision.id,
+                            StrategyV2ShadowDecision.symbol,
+                            StrategyV2ShadowDecision.config_version,
+                            StrategyV2ShadowDecision.session_date,
+                        )
+                        .filter(
+                            StrategyV2ShadowDecision.id.in_(ids),
+                            *expired,
+                        )
+                        .all()
+                    )
+                    ids = [
+                        int(row.id)
+                        for row in candidates
+                        if (
+                            str(row.symbol),
+                            str(row.config_version),
+                            row.session_date,
+                        )
+                        not in protected_sessions
+                    ]
+                if not ids:
+                    if fenced:
+                        self.db.commit()
+                    if exhausted:
+                        break
+                    continue
                 deleted += int(
                     self.db.query(StrategyV2ShadowDecision)
                     .filter(
@@ -344,12 +408,14 @@ class StrategyV2ShadowService:
                     .delete(synchronize_session=False)
                 )
                 self.db.commit()
+                self._checkpoint_operation()
             except Exception:
                 self.db.rollback()
                 raise
             batches += 1
             if exhausted:
                 break
+        self._checkpoint_operation()
         return StrategyV2WaitPruneResult(deleted=deleted, batches=batches)
 
     def backfill_forward_replay_artifacts(
@@ -517,15 +583,19 @@ class StrategyV2ShadowService:
         )
 
     def get_config(self, symbol: str | None = None) -> StrategyV2ShadowConfigResponse:
+        self._checkpoint_operation()
         row = self._get_or_create_config(symbol)
         self._ensure_version_snapshot(row)
-        return self._config_response(row)
+        response = self._config_response(row)
+        self._checkpoint_operation()
+        return response
 
     def ensure_universe_managed_enabled(
         self,
         symbol: str,
     ) -> StrategyV2ShadowConfigResponse:
         """Enable a managed observer and migrate only the legacy US bracket."""
+        self._checkpoint_operation()
         row = self._get_or_create_config(symbol)
         if not row.universe_managed:
             raise ValueError(
@@ -548,7 +618,9 @@ class StrategyV2ShadowService:
         )
         if row.enabled and not legacy_us_bracket:
             self._ensure_version_snapshot(row)
-            return self._config_response(row)
+            response = self._config_response(row)
+            self._checkpoint_operation()
+            return response
 
         payload: dict[str, object] = {"enabled": True}
         if legacy_us_bracket:
@@ -556,11 +628,13 @@ class StrategyV2ShadowService:
                 stop_loss_pct=_US_DEFAULT_STOP_LOSS_PCT,
                 profit_target_pct=_US_DEFAULT_PROFIT_TARGET_PCT,
             )
-        return self.update_config(
+        response = self.update_config(
             StrategyV2ShadowConfigUpdate.model_validate(payload),
             symbol=row.symbol,
             preserve_universe_management=True,
         )
+        self._checkpoint_operation()
+        return response
 
     def list_configs(self) -> list[StrategyV2ShadowConfigResponse]:
         rows = self.db.query(StrategyV2ShadowConfig).all()
@@ -731,97 +805,136 @@ class StrategyV2ShadowService:
         symbol: str | None = None,
         preserve_universe_management: bool = False,
     ) -> StrategyV2ShadowConfigResponse:
+        self._checkpoint_operation()
         row = self._get_or_create_config(symbol)
         self._ensure_version_snapshot(row)
+        normalized_symbol = row.symbol
         updates = payload.model_dump(exclude_unset=True, exclude_none=True)
         opening_execution_eligible = updates.pop(
             "opening_momentum_execution_eligible",
             None,
         )
-        tunable_updates = set(updates) - {"enabled"}
-        open_trade = self._open_trade(row.symbol)
-        if open_trade is not None and tunable_updates:
-            raise ValueError("strategy v2 shadow config cannot change while a virtual trade is open")
-        bracket_open = self.bracket_challengers.has_open_trades(row.symbol)
-        if bracket_open and tunable_updates:
-            raise ValueError(
-                "strategy v2 shadow config cannot change while a bracket "
-                "challenger trade is open"
-            )
-        if not updates and opening_execution_eligible is None:
-            return self._config_response(row)
-        ownership_changed = False
-        if (
-            (
-                "enabled" in updates
-                or opening_execution_eligible is not None
-            )
-            and not preserve_universe_management
-            and row.universe_managed
-        ):
-            # Explicit operator controls take ownership away from the
-            # universe reconciler so a refresh cannot undo them.
-            row.universe_managed = False
-            ownership_changed = True
+        uses_fence = self._transaction_fence is not None
+        try:
+            fenced = self._start_fenced_transaction()
+            if fenced:
+                # Re-read under the SQLite writer lock acquired by the lease
+                # fence. This prevents a stale pre-fence snapshot from
+                # overwriting an operator's concurrent config change.
+                row = self.db.query(StrategyV2ShadowConfig).filter(
+                    StrategyV2ShadowConfig.symbol == normalized_symbol
+                ).one()
 
-        merged = self._config_values(row)
-        merged.update(updates)
-        validated = StrategyV2ShadowConfigValues.model_validate(merged)
-        if tunable_updates or (
-            "enabled" in updates and validated.enabled
-        ):
-            self._validate_minimum_net_edge(validated.model_dump())
+            if preserve_universe_management and not row.universe_managed:
+                raise ValueError(
+                    "strategy v2 shadow config is no longer universe managed"
+                )
 
-        was_enabled = row.enabled
-        changed = (
-            ownership_changed
-            or any(
-                getattr(row, field) != value
-                for field, value in updates.items()
+            tunable_updates = set(updates) - {"enabled"}
+            open_trade = self._open_trade(row.symbol)
+            if open_trade is not None and tunable_updates:
+                raise ValueError(
+                    "strategy v2 shadow config cannot change while a "
+                    "virtual trade is open"
+                )
+            bracket_open = self.bracket_challengers.has_open_trades(
+                row.symbol
             )
-            or (
-                opening_execution_eligible is not None
-                and row.opening_momentum_execution_eligible
-                != opening_execution_eligible
-            )
-        )
-        if not changed:
-            return self._config_response(row)
-        now = datetime.now(timezone.utc)
-        for field in _CONFIG_FIELDS:
-            setattr(row, field, getattr(validated, field))
-        if opening_execution_eligible is not None:
-            row.opening_momentum_execution_eligible = (
-                opening_execution_eligible
-            )
-        row.updated_at = now
-        self.db.add(row)
-        self.db.flush()
+            if bracket_open and tunable_updates:
+                raise ValueError(
+                    "strategy v2 shadow config cannot change while a "
+                    "bracket challenger trade is open"
+                )
+            if not updates and opening_execution_eligible is None:
+                if fenced:
+                    self.db.commit()
+                response = self._config_response(row)
+                self._checkpoint_operation()
+                return response
 
-        # Disabling is an operational control, not a strategy revision.  Keep
-        # an open virtual position and its engine snapshot intact so the cron
-        # can still execute deterministic protective exits.  Enabling from a
-        # flat state and every tunable edit start strictly forward from now.
-        reset_for_forward_run = bool(tunable_updates) or (
-            not was_enabled and row.enabled and open_trade is None
-        )
-        if reset_for_forward_run:
-            state = self._get_or_create_state(row.symbol, commit=False)
-            state.phase = StrategyV2State.COLD.value
-            market = "HK" if row.symbol.endswith(".HK") else "US"
-            state.last_bar_at = self._forward_watermark(market, now)
-            state.armed_at = None
-            state.armed_zscore = None
-            state.open_trade_id = None
-            state.state_json = "{}"
-            state.last_polled_at = None
-            state.last_poll_error = ""
-            state.config_version = self._config_version(row)
-            self.db.add(state)
-        self.db.commit()
-        self.db.refresh(row)
+            ownership_changed = (
+                (
+                    "enabled" in updates
+                    or opening_execution_eligible is not None
+                )
+                and not preserve_universe_management
+                and row.universe_managed
+            )
+            merged = self._config_values(row)
+            merged.update(updates)
+            validated = StrategyV2ShadowConfigValues.model_validate(merged)
+            if tunable_updates or (
+                "enabled" in updates and validated.enabled
+            ):
+                self._validate_minimum_net_edge(validated.model_dump())
+
+            was_enabled = row.enabled
+            changed = (
+                ownership_changed
+                or any(
+                    getattr(row, field) != value
+                    for field, value in updates.items()
+                )
+                or (
+                    opening_execution_eligible is not None
+                    and row.opening_momentum_execution_eligible
+                    != opening_execution_eligible
+                )
+            )
+            if not changed:
+                if fenced:
+                    self.db.commit()
+                response = self._config_response(row)
+                self._checkpoint_operation()
+                return response
+
+            if ownership_changed:
+                # Explicit operator controls take ownership away from the
+                # universe reconciler so a refresh cannot undo them.
+                row.universe_managed = False
+            now = datetime.now(timezone.utc)
+            for field in _CONFIG_FIELDS:
+                setattr(row, field, getattr(validated, field))
+            if opening_execution_eligible is not None:
+                row.opening_momentum_execution_eligible = (
+                    opening_execution_eligible
+                )
+            row.updated_at = now
+            self.db.add(row)
+            self.db.flush()
+
+            # Disabling is an operational control, not a strategy revision.
+            # Keep an open virtual position and its engine snapshot intact so
+            # the cron can still execute deterministic protective exits.
+            reset_for_forward_run = bool(tunable_updates) or (
+                not was_enabled and row.enabled and open_trade is None
+            )
+            if reset_for_forward_run:
+                state = self._get_or_create_state(
+                    row.symbol,
+                    commit=False,
+                )
+                state.phase = StrategyV2State.COLD.value
+                market = "HK" if row.symbol.endswith(".HK") else "US"
+                state.last_bar_at = self._forward_watermark(market, now)
+                state.armed_at = None
+                state.armed_zscore = None
+                state.open_trade_id = None
+                state.state_json = "{}"
+                state.last_polled_at = None
+                state.last_poll_error = ""
+                state.config_version = self._config_version(row)
+                self.db.add(state)
+            self.db.commit()
+            self.db.refresh(row)
+        except Exception:
+            if uses_fence:
+                self.db.rollback()
+            raise
         self._ensure_version_snapshot(row)
-        return self._config_response(row)
+        response = self._config_response(row)
+        self._checkpoint_operation()
+        return response
 
     def get_status(self, symbol: str | None = None) -> StrategyV2ShadowStatusResponse:
         config_row = self._get_or_create_config(symbol)
@@ -5935,9 +6048,10 @@ class StrategyV2ShadowService:
         *,
         commit: bool = True,
     ) -> StrategyV2ShadowVersion:
+        symbol = row.symbol
         version = self._config_version(row)
         existing = self.db.query(StrategyV2ShadowVersion).filter(
-            StrategyV2ShadowVersion.symbol == row.symbol,
+            StrategyV2ShadowVersion.symbol == symbol,
             StrategyV2ShadowVersion.config_version == version,
         ).first()
         if existing is not None:
@@ -5946,17 +6060,36 @@ class StrategyV2ShadowService:
         params.pop("enabled", None)
         activated_at = _as_utc(row.updated_at)
         state = self.db.query(StrategyV2ShadowState).filter(
-            StrategyV2ShadowState.symbol == row.symbol
+            StrategyV2ShadowState.symbol == symbol
         ).first()
         if (
             state is not None
             and state.config_version != version
         ):
             activated_at = datetime.now(timezone.utc)
+        config_json = json.dumps(
+            params,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        uses_fence = commit and self._transaction_fence is not None
+        if uses_fence:
+            try:
+                self._start_fenced_transaction()
+                existing = self.db.query(StrategyV2ShadowVersion).filter(
+                    StrategyV2ShadowVersion.symbol == symbol,
+                    StrategyV2ShadowVersion.config_version == version,
+                ).first()
+                if existing is not None:
+                    self.db.commit()
+                    return existing
+            except Exception:
+                self.db.rollback()
+                raise
         snapshot = StrategyV2ShadowVersion(
-            symbol=row.symbol,
+            symbol=symbol,
             config_version=version,
-            config_json=json.dumps(params, sort_keys=True, separators=(",", ":")),
+            config_json=config_json,
             activated_at=activated_at,
         )
         self.db.add(snapshot)
@@ -5966,12 +6099,16 @@ class StrategyV2ShadowService:
             except IntegrityError:
                 self.db.rollback()
                 existing = self.db.query(StrategyV2ShadowVersion).filter(
-                    StrategyV2ShadowVersion.symbol == row.symbol,
+                    StrategyV2ShadowVersion.symbol == symbol,
                     StrategyV2ShadowVersion.config_version == version,
                 ).first()
                 if existing is None:
                     raise
                 return existing
+            except Exception:
+                if uses_fence:
+                    self.db.rollback()
+                raise
             self.db.refresh(snapshot)
         return snapshot
 
@@ -6622,6 +6759,19 @@ class StrategyV2ShadowService:
                     ),
                 ),
             )
+        uses_fence = self._transaction_fence is not None
+        if uses_fence:
+            try:
+                self._start_fenced_transaction()
+                existing = self.db.query(StrategyV2ShadowConfig).filter(
+                    StrategyV2ShadowConfig.symbol == normalized
+                ).first()
+                if existing is not None:
+                    self.db.commit()
+                    return existing
+            except Exception:
+                self.db.rollback()
+                raise
         row = StrategyV2ShadowConfig(
             symbol=normalized,
             enabled=False,
@@ -6641,6 +6791,10 @@ class StrategyV2ShadowService:
             if existing is None:
                 raise
             return existing
+        except Exception:
+            if uses_fence:
+                self.db.rollback()
+            raise
         self.db.refresh(row)
         return row
 

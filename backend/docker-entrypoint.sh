@@ -27,7 +27,8 @@ OPENING_STOP_REVISION = '20260726_opening_stop'
 OPENING_CONTEXT_REVISION = '20260727_opening_context'
 OPENING_EXECUTION_REVISION = '20260727_opening_execution'
 WATCHLIST_QUANT_V6_REVISION = '20260801_watchlist_quant_v6'
-HEAD_REVISION = WATCHLIST_QUANT_V6_REVISION
+DURABLE_JOB_LEASES_REVISION = '20260801_durable_job_leases'
+HEAD_REVISION = DURABLE_JOB_LEASES_REVISION
 # IMPORTANT: 每次新增 alembic 迁移时，必须同步更新 HEAD_REVISION 及 mark_migrated_if_needed 的列检测逻辑
 
 
@@ -133,6 +134,77 @@ def opening_execution_schema_issues(inspector):
     return tuple(issues)
 
 
+def durable_job_lease_schema_issues(inspector, conn):
+    table_name = 'durable_job_leases'
+    expected_columns = (
+        ('lease_key', 'VARCHAR(128)', False),
+        ('holder_id', 'VARCHAR(128)', False),
+        ('fencing_token', 'INTEGER', False),
+        ('acquired_at_epoch_ms', 'INTEGER', False),
+        ('renewed_at_epoch_ms', 'INTEGER', False),
+        ('expires_at_epoch_ms', 'INTEGER', False),
+    )
+    actual_columns = tuple(
+        (
+            str(column['name']),
+            str(column['type']).upper(),
+            bool(column['nullable']),
+        )
+        for column in inspector.get_columns(table_name)
+    )
+    issues = []
+    if actual_columns != expected_columns:
+        issues.append(
+            f'columns differ: expected {expected_columns}, '
+            f'found {actual_columns}'
+        )
+    primary_key = tuple(
+        inspector.get_pk_constraint(table_name).get(
+            'constrained_columns'
+        )
+        or ()
+    )
+    if primary_key != ('lease_key',):
+        issues.append(f'primary key differs: {primary_key}')
+    expected_checks = {
+        'ck_durable_job_lease_key',
+        'ck_durable_job_lease_holder',
+        'ck_durable_job_lease_fencing_token',
+        'ck_durable_job_lease_epoch_ms',
+    }
+    actual_checks = {
+        str(constraint.get('name'))
+        for constraint in inspector.get_check_constraints(table_name)
+    }
+    missing_checks = sorted(expected_checks - actual_checks)
+    if missing_checks:
+        issues.append(f'missing check constraints: {missing_checks}')
+    trigger_sql = conn.execute(
+        text(
+            'SELECT sql FROM sqlite_master '
+            'WHERE type = :object_type AND name = :trigger_name'
+        ),
+        {
+            'object_type': 'trigger',
+            'trigger_name': 'trg_durable_job_leases_no_delete',
+        },
+    ).scalar_one_or_none()
+    expected_trigger_sql = (
+        'CREATE TRIGGER trg_durable_job_leases_no_delete '
+        'BEFORE DELETE ON durable_job_leases '
+        'BEGIN SELECT RAISE(ABORT, '
+        + chr(39)
+        + 'durable_job_leases rows cannot be deleted'
+        + chr(39)
+        + '); END'
+    )
+    if trigger_sql is None:
+        issues.append('missing no-delete trigger')
+    elif ' '.join(str(trigger_sql).split()) != expected_trigger_sql:
+        issues.append('no-delete trigger does not match canonical DDL')
+    return tuple(issues)
+
+
 def mark_migrated_if_needed():
     engine = create_engine(settings.database_url)
     with engine.connect() as conn:
@@ -149,6 +221,20 @@ def mark_migrated_if_needed():
                     + '; '.join(quant_issues)
                 )
             quant_schema_complete = True
+        lease_schema_complete = False
+        if 'durable_job_leases' in tables:
+            lease_issues = durable_job_lease_schema_issues(inspector, conn)
+            if lease_issues:
+                raise RuntimeError(
+                    'partial durable-job-lease schema; refusing to stamp: '
+                    + '; '.join(lease_issues)
+                )
+            lease_schema_complete = True
+        if lease_schema_complete and not quant_schema_complete:
+            raise RuntimeError(
+                'durable-job-lease schema exists without its quant-v6 '
+                'predecessor schema'
+            )
         if 'alembic_version' in tables:
             recorded_revisions = tuple(
                 conn.execute(
@@ -161,6 +247,35 @@ def mark_migrated_if_needed():
                     f'found {recorded_revisions}'
                 )
             recorded_revision = recorded_revisions[0]
+            if recorded_revision == DURABLE_JOB_LEASES_REVISION:
+                if not quant_schema_complete or not lease_schema_complete:
+                    raise RuntimeError(
+                        'alembic_version is durable-job-leases but its '
+                        'schema or predecessor schema is incomplete'
+                    )
+                return
+            if lease_schema_complete:
+                if recorded_revision != WATCHLIST_QUANT_V6_REVISION:
+                    raise RuntimeError(
+                        'complete durable-job-lease schema is outside the '
+                        'expected recorded lineage: '
+                        f'{recorded_revision} != '
+                        f'{WATCHLIST_QUANT_V6_REVISION}'
+                    )
+                conn.execute(
+                    text(
+                        'UPDATE alembic_version SET version_num = '
+                        ':version_num'
+                    ),
+                    {'version_num': DURABLE_JOB_LEASES_REVISION},
+                )
+                conn.commit()
+                print(
+                    'advanced alembic_version from '
+                    f'{WATCHLIST_QUANT_V6_REVISION} to '
+                    f'{DURABLE_JOB_LEASES_REVISION}'
+                )
+                return
             if recorded_revision == WATCHLIST_QUANT_V6_REVISION:
                 if not quant_schema_complete:
                     quant_issues = _watchlist_quant_v6_schema_issues(engine)
@@ -296,6 +411,15 @@ def mark_migrated_if_needed():
                     f'{OPENING_EXECUTION_REVISION}'
                 )
             version_num = WATCHLIST_QUANT_V6_REVISION
+
+        if lease_schema_complete:
+            if version_num != WATCHLIST_QUANT_V6_REVISION:
+                raise RuntimeError(
+                    'durable-job-lease schema is outside the expected '
+                    f'revision lineage: {version_num} != '
+                    f'{WATCHLIST_QUANT_V6_REVISION}'
+                )
+            version_num = DURABLE_JOB_LEASES_REVISION
 
         conn.execute(text(\"CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)\"))
         conn.execute(text('INSERT INTO alembic_version (version_num) VALUES (:version_num)'), {'version_num': version_num})

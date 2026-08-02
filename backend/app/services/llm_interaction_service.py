@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -15,6 +16,7 @@ from app.models import ExperimentResult, LLMInteraction
 from app.schemas import LLMInteractionDetail
 
 
+LLM_STORAGE_MAINTENANCE_LEASE_KEY = "llm_storage_maintenance"
 _CONTEXT_STORAGE_SCHEMA_VERSION = 1
 _MIN_CONTEXT_MAX_BYTES = 2048
 _RECENT_PRICE_POINTS = 24
@@ -495,6 +497,8 @@ class LLMInteractionService:
         batch_size: int,
         max_batches: int | None = 8,
         now: datetime | None = None,
+        transaction_fence: Callable[[Session], object] | None = None,
+        operation_checkpoint: Callable[[], object] | None = None,
     ) -> LLMInteractionPruneResult:
         """Delete expired interactions in short transactions.
 
@@ -548,6 +552,8 @@ class LLMInteractionService:
         deleted = 0
         batches = 0
         while max_batches is None or batches < max_batches:
+            if operation_checkpoint is not None:
+                operation_checkpoint()
             ids = [
                 row[0]
                 for row in (
@@ -561,6 +567,14 @@ class LLMInteractionService:
             if not ids:
                 break
             try:
+                if transaction_fence is not None:
+                    # End the WAL read snapshot before upgrading to the
+                    # protected write transaction.  The lease UPDATE must be
+                    # its first DML so a takeover cannot race the delete.
+                    self.db.rollback()
+                    if operation_checkpoint is not None:
+                        operation_checkpoint()
+                    transaction_fence(self.db)
                 deleted += int(
                     self.db.query(LLMInteraction)
                     .filter(
@@ -574,6 +588,8 @@ class LLMInteractionService:
                 self.db.rollback()
                 raise
             batches += 1
+            if operation_checkpoint is not None:
+                operation_checkpoint()
         return LLMInteractionPruneResult(deleted=deleted, batches=batches)
 
     def compact_oversized_contexts(
@@ -583,6 +599,8 @@ class LLMInteractionService:
         recent_price_points: int = _RECENT_PRICE_POINTS,
         batch_size: int = 25,
         max_rows: int | None = None,
+        transaction_fence: Callable[[Session], object] | None = None,
+        operation_checkpoint: Callable[[], object] | None = None,
     ) -> LLMContextCompactionResult:
         """Rewrite legacy oversized snapshots in bounded transactions."""
         _validate_context_limits(max_bytes, recent_price_points)
@@ -596,6 +614,8 @@ class LLMInteractionService:
         batches = 0
         last_id = 0
         while max_rows is None or inspected < max_rows:
+            if operation_checkpoint is not None:
+                operation_checkpoint()
             limit = batch_size
             if max_rows is not None:
                 limit = min(limit, max_rows - inspected)
@@ -615,6 +635,7 @@ class LLMInteractionService:
                 break
             inspected += len(rows)
             last_id = rows[-1].id
+            prepared_updates: list[tuple[int, str, str]] = []
             for record in rows:
                 original_text = record.context_snapshot or ""
                 try:
@@ -640,14 +661,50 @@ class LLMInteractionService:
                     raise RuntimeError(
                         f"oversized context for interaction {record.id} was not rewritten"
                     )
-                record.context_snapshot = compacted_text
-                compacted_count += 1
+                prepared_updates.append(
+                    (record.id, original_text, compacted_text)
+                )
             try:
+                if transaction_fence is not None:
+                    # Convert ORM rows to pure values above, then end the read
+                    # snapshot before fencing.  Conditional UPDATEs avoid
+                    # overwriting a row changed after it was inspected.
+                    self.db.rollback()
+                    if operation_checkpoint is not None:
+                        operation_checkpoint()
+                    transaction_fence(self.db)
+                    for row_id, original_text, compacted_text in prepared_updates:
+                        compacted_count += int(
+                            self.db.query(LLMInteraction)
+                            .filter(
+                                LLMInteraction.id == row_id,
+                                LLMInteraction.context_snapshot
+                                == original_text,
+                            )
+                            .update(
+                                {
+                                    LLMInteraction.context_snapshot:
+                                    compacted_text,
+                                },
+                                synchronize_session=False,
+                            )
+                        )
+                else:
+                    updates_by_id = {
+                        row_id: compacted_text
+                        for row_id, _original_text, compacted_text
+                        in prepared_updates
+                    }
+                    for record in rows:
+                        record.context_snapshot = updates_by_id[record.id]
+                    compacted_count += len(prepared_updates)
                 self.db.commit()
             except Exception:
                 self.db.rollback()
                 raise
             batches += 1
+            if operation_checkpoint is not None:
+                operation_checkpoint()
         return LLMContextCompactionResult(
             inspected=inspected,
             compacted=compacted_count,

@@ -12,6 +12,12 @@ import pytest
 
 from app import main as main_module
 from app.core.engine import StrategyParams
+from app.services import durable_job_lease_service
+from app.services import llm_interaction_service
+from app.services import strategy_v2_shadow_service
+from app.services.universe_selection_service import (
+    UniverseSelectionLeaseBusyError,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -120,6 +126,223 @@ async def test_llm_storage_maintenance_waits_for_worker_during_cancel(
         await task
 
 
+async def test_llm_storage_maintenance_join_resists_repeated_cancel(
+    monkeypatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocking_tick() -> None:
+        started.set()
+        assert release.wait(2)
+        finished.set()
+
+    monkeypatch.setattr(
+        main_module,
+        "_llm_storage_maintenance_tick_sync",
+        blocking_tick,
+    )
+    task = asyncio.create_task(main_module._run_llm_storage_maintenance_tick())
+    assert await asyncio.to_thread(started.wait, 2)
+
+    assert task.cancel() is True
+    await asyncio.sleep(0)
+    assert task.cancel() is True
+    await asyncio.sleep(0)
+    assert task.done() is False
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set()
+
+
+def test_storage_maintenance_busy_lease_avoids_business_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened_sessions = 0
+
+    def unexpected_session():
+        nonlocal opened_sessions
+        opened_sessions += 1
+        raise AssertionError("busy maintenance opened a business session")
+
+    class BusyLeaseService:
+        def __init__(self, session_factory, **_kwargs) -> None:
+            assert session_factory is unexpected_session
+
+        @staticmethod
+        def try_acquire(lease_key: str):
+            assert lease_key == (
+                main_module._LLM_STORAGE_MAINTENANCE_LEASE_KEY
+            )
+            return None
+
+    monkeypatch.setattr(main_module, "SessionLocal", unexpected_session)
+    monkeypatch.setattr(
+        durable_job_lease_service,
+        "DurableJobLeaseService",
+        BusyLeaseService,
+    )
+
+    assert (
+        main_module._llm_storage_maintenance_tick_sync()
+        is main_module._JOB_LEASE_BUSY_DEFERRED
+    )
+    assert opened_sessions == 0
+
+
+def test_storage_maintenance_uses_one_lease_for_all_writers_and_closes_first(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    handle = object()
+
+    class FakeSession:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+            events.append("business-session-close")
+
+    db = FakeSession()
+
+    class FakeGuard:
+        def __enter__(self):
+            events.append("keepalive-enter")
+            return self
+
+        def __exit__(self, *_args: object) -> bool:
+            assert db.closed is True
+            events.append("keepalive-exit")
+            return False
+
+        def checkpoint(self) -> None:
+            events.append("lease-checkpoint")
+
+        def fence_in_transaction(self, session: object) -> None:
+            assert session is db
+            events.append("lease-fence")
+
+    guard = FakeGuard()
+
+    class FakeLeaseService:
+        def __init__(
+            self,
+            session_factory: object,
+            *,
+            default_ttl_seconds: object,
+        ) -> None:
+            assert session_factory is session_factory_stub
+            assert default_ttl_seconds == settings_ttl
+            events.append("lease-service")
+
+        @staticmethod
+        def try_acquire(lease_key: str) -> object:
+            assert lease_key == (
+                main_module._LLM_STORAGE_MAINTENANCE_LEASE_KEY
+            )
+            events.append("lease-acquire")
+            return handle
+
+        @staticmethod
+        def keepalive(
+            acquired: object,
+            *,
+            interval_seconds: object,
+        ) -> FakeGuard:
+            assert acquired is handle
+            assert interval_seconds == settings_heartbeat
+            return guard
+
+    def _exercise_callbacks(
+        name: str,
+        kwargs: dict[str, object],
+    ) -> None:
+        checkpoint = kwargs["operation_checkpoint"]
+        fence = kwargs["transaction_fence"]
+        assert callable(checkpoint)
+        assert callable(fence)
+        assert getattr(checkpoint, "__self__", None) is guard
+        assert getattr(fence, "__self__", None) is guard
+        events.append(name)
+        checkpoint()
+        fence(db)
+
+    class FakeLLMService:
+        def __init__(self, session: object) -> None:
+            assert session is db
+
+        @staticmethod
+        def prune_expired(**kwargs: object) -> object:
+            _exercise_callbacks("llm-prune", kwargs)
+            return SimpleNamespace(deleted=1, batches=1)
+
+        @staticmethod
+        def compact_oversized_contexts(**kwargs: object) -> object:
+            _exercise_callbacks("llm-compact", kwargs)
+            return SimpleNamespace(compacted=1, inspected=1, batches=1)
+
+    class FakeShadowService:
+        def __init__(self, session: object, **kwargs: object) -> None:
+            assert session is db
+            self.kwargs = kwargs
+
+        def prune_expired_wait_decisions(self, **_kwargs: object) -> object:
+            _exercise_callbacks("wait-prune", self.kwargs)
+            return SimpleNamespace(deleted=1, batches=1)
+
+    session_calls = 0
+
+    def session_factory_stub() -> FakeSession:
+        nonlocal session_calls
+        session_calls += 1
+        events.append("business-session-open")
+        return db
+
+    settings_ttl = main_module.settings.job_lease_ttl_seconds
+    settings_heartbeat = main_module.settings.job_lease_heartbeat_seconds
+    monkeypatch.setattr(main_module, "SessionLocal", session_factory_stub)
+    monkeypatch.setattr(
+        durable_job_lease_service,
+        "DurableJobLeaseService",
+        FakeLeaseService,
+    )
+    monkeypatch.setattr(
+        llm_interaction_service,
+        "LLMInteractionService",
+        FakeLLMService,
+    )
+    monkeypatch.setattr(
+        strategy_v2_shadow_service,
+        "StrategyV2ShadowService",
+        FakeShadowService,
+    )
+
+    assert main_module._llm_storage_maintenance_tick_sync() is None
+
+    assert session_calls == 1
+    assert events == [
+        "lease-service",
+        "lease-acquire",
+        "keepalive-enter",
+        "business-session-open",
+        "llm-prune",
+        "lease-checkpoint",
+        "lease-fence",
+        "llm-compact",
+        "lease-checkpoint",
+        "lease-fence",
+        "wait-prune",
+        "lease-checkpoint",
+        "lease-fence",
+        "lease-checkpoint",
+        "business-session-close",
+        "keepalive-exit",
+    ]
+
+
 async def test_universe_selection_waits_for_worker_during_cancel(
     monkeypatch,
 ) -> None:
@@ -147,6 +370,74 @@ async def test_universe_selection_waits_for_worker_during_cancel(
     release.set()
     with pytest.raises(asyncio.CancelledError):
         await task
+
+
+async def test_universe_selection_join_resists_repeated_cancel(
+    monkeypatch,
+) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocking_tick() -> None:
+        started.set()
+        assert release.wait(2)
+        finished.set()
+
+    monkeypatch.setattr(
+        main_module,
+        "_universe_selection_tick_sync",
+        blocking_tick,
+    )
+    task = asyncio.create_task(main_module._run_universe_selection_tick())
+    assert await asyncio.to_thread(started.wait, 2)
+
+    assert task.cancel() is True
+    await asyncio.sleep(0)
+    assert task.cancel() is True
+    await asyncio.sleep(0)
+    assert task.done() is False
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set()
+
+
+def test_universe_selection_busy_lease_returns_defer_and_closes_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.api import universe as universe_api
+
+    closed = False
+
+    class FakeSession:
+        def close(self) -> None:
+            nonlocal closed
+            closed = True
+
+    class BusyService:
+        @staticmethod
+        def refresh() -> None:
+            raise UniverseSelectionLeaseBusyError("already running")
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "universe_selection_enabled",
+        True,
+    )
+    monkeypatch.setattr(main_module, "SessionLocal", FakeSession)
+    monkeypatch.setattr(
+        universe_api,
+        "build_universe_selection_service",
+        lambda _db: BusyService(),
+    )
+
+    assert (
+        main_module._universe_selection_tick_sync()
+        is main_module._JOB_LEASE_BUSY_DEFERRED
+    )
+    assert closed is True
 
 
 async def test_watchlist_quant_waits_for_worker_during_cancel(
@@ -789,6 +1080,113 @@ async def test_storage_maintenance_rechecks_after_research_defer(
 
 
 @pytest.mark.asyncio
+async def test_storage_maintenance_rechecks_after_busy_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.cron_health_service import (
+        CronHealthService,
+        set_cron_health_service,
+    )
+
+    isolated = CronHealthService()
+    set_cron_health_service(isolated)
+    sleeps: list[float] = []
+    outcomes = iter((main_module._JOB_LEASE_BUSY_DEFERRED, None))
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) == 3:
+            raise asyncio.CancelledError
+
+    async def next_outcome() -> object | None:
+        return next(outcomes)
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "llm_storage_maintenance_interval_minutes",
+        720,
+    )
+    monkeypatch.setattr(main_module.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(
+        main_module,
+        "_run_llm_storage_maintenance_tick",
+        next_outcome,
+    )
+
+    try:
+        main_module._register_cron_health_jobs()
+        main_module._activate_cron_health_jobs()
+        with pytest.raises(asyncio.CancelledError):
+            await main_module._llm_storage_maintenance_cron()
+
+        assert sleeps == [
+            60,
+            main_module._JOB_LEASE_RETRY_SECONDS,
+            720 * 60,
+        ]
+        rows = {row.name: row for row in isolated.snapshot()}
+        storage = rows[main_module._CRON_LLM_STORAGE_MAINTENANCE]
+        assert storage.tick_count == 2
+        assert storage.failure_count == 0
+        assert storage.last_outcome == "success"
+    finally:
+        set_cron_health_service(None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "lease_error",
+    [
+        durable_job_lease_service.LeaseBackendError("storage lease DB failed"),
+        durable_job_lease_service.LeaseLostError("storage lease was lost"),
+    ],
+)
+async def test_storage_maintenance_lease_failure_retries_and_records_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    lease_error: Exception,
+) -> None:
+    from app.services.cron_health_service import (
+        CronHealthService,
+        set_cron_health_service,
+    )
+
+    isolated = CronHealthService()
+    set_cron_health_service(isolated)
+    sleeps: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) == 2:
+            raise asyncio.CancelledError
+
+    async def fail_lease() -> None:
+        raise lease_error
+
+    monkeypatch.setattr(main_module.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(
+        main_module,
+        "_run_llm_storage_maintenance_tick",
+        fail_lease,
+    )
+
+    try:
+        main_module._register_cron_health_jobs()
+        main_module._activate_cron_health_jobs()
+        with pytest.raises(asyncio.CancelledError):
+            await main_module._llm_storage_maintenance_cron()
+
+        assert sleeps == [60, main_module._JOB_LEASE_RETRY_SECONDS]
+        rows = {row.name: row for row in isolated.snapshot()}
+        storage = rows[main_module._CRON_LLM_STORAGE_MAINTENANCE]
+        assert storage.tick_count == 1
+        assert storage.failure_count == 1
+        assert storage.last_outcome == "failure"
+        assert storage.last_failure_code == type(lease_error).__name__
+    finally:
+        set_cron_health_service(None)
+
+
+@pytest.mark.asyncio
 async def test_universe_selection_rechecks_after_research_defer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -830,6 +1228,48 @@ async def test_universe_selection_rechecks_after_research_defer(
     assert sleeps == [
         30,
         main_module._OPENING_RESEARCH_DEFER_RETRY_SECONDS,
+        90 * 60,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_universe_selection_rechecks_after_busy_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    outcomes = iter((main_module._JOB_LEASE_BUSY_DEFERRED, None))
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) == 3:
+            raise asyncio.CancelledError
+
+    async def next_outcome() -> object | None:
+        return next(outcomes)
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "universe_selection_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "universe_selection_interval_minutes",
+        90,
+    )
+    monkeypatch.setattr(main_module.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(
+        main_module,
+        "_run_universe_selection_tick",
+        next_outcome,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await main_module._universe_selection_cron()
+
+    assert sleeps == [
+        30,
+        main_module._JOB_LEASE_RETRY_SECONDS,
         90 * 60,
     ]
 

@@ -1216,6 +1216,164 @@ def test_binding_insert_failure_rolls_back_header_and_new_artifacts(
     assert _counts(engine) == (1, 0, 0, 0)
 
 
+def test_transaction_fence_runs_before_any_publication_dml(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+    factory = _factory(engine)
+    plan = _one_member_plan()
+    business_dml: list[str] = []
+    fenced_sessions: list[Session] = []
+
+    def _record_business_dml(
+        _connection,
+        _cursor,
+        statement: str,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        normalized = " ".join(statement.upper().split())
+        if any(
+            table_name.upper() in normalized
+            for table_name in (
+                "watchlist_quant_v6_artifacts",
+                "watchlist_quant_v6_publications",
+                "watchlist_quant_v6_publication_artifacts",
+            )
+        ) and normalized.startswith(("INSERT ", "UPDATE ", "DELETE ")):
+            business_dml.append(statement)
+
+    def _fence(session: Session) -> None:
+        assert business_dml == []
+        fenced_sessions.append(session)
+
+    service = WatchlistQuantV6PublicationService(
+        factory,
+        clock=lambda: _NOW,
+        transaction_fence=_fence,
+    )
+    service.register_plan(plan)
+    fenced_sessions.clear()
+    event.listen(engine, "before_cursor_execute", _record_business_dml)
+    try:
+        receipt = service.publish_registration(
+            plan=plan,
+            evaluations=_missing_evaluations(),
+        )
+    finally:
+        event.remove(engine, "before_cursor_execute", _record_business_dml)
+
+    assert receipt.created is True
+    assert len(fenced_sessions) == 1
+    assert business_dml
+    assert _counts(engine) == (1, 1, 1, 1)
+
+
+def test_lost_transaction_fence_keeps_registration_and_rolls_back_publication(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+    factory = _factory(engine)
+    plan = _one_member_plan()
+    fenced_sessions: list[Session] = []
+
+    def _lost_fence(session: Session) -> None:
+        fenced_sessions.append(session)
+        raise RuntimeError("durable quant-v6 lease was lost")
+
+    WatchlistQuantV6PublicationService(
+        factory,
+        clock=lambda: _NOW,
+    ).register_plan(plan)
+    service = WatchlistQuantV6PublicationService(
+        factory,
+        clock=lambda: _NOW,
+        transaction_fence=_lost_fence,
+    )
+
+    with pytest.raises(RuntimeError, match="lease was lost"):
+        service.publish_registration(
+            plan=plan,
+            evaluations=_missing_evaluations(),
+        )
+
+    assert len(fenced_sessions) == 1
+    assert _counts(engine) == (1, 0, 0, 0)
+
+
+def test_transaction_fence_runs_before_any_registration_dml(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+    factory = _factory(engine)
+    plan = _one_member_plan()
+    registration_dml: list[str] = []
+    fenced_sessions: list[Session] = []
+
+    def _record_registration_dml(
+        _connection,
+        _cursor,
+        statement: str,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        normalized = " ".join(statement.upper().split())
+        if (
+            "WATCHLIST_QUANT_V6_REGISTRATIONS" in normalized
+            and normalized.startswith(("INSERT ", "UPDATE ", "DELETE "))
+        ):
+            registration_dml.append(statement)
+
+    def _fence(session: Session) -> None:
+        assert registration_dml == []
+        assert session.in_transaction() is False
+        fenced_sessions.append(session)
+
+    service = WatchlistQuantV6PublicationService(
+        factory,
+        clock=lambda: _NOW,
+        transaction_fence=_fence,
+    )
+    event.listen(engine, "before_cursor_execute", _record_registration_dml)
+    try:
+        receipt = service.register_plan(plan)
+    finally:
+        event.remove(engine, "before_cursor_execute", _record_registration_dml)
+
+    assert receipt.created is True
+    assert len(fenced_sessions) == 1
+    assert registration_dml
+    assert _counts(engine) == (1, 0, 0, 0)
+
+
+def test_lost_transaction_fence_rolls_back_registration(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+    factory = _factory(engine)
+    plan = _one_member_plan()
+    fenced_sessions: list[Session] = []
+
+    def _lost_fence(session: Session) -> None:
+        assert session.in_transaction() is False
+        fenced_sessions.append(session)
+        raise RuntimeError("durable quant-v6 lease was lost")
+
+    service = WatchlistQuantV6PublicationService(
+        factory,
+        clock=lambda: _NOW,
+        transaction_fence=_lost_fence,
+    )
+
+    with pytest.raises(RuntimeError, match="lease was lost"):
+        service.register_plan(plan)
+
+    assert len(fenced_sessions) == 1
+    assert _counts(engine) == (0, 0, 0, 0)
+
+
 @pytest.mark.parametrize("expire_after_flush", [1, 2, 3])
 def test_deadline_between_publication_flushes_rolls_back_everything(
     tmp_path,

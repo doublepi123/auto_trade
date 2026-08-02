@@ -6,6 +6,7 @@ from typing import Optional
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    DDL,
     Date,
     DateTime,
     Float,
@@ -17,6 +18,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    event,
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -30,6 +32,68 @@ def _utcnow() -> datetime:
 
 class Base(DeclarativeBase):
     pass
+
+
+class DurableJobLease(Base):
+    """Durable cross-process ownership for one background job.
+
+    Epoch values are written from SQLite's clock by the lease service.  The
+    row is retained across releases so ``fencing_token`` can never suffer an
+    ABA reset through an ordinary delete/reinsert cycle.
+    """
+
+    __tablename__ = "durable_job_leases"
+    __table_args__ = (
+        CheckConstraint(
+            "length(lease_key) > 0 AND length(lease_key) <= 128 "
+            "AND lease_key = trim(lease_key)",
+            name="ck_durable_job_lease_key",
+        ),
+        CheckConstraint(
+            "length(holder_id) > 0 AND length(holder_id) <= 128 "
+            "AND holder_id = trim(holder_id)",
+            name="ck_durable_job_lease_holder",
+        ),
+        CheckConstraint(
+            "fencing_token >= 1",
+            name="ck_durable_job_lease_fencing_token",
+        ),
+        CheckConstraint(
+            "acquired_at_epoch_ms >= 0 "
+            "AND renewed_at_epoch_ms >= 0 "
+            "AND expires_at_epoch_ms >= 0",
+            name="ck_durable_job_lease_epoch_ms",
+        ),
+    )
+
+    lease_key: Mapped[str] = mapped_column(String(128), primary_key=True)
+    holder_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False)
+    acquired_at_epoch_ms: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+    renewed_at_epoch_ms: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+    expires_at_epoch_ms: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+    )
+
+
+event.listen(
+    DurableJobLease.__table__,
+    "after_create",
+    DDL(
+        "CREATE TRIGGER trg_durable_job_leases_no_delete "
+        "BEFORE DELETE ON durable_job_leases "
+        "BEGIN "
+        "SELECT RAISE(ABORT, 'durable_job_leases rows cannot be deleted'); "
+        "END"
+    ).execute_if(dialect="sqlite"),
+)
 
 
 class StrategyConfig(Base):

@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Protocol, cast
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.broker import BrokerCandle, Quote
@@ -35,6 +35,7 @@ from app.models import (
 from app.schemas import StrategyV2ShadowConfigUpdate
 from app.services.universe_selection_service import (
     _HISTORICAL_RESEARCH_BARS_CACHE,
+    UniverseSelectionLeaseBusyError,
     historical_membership_end,
     historical_research_candlesticks,
     research_candidate_uses_recent_candlesticks,
@@ -42,6 +43,11 @@ from app.services.universe_selection_service import (
     minimum_peer_observation_dollar_volume,
     observation_pool_overrides,
     select_exploration_candidates,
+)
+from app.services.durable_job_lease_service import (
+    DurableJobLeaseService,
+    LeaseKeepalive,
+    LeaseLostError,
 )
 
 _NOW = datetime(2026, 7, 24, 18, 0, tzinfo=timezone.utc)
@@ -2792,5 +2798,420 @@ def test_shadow_enable_failure_does_not_leave_orphaned_ownership(
         assert configs
         assert all(row.enabled is False for row in configs)
         assert all(row.universe_managed is False for row in configs)
+    finally:
+        db.close()
+
+
+class _LeaseGuardSpy:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.fenced_transaction: object | None = None
+
+    def __enter__(self) -> _LeaseGuardSpy:
+        self.events.append("keepalive_enter")
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: object,
+        _exc_value: object,
+        _traceback: object,
+    ) -> bool:
+        self.events.append("release")
+        return False
+
+    def checkpoint(self) -> object:
+        self.events.append("checkpoint")
+        return object()
+
+    def fence_in_transaction(self, session: Session) -> object:
+        self.events.append("fence")
+        if not session.in_transaction():
+            session.begin()
+        self.fenced_transaction = session.get_transaction()
+        assert self.fenced_transaction is not None
+        return object()
+
+
+class _LeaseServiceSpy:
+    def __init__(
+        self,
+        guard: _LeaseGuardSpy,
+        *,
+        acquired: bool = True,
+    ) -> None:
+        self.guard = guard
+        self.acquired = acquired
+        self.keys: list[str] = []
+        self.handle = object()
+
+    def try_acquire(self, lease_key: str) -> object | None:
+        self.keys.append(lease_key)
+        self.guard.events.append("acquire")
+        return self.handle if self.acquired else None
+
+    def keepalive(self, handle: object) -> _LeaseGuardSpy:
+        assert handle is self.handle
+        self.guard.events.append("keepalive")
+        return self.guard
+
+
+class _LostLeaseGuard:
+    def checkpoint(self) -> object:
+        return object()
+
+    def fence_in_transaction(self, _session: Session) -> object:
+        raise LeaseLostError("injected universe lease loss")
+
+
+def test_durable_lease_busy_skips_broker_and_database_writes() -> None:
+    db = _db()
+    broker = _FakeBroker()
+    events: list[str] = []
+    lease_service = _LeaseServiceSpy(
+        _LeaseGuardSpy(events),
+        acquired=False,
+    )
+    service = _service(db, broker)
+    service.lease_service = cast(
+        DurableJobLeaseService,
+        lease_service,
+    )
+    try:
+        with pytest.raises(UniverseSelectionLeaseBusyError):
+            service.refresh()
+
+        assert lease_service.keys == ["universe_selection"]
+        assert events == ["acquire"]
+        assert broker.quote_calls == 0
+        assert broker.candle_calls == 0
+        assert db.query(UniverseSelectionRun).count() == 0
+    finally:
+        db.close()
+
+
+def test_durable_lease_keepalive_checkpoints_and_releases_normally() -> None:
+    db = _db()
+    events: list[str] = []
+    lease_service = _LeaseServiceSpy(_LeaseGuardSpy(events))
+    service = _service(db, _FakeBroker())
+    service.lease_service = cast(
+        DurableJobLeaseService,
+        lease_service,
+    )
+    try:
+        result = service.refresh(apply_to_watchlist=False)
+
+        assert result.run.status == "COMPLETE"
+        assert lease_service.keys == ["universe_selection"]
+        assert events[:3] == [
+            "acquire",
+            "keepalive",
+            "keepalive_enter",
+        ]
+        assert "fence" in events
+        assert events.count("checkpoint") >= 2
+        assert events[-1] == "release"
+    finally:
+        db.close()
+
+
+def test_claim_run_fences_before_upsert_in_the_same_transaction() -> None:
+    db = _db()
+    service = _service(db, _FakeBroker())
+    events_seen: list[str] = []
+    guard = _LeaseGuardSpy(events_seen)
+
+    def _record_run_dml(
+        _connection,
+        _cursor,
+        statement: str,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        normalized = " ".join(statement.upper().split())
+        if normalized.startswith("INSERT INTO UNIVERSE_SELECTION_RUNS"):
+            events_seen.append("run_upsert")
+            assert db.get_transaction() is guard.fenced_transaction
+
+    event.listen(db.get_bind(), "before_cursor_execute", _record_run_dml)
+    try:
+        parameters = service._parameters()
+        claim = service._claim_run(
+            as_of_date=date(2026, 7, 23),
+            algorithm_version=service._algorithm_version(parameters),
+            parameters=parameters,
+            lease_guard=cast(LeaseKeepalive, guard),
+        )
+
+        assert claim is not None
+        assert events_seen.index("fence") < events_seen.index("run_upsert")
+    finally:
+        event.remove(
+            db.get_bind(),
+            "before_cursor_execute",
+            _record_run_dml,
+        )
+        db.close()
+
+
+def test_publish_claim_lease_loss_keeps_run_nonterminal_and_candidates_empty(
+) -> None:
+    db = _db()
+    service = _service(db, _FakeBroker())
+    parameters = service._parameters()
+    algorithm_version = service._algorithm_version(parameters)
+    try:
+        claim = service._claim_run(
+            as_of_date=date(2026, 7, 23),
+            algorithm_version=algorithm_version,
+            parameters=parameters,
+        )
+        assert claim is not None
+        selections, _, rotation_parameters = service._evaluate_catalog(
+            expected_as_of_date=date(2026, 7, 23),
+        )
+
+        with pytest.raises(LeaseLostError):
+            service._publish_claim(
+                claim,
+                selections=selections,
+                status="COMPLETE",
+                candidate_count=len(selections),
+                evaluable_count=sum(row.evaluable for row in selections),
+                selected_count=sum(row.selected for row in selections),
+                coverage_ratio=1.0,
+                parameters={**parameters, **rotation_parameters},
+                error="",
+                lease_guard=cast(LeaseKeepalive, _LostLeaseGuard()),
+            )
+
+        db.rollback()
+        db.expire_all()
+        run = db.get(UniverseSelectionRun, claim.run_id)
+        assert run is not None
+        assert run.status == "RUNNING"
+        assert db.query(UniverseSelectionCandidate).count() == 0
+    finally:
+        db.close()
+
+
+def test_reconcile_watchlist_lease_loss_leaves_watchlist_unchanged() -> None:
+    db = _db()
+    db.add(
+        WatchlistItem(
+            symbol="AAPL.US",
+            market="US",
+            alias="Original Apple",
+            source="manual",
+            is_active=False,
+            created_at=_NOW,
+        )
+    )
+    db.commit()
+    candidate = UniverseSelectionCandidate(
+        run_id=1,
+        symbol="JPM.US",
+        market="US",
+        alias="JPMorgan Chase",
+        sector="Financials",
+        memberships_json='["DJIA"]',
+        selected=True,
+        score=1.0,
+        metrics_json="{}",
+        exclusion_reasons_json="[]",
+        created_at=_NOW,
+    )
+    try:
+        with pytest.raises(LeaseLostError):
+            _service(db, _FakeBroker())._reconcile_watchlist(
+                [candidate],
+                lease_guard=cast(LeaseKeepalive, _LostLeaseGuard()),
+            )
+
+        db.rollback()
+        rows = db.query(WatchlistItem).all()
+        assert [(row.symbol, row.alias) for row in rows] == [
+            ("AAPL.US", "Original Apple")
+        ]
+    finally:
+        db.close()
+
+
+def test_reconcile_watchlist_rereads_primary_symbol_after_fence(
+    tmp_path: Path,
+) -> None:
+    engine = create_engine(f"sqlite:///{tmp_path / 'primary-switch.db'}")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine)
+    db = sessions()
+    db.add(StrategyConfig(symbol="AAPL.US", market="US"))
+    db.add_all([
+        WatchlistItem(
+            symbol="AAPL.US",
+            market="US",
+            alias="Apple",
+            source="manual",
+            is_active=True,
+            created_at=_NOW,
+        ),
+        WatchlistItem(
+            symbol="JPM.US",
+            market="US",
+            alias="JPMorgan Chase",
+            source="manual",
+            is_active=False,
+            created_at=_NOW,
+        ),
+    ])
+    db.commit()
+    candidate = UniverseSelectionCandidate(
+        run_id=1,
+        symbol="JPM.US",
+        market="US",
+        alias="JPMorgan Chase",
+        sector="Financials",
+        memberships_json='["DJIA"]',
+        selected=True,
+        score=1.0,
+        metrics_json="{}",
+        exclusion_reasons_json="[]",
+        created_at=_NOW,
+    )
+
+    class _PrimarySwitchGuard:
+        switched = False
+
+        @staticmethod
+        def checkpoint() -> object:
+            return object()
+
+        def fence_in_transaction(self, session: Session) -> object:
+            assert session is db
+            assert session.in_transaction() is False
+            with sessions.begin() as operator_db:
+                config = (
+                    operator_db.query(StrategyConfig)
+                    .order_by(StrategyConfig.id.desc())
+                    .one()
+                )
+                config.symbol = "JPM.US"
+                operator_db.query(WatchlistItem).update(
+                    {WatchlistItem.is_active: False},
+                    synchronize_session=False,
+                )
+                operator_db.query(WatchlistItem).filter(
+                    WatchlistItem.symbol == "JPM.US",
+                ).update(
+                    {WatchlistItem.is_active: True},
+                    synchronize_session=False,
+                )
+            self.switched = True
+            session.begin()
+            return object()
+
+    guard = _PrimarySwitchGuard()
+    try:
+        _service(db, _FakeBroker())._reconcile_watchlist(
+            [candidate],
+            lease_guard=cast(LeaseKeepalive, guard),
+        )
+
+        rows = {
+            row.symbol: row.is_active
+            for row in db.query(WatchlistItem).all()
+        }
+        assert guard.switched is True
+        assert rows == {"AAPL.US": False, "JPM.US": True}
+    finally:
+        db.close()
+        engine.dispose()
+
+
+def test_shadow_lease_loss_is_not_swallowed_or_followed_by_more_symbols(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.strategy_v2_shadow_service import (
+        StrategyV2ShadowService,
+    )
+
+    db = _db()
+    calls: list[str] = []
+
+    def _lose_lease(
+        _service: StrategyV2ShadowService,
+        symbol: str,
+    ) -> object:
+        calls.append(symbol)
+        raise LeaseLostError("injected shadow lease loss")
+
+    monkeypatch.setattr(
+        StrategyV2ShadowService,
+        "ensure_universe_managed_enabled",
+        _lose_lease,
+    )
+    try:
+        with pytest.raises(LeaseLostError):
+            _service(
+                db,
+                _FakeBroker(),
+                enable_shadow=True,
+            )._sync_observation_shadows(
+                observed_symbols={"AAPL.US", "JPM.US"},
+            )
+
+        assert calls == ["AAPL.US"]
+        assert (
+            db.query(StrategyV2ShadowConfig)
+            .filter(StrategyV2ShadowConfig.symbol == "JPM.US")
+            .first()
+            is None
+        )
+    finally:
+        db.close()
+
+
+def test_fenced_shadow_enable_failure_releases_new_config_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.strategy_v2_shadow_service import (
+        StrategyV2ShadowService,
+    )
+
+    db = _db()
+    guard = _LeaseGuardSpy([])
+
+    def _fail_enable(
+        _service: StrategyV2ShadowService,
+        _symbol: str,
+    ) -> object:
+        raise RuntimeError("injected fenced enable failure")
+
+    monkeypatch.setattr(
+        StrategyV2ShadowService,
+        "ensure_universe_managed_enabled",
+        _fail_enable,
+    )
+    try:
+        enabled, disabled, failures = _service(
+            db,
+            _FakeBroker(),
+            enable_shadow=True,
+        )._sync_observation_shadows(
+            observed_symbols={"AAPL.US"},
+            lease_guard=cast(LeaseKeepalive, guard),
+        )
+
+        config = (
+            db.query(StrategyV2ShadowConfig)
+            .filter(StrategyV2ShadowConfig.symbol == "AAPL.US")
+            .one()
+        )
+        assert enabled == []
+        assert disabled == []
+        assert failures == ["enable:AAPL.US"]
+        assert config.enabled is False
+        assert config.universe_managed is False
     finally:
         db.close()
