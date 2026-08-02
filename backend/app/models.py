@@ -1521,6 +1521,10 @@ class OpeningMomentumShadowRun(Base):
         Float,
         nullable=True,
     )
+    candidate_breakout_depth_bps: Mapped[Optional[float]] = mapped_column(
+        Float,
+        nullable=True,
+    )
     candidate_signal_turnover: Mapped[Optional[float]] = mapped_column(
         Float,
         nullable=True,

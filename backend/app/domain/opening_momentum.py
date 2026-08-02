@@ -20,6 +20,21 @@ OpeningRangeBreakoutRanking = Literal[
 ]
 
 
+_BREAKOUT_DEPTH_BPS_EPSILON = 1e-9
+
+
+def _validated_minimum_breakout_depth_bps(
+    value: float | None,
+) -> float | None:
+    if value is None:
+        return None
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(
+            "minimum_breakout_depth_bps must be finite and non-negative"
+        )
+    return float(value)
+
+
 @dataclass(frozen=True)
 class OpeningMomentumConfig:
     """Frozen parameters for the prospective opening-momentum shadow."""
@@ -263,15 +278,20 @@ def evaluate_opening_range_breakout(
     observations: Sequence[OpeningMomentumObservation],
     *,
     opening_range_high_by_symbol: Mapping[str, float],
+    minimum_breakout_depth_bps: float | None = None,
     config: OpeningMomentumConfig | None = None,
 ) -> OpeningMomentumDecision:
     """Select the strongest close-confirmed opening-range breakout."""
 
+    minimum_depth_bps = _validated_minimum_breakout_depth_bps(
+        minimum_breakout_depth_bps
+    )
     return _evaluate_opening_range_breakout(
         observations,
         opening_range_high_by_symbol=opening_range_high_by_symbol,
         eligible_symbols=None,
         candidate_ranking="BREAKOUT_DEPTH",
+        minimum_breakout_depth_bps=minimum_depth_bps,
         entry_reason="FIVE_MINUTE_OPENING_RANGE_BREAKOUT",
         config=config,
     )
@@ -285,10 +305,14 @@ def evaluate_stocks_in_play_opening_range_breakout(
     maximum_stocks_in_play: int = 20,
     minimum_opening_activity_ratio: float | None = None,
     candidate_ranking: OpeningRangeBreakoutRanking = "BREAKOUT_DEPTH",
+    minimum_breakout_depth_bps: float | None = None,
     config: OpeningMomentumConfig | None = None,
 ) -> OpeningMomentumDecision:
     """Restrict ORB candidates to the most active opening names."""
 
+    minimum_depth_bps = _validated_minimum_breakout_depth_bps(
+        minimum_breakout_depth_bps
+    )
     if maximum_stocks_in_play <= 0:
         raise ValueError("maximum_stocks_in_play must be positive")
     if minimum_opening_activity_ratio is not None and (
@@ -354,6 +378,7 @@ def evaluate_stocks_in_play_opening_range_breakout(
         opening_range_high_by_symbol=opening_range_high_by_symbol,
         eligible_symbols=stocks_in_play,
         candidate_ranking=candidate_ranking,
+        minimum_breakout_depth_bps=minimum_depth_bps,
         entry_reason=(
             "OPENING_RETURN_RERANKED_STOCKS_IN_PLAY_"
             "FIVE_MINUTE_OPENING_RANGE_BREAKOUT"
@@ -370,6 +395,7 @@ def _evaluate_opening_range_breakout(
     opening_range_high_by_symbol: Mapping[str, float],
     eligible_symbols: set[str] | None,
     candidate_ranking: OpeningRangeBreakoutRanking,
+    minimum_breakout_depth_bps: float | None,
     entry_reason: str,
     config: OpeningMomentumConfig | None,
 ) -> OpeningMomentumDecision:
@@ -405,7 +431,7 @@ def _evaluate_opening_range_breakout(
     market_return_bps = median(
         item.opening_return_bps for item in ranking
     )
-    eligible = [
+    confirmed_breakouts = [
         item
         for item in by_symbol.values()
         if (
@@ -416,7 +442,7 @@ def _evaluate_opening_range_breakout(
             and item.signal_close > opening_range_high
         )
     ]
-    if not eligible:
+    if not confirmed_breakouts:
         return OpeningMomentumDecision(
             action="SKIP",
             reason="OPENING_RANGE_BREAKOUT_MISSING",
@@ -429,20 +455,52 @@ def _evaluate_opening_range_breakout(
             ranking=ranking,
         )
 
+    def breakout_depth(
+        item: OpeningMomentumObservation,
+    ) -> float:
+        return item.signal_close / normalized_highs[item.symbol] - 1
+
+    def breakout_depth_bps(
+        item: OpeningMomentumObservation,
+    ) -> float:
+        return breakout_depth(item) * 10_000
+
+    eligible = confirmed_breakouts
+    if minimum_breakout_depth_bps is not None:
+        eligible = [
+            item
+            for item in confirmed_breakouts
+            if (
+                breakout_depth_bps(item)
+                + _BREAKOUT_DEPTH_BPS_EPSILON
+                >= minimum_breakout_depth_bps
+            )
+        ]
+        if not eligible:
+            return OpeningMomentumDecision(
+                action="SKIP",
+                reason="MINIMUM_BREAKOUT_DEPTH_FILTER",
+                universe_size=len(ranking),
+                market_return_bps=market_return_bps,
+                candidate_symbol=None,
+                candidate_return_bps=None,
+                excess_return_bps=None,
+                entry_price=None,
+                ranking=ranking,
+            )
+
     def candidate_key(
         item: OpeningMomentumObservation,
     ) -> tuple[float, float, str]:
-        breakout_depth = (
-            item.signal_close / normalized_highs[item.symbol] - 1
-        )
+        depth = breakout_depth(item)
         if candidate_ranking == "OPENING_RETURN":
             return (
                 -item.opening_return_bps,
-                -breakout_depth,
+                -depth,
                 item.symbol,
             )
         return (
-            -breakout_depth,
+            -depth,
             -item.opening_return_bps,
             item.symbol,
         )

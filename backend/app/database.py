@@ -2125,6 +2125,7 @@ def _ensure_opening_momentum_shadow_table(db_engine: Engine) -> None:
         "candidate_path_efficiency": "FLOAT",
         "candidate_max_pullback_bps": "FLOAT",
         "candidate_opening_range_bps": "FLOAT",
+        "candidate_breakout_depth_bps": "FLOAT",
         "candidate_signal_turnover": "FLOAT",
         "candidate_avg_dollar_volume": "FLOAT",
         "candidate_signal_turnover_ratio": "FLOAT",

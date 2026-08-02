@@ -223,8 +223,12 @@ class TestOpeningMomentumShadowApi:
             "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
             "OPENING_RETURN_CHALLENGER"
         ]
+        index_catalog_relative_volume_opening_return_depth10 = variants[
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+            "OPENING_RETURN_DEPTH10_CHALLENGER"
+        ]
         execution_sndk = variants["EXECUTION_SNDK_CHALLENGER"]
-        assert len(variants) == 45
+        assert len(variants) == 46
         assert early["universe_source"] == "OPENING_EARLY_BROAD"
         assert early["signal_minutes"] == 3
         assert early["minimum_market_return_bps"] == -50.0
@@ -802,6 +806,33 @@ class TestOpeningMomentumShadowApi:
         assert index_catalog_relative_volume_opening_return["comparison"][
             "multiple_testing_family_size"
         ] == 1
+        assert index_catalog_relative_volume_opening_return_depth10[
+            "universe_source"
+        ] == (
+            "OPENING_INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+            "OPENING_RETURN_DEPTH10"
+        )
+        assert index_catalog_relative_volume_opening_return_depth10[
+            "candidate_selection_mode"
+        ] == "OPENING_ACTIVITY_TOP_N_THEN_OPENING_RETURN_BREAKOUT"
+        assert index_catalog_relative_volume_opening_return_depth10[
+            "minimum_breakout_depth_bps"
+        ] == 10.0
+        assert index_catalog_relative_volume_opening_return_depth10[
+            "forward_evidence_start_date"
+        ] == "2026-08-03"
+        assert index_catalog_relative_volume_opening_return_depth10[
+            "comparison_baseline"
+        ] == (
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+            "OPENING_RETURN_CHALLENGER"
+        )
+        assert index_catalog_relative_volume_opening_return_depth10[
+            "comparison"
+        ] is not None
+        assert index_catalog_relative_volume_opening_return_depth10[
+            "comparison"
+        ]["multiple_testing_family_size"] == 1
         assert execution_sndk["required_symbols"] == ["SNDK.US"]
         assert (
             execution_sndk["comparison_baseline"]
@@ -866,7 +897,8 @@ class TestOpeningMomentumShadowApi:
                     excluded_symbols_json="{}",
                     ranking_json=(
                         '[{"symbol":"AAPL.US",'
-                        '"opening_return_bps":80.0}]'
+                        '"opening_return_bps":80.0,'
+                        '"breakout_depth_bps":12.5}]'
                     ),
                     candidate_symbol="AAPL.US",
                     market_return_bps=10.0,
@@ -877,6 +909,7 @@ class TestOpeningMomentumShadowApi:
                     candidate_path_efficiency=0.42,
                     candidate_max_pullback_bps=-35.0,
                     candidate_opening_range_bps=130.0,
+                    candidate_breakout_depth_bps=12.5,
                     candidate_signal_turnover=31_000_000.0,
                     candidate_avg_dollar_volume=1_250_000_000.0,
                     candidate_signal_turnover_ratio=0.0248,
@@ -907,9 +940,11 @@ class TestOpeningMomentumShadowApi:
         assert runs.status_code == 200
         assert runs.json()[0]["candidate_symbol"] == "AAPL.US"
         assert runs.json()[0]["ranking"][0]["opening_return_bps"] == 80.0
+        assert runs.json()[0]["ranking"][0]["breakout_depth_bps"] == 12.5
         assert runs.json()[0]["candidate_first_five_return_bps"] == 25.0
         assert runs.json()[0]["candidate_path_efficiency"] == 0.42
         assert runs.json()[0]["candidate_max_pullback_bps"] == -35.0
+        assert runs.json()[0]["candidate_breakout_depth_bps"] == 12.5
         assert runs.json()[0]["candidate_signal_turnover"] == 31_000_000.0
         assert (
             runs.json()[0]["candidate_avg_dollar_volume"]

@@ -403,6 +403,7 @@ def test_opening_momentum_path_feature_migration_is_idempotent(
         "candidate_path_efficiency",
         "candidate_max_pullback_bps",
         "candidate_opening_range_bps",
+        "candidate_breakout_depth_bps",
         "candidate_signal_turnover",
         "candidate_avg_dollar_volume",
         "candidate_signal_turnover_ratio",

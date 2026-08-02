@@ -704,6 +704,12 @@
                           }}
                         </template>
                       </small>
+                      <small
+                        v-if="row.minimum_breakout_depth_bps != null"
+                        class="opening-momentum-exception-threshold"
+                      >
+                        突破深度门槛 {{ formatBps(row.minimum_breakout_depth_bps) }}
+                      </small>
                     </template>
                   </el-table-column>
                   <el-table-column label="QQQ/DIA 均值上限" min-width="130">
@@ -759,6 +765,11 @@
                   <el-table-column label="当日候选" min-width="110">
                     <template #default="{ row }">
                       {{ row.latest?.candidate_symbol || '-' }}
+                    </template>
+                  </el-table-column>
+                  <el-table-column label="候选突破深度" min-width="120">
+                    <template #default="{ row }">
+                      {{ formatNullableBps(row.latest?.candidate_breakout_depth_bps ?? null) }}
                     </template>
                   </el-table-column>
                   <el-table-column label="隔夜 / 昨收" min-width="150">
@@ -2689,6 +2700,9 @@ function openingMomentumVariantLabel(
   }
   if (variant === 'INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN_CHALLENGER') {
     return '相对量 Top5 + 涨幅重排'
+  }
+  if (variant === 'INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN_DEPTH10_CHALLENGER') {
+    return '相对量 Top5 + 涨幅重排 + 突破深度 10bp'
   }
   if (variant === 'INDEX_CATALOG_STOCKS_IN_PLAY_ORB_CHALLENGER') return '全指数目录活跃 ORB Top20'
   const indexCatalogStocksInPlay = /^INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP(\d+)_CHALLENGER$/.exec(variant)

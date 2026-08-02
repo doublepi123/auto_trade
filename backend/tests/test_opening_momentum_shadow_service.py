@@ -31,6 +31,14 @@ from app.services.opening_momentum_shadow_service import (
 
 
 _SESSION_OPEN = datetime(2026, 7, 29, 13, 30, tzinfo=timezone.utc)
+_FORWARD_SESSION_OPEN = datetime(
+    2026,
+    8,
+    3,
+    13,
+    30,
+    tzinfo=timezone.utc,
+)
 _SYMBOLS = tuple(f"S{index}.US" for index in range(8))
 _SNDK_SYMBOL = "SNDK.US"
 _EXTENSION_SYMBOLS = (
@@ -97,6 +105,10 @@ _ALL_CHALLENGER_VARIANTS = (
     "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
     "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER",
     "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN_CHALLENGER",
+    (
+        "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+        "OPENING_RETURN_DEPTH10_CHALLENGER"
+    ),
     *_EXECUTION_EXTENSION_VARIANTS,
 )
 
@@ -117,6 +129,7 @@ class _FakeCandles:
         orb_breakout_returns_bps: dict[str, float] | None = None,
         unavailable_symbols: set[str] | None = None,
         turnover_per_minute_by_symbol: dict[str, float] | None = None,
+        session_open: datetime = _SESSION_OPEN,
     ) -> None:
         self.missing_entry_for = missing_entry_for
         self.opening_returns_bps = opening_returns_bps or {}
@@ -132,6 +145,7 @@ class _FakeCandles:
         self.turnover_per_minute_by_symbol = (
             turnover_per_minute_by_symbol or {}
         )
+        self.session_open = session_open
         self.calls: list[str] = []
 
     def get_candlesticks(
@@ -213,7 +227,7 @@ class _FakeCandles:
                 open_price = 102.5 if symbol_index == 7 else 100.0
             bars.append(
                 BrokerCandle(
-                    timestamp=_SESSION_OPEN
+                    timestamp=self.session_open
                     + timedelta(minutes=index),
                     open=open_price,
                     high=max(open_price, close_price) + 0.1,
@@ -1492,6 +1506,29 @@ def test_relative_volume_opening_return_challenger_reranks_breakouts(
             "OPENING_RETURN_RERANKED_STOCKS_IN_PLAY_"
             "FIVE_MINUTE_OPENING_RANGE_BREAKOUT"
         )
+        pre_forward_depth10 = opened_variants[
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+            "OPENING_RETURN_DEPTH10_CHALLENGER"
+        ]
+        assert pre_forward_depth10.latest is None
+        depth10_config_version = next(
+            item.config_version
+            for item in service._variant_identities()
+            if item.variant
+            == (
+                "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+                "OPENING_RETURN_DEPTH10_CHALLENGER"
+            )
+        )
+        assert (
+            db.query(OpeningMomentumShadowRun)
+            .filter(
+                OpeningMomentumShadowRun.config_version
+                == depth10_config_version
+            )
+            .count()
+            == 0
+        )
         status = service.tick(
             now=_SESSION_OPEN + timedelta(minutes=67, seconds=10),
         )
@@ -1508,8 +1545,20 @@ def test_relative_volume_opening_return_challenger_reranks_breakouts(
         assert challenger.latest is not None
         assert baseline.latest.status == "CLOSED"
         assert baseline.latest.candidate_symbol == "S0.US"
+        assert baseline.latest.candidate_breakout_depth_bps == pytest.approx(
+            (100.8 / 100.1 - 1) * 10_000
+        )
         assert challenger.latest.status == "CLOSED"
         assert challenger.latest.candidate_symbol == "S7.US"
+        assert challenger.latest.candidate_breakout_depth_bps == pytest.approx(
+            (101.0 / 100.6 - 1) * 10_000
+        )
+        ranking_by_symbol = {
+            item.symbol: item for item in challenger.latest.ranking
+        }
+        assert ranking_by_symbol["S7.US"].breakout_depth_bps == pytest.approx(
+            (101.0 / 100.6 - 1) * 10_000
+        )
         assert challenger.latest.reason == "STOP_LOSS_EXIT"
         assert challenger.candidate_selection_mode == (
             "OPENING_ACTIVITY_TOP_N_THEN_OPENING_RETURN_BREAKOUT"
@@ -1522,6 +1571,183 @@ def test_relative_volume_opening_return_challenger_reranks_breakouts(
         assert challenger.comparison.multiple_testing_family_size == 1
         assert challenger.comparison.policy_displacement_sessions == 1
         assert challenger.comparison.promotion_ready is False
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_depth10_forward_shadow_filters_shallow_opening_leader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        _seed_universe(db, avg_dollar_volume=100_000_000.0)
+        _seed_active_broad_pool(db)
+        _seed_opening_activity_history(
+            db,
+            low_baseline_symbol="S7.US",
+        )
+        service = OpeningMomentumShadowService(
+            db,
+            _FakeCandles(
+                orb_breakout_returns_bps={
+                    "S0.US": 30.0,
+                    "S7.US": 65.0,
+                },
+                session_open=_FORWARD_SESSION_OPEN,
+            ),
+        )
+
+        assert service.paper_execution_variant_identity().variant == (
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        )
+        status = service.tick(
+            now=(
+                _FORWARD_SESSION_OPEN
+                + timedelta(minutes=7, seconds=10)
+            ),
+        )
+
+        variants = {item.variant: item for item in status.variants}
+        opening_return = variants[
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+            "OPENING_RETURN_CHALLENGER"
+        ]
+        depth10 = variants[
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+            "OPENING_RETURN_DEPTH10_CHALLENGER"
+        ]
+        assert opening_return.latest is not None
+        assert opening_return.latest.status == "OPEN"
+        assert opening_return.latest.candidate_symbol == "S7.US"
+        assert (
+            opening_return.latest.candidate_breakout_depth_bps
+            == pytest.approx((100.65 / 100.6 - 1) * 10_000)
+        )
+        opening_return_depth_bps = (
+            opening_return.latest.candidate_breakout_depth_bps
+        )
+        assert opening_return_depth_bps is not None
+        assert opening_return_depth_bps < 10.0
+        assert depth10.latest is not None
+        assert depth10.latest.status == "OPEN"
+        assert depth10.latest.candidate_symbol == "S0.US"
+        assert depth10.latest.candidate_breakout_depth_bps == pytest.approx(
+            (100.3 / 100.1 - 1) * 10_000
+        )
+        depth10_depth_bps = depth10.latest.candidate_breakout_depth_bps
+        assert depth10_depth_bps is not None
+        assert depth10_depth_bps >= 10.0
+        assert depth10.minimum_breakout_depth_bps == 10.0
+        assert depth10.forward_evidence_start_date == date(2026, 8, 3)
+        assert depth10.comparison_baseline == (
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+            "OPENING_RETURN_CHALLENGER"
+        )
+        assert depth10.comparison is not None
+        assert depth10.comparison.policy_displacement_sessions == 0
+        assert depth10.comparison.promotion_ready is False
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_depth10_forward_shadow_persists_near_misses_when_all_are_shallow(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        _seed_universe(db, avg_dollar_volume=100_000_000.0)
+        _seed_active_broad_pool(db)
+        _seed_opening_activity_history(
+            db,
+            low_baseline_symbol="S7.US",
+        )
+        service = OpeningMomentumShadowService(
+            db,
+            _FakeCandles(
+                orb_breakout_returns_bps={
+                    "S0.US": 15.0,
+                    "S7.US": 65.0,
+                },
+                session_open=_FORWARD_SESSION_OPEN,
+            ),
+        )
+        identity = next(
+            item
+            for item in service._variant_identities()
+            if item.variant
+            == (
+                "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+                "OPENING_RETURN_DEPTH10_CHALLENGER"
+            )
+        )
+
+        status = service.tick(
+            now=(
+                _FORWARD_SESSION_OPEN
+                + timedelta(minutes=7, seconds=10)
+            ),
+        )
+
+        depth10 = {
+            item.variant: item for item in status.variants
+        }[
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+            "OPENING_RETURN_DEPTH10_CHALLENGER"
+        ]
+        assert depth10.latest is not None
+        assert depth10.latest.status == "SKIPPED"
+        assert depth10.latest.reason == "MINIMUM_BREAKOUT_DEPTH_FILTER"
+        assert depth10.latest.candidate_symbol is None
+        assert depth10.latest.candidate_breakout_depth_bps is None
+
+        row = (
+            db.query(OpeningMomentumShadowRun)
+            .filter(
+                OpeningMomentumShadowRun.session_date
+                == _FORWARD_SESSION_OPEN.date(),
+                OpeningMomentumShadowRun.config_version
+                == identity.config_version,
+            )
+            .one()
+        )
+        assert row.candidate_symbol is None
+        ranking = {
+            item["symbol"]: item
+            for item in json.loads(row.ranking_json)
+        }
+        assert set(_SYMBOLS).issubset(ranking)
+        assert all(
+            "breakout_depth_bps" in item
+            for item in ranking.values()
+        )
+        assert ranking["S0.US"][
+            "breakout_depth_bps"
+        ] == pytest.approx((100.15 / 100.1 - 1) * 10_000)
+        assert ranking["S7.US"][
+            "breakout_depth_bps"
+        ] == pytest.approx((100.65 / 100.6 - 1) * 10_000)
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
@@ -1736,6 +1962,10 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
             "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER",
             "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN_CHALLENGER",
+            (
+                "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+                "OPENING_RETURN_DEPTH10_CHALLENGER"
+            ),
             "EXECUTION_SNDK_CHALLENGER",
             "EXECUTION_INTC_CHALLENGER",
             "EXECUTION_QCOM_CHALLENGER",
@@ -1818,6 +2048,10 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         index_catalog_relative_volume_opening_return = by_variant[
             "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
             "OPENING_RETURN_CHALLENGER"
+        ]
+        index_catalog_relative_volume_opening_return_depth10 = by_variant[
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+            "OPENING_RETURN_DEPTH10_CHALLENGER"
         ]
         reversal = by_variant["REVERSAL_CHALLENGER"]
         continuation = by_variant["CONTINUATION_CHALLENGER"]
@@ -2256,6 +2490,48 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
         )
         assert index_catalog_relative_volume_opening_return.universe_source == (
             "OPENING_INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN"
+        )
+        assert (
+            index_catalog_relative_volume_opening_return_depth10
+            .candidate_selection_mode
+            == "OPENING_ACTIVITY_TOP_N_THEN_OPENING_RETURN_BREAKOUT"
+        )
+        assert (
+            index_catalog_relative_volume_opening_return_depth10
+            .decision_config
+            == index_catalog_relative_volume_opening_return.decision_config
+        )
+        assert (
+            index_catalog_relative_volume_opening_return_depth10
+            .opening_activity_top_n
+            == 5
+        )
+        assert (
+            index_catalog_relative_volume_opening_return_depth10
+            .opening_activity_baseline
+            == "PRIOR_SAME_WINDOW_VOLUME"
+        )
+        assert (
+            index_catalog_relative_volume_opening_return_depth10
+            .minimum_breakout_depth_bps
+            == 10.0
+        )
+        assert (
+            index_catalog_relative_volume_opening_return_depth10
+            .forward_evidence_start_date
+            == date(2026, 8, 3)
+        )
+        assert (
+            index_catalog_relative_volume_opening_return_depth10
+            .universe_source
+            == (
+                "OPENING_INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+                "OPENING_RETURN_DEPTH10"
+            )
+        )
+        assert "research-through-20260731" in (
+            index_catalog_relative_volume_opening_return_depth10
+            .algorithm_version
         )
         for variant, symbol in zip(
             _EXECUTION_EXTENSION_VARIANTS,
@@ -2718,7 +2994,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 45
+        assert len(opened.variants) == 46
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -4042,7 +4318,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 45
+        assert len(status.variants) == 46
         by_variant = {
             item.variant: item for item in status.variants
         }

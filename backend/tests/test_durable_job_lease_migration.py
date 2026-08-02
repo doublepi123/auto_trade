@@ -18,6 +18,7 @@ from app.models import DurableJobLease
 
 _REVISION = "20260801_durable_job_leases"
 _PREDECESSOR = "20260801_watchlist_quant_v6"
+_HEAD_REVISION = "20260802_opening_breakout_depth"
 
 
 def _create_lease_table(engine: Engine) -> None:
@@ -69,7 +70,7 @@ def test_durable_job_lease_revision_is_head_and_round_trips(
     config = _alembic_config(backend_root, db_path)
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_current_head() == _REVISION
+    assert script.get_current_head() == _HEAD_REVISION
     revision = script.get_revision(_REVISION)
     assert revision is not None
     assert revision.down_revision == _PREDECESSOR
@@ -127,7 +128,7 @@ def test_entrypoint_stamps_complete_legacy_head_schema(
     with engine.connect() as connection:
         assert connection.execute(
             text("SELECT version_num FROM alembic_version")
-        ).scalar_one() == _REVISION
+        ).scalar_one() == _HEAD_REVISION
     engine.dispose()
 
 

@@ -331,6 +331,26 @@ _INDEX_CATALOG_RELATIVE_VOLUME_ORB_OPENING_RETURN_ALGORITHM_VERSION = (
     f"{_INDEX_CATALOG_RELATIVE_VOLUME_ORB_OPENING_RETURN_VERSION}"
 )
 _POST_20260728_FORWARD_EVIDENCE_START_DATE = date(2026, 7, 29)
+# The 10bp threshold sits in the middle of the stable 9..14bp historical
+# plateau.  Research through 2026-07-31 also showed that it would have skipped
+# a profitable shallow AMZN breakout, so this remains an independent,
+# forward-only hypothesis against the opening-return variant rather than a
+# revision of that evidence series.
+_INDEX_CATALOG_RELATIVE_VOLUME_ORB_OPENING_RETURN_DEPTH10_SOURCE = (
+    "OPENING_INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+    "OPENING_RETURN_DEPTH10"
+)
+_INDEX_CATALOG_RELATIVE_VOLUME_ORB_OPENING_RETURN_DEPTH10_VERSION = (
+    "forward-only-index-catalog-rvol14-min1-top5-orb5-"
+    "depth-min10bps-then-opening-return-hold60-cost30-"
+    "research-through-20260731-v1"
+)
+_INDEX_CATALOG_RELATIVE_VOLUME_ORB_OPENING_RETURN_DEPTH10_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+"
+    f"{_INDEX_CATALOG_RELATIVE_VOLUME_ORB_OPENING_RETURN_DEPTH10_VERSION}"
+)
+_RELATIVE_VOLUME_ORB_MINIMUM_BREAKOUT_DEPTH_BPS = 10.0
+_POST_20260731_FORWARD_EVIDENCE_START_DATE = date(2026, 8, 3)
 _RELATIVE_VOLUME_LOOKBACK_SESSIONS = 14
 _RELATIVE_VOLUME_MINIMUM_RATIO = 1.0
 _RELATIVE_VOLUME_TOP_N = 5
@@ -496,6 +516,10 @@ _VariantName = Literal[
     "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
     "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER",
     "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN_CHALLENGER",
+    (
+        "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+        "OPENING_RETURN_DEPTH10_CHALLENGER"
+    ),
     "EXECUTION_SNDK_CHALLENGER",
     "EXECUTION_INTC_CHALLENGER",
     "EXECUTION_QCOM_CHALLENGER",
@@ -684,6 +708,7 @@ class _UniverseVariant:
     opening_activity_baseline: _OpeningActivityBaseline | None = None
     opening_activity_lookback_sessions: int | None = None
     minimum_opening_activity_ratio: float | None = None
+    minimum_breakout_depth_bps: float | None = None
     required_symbols: tuple[str, ...] = ()
     excluded_symbols: tuple[str, ...] = ()
     forward_evidence_start_date: date | None = None
@@ -796,6 +821,20 @@ class _UniverseVariant:
             raise ValueError(
                 "opening-range breakout requires a five-minute range stop"
             )
+        if self.minimum_breakout_depth_bps is not None:
+            if (
+                not math.isfinite(self.minimum_breakout_depth_bps)
+                or self.minimum_breakout_depth_bps < 0
+            ):
+                raise ValueError(
+                    "minimum_breakout_depth_bps must be finite and "
+                    "non-negative"
+                )
+            if self.signal_model != "OPENING_RANGE_BREAKOUT":
+                raise ValueError(
+                    "minimum breakout depth requires an opening-range "
+                    "breakout signal"
+                )
         if self.opening_activity_top_n is not None:
             if self.opening_activity_top_n <= 0:
                 raise ValueError("opening_activity_top_n must be positive")
@@ -1039,7 +1078,14 @@ class OpeningMomentumShadowService:
         pending_variants = [
             variant
             for variant in variants
-            if variant.config_version not in existing_versions
+            if (
+                variant.config_version not in existing_versions
+                and (
+                    variant.forward_evidence_start_date is None
+                    or local.date()
+                    >= variant.forward_evidence_start_date
+                )
+            )
         ]
         due_variants = [
             variant
@@ -1370,12 +1416,18 @@ class OpeningMomentumShadowService:
                         )
                         else "BREAKOUT_DEPTH"
                     ),
+                    minimum_breakout_depth_bps=(
+                        variant.minimum_breakout_depth_bps
+                    ),
                     config=variant.decision_config,
                 )
             return evaluate_opening_range_breakout(
                 observations,
                 opening_range_high_by_symbol=(
                     opening_range_high_by_symbol
+                ),
+                minimum_breakout_depth_bps=(
+                    variant.minimum_breakout_depth_bps
                 ),
                 config=variant.decision_config,
             )
@@ -1774,6 +1826,21 @@ class OpeningMomentumShadowService:
                         self._opening_path_features(signal_candles)
                     )
 
+            breakout_depth_bps_by_symbol = (
+                {
+                    item.symbol: (
+                        item.signal_close
+                        / opening_range_high_by_symbol[item.symbol]
+                        - 1
+                    )
+                    * 10_000
+                    for item in observations
+                    if item.symbol in opening_range_high_by_symbol
+                }
+                if variant.signal_model == "OPENING_RANGE_BREAKOUT"
+                else {}
+            )
+
             required_observations = max(
                 config.minimum_universe_size,
                 math.ceil(
@@ -2110,6 +2177,11 @@ class OpeningMomentumShadowService:
             ranking_payload = []
             for item in decision.ranking:
                 payload = asdict(item)
+                breakout_depth_bps = (
+                    breakout_depth_bps_by_symbol.get(item.symbol)
+                )
+                if breakout_depth_bps is not None:
+                    payload["breakout_depth_bps"] = breakout_depth_bps
                 activity_rank = opening_activity_rank_by_symbol.get(
                     item.symbol
                 )
@@ -2172,6 +2244,13 @@ class OpeningMomentumShadowService:
                 candidate_opening_range_bps=(
                     path_features.opening_range_bps
                     if path_features is not None
+                    else None
+                ),
+                candidate_breakout_depth_bps=(
+                    breakout_depth_bps_by_symbol.get(
+                        decision.candidate_symbol
+                    )
+                    if decision.candidate_symbol is not None
                     else None
                 ),
                 candidate_signal_turnover=candidate_signal_turnover,
@@ -2669,6 +2748,10 @@ class OpeningMomentumShadowService:
             (
                 "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
                 "OPENING_RETURN_CHALLENGER"
+            ),
+            (
+                "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+                "OPENING_RETURN_DEPTH10_CHALLENGER"
             ),
         ):
             relative_volume_identity = identities_by_variant[
@@ -3230,6 +3313,52 @@ class OpeningMomentumShadowService:
                 ),
                 forward_evidence_start_date=(
                     _POST_20260728_FORWARD_EVIDENCE_START_DATE
+                ),
+            ))
+            variants.append(_UniverseVariant(
+                variant=(
+                    "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+                    "OPENING_RETURN_DEPTH10_CHALLENGER"
+                ),
+                algorithm_version=(
+                    _INDEX_CATALOG_RELATIVE_VOLUME_ORB_OPENING_RETURN_DEPTH10_ALGORITHM_VERSION
+                ),
+                config_version=self._evidence_config_version(
+                    f"{five_minute_orb_config.version_hash()}:"
+                    f"{_INDEX_CATALOG_RELATIVE_VOLUME_ORB_OPENING_RETURN_DEPTH10_VERSION}:"
+                    f"{_RELATIVE_VOLUME_LOOKBACK_SESSIONS}:"
+                    f"{_RELATIVE_VOLUME_MINIMUM_RATIO:.2f}:"
+                    f"{_RELATIVE_VOLUME_TOP_N}:OPENING_RETURN:"
+                    f"{_RELATIVE_VOLUME_ORB_MINIMUM_BREAKOUT_DEPTH_BPS:.1f}"
+                ),
+                universe_source=(
+                    _INDEX_CATALOG_RELATIVE_VOLUME_ORB_OPENING_RETURN_DEPTH10_SOURCE
+                ),
+                decision_config=five_minute_orb_config,
+                signal_model="OPENING_RANGE_BREAKOUT",
+                candidate_selection_mode=(
+                    "OPENING_ACTIVITY_TOP_N_THEN_"
+                    "OPENING_RETURN_BREAKOUT"
+                ),
+                minimum_data_coverage=(
+                    _EARLY_BROAD_MINIMUM_COVERAGE
+                ),
+                opening_range_stop=True,
+                opening_activity_top_n=_RELATIVE_VOLUME_TOP_N,
+                opening_activity_baseline=(
+                    "PRIOR_SAME_WINDOW_VOLUME"
+                ),
+                opening_activity_lookback_sessions=(
+                    _RELATIVE_VOLUME_LOOKBACK_SESSIONS
+                ),
+                minimum_opening_activity_ratio=(
+                    _RELATIVE_VOLUME_MINIMUM_RATIO
+                ),
+                minimum_breakout_depth_bps=(
+                    _RELATIVE_VOLUME_ORB_MINIMUM_BREAKOUT_DEPTH_BPS
+                ),
+                forward_evidence_start_date=(
+                    _POST_20260731_FORWARD_EVIDENCE_START_DATE
                 ),
             ))
             for spec in _EXECUTION_EXTENSION_SPECS:
@@ -3963,6 +4092,13 @@ class OpeningMomentumShadowService:
                 "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
                 "OPENING_RETURN_CHALLENGER"
             )
+            uses_relative_volume_opening_return_baseline = (
+                identity.variant
+                == (
+                    "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+                    "OPENING_RETURN_DEPTH10_CHALLENGER"
+                )
+            )
             requires_displacement_evidence = (
                 is_early_extension
                 or is_execution_extension
@@ -3972,6 +4108,7 @@ class OpeningMomentumShadowService:
                 or uses_five_minute_orb_baseline
                 or uses_index_catalog_five_minute_orb_baseline
                 or uses_relative_volume_orb_baseline
+                or uses_relative_volume_opening_return_baseline
             )
             identity_rows_by_date = rows_by_date[
                 identity.config_version
@@ -3986,6 +4123,10 @@ class OpeningMomentumShadowService:
                 "FIVE_MINUTE_ORB_CHALLENGER",
                 "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER",
                 "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER",
+                (
+                    "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+                    "OPENING_RETURN_CHALLENGER"
+                ),
             ] | None
             if identity.variant == "INCUMBENT":
                 comparison_baseline = None
@@ -4001,6 +4142,11 @@ class OpeningMomentumShadowService:
                 )
             elif uses_five_minute_orb_baseline:
                 comparison_baseline = "FIVE_MINUTE_ORB_CHALLENGER"
+            elif uses_relative_volume_opening_return_baseline:
+                comparison_baseline = (
+                    "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+                    "OPENING_RETURN_CHALLENGER"
+                )
             elif uses_relative_volume_orb_baseline:
                 comparison_baseline = (
                     "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER"
@@ -4032,6 +4178,11 @@ class OpeningMomentumShadowService:
             elif uses_five_minute_orb_baseline:
                 comparison_identity = identities_by_variant[
                     "FIVE_MINUTE_ORB_CHALLENGER"
+                ]
+            elif uses_relative_volume_opening_return_baseline:
+                comparison_identity = identities_by_variant[
+                    "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+                    "OPENING_RETURN_CHALLENGER"
                 ]
             elif uses_relative_volume_orb_baseline:
                 comparison_identity = identities_by_variant[
@@ -4180,6 +4331,9 @@ class OpeningMomentumShadowService:
                     ),
                     minimum_opening_activity_ratio=(
                         identity.minimum_opening_activity_ratio
+                    ),
+                    minimum_breakout_depth_bps=(
+                        identity.minimum_breakout_depth_bps
                     ),
                     required_symbols=list(
                         identity.required_symbols
@@ -4786,6 +4940,9 @@ class OpeningMomentumShadowService:
             ),
             candidate_opening_range_bps=(
                 row.candidate_opening_range_bps
+            ),
+            candidate_breakout_depth_bps=(
+                row.candidate_breakout_depth_bps
             ),
             candidate_signal_turnover=row.candidate_signal_turnover,
             candidate_avg_dollar_volume=(

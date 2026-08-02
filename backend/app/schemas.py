@@ -521,6 +521,10 @@ class OpeningMomentumShadowConfigResponse(BaseModel):
 class OpeningMomentumRankResponse(BaseModel):
     symbol: str
     opening_return_bps: float
+    breakout_depth_bps: Optional[float] = Field(
+        default=None,
+        allow_inf_nan=False,
+    )
     opening_activity_rank: Optional[int] = Field(default=None, ge=1)
     opening_activity_ratio: Optional[float] = Field(default=None, gt=0)
 
@@ -549,6 +553,10 @@ class OpeningMomentumShadowRunResponse(BaseModel):
     candidate_path_efficiency: Optional[float] = None
     candidate_max_pullback_bps: Optional[float] = None
     candidate_opening_range_bps: Optional[float] = None
+    candidate_breakout_depth_bps: Optional[float] = Field(
+        default=None,
+        allow_inf_nan=False,
+    )
     candidate_signal_turnover: Optional[float] = Field(default=None, ge=0)
     candidate_avg_dollar_volume: Optional[float] = Field(default=None, ge=0)
     candidate_signal_turnover_ratio: Optional[float] = Field(
@@ -663,6 +671,10 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER",
         "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER",
         "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN_CHALLENGER",
+        (
+            "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+            "OPENING_RETURN_DEPTH10_CHALLENGER"
+        ),
         "EXECUTION_SNDK_CHALLENGER",
         "EXECUTION_INTC_CHALLENGER",
         "EXECUTION_QCOM_CHALLENGER",
@@ -709,6 +721,11 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         default=None,
         gt=0,
     )
+    minimum_breakout_depth_bps: Optional[float] = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
     required_symbols: list[str] = Field(default_factory=list)
     excluded_symbols: list[str] = Field(default_factory=list)
     holding_minutes: int
@@ -727,6 +744,10 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
             "FIVE_MINUTE_ORB_CHALLENGER",
             "INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER",
             "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER",
+            (
+                "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_"
+                "OPENING_RETURN_CHALLENGER"
+            ),
         ]
     ] = None
     latest: Optional[OpeningMomentumShadowRunResponse] = None

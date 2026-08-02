@@ -28,7 +28,8 @@ OPENING_CONTEXT_REVISION = '20260727_opening_context'
 OPENING_EXECUTION_REVISION = '20260727_opening_execution'
 WATCHLIST_QUANT_V6_REVISION = '20260801_watchlist_quant_v6'
 DURABLE_JOB_LEASES_REVISION = '20260801_durable_job_leases'
-HEAD_REVISION = DURABLE_JOB_LEASES_REVISION
+OPENING_BREAKOUT_DEPTH_REVISION = '20260802_opening_breakout_depth'
+HEAD_REVISION = OPENING_BREAKOUT_DEPTH_REVISION
 # IMPORTANT: 每次新增 alembic 迁移时，必须同步更新 HEAD_REVISION 及 mark_migrated_if_needed 的列检测逻辑
 
 
@@ -210,6 +211,19 @@ def mark_migrated_if_needed():
     with engine.connect() as conn:
         inspector = inspect(conn)
         tables = set(inspector.get_table_names())
+        opening_columns = (
+            {
+                column['name']
+                for column in inspector.get_columns(
+                    'opening_momentum_shadow_runs'
+                )
+            }
+            if 'opening_momentum_shadow_runs' in tables
+            else set()
+        )
+        breakout_depth_schema_complete = (
+            'candidate_breakout_depth_bps' in opening_columns
+        )
         quant_table_names = set(WATCHLIST_QUANT_V6_TABLE_NAMES)
         present_quant_tables = tables & quant_table_names
         quant_schema_complete = False
@@ -247,13 +261,66 @@ def mark_migrated_if_needed():
                     f'found {recorded_revisions}'
                 )
             recorded_revision = recorded_revisions[0]
+            if recorded_revision == OPENING_BREAKOUT_DEPTH_REVISION:
+                if (
+                    not quant_schema_complete
+                    or not lease_schema_complete
+                    or not breakout_depth_schema_complete
+                ):
+                    raise RuntimeError(
+                        'alembic_version is opening-breakout-depth but its '
+                        'schema or predecessor schema is incomplete'
+                    )
+                return
+            if (
+                recorded_revision == WATCHLIST_QUANT_V6_REVISION
+                and quant_schema_complete
+                and lease_schema_complete
+                and breakout_depth_schema_complete
+            ):
+                conn.execute(
+                    text(
+                        'UPDATE alembic_version SET version_num = '
+                        ':version_num'
+                    ),
+                    {'version_num': OPENING_BREAKOUT_DEPTH_REVISION},
+                )
+                conn.commit()
+                print(
+                    'advanced alembic_version from '
+                    f'{WATCHLIST_QUANT_V6_REVISION} through '
+                    f'{DURABLE_JOB_LEASES_REVISION} to '
+                    f'{OPENING_BREAKOUT_DEPTH_REVISION}'
+                )
+                return
             if recorded_revision == DURABLE_JOB_LEASES_REVISION:
                 if not quant_schema_complete or not lease_schema_complete:
                     raise RuntimeError(
                         'alembic_version is durable-job-leases but its '
                         'schema or predecessor schema is incomplete'
                     )
+                if breakout_depth_schema_complete:
+                    conn.execute(
+                        text(
+                            'UPDATE alembic_version SET version_num = '
+                            ':version_num'
+                        ),
+                        {'version_num': OPENING_BREAKOUT_DEPTH_REVISION},
+                    )
+                    conn.commit()
+                    print(
+                        'advanced alembic_version from '
+                        f'{DURABLE_JOB_LEASES_REVISION} to '
+                        f'{OPENING_BREAKOUT_DEPTH_REVISION}'
+                    )
                 return
+            if breakout_depth_schema_complete:
+                raise RuntimeError(
+                    'opening-breakout-depth schema is outside the expected '
+                    'recorded lineage: '
+                    f'{recorded_revision} != '
+                    f'{DURABLE_JOB_LEASES_REVISION}'
+                )
             if lease_schema_complete:
                 if recorded_revision != WATCHLIST_QUANT_V6_REVISION:
                     raise RuntimeError(
@@ -313,11 +380,6 @@ def mark_migrated_if_needed():
         runtime_state_columns = (
             {column['name'] for column in inspector.get_columns('runtime_state')}
             if 'runtime_state' in tables
-            else set()
-        )
-        opening_columns = (
-            {column['name'] for column in inspector.get_columns('opening_momentum_shadow_runs')}
-            if 'opening_momentum_shadow_runs' in tables
             else set()
         )
         required_columns = {
@@ -420,6 +482,15 @@ def mark_migrated_if_needed():
                     f'{WATCHLIST_QUANT_V6_REVISION}'
                 )
             version_num = DURABLE_JOB_LEASES_REVISION
+
+        version_num = advance_added_columns(
+            current_revision=version_num,
+            predecessor=DURABLE_JOB_LEASES_REVISION,
+            revision=OPENING_BREAKOUT_DEPTH_REVISION,
+            label='opening-breakout-depth',
+            actual_columns=opening_columns,
+            added_columns={'candidate_breakout_depth_bps'},
+        )
 
         conn.execute(text(\"CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)\"))
         conn.execute(text('INSERT INTO alembic_version (version_num) VALUES (:version_num)'), {'version_num': version_num})

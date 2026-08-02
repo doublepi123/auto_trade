@@ -1996,6 +1996,7 @@ export interface OpeningMomentumShadowConfig {
 export interface OpeningMomentumRank {
   symbol: string
   opening_return_bps: number
+  breakout_depth_bps?: number | null
   opening_activity_rank?: number | null
   opening_activity_ratio?: number | null
 }
@@ -2024,6 +2025,7 @@ export interface OpeningMomentumShadowRun {
   candidate_path_efficiency: number | null
   candidate_max_pullback_bps: number | null
   candidate_opening_range_bps: number | null
+  candidate_breakout_depth_bps: number | null
   candidate_signal_turnover: number | null
   candidate_avg_dollar_volume: number | null
   candidate_signal_turnover_ratio: number | null
@@ -2131,6 +2133,7 @@ export interface OpeningMomentumShadowVariant {
     | 'INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP5_CHALLENGER'
     | 'INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER'
     | 'INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN_CHALLENGER'
+    | 'INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN_DEPTH10_CHALLENGER'
     | 'EXECUTION_SNDK_CHALLENGER'
     | 'EXECUTION_INTC_CHALLENGER'
     | 'EXECUTION_QCOM_CHALLENGER'
@@ -2162,6 +2165,7 @@ export interface OpeningMomentumShadowVariant {
     | null
   opening_activity_lookback_sessions?: number | null
   minimum_opening_activity_ratio?: number | null
+  minimum_breakout_depth_bps?: number | null
   required_symbols: string[]
   excluded_symbols: string[]
   holding_minutes: number
@@ -2179,6 +2183,7 @@ export interface OpeningMomentumShadowVariant {
     | 'FIVE_MINUTE_ORB_CHALLENGER'
     | 'INDEX_CATALOG_FIVE_MINUTE_ORB_CHALLENGER'
     | 'INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER'
+    | 'INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_OPENING_RETURN_CHALLENGER'
     | null
   latest: OpeningMomentumShadowRun | null
   metrics: OpeningMomentumShadowMetrics

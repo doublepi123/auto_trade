@@ -29,6 +29,13 @@ def _observation(
     )
 
 
+def _range_high_for_breakout_depth(
+    observation: OpeningMomentumObservation,
+    breakout_depth_bps: float,
+) -> float:
+    return observation.signal_close / (1 + breakout_depth_bps / 10_000)
+
+
 def test_selects_deterministic_opening_leader_after_all_gates() -> None:
     observations = [
         _observation(f"S{index}.US", value)
@@ -204,6 +211,167 @@ def test_opening_range_breakout_rejects_invalid_highs(
             [_observation("S0.US", 10)],
             opening_range_high_by_symbol=range_highs,
         )
+
+
+@pytest.mark.parametrize(
+    "minimum_depth_bps",
+    [-1.0, float("nan"), float("inf"), float("-inf")],
+)
+def test_opening_range_breakout_rejects_invalid_minimum_depth(
+    minimum_depth_bps: float,
+) -> None:
+    observations = [_observation(f"S{index}.US", index) for index in range(8)]
+    range_highs = {
+        item.symbol: item.signal_close - 0.1 for item in observations
+    }
+
+    with pytest.raises(ValueError, match="minimum_breakout_depth_bps"):
+        evaluate_opening_range_breakout(
+            observations,
+            opening_range_high_by_symbol=range_highs,
+            minimum_breakout_depth_bps=minimum_depth_bps,
+        )
+    with pytest.raises(ValueError, match="minimum_breakout_depth_bps"):
+        evaluate_stocks_in_play_opening_range_breakout(
+            observations,
+            opening_range_high_by_symbol=range_highs,
+            opening_activity_ratio_by_symbol={
+                item.symbol: 1.0 for item in observations
+            },
+            minimum_breakout_depth_bps=minimum_depth_bps,
+        )
+
+
+def test_opening_range_breakout_none_minimum_depth_preserves_results() -> None:
+    observations = [
+        _observation(f"S{index}.US", value)
+        for index, value in enumerate((-10, 0, 5, 10, 15, 20, 80, 100))
+    ]
+    range_highs = {
+        item.symbol: (
+            item.signal_close - 0.1
+            if item.symbol in {"S6.US", "S7.US"}
+            else item.signal_close + 0.1
+        )
+        for item in observations
+    }
+    activity = {item.symbol: 1.0 for item in observations}
+
+    assert evaluate_opening_range_breakout(
+        observations,
+        opening_range_high_by_symbol=range_highs,
+    ) == evaluate_opening_range_breakout(
+        observations,
+        opening_range_high_by_symbol=range_highs,
+        minimum_breakout_depth_bps=None,
+    )
+    assert evaluate_stocks_in_play_opening_range_breakout(
+        observations,
+        opening_range_high_by_symbol=range_highs,
+        opening_activity_ratio_by_symbol=activity,
+    ) == evaluate_stocks_in_play_opening_range_breakout(
+        observations,
+        opening_range_high_by_symbol=range_highs,
+        opening_activity_ratio_by_symbol=activity,
+        minimum_breakout_depth_bps=None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("breakout_depth_bps", "expected_action"),
+    [(9.99, "SKIP"), (10.0, "ENTER_LONG"), (10.01, "ENTER_LONG")],
+)
+def test_opening_range_breakout_minimum_depth_boundary(
+    breakout_depth_bps: float,
+    expected_action: str,
+) -> None:
+    observations = [
+        _observation(f"S{index}.US", 10 + index) for index in range(8)
+    ]
+    target = observations[-1]
+    range_highs = {
+        item.symbol: item.signal_close + 0.1 for item in observations
+    }
+    range_highs[target.symbol] = _range_high_for_breakout_depth(
+        target,
+        breakout_depth_bps,
+    )
+
+    decision = evaluate_opening_range_breakout(
+        observations,
+        opening_range_high_by_symbol=range_highs,
+        minimum_breakout_depth_bps=10.0,
+    )
+
+    assert decision.action == expected_action
+    assert decision.reason == (
+        "MINIMUM_BREAKOUT_DEPTH_FILTER"
+        if expected_action == "SKIP"
+        else "FIVE_MINUTE_OPENING_RANGE_BREAKOUT"
+    )
+    assert decision.candidate_symbol == (
+        None if expected_action == "SKIP" else target.symbol
+    )
+
+
+def test_stocks_in_play_orb_selects_next_ranked_eligible_breakout() -> None:
+    observations = [
+        _observation(f"S{index}.US", value)
+        for index, value in enumerate((-10, 0, 5, 10, 15, 20, 80, 100))
+    ]
+    shallow_leader = observations[-1]
+    eligible_runner_up = observations[-2]
+    range_highs = {
+        item.symbol: item.signal_close + 0.1 for item in observations
+    }
+    range_highs[shallow_leader.symbol] = _range_high_for_breakout_depth(
+        shallow_leader,
+        9.99,
+    )
+    range_highs[eligible_runner_up.symbol] = _range_high_for_breakout_depth(
+        eligible_runner_up,
+        10.01,
+    )
+
+    decision = evaluate_stocks_in_play_opening_range_breakout(
+        observations,
+        opening_range_high_by_symbol=range_highs,
+        opening_activity_ratio_by_symbol={
+            item.symbol: 1.0 for item in observations
+        },
+        maximum_stocks_in_play=8,
+        candidate_ranking="OPENING_RETURN",
+        minimum_breakout_depth_bps=10.0,
+    )
+
+    assert decision.action == "ENTER_LONG"
+    assert decision.candidate_symbol == eligible_runner_up.symbol
+    assert decision.candidate_return_bps == pytest.approx(80.0)
+
+
+def test_opening_range_breakout_reports_all_confirmed_depths_filtered() -> None:
+    observations = [
+        _observation(f"S{index}.US", 10 + index) for index in range(8)
+    ]
+    range_highs = {
+        item.symbol: item.signal_close + 0.1 for item in observations
+    }
+    for item, depth_bps in zip(observations[-2:], (8.0, 9.99), strict=True):
+        range_highs[item.symbol] = _range_high_for_breakout_depth(
+            item,
+            depth_bps,
+        )
+
+    decision = evaluate_opening_range_breakout(
+        observations,
+        opening_range_high_by_symbol=range_highs,
+        minimum_breakout_depth_bps=10.0,
+    )
+
+    assert decision.action == "SKIP"
+    assert decision.reason == "MINIMUM_BREAKOUT_DEPTH_FILTER"
+    assert decision.candidate_symbol is None
+    assert decision.entry_price is None
 
 
 def test_stocks_in_play_orb_restricts_breakout_to_activity_leaders() -> None:
