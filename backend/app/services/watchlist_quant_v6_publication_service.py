@@ -1031,26 +1031,17 @@ def _replay_session_input(
             f"{label} typed threshold identity or fee conflicts"
         )
     try:
-        leaf = QuantV6SessionLeaf(
+        QuantV6SessionLeaf(
             session_date=session_date,
             status=SESSION_COVERED,
             session_bars=bars,
             threshold_evidence=threshold,
             fee_rate=fee_rate,
         )
-        rebuilt_artifact = leaf.encoded_replay_input(
-            symbol=symbol,
-            market=market,
-        )
     except (QuantV6AssessmentError, QuantV6SemanticError) as exc:
         raise QuantV6PublicationError(
-            f"{label} failed canonical session-input replay"
+            f"{label} failed typed session-input replay"
         ) from exc
-    _compare_encoded_artifacts(
-        binding.artifact,
-        rebuilt_artifact,
-        label=label,
-    )
     return _ReplayedSessionInput(
         session_bars=bars,
         threshold_evidence=threshold,
@@ -1613,25 +1604,13 @@ def _validate_candidate_closure(
             event_binding = binding_by_key.get(event_key)
             if event_binding is None:
                 raise QuantV6PublicationError(
-                    f"event binding closure failed for {evaluation.member.symbol}"
+                    "session input or event binding closure failed for "
+                    f"{evaluation.member.symbol}"
                 )
             if event_binding.session_date != target_date:
                 raise QuantV6PublicationError(
                     f"event binding date conflicts for {evaluation.member.symbol}"
                 )
-            try:
-                rebuilt_event_artifact = event.encoded_artifact()
-            except QuantV6SemanticError as exc:
-                raise QuantV6PublicationError(
-                    f"event failed canonical replay for {evaluation.member.symbol}"
-                ) from exc
-            _compare_encoded_artifacts(
-                event_binding.artifact,
-                rebuilt_event_artifact,
-                label=(
-                    f"{evaluation.member.symbol} event {next_event_ordinal}"
-                ),
-            )
             consumed_event_keys.add(event_key)
             next_event_ordinal += 1
         try:
@@ -1658,7 +1637,7 @@ def _validate_candidate_closure(
         )
     try:
         _evaluation_checkpoint(evaluation_deadline)
-        rebuilt_assessment, rebuilt_assessment_artifact = (
+        encoded_replay = (
             _assess_and_encode_bar_next_open_stressed_window(
                 symbol=evaluation.member.symbol,
                 market=evaluation.member.market,
@@ -1668,12 +1647,58 @@ def _validate_candidate_closure(
                     if evaluation_deadline is not None
                     else None
                 ),
+                _include_replay_artifacts=True,
             )
         )
     except QuantV6AssessmentError as exc:
         raise QuantV6PublicationError(
             f"assessment typed replay failed for {evaluation.member.symbol}"
         ) from exc
+    rebuilt_assessment = encoded_replay.assessment
+    rebuilt_assessment_artifact = encoded_replay.assessment_artifact
+    rebuilt_session_keys: set[tuple[str, int]] = set()
+    for item in encoded_replay.session_input_artifacts:
+        _evaluation_checkpoint(evaluation_deadline)
+        key = (SESSION_INPUT_ROLE, item.artifact_ordinal)
+        binding = binding_by_key.get(key)
+        if binding is None or binding.session_date != item.session_date:
+            raise QuantV6PublicationError(
+                f"session input closure failed for {evaluation.member.symbol}"
+            )
+        _compare_encoded_artifacts(
+            binding.artifact,
+            item.artifact,
+            label=(
+                f"{evaluation.member.symbol} session input "
+                f"{item.artifact_ordinal}"
+            ),
+        )
+        rebuilt_session_keys.add(key)
+    if rebuilt_session_keys != consumed_session_keys:
+        raise QuantV6PublicationError(
+            f"session input closure failed for {evaluation.member.symbol}"
+        )
+    rebuilt_event_keys: set[tuple[str, int]] = set()
+    for item in encoded_replay.event_artifacts:
+        _evaluation_checkpoint(evaluation_deadline)
+        key = (EVENT_ROLE, item.artifact_ordinal)
+        binding = binding_by_key.get(key)
+        if binding is None or binding.session_date != item.session_date:
+            raise QuantV6PublicationError(
+                f"event binding closure failed for {evaluation.member.symbol}"
+            )
+        _compare_encoded_artifacts(
+            binding.artifact,
+            item.artifact,
+            label=(
+                f"{evaluation.member.symbol} event {item.artifact_ordinal}"
+            ),
+        )
+        rebuilt_event_keys.add(key)
+    if rebuilt_event_keys != consumed_event_keys:
+        raise QuantV6PublicationError(
+            f"event binding closure failed for {evaluation.member.symbol}"
+        )
     _compare_encoded_artifacts(
         assessment_binding.artifact,
         rebuilt_assessment_artifact,

@@ -953,7 +953,7 @@ def test_private_fused_assessment_encoding_matches_strict_public_golden() -> Non
         missing=29,
         event_session_counts=(2,),
     )
-    assessment, fused = (
+    replay = (
         assessment_module._assess_and_encode_bar_next_open_stressed_window(
             symbol=_SYMBOL,
             market=_MARKET,
@@ -961,8 +961,12 @@ def test_private_fused_assessment_encoding_matches_strict_public_golden() -> Non
             checkpoint=lambda: None,
         )
     )
+    assessment = replay.assessment
+    fused = replay.assessment_artifact
     strict = assessment.encoded_artifact(checkpoint=lambda: None)
 
+    assert replay.session_input_artifacts == ()
+    assert replay.event_artifacts == ()
     assert fused == strict
     assert zlib.decompress(fused.payload) == canonical_quant_v6_json(
         assessment.canonical_payload()
@@ -970,6 +974,193 @@ def test_private_fused_assessment_encoding_matches_strict_public_golden() -> Non
     assert fused.digest_sha256 == hashlib.sha256(
         zlib.decompress(fused.payload)
     ).hexdigest()
+
+
+def test_private_fused_artifact_bundle_matches_every_strict_artifact_byte() -> None:
+    leaves = _strong_leaves(
+        missing=28,
+        event_session_counts=(2, 1),
+    )
+    strict_session_artifacts = tuple(
+        (
+            ordinal,
+            leaf.session_date,
+            leaf.encoded_replay_input(symbol=_SYMBOL, market=_MARKET),
+        )
+        for ordinal, leaf in enumerate(leaves)
+        if leaf.status == SESSION_COVERED
+    )
+    strict_event_artifacts = tuple(
+        (
+            event_ordinal,
+            leaf.session_date,
+            event.encoded_artifact(),
+        )
+        for event_ordinal, (leaf, event) in enumerate(
+            (leaf, event)
+            for leaf in leaves
+            for event in leaf.events
+        )
+    )
+
+    replay = assessment_module._assess_and_encode_bar_next_open_stressed_window(
+        symbol=_SYMBOL,
+        market=_MARKET,
+        leaves=leaves,
+        checkpoint=lambda: None,
+        _include_replay_artifacts=True,
+    )
+
+    assert QUANT_V6_SEMANTIC_DIGEST == (
+        "f83e10d59aeef07c139569394ce23b0d6a1f799bf8ef40bd49b860f11c143316"
+    )
+    assert [item[2].digest_sha256 for item in strict_session_artifacts] == [
+        "96826b6f065524d4ec239c882721d1a89a117f9dae152b6998f9df2a55b26e2c",
+        "470b5b9c3a82fe4b133db1b611f29d5f46a1b9cc2505756d6551a85c892a4a23",
+    ]
+    assert [item[2].digest_sha256 for item in strict_event_artifacts] == [
+        "d062e2975f058866d99fe30ae02df761a51f6255061afb50bd6bc38bae6266b4",
+        "d0e3dede9d662089c6c4cf5ab2a390a4cf0f5e37314ac81d45f349cac2022a93",
+        "973adbfdff87737844ce112a3d2734734e69228cbaaea800d057e9fe5ba206ec",
+    ]
+    assert replay.assessment_artifact.digest_sha256 == (
+        "f93127c55ffc59dc23d714ef452b6dfc18fcbc571a03774c39ef2f604430d036"
+    )
+    assert replay.assessment_artifact == replay.assessment.encoded_artifact()
+    assert tuple(
+        (item.artifact_ordinal, item.session_date, item.artifact)
+        for item in replay.session_input_artifacts
+    ) == strict_session_artifacts
+    assert tuple(
+        (item.artifact_ordinal, item.session_date, item.artifact)
+        for item in replay.event_artifacts
+    ) == strict_event_artifacts
+    assert [
+        item.artifact.kind
+        for item in (
+            *replay.session_input_artifacts,
+            *replay.event_artifacts,
+        )
+    ] == [
+        *(
+            QUANT_V6_SESSION_INPUT_ARTIFACT_KIND
+            for _item in strict_session_artifacts
+        ),
+        *(
+            QUANT_V6_EVENT_ARTIFACT_KIND
+            for _item in strict_event_artifacts
+        ),
+    ]
+
+
+def test_private_fused_artifact_bundle_never_uses_public_encoders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    leaves = _strong_leaves(
+        missing=29,
+        event_session_counts=(1,),
+    )
+    strict_session = leaves[0].encoded_replay_input(
+        symbol=_SYMBOL,
+        market=_MARKET,
+    )
+    strict_event = leaves[0].events[0].encoded_artifact()
+
+    def _reject_session_encoder(
+        _leaf: QuantV6SessionLeaf,
+        *,
+        symbol: str,
+        market: str,
+        checkpoint: Callable[[], None] | None = None,
+    ) -> None:
+        del symbol, market, checkpoint
+        raise AssertionError("public session encoder must stay independent")
+
+    def _reject_event_encoder(
+        _event: BarNextOpenStressedEvent,
+    ) -> None:
+        raise AssertionError("public event encoder must stay independent")
+
+    monkeypatch.setattr(
+        QuantV6SessionLeaf,
+        "encoded_replay_input",
+        _reject_session_encoder,
+    )
+    monkeypatch.setattr(
+        BarNextOpenStressedEvent,
+        "encoded_artifact",
+        _reject_event_encoder,
+    )
+
+    replay = assessment_module._assess_and_encode_bar_next_open_stressed_window(
+        symbol=_SYMBOL,
+        market=_MARKET,
+        leaves=leaves,
+        _include_replay_artifacts=True,
+    )
+
+    assert [item.artifact for item in replay.session_input_artifacts] == [
+        strict_session,
+    ]
+    assert [item.artifact for item in replay.event_artifacts] == [strict_event]
+
+
+@pytest.mark.parametrize("artifact_kind", ("session", "event"))
+def test_private_fused_child_artifact_encoding_is_cooperative(
+    artifact_kind: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_count = 1 if artifact_kind == "event" else 0
+    leaves = _strong_leaves(
+        missing=29,
+        event_session_counts=(event_count,),
+    )
+    target_kind = (
+        QUANT_V6_EVENT_ARTIFACT_KIND
+        if artifact_kind == "event"
+        else QUANT_V6_SESSION_INPUT_ARTIFACT_KIND
+    )
+    sentinel = RuntimeError(f"{artifact_kind} artifact checkpoint sentinel")
+    completed_kind: str | None = None
+    original = assessment_module._encode_quant_v6_canonical_bytes
+
+    def _track_encode(
+        *,
+        value: Mapping[str, object],
+        raw: bytes,
+        kind: str,
+    ) -> assessment_module.EncodedQuantV6Artifact:
+        nonlocal completed_kind
+        artifact = original(value=value, raw=raw, kind=kind)
+        if kind == target_kind:
+            completed_kind = kind
+        return artifact
+
+    def _checkpoint() -> None:
+        if completed_kind == target_kind:
+            raise sentinel
+
+    monkeypatch.setattr(
+        assessment_module,
+        "_encode_quant_v6_canonical_bytes",
+        _track_encode,
+    )
+
+    result: object | None = None
+    with pytest.raises(RuntimeError) as caught:
+        result = (
+            assessment_module._assess_and_encode_bar_next_open_stressed_window(
+                symbol=_SYMBOL,
+                market=_MARKET,
+                leaves=leaves,
+                checkpoint=_checkpoint,
+                _include_replay_artifacts=True,
+            )
+        )
+
+    assert caught.value is sentinel
+    assert completed_kind == target_kind
+    assert result is None
 
 
 def test_private_fused_reuses_full_session_event_replay_only(
@@ -996,13 +1187,15 @@ def test_private_fused_reuses_full_session_event_replay_only(
         _track_local_validation,
     )
 
-    fused, _artifact = (
+    replay = (
         assessment_module._assess_and_encode_bar_next_open_stressed_window(
             symbol=_SYMBOL,
             market=_MARKET,
             leaves=leaves,
+            _include_replay_artifacts=True,
         )
     )
+    fused = replay.assessment
     assert fused.event_count == 2
     assert locally_validated == []
 
@@ -1050,6 +1243,7 @@ def test_private_fused_full_session_bytes_reject_event_tamper(
             symbol=_SYMBOL,
             market=_MARKET,
             leaves=leaves,
+            _include_replay_artifacts=True,
         )
 
 
@@ -1073,6 +1267,7 @@ def test_private_fused_rejects_malformed_event_canonical_type() -> None:
             symbol=_SYMBOL,
             market=_MARKET,
             leaves=leaves,
+            _include_replay_artifacts=True,
         )
 
 
@@ -1171,6 +1366,7 @@ def test_private_fused_exact_type_guard_matches_public_validator(
             symbol=_SYMBOL,
             market=_MARKET,
             leaves=leaves,
+            _include_replay_artifacts=True,
         )
 
 
@@ -1254,13 +1450,15 @@ def test_private_fused_path_cannot_be_replaced_by_public_replay_wrapper(
         "assess_bar_next_open_stressed_window",
         _poison_public_wrapper,
     )
-    assessment, artifact = (
+    replay = (
         assessment_module._assess_and_encode_bar_next_open_stressed_window(
             symbol=_SYMBOL,
             market=_MARKET,
             leaves=leaves,
         )
     )
+    assessment = replay.assessment
+    artifact = replay.assessment_artifact
 
     assert public_calls == 0
     assert assessment.event_count == 0
@@ -1304,13 +1502,15 @@ def test_private_fused_replay_isolated_from_checkpoint_object_mutation(
         missing=29,
         event_session_counts=(1,),
     )
-    _, baseline_artifact = (
+    baseline_replay = (
         assessment_module._assess_and_encode_bar_next_open_stressed_window(
             symbol=_SYMBOL,
             market=_MARKET,
             leaves=baseline_leaves,
+            _include_replay_artifacts=True,
         )
     )
+    baseline_artifact = baseline_replay.assessment_artifact
     leaves = _strong_leaves(
         missing=29,
         event_session_counts=(1,),
@@ -1339,20 +1539,27 @@ def test_private_fused_replay_isolated_from_checkpoint_object_mutation(
             mutated = True
 
     monkeypatch.setattr(assessment_module, "deepcopy", _track_deepcopy)
-    assessment, artifact = (
+    replay = (
         assessment_module._assess_and_encode_bar_next_open_stressed_window(
             symbol=_SYMBOL,
             market=_MARKET,
             leaves=leaves,
             checkpoint=_mutating_checkpoint,
+            _include_replay_artifacts=True,
         )
     )
+    assessment = replay.assessment
+    artifact = replay.assessment_artifact
 
     assert mutated is True
     assert caller_event.net_return_bps != original_net_return
     assert assessment.leaves[0].events[0] is not caller_event
     assert assessment.leaves[0].events[0].net_return_bps == original_net_return
     assert artifact == baseline_artifact
+    assert replay.session_input_artifacts == (
+        baseline_replay.session_input_artifacts
+    )
+    assert replay.event_artifacts == baseline_replay.event_artifacts
 
 
 @pytest.mark.parametrize("phase", ("canonical", "compression"))

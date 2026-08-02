@@ -28,8 +28,11 @@ from app.domain.universe_selection import (
 )
 from app.domain.watchlist_quant_v6 import (
     MAX_QUANT_V6_ARTIFACT_RAW_BYTES,
+    QUANT_V6_EVENT_ARTIFACT_KIND,
     QUANT_V6_SEMANTIC_DIGEST,
+    BarNextOpenStressedEvent,
     QuantV6Bar,
+    QuantV6SessionLeaf,
     canonical_quant_v6_json,
     decode_quant_v6_artifact,
     encode_quant_v6_artifact,
@@ -37,6 +40,7 @@ from app.domain.watchlist_quant_v6 import (
     quant_v6_payload_sha256,
 )
 from app.domain.watchlist_quant_v6 import artifact as artifact_module
+from app.domain.watchlist_quant_v6 import semantics as semantics_module
 from app.models import (
     WatchlistQuantV6Artifact,
     WatchlistQuantV6Publication,
@@ -221,6 +225,95 @@ def _covered_evaluations(
     )
 
 
+@cache
+def _exact_event_evaluations(
+    expected_event_count: int,
+) -> tuple[QuantV6CandidateEvaluation, ...]:
+    if expected_event_count == 0:
+        event_counts = (0,) * 30
+    elif expected_event_count == 60:
+        event_counts = (2,) * 30
+    elif expected_event_count == 135:
+        event_counts = (5,) * 15 + (4,) * 15
+    else:
+        raise AssertionError("unsupported exact event fixture")
+    plan = _one_member_plan()
+    training_dates = set(plan.training_session_dates)
+    target_ordinal_by_date = {
+        session_date: ordinal
+        for ordinal, session_date in enumerate(plan.target_session_dates)
+    }
+    values: list[QuantV6Bar] = []
+    for session_date in (
+        *plan.training_session_dates,
+        *plan.target_session_dates,
+    ):
+        starts = quant_v6_expected_rth_bar_starts("US", session_date)
+        bars = [
+            _bar(
+                start,
+                index,
+                closed=(
+                    None
+                    if session_date in training_dates
+                    else Decimal("100")
+                    + Decimal(index) / Decimal("1000")
+                ),
+            )
+            for index, start in enumerate(starts)
+        ]
+        target_ordinal = target_ordinal_by_date.get(session_date)
+        if target_ordinal is not None and event_counts[target_ordinal]:
+            epsilon = Decimal(1).scaleb(-20 * (target_ordinal + 1))
+            signal_indices = tuple(
+                1 + 8 * index
+                for index in range(event_counts[target_ordinal])
+            )
+            last_exit_index = signal_indices[-1] + 7
+            # Keep the post-event segment strictly increasing so every
+            # intended down-shock is explicit and no exit/re-entry boundary
+            # accidentally becomes another signal as thresholds rotate.
+            for index in range(last_exit_index, len(bars)):
+                price = (
+                    Decimal("102")
+                    + Decimal(index - last_exit_index) / Decimal("10")
+                )
+                bars[index] = _bar(
+                    starts[index],
+                    index,
+                    opened=price,
+                    closed=price,
+                )
+            for signal_index in signal_indices:
+                bars[signal_index] = QuantV6Bar(
+                    start_at=starts[signal_index],
+                    open=Decimal("100"),
+                    high=Decimal("101"),
+                    low=epsilon / Decimal("2"),
+                    close=epsilon,
+                    volume=Decimal("1000"),
+                )
+                exit_index = signal_index + 7
+                bars[exit_index] = _bar(
+                    starts[exit_index],
+                    exit_index,
+                    opened="102",
+                    closed="102",
+                )
+        values.extend(bars)
+    try:
+        evaluations = evaluate_quant_v6_registration(
+            registration=plan,
+            provider=_Provider(tuple(values)),
+        )
+        if evaluations[0].event_count != expected_event_count:
+            raise AssertionError("exact event fixture drifted")
+        return evaluations
+    finally:
+        semantics_module._threshold_calculation.cache_clear()
+        semantics_module._training_session_absolute_returns.cache_clear()
+
+
 def _decoded_binding_payload(
     binding: QuantV6PendingArtifactBinding,
 ) -> dict[str, object]:
@@ -311,6 +404,66 @@ def test_candidate_closure_fused_assessment_runs_one_complete_replay(
 
     assert prepared.assessment_count == 1
     assert replay_calls == 1
+
+
+def test_candidate_closure_child_bundle_avoids_public_reencoders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evaluations = _covered_evaluations(eventful=True)
+    assert evaluations[0].event_count > 0
+
+    def _reject_session_encoder(
+        _leaf: QuantV6SessionLeaf,
+        *,
+        symbol: str,
+        market: str,
+        checkpoint: Any = None,
+    ) -> Any:
+        del symbol, market, checkpoint
+        raise AssertionError("closure called the public session encoder")
+
+    def _reject_event_encoder(
+        _event: BarNextOpenStressedEvent,
+    ) -> Any:
+        raise AssertionError("closure called the public event encoder")
+
+    monkeypatch.setattr(
+        QuantV6SessionLeaf,
+        "encoded_replay_input",
+        _reject_session_encoder,
+    )
+    monkeypatch.setattr(
+        BarNextOpenStressedEvent,
+        "encoded_artifact",
+        _reject_event_encoder,
+    )
+
+    prepared = service_module._prepare_publication(
+        plan=_one_member_plan(),
+        evaluations=evaluations,
+    )
+
+    assert prepared.bindings == evaluations[0].bindings
+    assert prepared.session_input_count == evaluations[0].covered_sessions
+    assert prepared.event_count == evaluations[0].event_count
+
+
+@pytest.mark.parametrize("expected_event_count", (0, 60, 135))
+def test_candidate_closure_child_bundle_preserves_exact_cardinality(
+    expected_event_count: int,
+) -> None:
+    evaluations = _exact_event_evaluations(expected_event_count)
+
+    prepared = service_module._prepare_publication(
+        plan=_one_member_plan(),
+        evaluations=evaluations,
+    )
+
+    assert prepared.event_count == expected_event_count
+    assert prepared.bindings == evaluations[0].bindings
+    assert prepared.assessment_count == 1
+    assert prepared.session_input_count == 30
+    assert prepared.binding_count == 31 + expected_event_count
 
 
 def test_prepare_publication_logs_bounded_closure_progress(
@@ -410,6 +563,51 @@ def test_deadline_after_fused_assessment_compression_writes_no_artifacts(
         )
 
     assert compression_calls == 1
+    assert _counts(engine) == (1, 0, 0, 0)
+
+
+def test_deadline_after_fused_child_compression_writes_no_artifacts(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine(tmp_path)
+    service = WatchlistQuantV6PublicationService(
+        _factory(engine),
+        clock=lambda: _NOW,
+    )
+    plan = _one_member_plan()
+    evaluations = _exact_event_evaluations(60)
+    service.register_plan(plan)
+    deadline = QuantV6EvaluationDeadline(60)
+    original = assessment_module._encode_quant_v6_canonical_bytes
+    encoded_kinds: list[str] = []
+
+    def _expire_after_first_child(
+        *,
+        value: Mapping[str, object],
+        raw: bytes,
+        kind: str,
+    ):
+        artifact = original(value=value, raw=raw, kind=kind)
+        encoded_kinds.append(kind)
+        if kind == QUANT_V6_EVENT_ARTIFACT_KIND:
+            deadline.expire()
+        return artifact
+
+    monkeypatch.setattr(
+        assessment_module,
+        "_encode_quant_v6_canonical_bytes",
+        _expire_after_first_child,
+    )
+
+    with pytest.raises(QuantV6EvaluationDeadlineExceededError):
+        service.publish_registration(
+            plan=plan,
+            evaluations=evaluations,
+            evaluation_deadline=deadline,
+        )
+
+    assert encoded_kinds == [QUANT_V6_EVENT_ARTIFACT_KIND]
     assert _counts(engine) == (1, 0, 0, 0)
 
 
@@ -668,6 +866,40 @@ def test_atomic_publication_is_complete_p0_and_idempotent(tmp_path) -> None:
         assert publication.assessment_artifact_count == 1
         assert publication.session_input_artifact_count == 0
         assert publication.event_artifact_count == 0
+        assert publication.promotion_eligible is False
+        assert publication.automatic_promotion_allowed is False
+        assert publication.order_submission_allowed is False
+        assert publication.short_entry_allowed is False
+        assert publication.position_add_on_allowed is False
+
+
+def test_atomic_child_bundle_publication_persists_exact_closure(tmp_path) -> None:
+    engine = _engine(tmp_path)
+    service = WatchlistQuantV6PublicationService(
+        _factory(engine),
+        clock=lambda: _NOW,
+    )
+    plan = _one_member_plan()
+    evaluations = _exact_event_evaluations(60)
+    service.register_plan(plan)
+
+    receipt = service.publish_registration(
+        plan=plan,
+        evaluations=evaluations,
+    )
+
+    assert receipt.created is True
+    assert receipt.binding_count == 91
+    assert _counts(engine) == (1, 91, 1, 91)
+    with Session(engine) as session:
+        publication = session.get(
+            WatchlistQuantV6Publication,
+            receipt.publication_id,
+        )
+        assert publication is not None
+        assert publication.assessment_artifact_count == 1
+        assert publication.session_input_artifact_count == 30
+        assert publication.event_artifact_count == 60
         assert publication.promotion_eligible is False
         assert publication.automatic_promotion_allowed is False
         assert publication.order_submission_allowed is False
