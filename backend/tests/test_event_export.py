@@ -322,6 +322,10 @@ class TestExportFilters:
         assert len(export_rows) == 2001, f"expected 2001, got {len(export_rows)}"
         # All rows are trade source.
         assert all(r["source"] == "trade" for r in export_rows)
+        ids = [r["id"] for r in export_rows]
+        assert ids == sorted(ids, reverse=True)
+        assert export_rows[0]["message"] == "bulk-row-2000"
+        assert export_rows[-1]["message"] == "bulk-row-0"
 
     def test_export_list_parity_complete_rows(self) -> None:
         """Export and list produce identical normalized rows (including timestamps).
