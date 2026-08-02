@@ -3574,6 +3574,18 @@ class LLMInteractionResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class LLMInteractionPage(BaseModel):
+    """Paginated safe list projection of LLM interactions.
+
+    Never includes prompt, raw_response, parsed_response, or context_snapshot.
+    """
+
+    items: list[LLMInteractionResponse]
+    total: int
+    page: int
+    page_size: int
+
+
 class LLMInteractionDetail(BaseModel):
     """Full LLM interaction record incl. prompt / raw response / parsed /
     context snapshot (omitted from the lightweight list response)."""
