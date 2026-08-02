@@ -1152,6 +1152,24 @@ Cypress.Commands.add('stubApi', () => {
     })
   }).as('getCronHealth')
 
+  cy.intercept('GET', '/api/quote-health', (req) => {
+    req.reply({
+      body: {
+        symbol: 'NVDA.US',
+        quotes_received: 1523,
+        last_quote_timestamp: new Date().toISOString(),
+        last_quote_age_seconds: 0.8,
+        max_gap_seconds: 4.2,
+        disconnect_count: 2,
+        resubscribe_count: 3,
+        disconnect_retry_count: 1,
+        quotes_subscribed: true,
+        status: 'healthy',
+        as_of: new Date().toISOString(),
+      },
+    })
+  }).as('getQuoteStreamHealth')
+
   cy.intercept('GET', '/api/credentials', {
     body: {
       id: 1, longbridge_app_key: '', longbridge_app_secret: '',

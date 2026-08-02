@@ -1216,6 +1216,37 @@ export interface CronHealthSnapshot {
   jobs: CronJobHealth[]
 }
 
+/**
+ * Read-only quote-stream health snapshot (GET /api/quote-health).
+ *
+ * Served with HTTP 200 when the runner's tracker exists, and with HTTP 503 —
+ * validated by the same schema — when no runner/tracker exists yet
+ * (`status` is "unavailable" and `symbol` is "" in that case). Server-side
+ * status is one of: healthy / stale / waiting / unavailable. `waiting` means
+ * subscribed but no push quote yet in the current window. `last_quote_age_seconds`
+ * is null when no quote has been received. `quotes_received` and
+ * `max_gap_seconds` describe the current subscription window (reset on
+ * resubscribe/symbol change); `disconnect_count` / `resubscribe_count` /
+ * `disconnect_retry_count` are process-lifetime counters.
+ * `last_quote_timestamp` is the raw quote source timestamp string (epoch
+ * seconds/millis or ISO 8601) — parse defensively.
+ */
+export type QuoteStreamHealthStatus = 'healthy' | 'stale' | 'waiting' | 'unavailable'
+
+export interface QuoteStreamHealth {
+  symbol: string
+  quotes_received: number
+  last_quote_timestamp: string | null
+  last_quote_age_seconds: number | null
+  max_gap_seconds: number
+  disconnect_count: number
+  resubscribe_count: number
+  disconnect_retry_count: number
+  quotes_subscribed: boolean
+  status: string
+  as_of: string
+}
+
 export interface RiskHistoryPoint {
   created_at: string
   engine_state: string

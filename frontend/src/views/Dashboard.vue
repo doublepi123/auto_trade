@@ -674,6 +674,14 @@
         :error="cronHealthError"
         :now-tick="nowTick"
       />
+
+      <QuoteHealthPanel
+        :result="quoteHealth"
+        :loading="quoteHealthLoading"
+        :error="quoteHealthError"
+        :now-tick="nowTick"
+        :fetched-at="quoteHealthFetchedAt"
+      />
     </section>
 
     <section class="detail-panel" data-testid="position-pnl-section">
@@ -841,6 +849,7 @@ import SymbolAttributionPanel from '../components/SymbolAttributionPanel.vue'
 import SessionClockPanel from '../components/SessionClockPanel.vue'
 import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 import CronHealthPanel from '../components/CronHealthPanel.vue'
+import QuoteHealthPanel from '../components/QuoteHealthPanel.vue'
 import { useDashboardData } from '../composables/useDashboardData'
 import { useConnectionHealth } from '../composables/useConnectionHealth'
 import { useAccountRefresh } from '../composables/useAccountRefresh'
@@ -850,7 +859,7 @@ import { useSymbolStore } from '../composables/useSymbolStore'
 import { usePinnedSymbols } from '../composables/usePinnedSymbols'
 import { useRegisterViewRefresh } from '../composables/useViewRefreshRegistry'
 import { useDiagnosticsSnapshot } from '../composables/useDiagnosticsSnapshot'
-import { startTrading, stopTrading, pauseTrading, resumeTrading, enableProtectiveExits, disableProtectiveExits, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getNotifications, getOrders, getTradeEvents, getMetricsSummary, getDatabaseHealth, getCronHealth } from '../api'
+import { startTrading, stopTrading, pauseTrading, resumeTrading, enableProtectiveExits, disableProtectiveExits, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getNotifications, getOrders, getTradeEvents, getMetricsSummary, getDatabaseHealth, getCronHealth, getQuoteStreamHealth, type QuoteStreamHealthResult } from '../api'
 import type { CronHealthSnapshot, DatabaseHealthSnapshot, LLMIntervalStatus, NotificationLogOut, OrderRecord, Position, StatisticsQuality, StatusHistoryPoint, TradeEventRecord } from '../types'
 import { engineStateLabel, auditActionLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 import { EVENT_TYPE } from '../utils/constants'
@@ -958,10 +967,36 @@ async function loadCronHealth() {
   }
 }
 
+// Read-only quote-stream health (GET /api/quote-health). Augments the simple
+// push-age blocks above with the dedicated tracker snapshot. Passive load
+// only: on mount and on the diagnostics 刷新 button. The endpoint never
+// subscribes/reconnects/polls the broker; a schema-validated HTTP 503 body
+// ("no runtime yet") is rendered as an unavailable state, not an error.
+const quoteHealth = ref<QuoteStreamHealthResult | null>(null)
+const quoteHealthFetchedAt = ref<number | null>(null)
+const quoteHealthLoading = ref(false)
+const quoteHealthError = ref('')
+
+async function loadQuoteStreamHealth() {
+  quoteHealthLoading.value = true
+  quoteHealthError.value = ''
+  try {
+    quoteHealth.value = await getQuoteStreamHealth()
+    quoteHealthFetchedAt.value = Date.now()
+  } catch (err) {
+    quoteHealthError.value = resolveErrorMessage(err, '行情流健康状态不可用')
+    quoteHealth.value = null
+    quoteHealthFetchedAt.value = null
+  } finally {
+    quoteHealthLoading.value = false
+  }
+}
+
 function refreshDiagnostics() {
   loadDiagnostics()
   loadDatabaseHealth()
   loadCronHealth()
+  loadQuoteStreamHealth()
 }
 
 const walSizeLabel = computed(() => {
@@ -1434,6 +1469,7 @@ onMounted(() => {
   loadDiagnostics()
   loadDatabaseHealth()
   loadCronHealth()
+  loadQuoteStreamHealth()
   freshnessTimer = window.setInterval(() => { nowTick.value = Date.now() }, 1000)
   startMultiSymbols()
   llmStatusTimer = setInterval(() => {
