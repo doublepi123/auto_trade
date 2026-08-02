@@ -228,6 +228,41 @@ class WatchlistScoreService:
     def is_fresh(self, row: WatchlistScore, now: Optional[datetime] = None) -> bool:
         return not _is_stale(row, now or _utcnow())
 
+    def list_history(
+        self,
+        symbol: str,
+        *,
+        from_dt: datetime | None = None,
+        to_dt: datetime | None = None,
+        limit: int = 100,
+    ) -> tuple[list[WatchlistScore], int, datetime]:
+        """Bounded per-symbol score timeline, stable newest-first.
+
+        Returns ``(rows, total, observed_at)``. Never scores, calls the
+        LLM/provider/broker, refreshes TTLs, prunes, adds, flushes, or commits.
+        ``[from_dt, to_dt)`` is a half-open datetime range.
+        """
+        bounded_limit = max(1, min(int(limit), 500))
+        normalized = symbol.strip().upper()
+        query = self.db.query(WatchlistScore).filter(
+            WatchlistScore.symbol == normalized
+        )
+        if from_dt is not None:
+            query = query.filter(WatchlistScore.created_at >= from_dt)
+        if to_dt is not None:
+            query = query.filter(WatchlistScore.created_at < to_dt)
+        total = query.count()
+        rows = (
+            query.order_by(
+                WatchlistScore.created_at.desc(),
+                WatchlistScore.id.desc(),
+            )
+            .limit(bounded_limit)
+            .all()
+        )
+        observed_at = _utcnow()
+        return list(rows), total, observed_at
+
     def score_from_llm_or_fallback(
         self,
         *,

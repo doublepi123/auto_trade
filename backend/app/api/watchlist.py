@@ -19,6 +19,7 @@ from app.schemas import (
     WatchlistItemResponse,
     WatchlistItemSchema,
     WatchlistQuote,
+    WatchlistScoreHistoryResponse,
     WatchlistScoreListResponse,
     WatchlistScoreRequest,
     WatchlistScoreResponse,
@@ -332,6 +333,48 @@ def get_watchlist_scores(db: Session = Depends(get_db)) -> WatchlistScoreListRes
     return WatchlistScoreListResponse(
         scores=responses_for(quant_scores),
         reviews=responses_for(reviews),
+    )
+
+
+@router.get(
+    "/scores/history",
+    response_model=WatchlistScoreHistoryResponse,
+    dependencies=[Depends(require_api_key())],
+)
+def get_watchlist_score_history(
+    symbol: str = Query(..., min_length=1, max_length=50),
+    from_: datetime = Query(default=None, alias="from"),
+    to: datetime = Query(default=None),
+    limit: int = Query(default=100, ge=1, le=500),
+    db: Session = Depends(get_db),
+) -> WatchlistScoreHistoryResponse:
+    """Bounded per-symbol score timeline over existing persisted rows.
+
+    Queries stored ``WatchlistScore`` rows only, stable newest-first
+    ``(created_at DESC, id DESC)``. Never scores, calls the LLM/provider/broker,
+    refreshes TTLs, prunes, adds, flushes, or commits.
+    """
+    if from_ is not None and to is not None and from_ >= to:
+        raise HTTPException(status_code=422, detail="from must be before to")
+    svc = WatchlistScoreService(db)
+    rows, total, observed_at = svc.list_history(
+        symbol,
+        from_dt=from_,
+        to_dt=to,
+        limit=limit,
+    )
+    items = []
+    for row in rows:
+        response = WatchlistScoreResponse.model_validate(row)
+        response.is_stale = not svc.is_fresh(row, now=observed_at)
+        items.append(response)
+    bounded_limit = max(1, min(int(limit), 500))
+    return WatchlistScoreHistoryResponse(
+        items=items,
+        total=total,
+        returned=len(items),
+        truncated=total > bounded_limit,
+        observed_at=observed_at,
     )
 
 

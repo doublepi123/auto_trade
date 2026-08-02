@@ -4549,6 +4549,16 @@ class WatchlistScoreListResponse(BaseModel):
     reviews: list[WatchlistScoreResponse] = Field(default_factory=list)
 
 
+class WatchlistScoreHistoryResponse(BaseModel):
+    """Bounded per-symbol score timeline over existing persisted rows."""
+
+    items: list[WatchlistScoreResponse]
+    total: int = Field(ge=0)
+    returned: int = Field(ge=0)
+    truncated: bool = False
+    observed_at: datetime
+
+
 class WatchlistQuantV6PolicyResponse(BaseModel):
     promotion_eligible: Literal[False] = False
     automatic_promotion_allowed: Literal[False] = False
