@@ -117,7 +117,7 @@ class TestSettings:
         ):
             Settings()
 
-    @pytest.mark.parametrize("value", ["60", "3600"])
+    @pytest.mark.parametrize("value", ["60", "7200"])
     def test_quant_v6_evaluation_timeout_accepts_boundaries(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -134,7 +134,7 @@ class TestSettings:
             value
         )
 
-    @pytest.mark.parametrize("value", ["59", "3601", "not-a-number"])
+    @pytest.mark.parametrize("value", ["59", "7201", "not-a-number"])
     def test_quant_v6_evaluation_timeout_rejects_invalid_values(
         self,
         monkeypatch: pytest.MonkeyPatch,

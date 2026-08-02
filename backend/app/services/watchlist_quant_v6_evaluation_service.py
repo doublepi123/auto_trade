@@ -4,8 +4,15 @@ import hashlib
 import hmac
 import inspect
 import json
+import logging
 import sys
+import time
 from collections.abc import Mapping, Sequence
+from concurrent.futures import (
+    Future,
+    ThreadPoolExecutor,
+    wait,
+)
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -67,6 +74,9 @@ from app.services.watchlist_quant_v6_historical_provider import (
 from app.services.watchlist_quant_v6_deadline import (
     QuantV6EvaluationDeadline,
 )
+
+
+logger = logging.getLogger("auto_trade.watchlist_quant_v6_evaluation_service")
 
 
 QUANT_V6_REGISTRATION_SCHEMA_VERSION = 1
@@ -210,6 +220,21 @@ class QuantV6CandidateEvaluation:
     fetched_accepted_bars: int
     fetched_bar_starts: tuple[datetime, ...]
     rejected_rows: int
+
+
+@dataclass(frozen=True)
+class _VerifiedCandidateFetchRequest:
+    registration: QuantV6RegistrationPlan
+    member: QuantV6CohortMember
+    start_at: datetime
+    end_at: datetime
+
+
+@dataclass(frozen=True)
+class _CompletedCandidateFetch:
+    request: _VerifiedCandidateFetchRequest
+    fetched: QuantV6HistoricalBarFetch
+    fetch_ms: int
 
 
 def _normalized_source_sha256(module: ModuleType) -> str:
@@ -761,16 +786,29 @@ def _complete_session_bars(
     return selected
 
 
-def evaluate_quant_v6_candidate(
+def _candidate_fetch_window(
+    registration: QuantV6RegistrationPlan,
+) -> tuple[datetime, datetime]:
+    all_dates = (
+        *registration.training_session_dates,
+        *registration.target_session_dates,
+    )
+    first_grid = quant_v6_expected_rth_bar_starts(
+        registration.market,
+        all_dates[0],
+    )
+    last_grid = quant_v6_expected_rth_bar_starts(
+        registration.market,
+        all_dates[-1],
+    )
+    return first_grid[0], last_grid[-1] + timedelta(minutes=5)
+
+
+def _verified_candidate_fetch_request_from_validated_registration(
     *,
     registration: QuantV6RegistrationPlan,
     member: QuantV6CohortMember,
-    provider: QuantV6HistoricalProvider,
-    evaluation_deadline: QuantV6EvaluationDeadline | None = None,
-) -> QuantV6CandidateEvaluation:
-    if evaluation_deadline is not None:
-        evaluation_deadline.checkpoint()
-    validate_quant_v6_registration_plan(registration)
+) -> _VerifiedCandidateFetchRequest:
     if type(member) is not QuantV6CohortMember:
         raise QuantV6HistoricalEvaluationError(
             "candidate member has an unsupported type"
@@ -784,25 +822,80 @@ def evaluate_quant_v6_candidate(
         raise QuantV6HistoricalEvaluationError(
             "candidate is outside the frozen registration"
         )
+    start_at, end_at = _candidate_fetch_window(registration)
+    return _VerifiedCandidateFetchRequest(
+        registration=registration,
+        member=member,
+        start_at=start_at,
+        end_at=end_at,
+    )
+
+
+def _verified_candidate_fetch_request(
+    *,
+    registration: QuantV6RegistrationPlan,
+    member: QuantV6CohortMember,
+    evaluation_deadline: QuantV6EvaluationDeadline | None,
+) -> _VerifiedCandidateFetchRequest:
+    if evaluation_deadline is not None:
+        evaluation_deadline.checkpoint()
+    validate_quant_v6_registration_plan(registration)
+    return _verified_candidate_fetch_request_from_validated_registration(
+        registration=registration,
+        member=member,
+    )
+
+
+def _fetch_quant_v6_candidate(
+    *,
+    request: _VerifiedCandidateFetchRequest,
+    provider: QuantV6HistoricalProvider,
+) -> _CompletedCandidateFetch:
+    if type(request) is not _VerifiedCandidateFetchRequest:
+        raise QuantV6HistoricalEvaluationError(
+            "candidate fetch request has an unsupported type"
+        )
+    started_at = time.monotonic_ns()
+    fetched = provider.fetch_five_minute_no_adjust(
+        request.member.symbol,
+        start_at=request.start_at,
+        end_at=request.end_at,
+    )
+    if type(fetched) is not QuantV6HistoricalBarFetch:
+        raise QuantV6HistoricalEvaluationError(
+            "historical provider returned an unsupported fetch type"
+        )
+    elapsed_ns = max(0, time.monotonic_ns() - started_at)
+    return _CompletedCandidateFetch(
+        request=request,
+        fetched=fetched,
+        fetch_ms=elapsed_ns // 1_000_000,
+    )
+
+
+def _evaluate_candidate_from_fetch(
+    *,
+    completed_fetch: _CompletedCandidateFetch,
+    evaluation_deadline: QuantV6EvaluationDeadline | None = None,
+) -> QuantV6CandidateEvaluation:
+    if type(completed_fetch) is not _CompletedCandidateFetch:
+        raise QuantV6HistoricalEvaluationError(
+            "completed candidate fetch has an unsupported type"
+        )
+    request = completed_fetch.request
+    if type(request) is not _VerifiedCandidateFetchRequest:
+        raise QuantV6HistoricalEvaluationError(
+            "completed candidate request has an unsupported type"
+        )
+    registration = request.registration
+    member = request.member
+    fetched = completed_fetch.fetched
+    if evaluation_deadline is not None:
+        evaluation_deadline.checkpoint()
     all_dates = (
         *registration.training_session_dates,
         *registration.target_session_dates,
     )
-    first_grid = quant_v6_expected_rth_bar_starts(
-        registration.market,
-        all_dates[0],
-    )
-    last_grid = quant_v6_expected_rth_bar_starts(
-        registration.market,
-        all_dates[-1],
-    )
-    fetched = provider.fetch_five_minute_no_adjust(
-        member.symbol,
-        start_at=first_grid[0],
-        end_at=last_grid[-1] + timedelta(minutes=5),
-    )
-    if evaluation_deadline is not None:
-        evaluation_deadline.checkpoint()
     complete_by_date: dict[date, tuple[QuantV6Bar, ...] | None] = {}
     for session_date in all_dates:
         if evaluation_deadline is not None:
@@ -993,26 +1086,257 @@ def evaluate_quant_v6_candidate(
     )
 
 
+def evaluate_quant_v6_candidate(
+    *,
+    registration: QuantV6RegistrationPlan,
+    member: QuantV6CohortMember,
+    provider: QuantV6HistoricalProvider,
+    evaluation_deadline: QuantV6EvaluationDeadline | None = None,
+) -> QuantV6CandidateEvaluation:
+    """Synchronously fetch and evaluate one frozen cohort member."""
+    request = _verified_candidate_fetch_request(
+        registration=registration,
+        member=member,
+        evaluation_deadline=evaluation_deadline,
+    )
+    completed_fetch = _fetch_quant_v6_candidate(
+        request=request,
+        provider=provider,
+    )
+    return _evaluate_candidate_from_fetch(
+        completed_fetch=completed_fetch,
+        evaluation_deadline=evaluation_deadline,
+    )
+
+
+def _log_candidate_start(
+    request: _VerifiedCandidateFetchRequest,
+    *,
+    total: int,
+) -> None:
+    logger.info(
+        "quant-v6 candidate fetch started ordinal=%d ordinal_base=0 total=%d",
+        request.member.ordinal,
+        total,
+    )
+
+
+def _log_candidate_complete(
+    completed_fetch: _CompletedCandidateFetch,
+    evaluation: QuantV6CandidateEvaluation,
+    *,
+    total: int,
+    compute_ms: int,
+) -> None:
+    logger.info(
+        "quant-v6 candidate evaluation completed ordinal=%d ordinal_base=0 "
+        "completed_count=%d total=%d "
+        "fetch_ms=%d compute_ms=%d pages=%d rows=%d bars=%d events=%d",
+        evaluation.member.ordinal,
+        evaluation.member.ordinal + 1,
+        total,
+        completed_fetch.fetch_ms,
+        compute_ms,
+        completed_fetch.fetched.pages,
+        completed_fetch.fetched.raw_rows,
+        len(completed_fetch.fetched.bars),
+        evaluation.event_count,
+    )
+
+
+def _evaluate_completed_candidate_with_logging(
+    *,
+    completed_fetch: _CompletedCandidateFetch,
+    total: int,
+    evaluation_deadline: QuantV6EvaluationDeadline | None,
+) -> QuantV6CandidateEvaluation:
+    started_at = time.monotonic_ns()
+    evaluation = _evaluate_candidate_from_fetch(
+        completed_fetch=completed_fetch,
+        evaluation_deadline=evaluation_deadline,
+    )
+    compute_ns = max(0, time.monotonic_ns() - started_at)
+    _log_candidate_complete(
+        completed_fetch,
+        evaluation,
+        total=total,
+        compute_ms=compute_ns // 1_000_000,
+    )
+    return evaluation
+
+
+def _await_candidate_fetch(
+    future: Future[_CompletedCandidateFetch],
+    *,
+    evaluation_deadline: QuantV6EvaluationDeadline,
+) -> _CompletedCandidateFetch:
+    while True:
+        wait_seconds = min(
+            0.1,
+            evaluation_deadline.remaining_seconds(),
+        )
+        done, _not_done = wait((future,), timeout=wait_seconds)
+        if future in done:
+            return future.result()
+        evaluation_deadline.checkpoint()
+
+
+def _cancel_and_drain_candidate_fetch(
+    future: Future[_CompletedCandidateFetch] | None,
+    *,
+    evaluation_deadline: QuantV6EvaluationDeadline,
+) -> None:
+    if future is None or future.done():
+        return
+    if future.cancel():
+        return
+    if future.done():
+        return
+    # The production provider observes this same deadline from every bounded
+    # SDK wait. Cancelling the doomed tick makes the sole look-ahead future
+    # return promptly without widening the provider protocol.
+    evaluation_deadline.cancel()
+    while True:
+        done, _not_done = wait((future,), timeout=0.1)
+        if future in done:
+            break
+    try:
+        future.result()
+    except BaseException:
+        return
+
+
+def _evaluate_quant_v6_registration_sequential(
+    *,
+    registration: QuantV6RegistrationPlan,
+    provider: QuantV6HistoricalProvider,
+) -> tuple[QuantV6CandidateEvaluation, ...]:
+    evaluations: list[QuantV6CandidateEvaluation] = []
+    total = len(registration.members)
+    for member in registration.members:
+        request = _verified_candidate_fetch_request(
+            registration=registration,
+            member=member,
+            evaluation_deadline=None,
+        )
+        _log_candidate_start(request, total=total)
+        completed_fetch = _fetch_quant_v6_candidate(
+            request=request,
+            provider=provider,
+        )
+        evaluations.append(_evaluate_completed_candidate_with_logging(
+            completed_fetch=completed_fetch,
+            total=total,
+            evaluation_deadline=None,
+        ))
+    return tuple(evaluations)
+
+
 def evaluate_quant_v6_registration(
     *,
     registration: QuantV6RegistrationPlan,
     provider: QuantV6HistoricalProvider,
     evaluation_deadline: QuantV6EvaluationDeadline | None = None,
 ) -> tuple[QuantV6CandidateEvaluation, ...]:
-    """Evaluate every frozen member; any provider failure aborts the cohort."""
-    evaluations: list[QuantV6CandidateEvaluation] = []
-    for member in registration.members:
-        if evaluation_deadline is not None:
-            evaluation_deadline.checkpoint()
-        evaluations.append(evaluate_quant_v6_candidate(
+    """Evaluate every frozen member; any provider failure aborts the cohort.
+
+    Look-ahead requires the provider to cooperatively observe the exact
+    ``evaluation_deadline`` supplied here. Production construction binds that
+    same object to ``QuantV6HistoricalBarProvider``. Protocol implementations
+    without this cancellation invariant must omit the deadline and use the
+    synchronous path so an in-flight Python thread never needs forced cleanup.
+    """
+    if evaluation_deadline is None:
+        # Without a shared cancellation object there is no way to force an
+        # arbitrary protocol implementation to drain a running Python thread.
+        # Preserve the original synchronous behavior for this public mode.
+        return _evaluate_quant_v6_registration_sequential(
             registration=registration,
-            member=member,
             provider=provider,
-            evaluation_deadline=evaluation_deadline,
-        ))
-        if evaluation_deadline is not None:
+        )
+
+    evaluations: list[QuantV6CandidateEvaluation] = []
+    total = len(registration.members)
+    evaluation_deadline.checkpoint()
+    validate_quant_v6_registration_plan(registration)
+    first_request = (
+        _verified_candidate_fetch_request_from_validated_registration(
+            registration=registration,
+            member=registration.members[0],
+        )
+    )
+    executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="quant-v6-prefetch",
+    )
+    pending: Future[_CompletedCandidateFetch] | None = None
+    try:
+        _log_candidate_start(first_request, total=total)
+        pending = executor.submit(
+            _fetch_quant_v6_candidate,
+            request=first_request,
+            provider=provider,
+        )
+        for index, member in enumerate(registration.members):
             evaluation_deadline.checkpoint()
-    return tuple(evaluations)
+            if index:
+                # Preserve the former per-member strict registration replay.
+                # A hostile cooperative callback cannot mutate the frozen
+                # caller graph after the first fetch and have a prefetched
+                # result consumed under stale registration evidence.
+                validate_quant_v6_registration_plan(registration)
+            assert pending is not None
+            completed_fetch = _await_candidate_fetch(
+                pending,
+                evaluation_deadline=evaluation_deadline,
+            )
+            if (
+                completed_fetch.request.registration is not registration
+                or completed_fetch.request.member is not member
+            ):
+                raise QuantV6HistoricalEvaluationError(
+                    "candidate look-ahead result is outside registration order"
+                )
+            next_pending: Future[_CompletedCandidateFetch] | None = None
+            if index + 1 < total:
+                evaluation_deadline.checkpoint()
+                next_request = (
+                    _verified_candidate_fetch_request_from_validated_registration(
+                        registration=registration,
+                        member=registration.members[index + 1],
+                    )
+                )
+                _log_candidate_start(next_request, total=total)
+                next_pending = executor.submit(
+                    _fetch_quant_v6_candidate,
+                    request=next_request,
+                    provider=provider,
+                )
+            pending = next_pending
+            try:
+                evaluations.append(
+                    _evaluate_completed_candidate_with_logging(
+                        completed_fetch=completed_fetch,
+                        total=total,
+                        evaluation_deadline=evaluation_deadline,
+                    )
+                )
+            except BaseException:
+                _cancel_and_drain_candidate_fetch(
+                    pending,
+                    evaluation_deadline=evaluation_deadline,
+                )
+                raise
+            evaluation_deadline.checkpoint()
+        return tuple(evaluations)
+    except BaseException:
+        _cancel_and_drain_candidate_fetch(
+            pending,
+            evaluation_deadline=evaluation_deadline,
+        )
+        raise
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def quant_v6_binding_manifest(

@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
@@ -77,6 +79,9 @@ from app.services.watchlist_quant_v6_evaluation_service import (
 from app.services.watchlist_quant_v6_deadline import (
     QuantV6EvaluationDeadline,
 )
+
+
+logger = logging.getLogger("auto_trade.watchlist_quant_v6_publication_service")
 
 
 QUANT_V6_PUBLICATION_SCHEMA_VERSION = 1
@@ -1701,6 +1706,12 @@ def _prepare_publication(
     evaluation_deadline: QuantV6EvaluationDeadline | None = None,
 ) -> _PreparedPublication:
     _evaluation_checkpoint(evaluation_deadline)
+    started_at = time.monotonic_ns()
+    logger.info(
+        "quant-v6 publication phase=closure_start members=%d persisted=%s",
+        len(plan.members),
+        persisted_acquisition_outcomes is not None,
+    )
     normalized = tuple(evaluations)
     if len(normalized) != len(plan.members):
         raise QuantV6PublicationError(
@@ -2019,7 +2030,7 @@ def _prepare_publication(
             "publication JSON is outside the bounded root size limit"
         )
     _evaluation_checkpoint(evaluation_deadline)
-    return _PreparedPublication(
+    prepared = _PreparedPublication(
         bindings=ordered_bindings,
         artifacts=tuple(artifacts[key] for key in sorted(artifacts)),
         manifest_sha256=manifest_sha256,
@@ -2032,6 +2043,16 @@ def _prepare_publication(
         request_start_at=request_start_at,
         request_end_at=request_end_at,
     )
+    elapsed_ns = max(0, time.monotonic_ns() - started_at)
+    logger.info(
+        "quant-v6 publication phase=closure_complete members=%d bindings=%d "
+        "artifacts=%d elapsed_ms=%d",
+        len(plan.members),
+        prepared.binding_count,
+        len(prepared.artifacts),
+        elapsed_ns // 1_000_000,
+    )
+    return prepared
 
 
 def _artifact_from_row(

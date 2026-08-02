@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import hashlib
 import json
+import logging
 import threading
 import zlib
 from collections.abc import Callable, Mapping, Sequence
@@ -310,6 +311,61 @@ def test_candidate_closure_fused_assessment_runs_one_complete_replay(
 
     assert prepared.assessment_count == 1
     assert replay_calls == 1
+
+
+def test_prepare_publication_logs_bounded_closure_progress(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan = _one_member_plan()
+    evaluations = _missing_evaluations()
+    with caplog.at_level(
+        logging.INFO,
+        logger="auto_trade.watchlist_quant_v6_publication_service",
+    ):
+        prepared = service_module._prepare_publication(
+            plan=plan,
+            evaluations=evaluations,
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages[0] == (
+        "quant-v6 publication phase=closure_start members=1 persisted=False"
+    )
+    assert messages[-1].startswith(
+        "quant-v6 publication phase=closure_complete members=1 "
+        f"bindings={prepared.binding_count} artifacts={len(prepared.artifacts)} "
+        "elapsed_ms="
+    )
+    assert plan.members[0].symbol not in " ".join(messages)
+    assert plan.identity_sha256 not in " ".join(messages)
+
+    caplog.clear()
+    deadline = QuantV6EvaluationDeadline(60)
+    original_checkpoint = deadline.checkpoint
+    checkpoint_calls = 0
+
+    def _expire_during_closure() -> None:
+        nonlocal checkpoint_calls
+        checkpoint_calls += 1
+        if checkpoint_calls == 2:
+            deadline.expire()
+        original_checkpoint()
+
+    monkeypatch.setattr(deadline, "checkpoint", _expire_during_closure)
+    with caplog.at_level(
+        logging.INFO,
+        logger="auto_trade.watchlist_quant_v6_publication_service",
+    ):
+        with pytest.raises(QuantV6EvaluationDeadlineExceededError):
+            service_module._prepare_publication(
+                plan=plan,
+                evaluations=evaluations,
+                evaluation_deadline=deadline,
+            )
+    deadline_messages = [record.getMessage() for record in caplog.records]
+    assert any("phase=closure_start" in value for value in deadline_messages)
+    assert all("phase=closure_complete" not in value for value in deadline_messages)
 
 
 def test_deadline_after_fused_assessment_compression_writes_no_artifacts(

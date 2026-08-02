@@ -787,7 +787,7 @@ auto_trade/
 | `AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_ENABLED` | 启用独立的 quote-only quant-v6 历史评估与不可变证据发布；不读取当前 watchlist/universe，不提交订单、不自动晋级 | `false` |
 | `AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_INTERVAL_MINUTES` | quant-v6 历史评估成功后的常规周期（分钟，`60-10080`） | `1440` |
 | `AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_RETRY_INTERVAL_MINUTES` | quant-v6 provider/发布失败后的重试周期（分钟，`15-1440`，不得大于常规周期） | `60` |
-| `AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_TIMEOUT_SECONDS` | 单次 quant-v6 acquisition/evaluation/publication 的端到端协作式 deadline（秒，`60-3600`）；在 SDK、member、leaf/event replay 与 pre-commit 边界检查，不改变 domain 语义或 artifact payload，控制源由 historical evaluator manifest v2 绑定 | `1800` |
+| `AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_TIMEOUT_SECONDS` | 单次 quant-v6 acquisition/evaluation/publication 的端到端协作式 deadline（秒，`60-7200`）；在 SDK、member、leaf/event replay 与 pre-commit 边界检查，不改变 domain 语义或 artifact payload，控制源由 historical evaluator manifest v2 绑定 | `1800` |
 | `AUTO_TRADE_WATCHLIST_QUANT_V6_PROVIDER_PAGE_TIMEOUT_SECONDS` | 单页 quote-only 历史 SDK 调用的硬超时（秒，`5-120`）；取消部署时会协作终止剩余 cohort | `30` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_MAX_SYMBOLS` | 每次最多入选标的数 | `12` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_EXPLORATION_MAX_SYMBOLS` | 先补足已入选风险组的残差基准同伴（可使用仅成交额处于实盘门槛 75%-100% 的 peer-only 标的），再保留冻结轮动与最高分新挑战者，剩余容量用于细行业和长期观察；自动新增或重新启用的标的仅观察、不会获得开仓资格，已启用的开仓池独立保留且不占探索配额，`0` 表示关闭 | `24` |

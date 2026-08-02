@@ -492,7 +492,7 @@ class Settings(BaseSettings):
     watchlist_quant_v6_evaluation_timeout_seconds: int = Field(
         default=1_800,
         ge=60,
-        le=3_600,
+        le=7_200,
         validation_alias=(
             "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_TIMEOUT_SECONDS"
         ),
