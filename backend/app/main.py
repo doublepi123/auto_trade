@@ -113,6 +113,7 @@ from app.api.daily_consistency import router as daily_consistency_router
 from app.api.database_health import router as database_health_router
 from app.api.cron_health import router as cron_health_router
 from app.api.quote_health import router as quote_health_router
+from app.api.durable_job_leases import router as durable_job_leases_router
 from app.config import settings
 from app.database import init_db
 from app.runner import get_runner
@@ -2069,6 +2070,7 @@ app.include_router(daily_consistency_router)
 app.include_router(database_health_router)
 app.include_router(cron_health_router)
 app.include_router(quote_health_router)
+app.include_router(durable_job_leases_router)
 
 
 # Global exception handler: log unhandled exceptions and return a generic 500 JSON
