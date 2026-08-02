@@ -443,6 +443,67 @@ class TestBacktestCompare:
         assert len(resp.json()["runs"]) == 1
         assert resp.json()["runs"][0]["id"] == corrupt_id
 
+    def test_corrupt_json_baseline_classification_non_numeric(self) -> None:
+        """Corrupt-JSON baseline: baseline_classification is NON_NUMERIC, no deltas."""
+        db = database.SessionLocal()
+        try:
+            run = BacktestRun(
+                name="corrupt-baseline",
+                symbol="X.US",
+                params_json='{"buy_low":1.0,"sell_high":2.0}',
+                metrics_json="not-json",
+            )
+            db.add(run)
+            db.commit()
+            db.refresh(run)
+            corrupt_id = run.id
+            valid_id = _seed_run(db, metrics={"a": 1.0})
+        finally:
+            db.close()
+        resp = client.get(
+            "/api/backtest/runs/compare",
+            params={"ids": [corrupt_id, valid_id], "baseline_id": corrupt_id},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["baseline_id"] == corrupt_id
+        # Every metric row must have NON_NUMERIC baseline and no deltas.
+        for row in data["metric_comparison"]:
+            assert row["baseline_classification"] == "NON_NUMERIC"
+            assert row["baseline_value"] is None
+            for entry in row["runs"]:
+                assert entry["delta"] is None
+
+    def test_non_object_baseline_classification_non_numeric(self) -> None:
+        """Valid non-object JSON baseline: baseline_classification is NON_NUMERIC."""
+        db = database.SessionLocal()
+        try:
+            run = BacktestRun(
+                name="nonobj-baseline",
+                symbol="X.US",
+                params_json='{"buy_low":1.0,"sell_high":2.0}',
+                metrics_json="[1, 2, 3]",
+            )
+            db.add(run)
+            db.commit()
+            db.refresh(run)
+            nonobj_id = run.id
+            valid_id = _seed_run(db, metrics={"a": 1.0})
+        finally:
+            db.close()
+        resp = client.get(
+            "/api/backtest/runs/compare",
+            params={"ids": [nonobj_id, valid_id], "baseline_id": nonobj_id},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["baseline_id"] == nonobj_id
+        for row in data["metric_comparison"]:
+            assert row["baseline_classification"] == "NON_NUMERIC"
+            assert row["baseline_value"] is None
+            for entry in row["runs"]:
+                assert entry["delta"] is None
+
     # ---- Blocker 2: finite-only delta ----
 
     def test_delta_overflow_produces_none(self) -> None:
@@ -481,7 +542,11 @@ class TestBacktestCompare:
         assert [r["id"] for r in data["runs"]] == ids
 
     def test_no_backtest_engine_invocation(self, monkeypatch) -> None:
-        """Compare must never invoke BacktestEngine or execute a backtest."""
+        """Compare must never invoke BacktestEngine.run.
+
+        Unconditionally fail-fast patches the actual ``BacktestEngine.run``
+        method, then calls the endpoint and proves success.
+        """
         db = database.SessionLocal()
         try:
             id1 = _seed_run(db, metrics={"a": 1.0})
@@ -489,20 +554,15 @@ class TestBacktestCompare:
         finally:
             db.close()
 
-        # Fail-fast: if any backtest execution path is invoked, raise.
-        from app.core import backtest as bt_module
+        from app.core.backtest import BacktestEngine
 
-        original_run = getattr(bt_module, "run_backtest", None)
+        def _boom(self, *a, **kw):
+            raise AssertionError("compare must not invoke BacktestEngine.run")
 
-        def _boom(*a, **kw):
-            raise AssertionError("compare must not invoke run_backtest")
+        monkeypatch.setattr(BacktestEngine, "run", _boom)
 
-        if original_run is not None:
-            monkeypatch.setattr(bt_module, "run_backtest", _boom)
-
-        db = database.SessionLocal()
-        try:
-            result = BacktestRunService(db).compare_with_metrics([id1, id2])
-            assert len(result["runs"]) == 2
-        finally:
-            db.close()
+        resp = client.get(
+            "/api/backtest/runs/compare", params={"ids": [id1, id2]}
+        )
+        assert resp.status_code == 200, resp.text
+        assert len(resp.json()["runs"]) == 2

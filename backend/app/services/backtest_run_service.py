@@ -210,11 +210,23 @@ class BacktestRunService:
         baseline_metrics = (
             valid_metrics.get(baseline_id, {}) if baseline_id else {}
         )
+        # Derive baseline document validity: if the baseline document is
+        # INVALID_JSON or NON_OBJECT, its classification must be NON_NUMERIC
+        # (not MISSING), with no numeric baseline value or deltas.
+        baseline_doc_valid = (
+            baseline_id is not None and doc_status.get(baseline_id) == "VALID"
+        )
 
         rows: list[dict[str, Any]] = []
         for name in sorted_names:
-            baseline_raw = baseline_metrics.get(name)
-            baseline_cls, baseline_num = _classify_value(baseline_raw)
+            if baseline_doc_valid:
+                baseline_raw = baseline_metrics.get(name)
+                baseline_cls, baseline_num = _classify_value(baseline_raw)
+            else:
+                # Invalid baseline document: NON_NUMERIC, no value, no deltas.
+                baseline_raw = None
+                baseline_cls = "NON_NUMERIC"
+                baseline_num = None
 
             run_entries: list[dict[str, Any]] = []
             for rid in existing_ids:

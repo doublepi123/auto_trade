@@ -301,7 +301,7 @@ class TestStrategyVersionDiff:
         assert type(changed[0]["to_value"]) is float
 
     def test_exact_side_specific_missing_from(self) -> None:
-        """Missing from version produces exact side-specific detail."""
+        """Missing from version produces exact side-specific detail string."""
         db = database.SessionLocal()
         try:
             to_id = _seed_version(db, _base_params())
@@ -312,12 +312,10 @@ class TestStrategyVersionDiff:
             params={"from_version_id": 99997, "to_version_id": to_id},
         )
         assert resp.status_code == 404
-        detail = resp.json()["detail"]
-        assert "99997" in detail
-        assert "from" in detail.lower()
+        assert resp.json()["detail"] == f"from version 99997 not found"
 
     def test_exact_side_specific_missing_to(self) -> None:
-        """Missing to version produces exact side-specific detail."""
+        """Missing to version produces exact side-specific detail string."""
         db = database.SessionLocal()
         try:
             from_id = _seed_version(db, _base_params())
@@ -328,12 +326,14 @@ class TestStrategyVersionDiff:
             params={"from_version_id": from_id, "to_version_id": 99996},
         )
         assert resp.status_code == 404
-        detail = resp.json()["detail"]
-        assert "99996" in detail
-        assert "to" in detail.lower()
+        assert resp.json()["detail"] == f"to version 99996 not found"
 
     def test_mutation_and_runner_paths_not_reached(self, monkeypatch) -> None:
-        """Diff must never call record_version, update config, or access runner."""
+        """Diff must never call get_runner, get_config, update_config, or record_version.
+
+        Unconditionally fail-fast patches the actual production symbols, then
+        calls the diff endpoint and proves none are reached.
+        """
         db = database.SessionLocal()
         try:
             from_id = _seed_version(db, _base_params(buy_low=100.0))
@@ -341,9 +341,32 @@ class TestStrategyVersionDiff:
         finally:
             db.close()
 
-        # Fail-fast: record_version must not be called.
+        from app.api import strategy as strategy_api
+        from app.services import strategy_service as strat_svc_module
         from app.services import strategy_version_service as svc_module
 
+        # Unconditional fail-fast on every actual mutation/runner symbol.
+        monkeypatch.setattr(
+            strategy_api,
+            "get_runner",
+            lambda *a, **kw: (_ for _ in ()).throw(
+                AssertionError("diff must not call get_runner")
+            ),
+        )
+        monkeypatch.setattr(
+            strat_svc_module.StrategyService,
+            "get_config",
+            lambda self, *a, **kw: (_ for _ in ()).throw(
+                AssertionError("diff must not call StrategyService.get_config")
+            ),
+        )
+        monkeypatch.setattr(
+            strat_svc_module.StrategyService,
+            "update_config",
+            lambda self, *a, **kw: (_ for _ in ()).throw(
+                AssertionError("diff must not call StrategyService.update_config")
+            ),
+        )
         monkeypatch.setattr(
             svc_module.StrategyVersionService,
             "record_version",
@@ -352,22 +375,10 @@ class TestStrategyVersionDiff:
             ),
         )
 
-        # Fail-fast: StrategyService.update must not be called.
-        from app.services import strategy_service as strat_svc_module
-
-        original_update = getattr(strat_svc_module.StrategyService, "update", None)
-        if original_update is not None:
-            monkeypatch.setattr(
-                strat_svc_module.StrategyService,
-                "update",
-                lambda self, *a, **kw: (_ for _ in ()).throw(
-                    AssertionError("diff must not call StrategyService.update")
-                ),
-            )
-
         resp = client.get(
             "/api/strategy/versions/diff",
             params={"from_version_id": from_id, "to_version_id": to_id},
         )
         assert resp.status_code == 200
+        assert len(resp.json()["changed"]) == 1
         assert len(resp.json()["changed"]) == 1

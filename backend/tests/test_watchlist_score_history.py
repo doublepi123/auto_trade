@@ -301,54 +301,99 @@ class TestWatchlistScoreHistory:
     # ---- Blocker 4: missing negative evidence ----
 
     def test_no_scorer_llm_provider_broker_prune_invocation(self, monkeypatch) -> None:
-        """History must never invoke scorer, LLM/provider, broker, or prune."""
+        """History endpoint must never invoke scorer, LLM/provider, broker, or prune.
+
+        Calls the actual endpoint (not just the service). Fail-fast patches the
+        real entry points: ``WatchlistScoreService.score_from_llm_or_fallback``,
+        ``WatchlistScoreService.prune_history``, and ``app.api.watchlist.get_runner``.
+        """
         db = database.SessionLocal()
         try:
             _seed_score(db)
         finally:
             db.close()
 
-        # Fail-fast on any scorer/provider/broker/prune path.
+        from app.api import watchlist as watchlist_api
         from app.services import watchlist_score_service as wss_module
 
-        for attr in ("score_from_llm_or_fallback", "_prune_expired"):
-            original = getattr(wss_module.WatchlistScoreService, attr, None)
-            if original is not None:
-                monkeypatch.setattr(
-                    wss_module.WatchlistScoreService,
-                    attr,
-                    lambda self, *a, **kw: (_ for _ in ()).throw(
-                        AssertionError(f"history must not call {attr}")
-                    ),
-                )
+        def _boom_score(self, *a, **kw):
+            raise AssertionError("history must not call score_from_llm_or_fallback")
+
+        def _boom_prune(self, *a, **kw):
+            raise AssertionError("history must not call prune_history")
+
+        def _boom_runner(*a, **kw):
+            raise AssertionError("history must not call get_runner")
+
+        monkeypatch.setattr(
+            wss_module.WatchlistScoreService, "score_from_llm_or_fallback", _boom_score
+        )
+        monkeypatch.setattr(
+            wss_module.WatchlistScoreService, "prune_history", _boom_prune
+        )
+        monkeypatch.setattr(watchlist_api, "get_runner", _boom_runner)
+
+        resp = client.get(
+            "/api/watchlist/scores/history", params={"symbol": "AAPL.US"}
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["total"] == 1
+
+    def test_one_observation_clock_shared_across_rows(self, monkeypatch) -> None:
+        """Exactly one ``_utcnow`` call; all rows share the same stale clock.
+
+        Seeds multiple rows around the expiry boundary, patches
+        ``_utcnow`` with a call counter and fixed time, and asserts exactly
+        one clock invocation and consistent ``is_stale`` results.
+        """
+        fixed_now = datetime(2026, 6, 14, 10, 30, 0, tzinfo=timezone.utc)
+        call_count = [0]
+
+        def _counted_utcnow() -> datetime:
+            call_count[0] += 1
+            return fixed_now
+
+        import app.services.watchlist_score_service as wss_module
+
+        monkeypatch.setattr(wss_module, "_utcnow", _counted_utcnow)
 
         db = database.SessionLocal()
         try:
-            svc = WatchlistScoreService(db)
-            rows, total, observed = svc.list_history("AAPL.US")
-            assert total == 1
+            # Row before expiry (fresh at fixed_now).
+            _seed_score(
+                db,
+                created_at=datetime(2026, 6, 14, 10, 0, 0, tzinfo=timezone.utc),
+                expires_at=datetime(2026, 6, 14, 11, 0, 0, tzinfo=timezone.utc),
+            )
+            # Row after expiry (stale at fixed_now).
+            _seed_score(
+                db,
+                created_at=datetime(2026, 6, 14, 9, 0, 0, tzinfo=timezone.utc),
+                expires_at=datetime(2026, 6, 14, 10, 0, 0, tzinfo=timezone.utc),
+            )
+            # Another stale row.
+            _seed_score(
+                db,
+                created_at=datetime(2026, 6, 14, 8, 0, 0, tzinfo=timezone.utc),
+                expires_at=datetime(2026, 6, 14, 9, 0, 0, tzinfo=timezone.utc),
+            )
         finally:
             db.close()
 
-    def test_one_observation_clock_shared_across_rows(self) -> None:
-        """All returned rows share the same observation clock for stale status."""
-        db = database.SessionLocal()
-        try:
-            for i in range(3):
-                _seed_score(
-                    db,
-                    created_at=datetime(2026, 6, 14, 10, i, 0, tzinfo=timezone.utc),
-                )
-        finally:
-            db.close()
         resp = client.get(
             "/api/watchlist/scores/history",
             params={"symbol": "AAPL.US", "limit": 10},
         )
         assert resp.status_code == 200
         data = resp.json()
+        # Exactly one clock call for the entire response.
+        assert call_count[0] == 1
         observed = data["observed_at"]
-        # Every row's stale status was computed from the same observed_at.
         assert observed is not None
-        # All rows share the same observation time (it's one value in the response).
-        assert len(data["items"]) == 3
+        items = data["items"]
+        assert len(items) == 3
+        # Consistent stale classification from the single observation clock.
+        # The fresh row (expires 11:00) is not stale; the two expired rows are.
+        stale_flags = [item["is_stale"] for item in items]
+        assert stale_flags.count(True) == 2
+        assert stale_flags.count(False) == 1
