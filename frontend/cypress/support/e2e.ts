@@ -1323,6 +1323,33 @@ Cypress.Commands.add('stubApi', () => {
     req.reply({ body: { items: filtered, total: filtered.length, page: 1, page_size: 20 } })
   }).as('getEvents')
 
+  cy.intercept('GET', '/api/intervention-evidence*', {
+    body: {
+      items: [],
+      summary: {
+        total_evidence: 0,
+        scanned_evidence: 0,
+        classification_complete: true,
+        paired_count: 0,
+        open_count: 0,
+        unmatched_close_count: 0,
+        ambiguous_count: 0,
+        unknown_count: 0,
+        paired_duration_seconds: 0,
+      },
+      total: 0,
+      pairing_context_scanned: 0,
+      filtered_scanned: 0,
+      returned: 0,
+      truncated: false,
+      pairing_complete: true,
+      scan_truncated: false,
+      classification_complete: true,
+      pairing_rule: 'Manual pause/resume and kill-switch durations come ONLY from the authoritative audit stream.',
+      filters: { limit: 500 },
+    },
+  }).as('getInterventionEvidence')
+
   cy.intercept('GET', '/api/reports/range*', {
     body: {
       period_type: 'range',

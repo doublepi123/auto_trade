@@ -103,3 +103,24 @@ export function formatBytes(value: number | null | undefined): string {
   }
   return `${size >= 100 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`
 }
+
+/**
+ * Compact Chinese duration: 45 → '45 秒', 83 → '1 分 23 秒', 3725 →
+ * '1 小时 2 分', 90000 → '1 天 1 小时'. Only the two most significant units
+ * are shown. null/negative/non-finite → '—' so callers render absent
+ * durations (e.g. suppressed pairing evidence) honestly.
+ */
+export function formatDurationSeconds(value: number | null | undefined): string {
+  if (value == null || !Number.isFinite(value) || value < 0) return '—'
+  const total = Math.round(value)
+  if (total < 60) return `${total} 秒`
+  const minutes = Math.floor(total / 60)
+  const seconds = total % 60
+  if (minutes < 60) return seconds > 0 ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分`
+  const hours = Math.floor(minutes / 60)
+  const remMinutes = minutes % 60
+  if (hours < 24) return remMinutes > 0 ? `${hours} 小时 ${remMinutes} 分` : `${hours} 小时`
+  const days = Math.floor(hours / 24)
+  const remHours = hours % 24
+  return remHours > 0 ? `${days} 天 ${remHours} 小时` : `${days} 天`
+}

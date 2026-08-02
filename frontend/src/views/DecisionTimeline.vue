@@ -83,6 +83,8 @@
       </div>
     </div>
 
+    <InterventionEvidencePanel />
+
     <div v-if="bookmarks.length" class="timeline-bookmarks" role="region" aria-labelledby="timeline-bookmarks-heading">
       <div class="bookmarks-header">
         <span id="timeline-bookmarks-heading">书签：</span>
@@ -267,6 +269,7 @@ import type { TimelineSource, TradeEventRecord, LLMInteractionDetail } from '../
 import { auditActionLabel, orderSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 import { EVENT_TYPE } from '../utils/constants'
 import CopyButton from '../components/CopyButton.vue'
+import InterventionEvidencePanel from '../components/InterventionEvidencePanel.vue'
 
 type Row = TradeEventRecord & { row_uid: string }
 

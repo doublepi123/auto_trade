@@ -1247,6 +1247,84 @@ export interface QuoteStreamHealth {
   as_of: string
 }
 
+/**
+ * Read-only runtime intervention evidence (GET /api/intervention-evidence).
+ *
+ * Projects ONLY persisted, explicit, successful pause/resume and kill-switch
+ * transitions from audit logs and trade events. This is evidence, not a
+ * synthesized runtime-state history: gaps are never inferred. `reason` is a
+ * fixed category code (MANUAL_PAUSE / MANUAL_RESUME / MANUAL_KILL_SWITCH /
+ * MANUAL_KILL_SWITCH_DISABLE / AUTOMATIC_RESUME), never free-form text.
+ * `duration_seconds` is present ONLY on the close row of an explicit,
+ * unambiguous open→close pair; it is null for every other row, and ALL
+ * durations are suppressed when `pairing_complete` is false (scan cap
+ * exceeded — in that case context-dependent states degrade to UNKNOWN).
+ */
+export type InterventionEvidenceSource = 'audit' | 'trade_auto'
+export type InterventionEvidenceFamily = 'pause' | 'kill_switch'
+export type InterventionEvidenceDirection = 'open' | 'close'
+export type InterventionPairingStatus =
+  | 'PAIRED'
+  | 'OPEN'
+  | 'UNMATCHED_CLOSE'
+  | 'AMBIGUOUS'
+  | 'UNKNOWN'
+
+export interface InterventionEvidenceRow {
+  source: InterventionEvidenceSource
+  source_id: number
+  timestamp: string
+  family: InterventionEvidenceFamily
+  kind: string
+  direction: InterventionEvidenceDirection
+  reason: string
+  action: string
+  actor_hash: string | null
+  pairing_status: InterventionPairingStatus
+  paired_source: InterventionEvidenceSource | null
+  paired_source_id: number | null
+  duration_seconds: number | null
+}
+
+export interface InterventionEvidenceSummary {
+  /** Exact complete filtered population (same snapshot as the scan). */
+  total_evidence: number
+  /** Scanned rows matching the date filters; feeds the status counts. */
+  scanned_evidence: number
+  /** False when a scan cap truncated the pairing context. */
+  classification_complete: boolean
+  paired_count: number
+  open_count: number
+  unmatched_close_count: number
+  ambiguous_count: number
+  unknown_count: number
+  /** Sum of explicit paired close-row durations (0 when suppressed). */
+  paired_duration_seconds: number
+}
+
+export interface InterventionEvidenceResponse {
+  items: InterventionEvidenceRow[]
+  summary: InterventionEvidenceSummary
+  /** Exact complete filtered population, independent of scan/limit bounds. */
+  total: number
+  /** Global rows loaded to establish pairing context (before date filters). */
+  pairing_context_scanned: number
+  /** Scanned rows matching the requested date filters. */
+  filtered_scanned: number
+  /** Rows returned after the response limit. */
+  returned: number
+  /** True when rows were omitted by the response limit OR a scan cap. */
+  truncated: boolean
+  /** False when a scan cap truncated the global pairing context. */
+  pairing_complete: boolean
+  scan_truncated: boolean
+  classification_complete: boolean
+  /** Backend-provided human-readable pairing rule (verbatim). */
+  pairing_rule: string
+  /** Echo of the applied filters ({ limit, from_date?, to_date? }). */
+  filters: Record<string, unknown>
+}
+
 export interface RiskHistoryPoint {
   created_at: string
   engine_state: string
