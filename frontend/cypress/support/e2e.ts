@@ -1102,6 +1102,56 @@ Cypress.Commands.add('stubApi', () => {
     })
   }).as('getDatabaseHealth')
 
+  cy.intercept('GET', '/api/cron-health', (req) => {
+    const now = new Date().toISOString()
+    req.reply({
+      body: {
+        as_of: now,
+        jobs: [
+          {
+            name: 'notification_retry',
+            enabled: true,
+            expected_interval_seconds: 60,
+            last_success_at: now,
+            last_failure_at: null,
+            last_failure_code: null,
+            tick_count: 240,
+            failure_count: 0,
+            last_outcome: 'success',
+            stale: false,
+            status: 'healthy',
+          },
+          {
+            name: 'daily_report',
+            enabled: false,
+            expected_interval_seconds: 3600,
+            last_success_at: null,
+            last_failure_at: null,
+            last_failure_code: null,
+            tick_count: 0,
+            failure_count: 0,
+            last_outcome: '',
+            stale: false,
+            status: 'disabled',
+          },
+          {
+            name: 'universe_rotation',
+            enabled: null,
+            expected_interval_seconds: 300,
+            last_success_at: null,
+            last_failure_at: null,
+            last_failure_code: null,
+            tick_count: 0,
+            failure_count: 0,
+            last_outcome: '',
+            stale: false,
+            status: 'pending',
+          },
+        ],
+      },
+    })
+  }).as('getCronHealth')
+
   cy.intercept('GET', '/api/credentials', {
     body: {
       id: 1, longbridge_app_key: '', longbridge_app_secret: '',

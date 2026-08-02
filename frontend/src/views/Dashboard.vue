@@ -663,10 +663,17 @@
             <div class="db-health-usage-track">
               <div class="db-health-usage-fill" :style="{ width: dbUsagePct + '%' }" />
             </div>
-            <span class="db-health-usage-label" data-testid="db-health-usage-label">{{ dbUsageLabel }}</span>
-          </div>
+          <span class="db-health-usage-label" data-testid="db-health-usage-label">{{ dbUsageLabel }}</span>
+        </div>
         </template>
       </div>
+
+      <CronHealthPanel
+        :snapshot="cronHealth"
+        :loading="cronHealthLoading"
+        :error="cronHealthError"
+        :now-tick="nowTick"
+      />
     </section>
 
     <section class="detail-panel" data-testid="position-pnl-section">
@@ -833,6 +840,7 @@ import EquityCurvePanel from '../components/EquityCurvePanel.vue'
 import SymbolAttributionPanel from '../components/SymbolAttributionPanel.vue'
 import SessionClockPanel from '../components/SessionClockPanel.vue'
 import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
+import CronHealthPanel from '../components/CronHealthPanel.vue'
 import { useDashboardData } from '../composables/useDashboardData'
 import { useConnectionHealth } from '../composables/useConnectionHealth'
 import { useAccountRefresh } from '../composables/useAccountRefresh'
@@ -842,8 +850,8 @@ import { useSymbolStore } from '../composables/useSymbolStore'
 import { usePinnedSymbols } from '../composables/usePinnedSymbols'
 import { useRegisterViewRefresh } from '../composables/useViewRefreshRegistry'
 import { useDiagnosticsSnapshot } from '../composables/useDiagnosticsSnapshot'
-import { startTrading, stopTrading, pauseTrading, resumeTrading, enableProtectiveExits, disableProtectiveExits, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getNotifications, getOrders, getTradeEvents, getMetricsSummary, getDatabaseHealth } from '../api'
-import type { DatabaseHealthSnapshot, LLMIntervalStatus, NotificationLogOut, OrderRecord, Position, StatisticsQuality, StatusHistoryPoint, TradeEventRecord } from '../types'
+import { startTrading, stopTrading, pauseTrading, resumeTrading, enableProtectiveExits, disableProtectiveExits, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getNotifications, getOrders, getTradeEvents, getMetricsSummary, getDatabaseHealth, getCronHealth } from '../api'
+import type { CronHealthSnapshot, DatabaseHealthSnapshot, LLMIntervalStatus, NotificationLogOut, OrderRecord, Position, StatisticsQuality, StatusHistoryPoint, TradeEventRecord } from '../types'
 import { engineStateLabel, auditActionLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 import { EVENT_TYPE } from '../utils/constants'
 import { downloadCsv } from '../utils/csv'
@@ -929,9 +937,31 @@ async function loadDatabaseHealth() {
   }
 }
 
+// Read-only cron job health (GET /api/cron-health). Passive observation only —
+// the endpoint never runs/restarts/registers jobs and this panel offers no
+// such controls. Same load cadence as database health: on mount and on the
+// diagnostics 刷新 button, not on the 5s poll (cron ticks are minute-scale).
+const cronHealth = ref<CronHealthSnapshot | null>(null)
+const cronHealthLoading = ref(false)
+const cronHealthError = ref('')
+
+async function loadCronHealth() {
+  cronHealthLoading.value = true
+  cronHealthError.value = ''
+  try {
+    cronHealth.value = await getCronHealth()
+  } catch (err) {
+    cronHealthError.value = resolveErrorMessage(err, '定时任务健康状态不可用')
+    cronHealth.value = null
+  } finally {
+    cronHealthLoading.value = false
+  }
+}
+
 function refreshDiagnostics() {
   loadDiagnostics()
   loadDatabaseHealth()
+  loadCronHealth()
 }
 
 const walSizeLabel = computed(() => {
@@ -1403,6 +1433,7 @@ onMounted(() => {
   loadMetrics()
   loadDiagnostics()
   loadDatabaseHealth()
+  loadCronHealth()
   freshnessTimer = window.setInterval(() => { nowTick.value = Date.now() }, 1000)
   startMultiSymbols()
   llmStatusTimer = setInterval(() => {

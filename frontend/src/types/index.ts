@@ -1177,6 +1177,45 @@ export interface DatabaseHealthSnapshot {
   wal_size_bytes: number | null
 }
 
+/**
+ * Read-only per-job health row (GET /api/cron-health).
+ *
+ * `enabled` is true/false when cheaply known and null when the backend cannot
+ * determine it without I/O. `status` is the server-authoritative verdict:
+ * disabled / healthy / failing / stale / pending / unknown. `stale` is a
+ * separate heartbeat dimension (a failing job can also be stale). Disabled
+ * jobs are never stale. `last_failure_code` is a sanitized exception class
+ * name only — never a raw message. `last_outcome` is 'success' / 'failure' /
+ * '' (no completed tick yet).
+ */
+export type CronJobStatus =
+  | 'disabled'
+  | 'healthy'
+  | 'failing'
+  | 'stale'
+  | 'pending'
+  | 'unknown'
+
+export interface CronJobHealth {
+  name: string
+  enabled: boolean | null
+  expected_interval_seconds: number | null
+  last_success_at: string | null
+  last_failure_at: string | null
+  last_failure_code: string | null
+  tick_count: number
+  failure_count: number
+  last_outcome: string
+  stale: boolean
+  status: string
+}
+
+/** Top-level response for GET /api/cron-health. `as_of` is server time. */
+export interface CronHealthSnapshot {
+  as_of: string
+  jobs: CronJobHealth[]
+}
+
 export interface RiskHistoryPoint {
   created_at: string
   engine_state: string
