@@ -676,6 +676,22 @@ def test_provider_contract_is_exact_and_strictly_typed() -> None:
         with pytest.raises(QuantV6ReadIntegrityError):
             _validate_provider_contract(candidate)
 
+    legacy_contract = dict(provider_contract)
+    legacy_contract["provider_contract_version"] = (
+        "watchlist-quant-v6-longport-quote-only-history-v1"
+    )
+    legacy_contract["page_boundary"] = (
+        "EXCLUSIVE_AFTER_LAST_ACCEPTED_TIMESTAMP"
+    )
+    assert _validate_provider_contract(legacy_contract) == legacy_contract
+
+    mismatched_legacy_contract = dict(legacy_contract)
+    mismatched_legacy_contract["page_boundary"] = provider_contract[
+        "page_boundary"
+    ]
+    with pytest.raises(QuantV6ReadIntegrityError):
+        _validate_provider_contract(mismatched_legacy_contract)
+
     missing_field = dict(provider_contract)
     missing_field.pop("bounded_context_close")
     with pytest.raises(QuantV6ReadIntegrityError):

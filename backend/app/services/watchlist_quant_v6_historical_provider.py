@@ -29,10 +29,13 @@ from app.services.watchlist_quant_v6_deadline import (
 logger = logging.getLogger("auto_trade.watchlist_quant_v6_historical_provider")
 
 QUANT_V6_HISTORICAL_PROVIDER_CONTRACT_VERSION = (
-    "watchlist-quant-v6-longport-quote-only-history-v1"
+    "watchlist-quant-v6-longport-quote-only-history-v2"
 )
 QUANT_V6_HISTORICAL_PERIOD = "MIN_5"
 QUANT_V6_HISTORICAL_ADJUSTMENT_MODE = "NO_ADJUST"
+QUANT_V6_HISTORICAL_PAGE_BOUNDARY = (
+    "EXCLUSIVE_AFTER_CURSOR_WITH_EXACT_VALID_SINGLETON_TERMINAL_REPEAT"
+)
 QUANT_V6_HISTORICAL_PAGE_SIZE = 1_000
 QUANT_V6_HISTORICAL_MAX_PAGES = 16
 QUANT_V6_HISTORICAL_MAX_BARS = 10_000
@@ -81,7 +84,7 @@ _PROVIDER_CONTRACT: Mapping[str, object] = MappingProxyType({
     "max_raw_rows": QUANT_V6_HISTORICAL_MAX_RAW_ROWS,
     "max_range_days": QUANT_V6_HISTORICAL_MAX_RANGE_DAYS,
     "naive_sdk_timestamp_policy": "UTC_HOST_LOCAL_ONLY",
-    "page_boundary": "EXCLUSIVE_AFTER_LAST_ACCEPTED_TIMESTAMP",
+    "page_boundary": QUANT_V6_HISTORICAL_PAGE_BOUNDARY,
     "page_timeout_milliseconds": (
         QUANT_V6_HISTORICAL_PAGE_TIMEOUT_MILLISECONDS
     ),
@@ -629,6 +632,33 @@ class QuantV6HistoricalBarProvider:
                     1 for _item, timestamp in parsed_rows if timestamp is None
                 )
                 if not advancing:
+                    # Longport's forward paging can repeat its inclusive
+                    # boundary once the requested range is exhausted.  Treat
+                    # only one exact, valid copy of the already accepted
+                    # terminal bar as EOF.  Every other non-advancing response
+                    # remains a fail-closed paging error.
+                    if (
+                        cursor + _BAR_DURATION >= end
+                        and bars
+                        and bars[-1].start_at == cursor
+                        and len(parsed_rows) == 1
+                    ):
+                        repeated_item, repeated_timestamp = parsed_rows[0]
+                        if repeated_timestamp is not None:
+                            repeated_bar = _coerce_bar(
+                                repeated_item,
+                                repeated_timestamp,
+                            )
+                            if (
+                                repeated_timestamp == cursor
+                                and repeated_bar == bars[-1]
+                            ):
+                                return QuantV6HistoricalBarFetch(
+                                    bars=tuple(bars),
+                                    pages=page_number,
+                                    raw_rows=raw_rows,
+                                    rejected_rows=rejected_rows,
+                                )
                     raise QuantV6HistoricalProviderError(
                         "historical candlestick cursor did not advance"
                     )

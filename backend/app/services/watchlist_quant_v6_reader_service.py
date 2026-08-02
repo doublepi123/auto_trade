@@ -206,15 +206,19 @@ _PROVIDER_FIXED_INTEGER_VALUES = {
     "page_size": _PROVIDER_PAGE_SIZE,
     "schema_version": 1,
 }
-_PROVIDER_TEXT_VALUES = {
+_PROVIDER_FIXED_TEXT_VALUES = {
     "adjustment_mode": "NO_ADJUST",
     "naive_sdk_timestamp_policy": "UTC_HOST_LOCAL_ONLY",
-    "page_boundary": "EXCLUSIVE_AFTER_LAST_ACCEPTED_TIMESTAMP",
     "period": "MIN_5",
-    "provider_contract_version": (
-        "watchlist-quant-v6-longport-quote-only-history-v1"
-    ),
     "runtime_local_timezone_required": "UTC",
+}
+_PROVIDER_PAGE_BOUNDARY_BY_VERSION = {
+    "watchlist-quant-v6-longport-quote-only-history-v1": (
+        "EXCLUSIVE_AFTER_LAST_ACCEPTED_TIMESTAMP"
+    ),
+    "watchlist-quant-v6-longport-quote-only-history-v2": (
+        "EXCLUSIVE_AFTER_CURSOR_WITH_EXACT_VALID_SINGLETON_TERMINAL_REPEAT"
+    ),
 }
 _REGISTRATION_POLICY_KEYS = frozenset({
     "automatic_promotion_allowed",
@@ -599,7 +603,7 @@ def _validate_provider_contract(value: object) -> dict[str, Any]:
         raise _integrity(
             "persisted registration provider timeout contract conflicts"
         )
-    for key, expected in _PROVIDER_TEXT_VALUES.items():
+    for key, expected in _PROVIDER_FIXED_TEXT_VALUES.items():
         if _require_text(
             contract.get(key),
             label=f"registration provider contract.{key}",
@@ -607,6 +611,24 @@ def _validate_provider_contract(value: object) -> dict[str, Any]:
             raise _integrity(
                 "persisted registration provider text contract conflicts"
             )
+    provider_version = _require_text(
+        contract.get("provider_contract_version"),
+        label="registration provider contract.provider_contract_version",
+    )
+    expected_page_boundary = _PROVIDER_PAGE_BOUNDARY_BY_VERSION.get(
+        provider_version
+    )
+    if expected_page_boundary is None:
+        raise _integrity(
+            "persisted registration provider version is unsupported"
+        )
+    if _require_text(
+        contract.get("page_boundary"),
+        label="registration provider contract.page_boundary",
+    ) != expected_page_boundary:
+        raise _integrity(
+            "persisted registration provider page boundary conflicts"
+        )
     return contract
 
 

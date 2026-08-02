@@ -13,8 +13,10 @@ import pytest
 from app.services import watchlist_quant_v6_historical_provider as provider_module
 from app.services.watchlist_quant_v6_historical_provider import (
     QUANT_V6_HISTORICAL_ADJUSTMENT_MODE,
+    QUANT_V6_HISTORICAL_PAGE_BOUNDARY,
     QUANT_V6_HISTORICAL_PAGE_TIMEOUT_MILLISECONDS,
     QUANT_V6_HISTORICAL_PERIOD,
+    QUANT_V6_HISTORICAL_PROVIDER_CONTRACT_VERSION,
     QUANT_V6_HISTORICAL_RETRY_BASE_MILLISECONDS,
     QUANT_V6_HISTORICAL_RETRY_MAX,
     QuantV6HistoricalBarProvider,
@@ -45,7 +47,7 @@ def _utc_process_timezone(monkeypatch: pytest.MonkeyPatch) -> None:
 class _Candle:
     def __init__(
         self,
-        timestamp: datetime,
+        timestamp: object,
         *,
         opened: object = "100",
         high: object = "101",
@@ -287,12 +289,115 @@ def test_provider_rejects_nonadvancing_pages_and_closes_context() -> None:
     assert quote_context_type.instances[0].closed is True
 
 
+def test_provider_treats_terminal_boundary_repeat_as_end_of_range() -> None:
+    start = datetime(2026, 1, 2, 14, 30, tzinfo=timezone.utc)
+    module, quote_context_type = _module([
+        [_Candle(start)],
+        [_Candle(start)],
+    ])
+
+    result = QuantV6HistoricalBarProvider(
+        module_loader=lambda: module,
+    ).fetch_five_minute_no_adjust(
+        "AAPL.US",
+        start_at=start,
+        end_at=start + timedelta(minutes=5),
+    )
+
+    assert [bar.start_at for bar in result.bars] == [start]
+    assert result.pages == 2
+    assert result.raw_rows == 2
+    assert result.rejected_rows == 0
+    assert len(quote_context_type.instances[0].calls) == 2
+
+
+def test_provider_rejects_terminal_repeat_when_boundary_bar_was_invalid() -> None:
+    start = datetime(2026, 1, 2, 14, 30, tzinfo=timezone.utc)
+    module, _quote_context_type = _module([
+        [_Candle(start)],
+        [_Candle(start, low="102")],
+    ])
+
+    with pytest.raises(
+        QuantV6HistoricalProviderError,
+        match="did not advance",
+    ):
+        QuantV6HistoricalBarProvider(
+            module_loader=lambda: module,
+        ).fetch_five_minute_no_adjust(
+            "AAPL.US",
+            start_at=start,
+            end_at=start + timedelta(minutes=5),
+        )
+
+
+@pytest.mark.parametrize(
+    "terminal_page",
+    [
+        [_Candle(datetime(2026, 1, 2, 14, 30, tzinfo=timezone.utc))] * 2,
+        [
+            _Candle(datetime(2026, 1, 2, 14, 30, tzinfo=timezone.utc)),
+            _Candle(datetime(2026, 1, 2, 14, 25, tzinfo=timezone.utc)),
+        ],
+        [
+            _Candle(datetime(2026, 1, 2, 14, 30, tzinfo=timezone.utc)),
+            _Candle("invalid-timestamp"),
+        ],
+    ],
+    ids=("multiple-repeats", "older-row", "invalid-timestamp"),
+)
+def test_provider_rejects_non_singleton_terminal_pages(
+    terminal_page: list[_Candle],
+) -> None:
+    start = datetime(2026, 1, 2, 14, 30, tzinfo=timezone.utc)
+    module, _quote_context_type = _module([
+        [_Candle(start)],
+        terminal_page,
+    ])
+
+    with pytest.raises(
+        QuantV6HistoricalProviderError,
+        match="did not advance",
+    ):
+        QuantV6HistoricalBarProvider(
+            module_loader=lambda: module,
+        ).fetch_five_minute_no_adjust(
+            "AAPL.US",
+            start_at=start,
+            end_at=start + timedelta(minutes=5),
+        )
+
+
+def test_provider_rejects_changed_terminal_boundary_bar() -> None:
+    start = datetime(2026, 1, 2, 14, 30, tzinfo=timezone.utc)
+    module, _quote_context_type = _module([
+        [_Candle(start)],
+        [_Candle(start, close="100.75")],
+    ])
+
+    with pytest.raises(
+        QuantV6HistoricalProviderError,
+        match="did not advance",
+    ):
+        QuantV6HistoricalBarProvider(
+            module_loader=lambda: module,
+        ).fetch_five_minute_no_adjust(
+            "AAPL.US",
+            start_at=start,
+            end_at=start + timedelta(minutes=5),
+        )
+
+
 def test_provider_contract_and_source_exclude_order_capabilities() -> None:
     contract = quant_v6_historical_provider_contract()
     assert contract["period"] == QUANT_V6_HISTORICAL_PERIOD
     assert contract["adjustment_mode"] == QUANT_V6_HISTORICAL_ADJUSTMENT_MODE
     assert contract["fallback_allowed"] is False
     assert contract["quote_context_only"] is True
+    assert contract["page_boundary"] == QUANT_V6_HISTORICAL_PAGE_BOUNDARY
+    assert contract["provider_contract_version"] == (
+        QUANT_V6_HISTORICAL_PROVIDER_CONTRACT_VERSION
+    )
     assert contract["acquisition_spec_sha256"] == (
         QUANT_V6_ACQUISITION_SPEC_DIGEST
     )
