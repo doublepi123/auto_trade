@@ -522,15 +522,17 @@ def test_armed_signal_is_an_active_quote_policy(
         Base.metadata.drop_all(bind=engine)
 
 
+@pytest.mark.parametrize("retry_status", ["NO_QUOTE", "QUOTE_DEVIATION"])
 def test_transient_quote_failure_retries_only_inside_entry_window(
     monkeypatch: pytest.MonkeyPatch,
+    retry_status: str,
 ) -> None:
     _enable_execution(monkeypatch)
     engine, db = _database()
     runner = _FakeRunner([
         {
             "executed": False,
-            "status": "NO_QUOTE",
+            "status": retry_status,
             "order_id": None,
             "reason": "quote unavailable",
         },
@@ -559,6 +561,88 @@ def test_transient_quote_failure_retries_only_inside_entry_window(
         assert filled.latest is not None
         assert filled.latest.submit_attempts == 2
         assert filled.latest.entry_order_id == "entry-2"
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+@pytest.mark.parametrize("retry_status", ["NO_QUOTE", "QUOTE_DEVIATION"])
+def test_transient_quote_failure_expires_without_another_submission(
+    monkeypatch: pytest.MonkeyPatch,
+    retry_status: str,
+) -> None:
+    _enable_execution(monkeypatch)
+    engine, db = _database()
+    runner = _FakeRunner([
+        {
+            "executed": False,
+            "status": retry_status,
+            "order_id": None,
+            "reason": "transient final quote failure",
+        },
+    ])
+    try:
+        service = OpeningMomentumExecutionService(db, None, runner)
+        signal = _signal(service)
+        monkeypatch.setattr(
+            OpeningMomentumShadowService,
+            "evaluate_execution_signal",
+            lambda _self, *, now=None: signal,
+        )
+
+        armed = service.tick(now=_ENTRY_DUE)
+        assert armed.latest is not None
+        deadline = armed.latest.entry_deadline_at.replace(
+            tzinfo=timezone.utc
+        )
+        expired = service.tick(now=deadline + timedelta(seconds=1))
+
+        assert armed.state == "ARMED"
+        assert expired.state == "EXPIRED"
+        assert expired.latest is not None
+        assert expired.latest.reason == "ENTRY_WINDOW_EXPIRED"
+        assert expired.latest.submit_attempts == 1
+        assert len(runner.calls) == 1
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_unrelated_skipped_order_is_rejected_and_never_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _enable_execution(monkeypatch)
+    engine, db = _database()
+    runner = _FakeRunner([
+        {
+            "executed": False,
+            "status": "SKIPPED",
+            "order_id": None,
+            "reason": "an unrelated order policy rejected submission",
+        },
+    ])
+    try:
+        service = OpeningMomentumExecutionService(db, None, runner)
+        signal = _signal(service)
+        monkeypatch.setattr(
+            OpeningMomentumShadowService,
+            "evaluate_execution_signal",
+            lambda _self, *, now=None: signal,
+        )
+
+        rejected = service.tick(now=_ENTRY_DUE)
+        unchanged = service.tick(
+            now=_ENTRY_DUE + timedelta(seconds=10)
+        )
+
+        assert rejected.state == "REJECTED"
+        assert unchanged.state == "REJECTED"
+        assert rejected.latest is not None
+        assert rejected.latest.reason == (
+            "an unrelated order policy rejected submission"
+        )
+        assert rejected.latest.submit_attempts == 1
+        assert len(runner.calls) == 1
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)

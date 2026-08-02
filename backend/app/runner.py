@@ -102,6 +102,15 @@ DISCONNECT_RETRY_EXHAUSTED_THRESHOLD = 3
 _QUOTE_SPREAD_THRESHOLD_PCT = 0.05  # Reject quotes with >5% bid-ask spread
 _QUOTE_LAST_BBO_DEVIATION_THRESHOLD_PCT = 0.005
 _QUOTE_SOURCE_MAX_AGE_SECONDS = 30.0
+_OPENING_FINAL_QUOTE_DEVIATION_REASON_PREFIX = (
+    "submitted limit price deviates from fresh executable BBO by "
+)
+_OPENING_FINAL_QUOTE_UNAVAILABLE_REASONS = frozenset({
+    "fresh quote for the submitted symbol is unavailable",
+    "fresh executable quote failed the final quality gate",
+    "fresh executable BBO price is unavailable",
+    "fresh executable quote could not be verified",
+})
 _POST_FILL_SETTLEMENT_GRACE_SECONDS = 60.0
 _UNKNOWN_SUBMISSION_RESUME_GRACE_SECONDS = 60.0
 _UNKNOWN_SUBMISSION_SECOND_PROOF_SECONDS = 5.0
@@ -2673,11 +2682,20 @@ class AppRunner:
                 target_engine.restore(engine_snapshot)
                 return result("NO_ORDER")
             status = str(order_status.status or "UNKNOWN").upper()
+            reason = str(order_status.reason or status)
+            order_id = str(order_status.broker_order_id or "") or None
             if (
                 status == "SKIPPED"
-                and order_status.reason == "ENTRY_WINDOW_EXPIRED"
+                and reason == "ENTRY_WINDOW_EXPIRED"
             ):
                 status = "ENTRY_WINDOW_EXPIRED"
+            elif status == "SKIPPED" and order_id is None:
+                if reason.startswith(
+                    _OPENING_FINAL_QUOTE_DEVIATION_REASON_PREFIX
+                ):
+                    status = "QUOTE_DEVIATION"
+                elif reason in _OPENING_FINAL_QUOTE_UNAVAILABLE_REASONS:
+                    status = "NO_QUOTE"
             executed = status in {
                 "FILLED",
                 "SUBMITTED",
@@ -2685,12 +2703,11 @@ class AppRunner:
             }
             if not executed:
                 target_engine.restore(engine_snapshot)
-            order_id = str(order_status.broker_order_id or "") or None
             return result(
                 status,
                 executed=executed,
                 order_id=order_id,
-                reason=str(order_status.reason or status),
+                reason=reason,
             )
         except Exception:
             if engine_snapshot is not None:

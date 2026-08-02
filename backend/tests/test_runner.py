@@ -7593,6 +7593,174 @@ class TestOpeningMomentumExecution:
         assert runner.engine.state == EngineState.FLAT
         assert runner._trigger_in_flight is False
 
+    @pytest.mark.parametrize(
+        ("reason", "expected_status"),
+        [
+            (
+                "submitted limit price deviates from fresh executable BBO "
+                "by 0.58%",
+                "QUOTE_DEVIATION",
+            ),
+            (
+                "fresh quote for the submitted symbol is unavailable",
+                "NO_QUOTE",
+            ),
+            (
+                "fresh executable quote failed the final quality gate",
+                "NO_QUOTE",
+            ),
+            (
+                "fresh executable BBO price is unavailable",
+                "NO_QUOTE",
+            ),
+            (
+                "fresh executable quote could not be verified",
+                "NO_QUOTE",
+            ),
+        ],
+    )
+    def test_retryable_final_quote_skip_preserves_opening_retry_semantics(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        reason: str,
+        expected_status: str,
+    ) -> None:
+        runner = TestAppRunner._runner_with_primary_quote_runtime()
+        self._enable(runner, monkeypatch)
+        runner._opening_execution_policies = {
+            "NVDA.US": self._policy()
+        }
+        monkeypatch.setattr(
+            runner.broker,
+            "get_quotes",
+            lambda _symbols: [Quote(
+                "NVDA.US",
+                100.0,
+                99.99,
+                100.01,
+                _fresh_timestamp(),
+            )],
+        )
+        monkeypatch.setattr(
+            runner._trade_svc,
+            "execute",
+            lambda **_kwargs: OrderStatus(
+                "",
+                "SKIPPED",
+                reason=reason,
+            ),
+        )
+
+        result = runner.execute_opening_momentum_entry(
+            execution_id=17,
+            symbol="NVDA.US",
+            reference_entry_price=100.0,
+            entry_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+            max_price_deviation_bps=200.0,
+            stop_loss_pct=1.0,
+            max_holding_minutes=60,
+            signal_context={},
+        )
+
+        assert result == {
+            "executed": False,
+            "status": expected_status,
+            "order_id": None,
+            "action": "BUY",
+            "reason": reason,
+        }
+        assert runner.engine.state == EngineState.FLAT
+        assert runner._trigger_in_flight is False
+
+    @pytest.mark.parametrize(
+        (
+            "order_status",
+            "broker_order_id",
+            "reason",
+            "expected_status",
+            "expected_order_id",
+        ),
+        [
+            (
+                "SKIPPED",
+                "",
+                "an unrelated order policy rejected submission",
+                "SKIPPED",
+                None,
+            ),
+            (
+                "SKIPPED",
+                "unexpected-order-id",
+                "submitted limit price deviates from fresh executable BBO "
+                "by 0.58%",
+                "SKIPPED",
+                "unexpected-order-id",
+            ),
+            (
+                "REJECTED",
+                "",
+                "fresh quote for the submitted symbol is unavailable",
+                "REJECTED",
+                None,
+            ),
+        ],
+    )
+    def test_only_unlinked_retryable_skipped_order_is_reclassified(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        order_status: str,
+        broker_order_id: str,
+        reason: str,
+        expected_status: str,
+        expected_order_id: str | None,
+    ) -> None:
+        runner = TestAppRunner._runner_with_primary_quote_runtime()
+        self._enable(runner, monkeypatch)
+        runner._opening_execution_policies = {
+            "NVDA.US": self._policy()
+        }
+        monkeypatch.setattr(
+            runner.broker,
+            "get_quotes",
+            lambda _symbols: [Quote(
+                "NVDA.US",
+                100.0,
+                99.99,
+                100.01,
+                _fresh_timestamp(),
+            )],
+        )
+        monkeypatch.setattr(
+            runner._trade_svc,
+            "execute",
+            lambda **_kwargs: OrderStatus(
+                broker_order_id,
+                order_status,
+                reason=reason,
+            ),
+        )
+
+        result = runner.execute_opening_momentum_entry(
+            execution_id=17,
+            symbol="NVDA.US",
+            reference_entry_price=100.0,
+            entry_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=1),
+            max_price_deviation_bps=200.0,
+            stop_loss_pct=1.0,
+            max_holding_minutes=60,
+            signal_context={},
+        )
+
+        assert result == {
+            "executed": False,
+            "status": expected_status,
+            "order_id": expected_order_id,
+            "action": "BUY",
+            "reason": reason,
+        }
+        assert runner.engine.state == EngineState.FLAT
+        assert runner._trigger_in_flight is False
+
     def test_opening_policy_recheck_rejects_an_expired_deadline(self) -> None:
         runner = TestAppRunner._runner_with_primary_quote_runtime()
         runner._opening_execution_policies = {
