@@ -1296,6 +1296,8 @@ const metricsLoading = ref(false)
 const metricsLoaded = ref(false)
 const metricsError = ref(false)
 const metricsUpdatedAt = ref<number | null>(null)
+const METRICS_REFRESH_INTERVAL_MS = 60_000
+let metricsRefreshTimer: number | undefined
 interface DashboardCurrencyMetrics {
   currency: 'USD' | 'HKD'
   total_pnl: number
@@ -1466,6 +1468,9 @@ onMounted(() => {
   loadRecentNotifications()
   loadStatusHistory()
   loadMetrics()
+  metricsRefreshTimer = window.setInterval(() => {
+    void loadMetrics()
+  }, METRICS_REFRESH_INTERVAL_MS)
   loadDiagnostics()
   loadDatabaseHealth()
   loadCronHealth()
@@ -1507,6 +1512,10 @@ onUnmounted(() => {
   if (freshnessTimer !== undefined) {
     clearInterval(freshnessTimer)
     freshnessTimer = undefined
+  }
+  if (metricsRefreshTimer !== undefined) {
+    clearInterval(metricsRefreshTimer)
+    metricsRefreshTimer = undefined
   }
   window.removeEventListener('resize', handleResize)
 })

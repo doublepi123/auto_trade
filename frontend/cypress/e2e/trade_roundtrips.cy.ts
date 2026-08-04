@@ -207,4 +207,70 @@ describe('Closed round-trip trades', () => {
     cy.wait('@strategyTrades').its('request.query.strategy_source').should('eq', 'INTERVAL')
     cy.wait('@strategyStats').its('request.query.strategy_source').should('eq', 'INTERVAL')
   })
+
+  it('keeps a slower obsolete quality response from overwriting a unified refresh', () => {
+    cy.stubApi()
+    let releaseObsolete: (() => void) | null = null
+    const obsoleteGate = new Cypress.Promise<void>((resolve) => {
+      releaseObsolete = resolve
+    })
+    cy.intercept({ method: 'GET', pathname: '/api/trades' }, (req) => {
+      const obsolete = req.query.from_date === '2026-08-01'
+      req.alias = obsolete ? 'slowObsoleteTrades' : 'freshTrades'
+      const response = {
+        body: {
+          items: [],
+          total: 0,
+          statistics_quality: obsolete
+            ? {
+                status: 'UNRESOLVED',
+                known_exclusion_count: 0,
+                unresolved_issue_count: 1,
+                omitted_day_count: 1,
+                items: [],
+              }
+            : {
+                status: 'KNOWN_EXCLUSIONS',
+                known_exclusion_count: 2,
+                unresolved_issue_count: 0,
+                omitted_day_count: 0,
+                items: [],
+              },
+        },
+      }
+      if (obsolete) {
+        req.on('before:response', (res) => obsoleteGate.then(() => {
+          res.send(response)
+        }))
+        return
+      }
+      req.reply(response)
+    })
+
+    cy.visit('/#/history?from=2026-08-01')
+    cy.wait('@getTradeStats')
+    cy.contains('已实现成交（往返配对').click()
+    cy.get('input[placeholder="开始日期"]').clear()
+    cy.get('[data-testid="history-refresh"]').click()
+    cy.wait('@freshTrades')
+    cy.wait('@getTradeStats')
+    cy.wait([
+      '@getTradeCalendar',
+      '@getTradeHoldDuration',
+      '@getTradePnlDistribution',
+      '@getTradeMonthlySummary',
+      '@getTradeWeekdayAttribution',
+    ])
+    cy.get('[data-testid="history-refresh"]').should('not.have.class', 'is-loading')
+    cy.get('[data-testid="statistics-quality-alert"]')
+      .should('have.attr', 'data-quality-status', 'KNOWN_EXCLUSIONS')
+
+    cy.then(() => {
+      if (releaseObsolete === null) throw new Error('obsolete trade response gate was not initialized')
+      releaseObsolete()
+    })
+    cy.wait('@slowObsoleteTrades')
+    cy.get('[data-testid="statistics-quality-alert"]')
+      .should('have.attr', 'data-quality-status', 'KNOWN_EXCLUSIONS')
+  })
 })

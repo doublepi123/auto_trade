@@ -35,7 +35,7 @@
         >
           全部撤单
         </el-button>
-        <el-button @click="loadOrders(true)" :loading="loading">刷新</el-button>
+        <el-button data-testid="history-refresh" @click="refreshHistory" :loading="pageRefreshing">刷新</el-button>
       </el-space>
     </div>
     <el-table :data="filteredOrders" stripe style="width: 100%" v-loading="loading" @row-click="openOrderDrawer">
@@ -168,7 +168,7 @@
             class="roundtrips-strategy-select"
             size="small"
             data-testid="roundtrip-strategy-source"
-            @change="loadTradeData"
+            @change="loadTradeData()"
           >
             <el-option
               v-for="option in strategySourceOptions"
@@ -186,7 +186,7 @@
           </el-button-group>
           <el-date-picker v-model="rtFromDate" type="date" value-format="YYYY-MM-DD" placeholder="开始日期" size="small" />
           <el-date-picker v-model="rtToDate" type="date" value-format="YYYY-MM-DD" placeholder="结束日期" size="small" />
-          <el-button size="small" type="primary" :loading="rtLoading" data-testid="load-roundtrips" @click="loadTradeData">拉取</el-button>
+          <el-button size="small" type="primary" :loading="rtLoading" data-testid="load-roundtrips" @click="loadTradeData()">拉取</el-button>
           <el-button size="small" plain :loading="rtExporting" data-testid="trades-export-csv" @click="exportClosedTradesCsv">导出 CSV</el-button>
           <span class="muted">按平仓时间，最近优先；筛选仅作用于当前已加载前 200 条</span>
         </div>
@@ -468,7 +468,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, computed, watch } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -509,6 +509,7 @@ import StatisticsQualityAlert from '../components/StatisticsQualityAlert.vue'
 
 const orders = ref<OrderRecord[]>([])
 const loading = ref(false)
+const pageRefreshing = ref(false)
 const cancellingOrderId = ref('')
 const cancellingAllOrders = ref(false)
 const scope = ref<'today' | 'history'>('today')
@@ -615,7 +616,10 @@ const orderDrawer = reactive({
   order: null as OrderRecord | null,
 })
 
+let ordersRequestEpoch = 0
+
 async function loadOrders(refresh = false) {
+  const requestEpoch = ++ordersRequestEpoch
   loading.value = true
   try {
     const data = await getOrders({
@@ -624,13 +628,19 @@ async function loadOrders(refresh = false) {
       page_size: pageSize.value,
       ...(scope.value === 'today' && refresh ? { refresh: true } : {}),
     })
-    orders.value = data.items
-    total.value = data.total
+    if (requestEpoch === ordersRequestEpoch) {
+      orders.value = data.items
+      total.value = data.total
+    }
   } catch (e) {
-    console.error('加载订单失败：', e)
-    ElMessage.error('加载订单失败')
+    if (requestEpoch === ordersRequestEpoch) {
+      console.error('加载订单失败：', e)
+      ElMessage.error('加载订单失败')
+    }
   } finally {
-    loading.value = false
+    if (requestEpoch === ordersRequestEpoch) {
+      loading.value = false
+    }
   }
 }
 
@@ -680,10 +690,18 @@ watch([scope, rtFromDate, rtToDate, roundTripFilter, roundTripSymbolSearch, roun
 
 onMounted(() => {
   hydrateFiltersFromQuery()
-  loadOrders()
-  loadNotes()
-  loadClosedTrades()
-  loadTradeStats()
+  void loadOrders()
+  void loadNotes()
+  void loadTradeData()
+})
+
+onUnmounted(() => {
+  ordersRequestEpoch += 1
+  tradeDataEpoch += 1
+  if (syncTimer) {
+    clearTimeout(syncTimer)
+    syncTimer = null
+  }
 })
 
 const nonEmptyHoldBuckets = computed(() => tradeHoldDuration.value?.items.filter((bucket) => bucket.trade_count > 0) ?? [])
@@ -770,14 +788,17 @@ const tradeAnalyticsInsights = computed(() => {
   return insights
 })
 
-async function loadTradeStats() {
+async function loadTradeStats(requestEpoch: number) {
   try {
-    tradeStats.value = await getTradeStats({
+    const data = await getTradeStats({
       days: 30,
       ...(roundTripStrategySource.value !== 'all'
         ? { strategy_source: roundTripStrategySource.value }
         : {}),
     })
+    if (requestEpoch === tradeDataEpoch) {
+      tradeStats.value = data
+    }
   } catch {
     // Stats are supplementary; never block the page on them.
   }
@@ -788,7 +809,7 @@ function streakLabel(s: TradeStats): string {
   return `${s.current_streak_count}${s.current_streak_type === 'win' ? '胜' : '败'}`
 }
 
-async function loadClosedTrades() {
+async function loadClosedTrades(requestEpoch: number) {
   rtLoading.value = true
   try {
     const data = await getClosedTrades({
@@ -799,18 +820,21 @@ async function loadClosedTrades() {
         : {}),
       limit: 200,
     })
-    closedTrades.value = data.items
-    rtTotal.value = data.total
-    closedTradeQuality.value = data.statistics_quality
+    if (requestEpoch === tradeDataEpoch) {
+      closedTrades.value = data.items
+      rtTotal.value = data.total
+      closedTradeQuality.value = data.statistics_quality
+    }
   } catch {
     // Round-trip view is supplementary; never block the page on it.
   } finally {
-    rtLoading.value = false
-    statisticsQualityLoaded.value = true
+    if (requestEpoch === tradeDataEpoch) {
+      rtLoading.value = false
+    }
   }
 }
 
-async function loadTradeAnalytics() {
+async function loadTradeAnalytics(requestEpoch: number) {
   analyticsLoading.value = true
   const params = {
     ...(rtFromDate.value ? { from_date: rtFromDate.value } : {}),
@@ -826,6 +850,7 @@ async function loadTradeAnalytics() {
     getTradeMonthlySummary(params),
     getTradeWeekdayAttribution(params),
   ])
+  if (requestEpoch !== tradeDataEpoch) return
   if (calendar.status === 'fulfilled') tradeCalendar.value = calendar.value
   if (holdDuration.status === 'fulfilled') tradeHoldDuration.value = holdDuration.value
   if (pnlDistribution.status === 'fulfilled') tradePnlDistribution.value = pnlDistribution.value
@@ -840,20 +865,47 @@ function resetTradeAnalytics() {
   tradePnlDistribution.value = null
   tradeMonthlySummary.value = null
   tradeWeekdayAttribution.value = null
+  analyticsLoading.value = false
 }
 
-async function loadTradeData() {
+let tradeDataEpoch = 0
+
+async function loadTradeData(options: { includeAnalytics?: boolean } = {}) {
+  const requestEpoch = ++tradeDataEpoch
+  statisticsQualityLoaded.value = false
+  closedTradeQuality.value = null
+  tradeStats.value = null
   resetTradeAnalytics()
-  const closedTradesPromise = loadClosedTrades()
-  const statsPromise = loadTradeStats()
-  if (analyticsOpen.value) void loadTradeAnalytics()
-  await Promise.all([closedTradesPromise, statsPromise])
+  const requests: Promise<void>[] = [
+    loadClosedTrades(requestEpoch),
+    loadTradeStats(requestEpoch),
+  ]
+  if (options.includeAnalytics ?? analyticsOpen.value) {
+    requests.push(loadTradeAnalytics(requestEpoch))
+  }
+  await Promise.all(requests)
+  if (requestEpoch === tradeDataEpoch) {
+    statisticsQualityLoaded.value = true
+  }
+}
+
+async function refreshHistory() {
+  if (pageRefreshing.value) return
+  pageRefreshing.value = true
+  try {
+    await Promise.all([
+      loadOrders(true),
+      loadTradeData({ includeAnalytics: true }),
+    ])
+  } finally {
+    pageRefreshing.value = false
+  }
 }
 
 function handleAnalyticsCollapseChange(activeNames: string | string[]) {
   const names = Array.isArray(activeNames) ? activeNames : [activeNames]
   if (names.includes('trade-analytics') && tradeCalendar.value === null && !analyticsLoading.value) {
-    void loadTradeAnalytics()
+    void loadTradeAnalytics(tradeDataEpoch)
   }
 }
 
