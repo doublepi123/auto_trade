@@ -6815,7 +6815,11 @@ class AppRunner:
         if order.filled_at is not None and order.submit_started_at is not None:
             order.fill_latency_ms = max(
                 0.0,
-                (order.filled_at - order.submit_started_at).total_seconds() * 1000,
+                (
+                    AppRunner._as_utc(order.filled_at)
+                    - AppRunner._as_utc(order.submit_started_at)
+                ).total_seconds()
+                * 1000,
             )
         fill_price = float(order.executed_price or 0)
         fill_quantity = float(order.executed_quantity or 0)

@@ -3099,6 +3099,26 @@ class TestAppRunner:
         assert order.gross_pnl == pytest.approx(2.0)
         assert order.pnl_source == pnl_source
 
+    def test_execution_outcome_normalizes_mixed_timezone_latency(self) -> None:
+        order = SimpleNamespace(
+            filled_at=datetime(2026, 8, 4, 19, 32, 22),
+            submit_started_at=datetime(
+                2026,
+                8,
+                4,
+                19,
+                32,
+                21,
+                tzinfo=timezone.utc,
+            ),
+            executed_price=0.0,
+            executed_quantity=0.0,
+        )
+
+        AppRunner._update_execution_outcome_fields(order)
+
+        assert order.fill_latency_ms == 1_000.0
+
     def test_immediate_filled_order_is_atomically_recorded_with_execution(self) -> None:
         from app.database import SessionLocal
         from app.models import OrderRecord, TradeEvent
