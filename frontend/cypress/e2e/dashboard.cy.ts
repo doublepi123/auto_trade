@@ -74,54 +74,6 @@ describe('Dashboard', () => {
       .should('have.attr', 'data-quality-status', 'UNKNOWN')
   })
 
-  it('clears a stale quality warning after the automatic metrics refresh', () => {
-    cy.clock(new Date('2026-08-05T10:00:00Z').getTime())
-    let requestCount = 0
-    cy.intercept({ method: 'GET', pathname: '/api/metrics/summary' }, (req) => {
-      requestCount += 1
-      req.reply({
-        body: {
-          trade_count: 1,
-          win_rate: 100,
-          profit_factor: null,
-          sharpe_ratio: null,
-          avg_pnl: 10,
-          total_pnl: 10,
-          max_drawdown: 0,
-          max_drawdown_amount: 0,
-          window_days: 30,
-          currency: 'USD',
-          totals_comparable: true,
-          by_currency: [],
-          statistics_quality: requestCount === 1
-            ? {
-                status: 'UNRESOLVED',
-                known_exclusion_count: 0,
-                unresolved_issue_count: 1,
-                omitted_day_count: 1,
-                items: [],
-              }
-            : {
-                status: 'COMPLETE',
-                known_exclusion_count: 0,
-                unresolved_issue_count: 0,
-                omitted_day_count: 0,
-                items: [],
-              },
-        },
-      })
-    }).as('recoveringMetrics')
-
-    cy.visit('/')
-    cy.wait('@recoveringMetrics')
-    cy.get('[data-testid="statistics-quality-alert"]')
-      .should('have.attr', 'data-quality-status', 'UNRESOLVED')
-
-    cy.tick(60_000)
-    cy.wait('@recoveringMetrics')
-    cy.get('[data-testid="statistics-quality-alert"]').should('not.exist')
-  })
-
   it('does not disguise a metrics request failure as zero trades', () => {
     cy.intercept('GET', '/api/metrics/summary*', {
       statusCode: 503,
@@ -556,5 +508,56 @@ describe('Dashboard', () => {
     cy.get('[data-testid="dashboard-diagnostics"]').should('contain', '2 个')
     cy.contains('全局紧急停止').should('be.visible')
     cy.contains('全局暂停状态').should('be.visible')
+  })
+})
+
+describe('Dashboard metrics refresh', () => {
+  it('clears a stale quality warning after the automatic metrics refresh', () => {
+    cy.stubApi()
+    cy.clock(new Date('2026-08-05T10:00:00Z').getTime())
+    let requestCount = 0
+    cy.intercept({ method: 'GET', pathname: '/api/metrics/summary' }, (req) => {
+      requestCount += 1
+      req.reply({
+        body: {
+          trade_count: 1,
+          win_rate: 100,
+          profit_factor: null,
+          sharpe_ratio: null,
+          avg_pnl: 10,
+          total_pnl: 10,
+          max_drawdown: 0,
+          max_drawdown_amount: 0,
+          window_days: 30,
+          currency: 'USD',
+          totals_comparable: true,
+          by_currency: [],
+          statistics_quality: requestCount === 1
+            ? {
+                status: 'UNRESOLVED',
+                known_exclusion_count: 0,
+                unresolved_issue_count: 1,
+                omitted_day_count: 1,
+                items: [],
+              }
+            : {
+                status: 'COMPLETE',
+                known_exclusion_count: 0,
+                unresolved_issue_count: 0,
+                omitted_day_count: 0,
+                items: [],
+              },
+        },
+      })
+    }).as('recoveringMetrics')
+
+    cy.visit('/')
+    cy.wait('@recoveringMetrics')
+    cy.get('[data-testid="statistics-quality-alert"]')
+      .should('have.attr', 'data-quality-status', 'UNRESOLVED')
+
+    cy.tick(60_000)
+    cy.wait('@recoveringMetrics')
+    cy.get('[data-testid="statistics-quality-alert"]').should('not.exist')
   })
 })
