@@ -51,6 +51,7 @@ from app.services.watchlist_quant_v6_evaluation_service import (
     QuantV6RegistrationPlan,
     _build_registration_plan,
     build_latest_quant_v6_registration_plan,
+    evaluate_quant_v6_registration,
 )
 from app.services.watchlist_quant_v6_historical_provider import (
     QuantV6HistoricalBarFetch,
@@ -77,6 +78,11 @@ _HISTORICAL_SOURCE_KEYS_V1 = {
 _HISTORICAL_SOURCE_KEYS_V2 = {
     *_HISTORICAL_SOURCE_KEYS_V1,
     "app.services.watchlist_quant_v6_deadline",
+}
+_HISTORICAL_SOURCE_KEYS_V3 = {
+    *_HISTORICAL_SOURCE_KEYS_V2,
+    "app.services.watchlist_quant_v6_publication_service",
+    "app.services.watchlist_quant_v6_spawn_supervisor",
 }
 
 
@@ -246,9 +252,14 @@ class _EnvironmentFactory:
         )
         receipt: QuantV6PublicationReceipt | None
         if publish:
-            receipt = publication_service.register_provider_evaluate_publish(
+            receipt = publication_service.register_evaluate_publish(
                 plan=plan,
-                provider=provider,
+                evaluation_callback=lambda registration, _checkpoint: (
+                    evaluate_quant_v6_registration(
+                        registration=registration,
+                        provider=provider,
+                    )
+                ),
             )
         else:
             publication_service.register_plan(plan)
@@ -310,9 +321,15 @@ def _publish_later(
         environment.session_factory,
         clock=lambda: observed_at + timedelta(hours=2),
     )
-    return service.register_provider_evaluate_publish(
+    provider = _Provider()
+    return service.register_evaluate_publish(
         plan=_plan(1, observed_at=observed_at),
-        provider=_Provider(),
+        evaluation_callback=lambda registration, _checkpoint: (
+            evaluate_quant_v6_registration(
+                registration=registration,
+                provider=provider,
+            )
+        ),
     )
 
 
@@ -443,8 +460,8 @@ def test_all_reader_endpoints_are_persisted_only_and_bounded(
     historical_sources = registration_payload["evaluator_manifest"][
         "source_sha256"
     ]
-    assert registration_payload["evaluator_manifest"]["manifest_version"] == 2
-    assert set(historical_sources) == _HISTORICAL_SOURCE_KEYS_V2
+    assert registration_payload["evaluator_manifest"]["manifest_version"] == 3
+    assert set(historical_sources) == _HISTORICAL_SOURCE_KEYS_V3
     publication_id = _publication_id(environment)
     environment.provider.fail_if_called = True
     provider_calls = environment.provider.calls
@@ -583,14 +600,57 @@ def test_reader_accepts_legacy_v1_historical_evaluator_closure(
     assert response.json()["validation"]["registration_identity_verified"] is True
 
 
+def test_reader_accepts_legacy_v2_historical_evaluator_closure(
+    environment_factory: _EnvironmentFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _pin_historical_evaluator_manifest(
+        monkeypatch,
+        manifest_version=2,
+        source_keys=_HISTORICAL_SOURCE_KEYS_V2,
+    )
+    environment = environment_factory.build(member_count=1)
+    registration_payload = json.loads(environment.plan.registration_json)
+    evaluator_manifest = registration_payload["evaluator_manifest"]
+    assert evaluator_manifest["manifest_version"] == 2
+    assert set(evaluator_manifest["source_sha256"]) == (
+        _HISTORICAL_SOURCE_KEYS_V2
+    )
+
+    response = environment.client.get(
+        f"/api/watchlist/quant-v6/publications/{_publication_id(environment)}"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["validation"]["registration_identity_verified"] is True
+
+
 @pytest.mark.parametrize(
     ("manifest_version", "source_keys"),
     (
         (1, _HISTORICAL_SOURCE_KEYS_V2),
         (2, _HISTORICAL_SOURCE_KEYS_V1),
         (2, {*_HISTORICAL_SOURCE_KEYS_V2, "app.services.unexpected"}),
+        (
+            3,
+            _HISTORICAL_SOURCE_KEYS_V3
+            - {"app.services.watchlist_quant_v6_spawn_supervisor"},
+        ),
+        (
+            3,
+            _HISTORICAL_SOURCE_KEYS_V3
+            - {"app.services.watchlist_quant_v6_publication_service"},
+        ),
+        (3, {*_HISTORICAL_SOURCE_KEYS_V3, "app.services.unexpected"}),
     ),
-    ids=("v1-new-key-superset", "v2-missing-deadline", "v2-extra-key"),
+    ids=(
+        "v1-new-key-superset",
+        "v2-missing-deadline",
+        "v2-extra-key",
+        "v3-missing-supervisor",
+        "v3-missing-publication",
+        "v3-extra-key",
+    ),
 )
 def test_reader_rejects_historical_evaluator_version_closure_mismatch(
     environment_factory: _EnvironmentFactory,

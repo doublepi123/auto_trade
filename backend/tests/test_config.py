@@ -38,6 +38,8 @@ class TestSettings:
         )
         assert s.watchlist_quant_v6_evaluation_timeout_seconds == 1_800
         assert s.watchlist_quant_v6_provider_page_timeout_seconds == 30.0
+        assert s.watchlist_quant_v6_compute_workers == 4
+        assert s.watchlist_quant_v6_pipeline_memory_limit_mib == 2_048
 
     def test_quant_v6_evaluation_controls_read_environment(
         self,
@@ -59,6 +61,14 @@ class TestSettings:
             "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_TIMEOUT_SECONDS",
             "900",
         )
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_COMPUTE_WORKERS",
+            "3",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_PIPELINE_MEMORY_LIMIT_MIB",
+            "4096",
+        )
 
         configured = Settings()
 
@@ -69,6 +79,8 @@ class TestSettings:
             == 30
         )
         assert configured.watchlist_quant_v6_evaluation_timeout_seconds == 900
+        assert configured.watchlist_quant_v6_compute_workers == 3
+        assert configured.watchlist_quant_v6_pipeline_memory_limit_mib == 4_096
 
     @pytest.mark.parametrize("value", ["59", "10081"])
     def test_quant_v6_evaluation_interval_is_bounded(
@@ -156,6 +168,67 @@ class TestSettings:
     ) -> None:
         monkeypatch.setenv(
             "AUTO_TRADE_WATCHLIST_QUANT_V6_PROVIDER_PAGE_TIMEOUT_SECONDS",
+            value,
+        )
+
+        with pytest.raises(ValidationError):
+            Settings()
+
+    @pytest.mark.parametrize("value", ["2", "4"])
+    def test_quant_v6_compute_workers_accepts_boundaries(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_COMPUTE_WORKERS",
+            value,
+        )
+
+        configured = Settings()
+
+        assert configured.watchlist_quant_v6_compute_workers == int(value)
+
+    @pytest.mark.parametrize("value", ["0", "1", "5", "not-a-number"])
+    def test_quant_v6_compute_workers_rejects_invalid_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_COMPUTE_WORKERS",
+            value,
+        )
+
+        with pytest.raises(ValidationError):
+            Settings()
+
+    @pytest.mark.parametrize("value", ["512", "8192"])
+    def test_quant_v6_pipeline_memory_limit_accepts_boundaries(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_PIPELINE_MEMORY_LIMIT_MIB",
+            value,
+        )
+
+        configured = Settings()
+
+        assert (
+            configured.watchlist_quant_v6_pipeline_memory_limit_mib
+            == int(value)
+        )
+
+    @pytest.mark.parametrize("value", ["511", "8193", "not-a-number"])
+    def test_quant_v6_pipeline_memory_limit_rejects_invalid_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_PIPELINE_MEMORY_LIMIT_MIB",
             value,
         )
 

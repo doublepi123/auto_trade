@@ -99,3 +99,29 @@ print(json.dumps({{
         "exports_present": True,
         "manifest_version": 1,
     }
+
+
+def test_historical_manifest_lazily_imports_publication_without_cycle() -> None:
+    source = """
+import json
+import sys
+
+from app.services import watchlist_quant_v6_evaluation_service as evaluation
+
+publication_module = "app.services.watchlist_quant_v6_publication_service"
+before_manifest = publication_module in sys.modules
+manifest = evaluation.quant_v6_historical_evaluator_manifest()
+print(json.dumps({
+    "after_manifest": publication_module in sys.modules,
+    "before_manifest": before_manifest,
+    "publication_bound": publication_module in manifest["source_sha256"],
+}))
+"""
+    completed = _run_fresh_python(source)
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "after_manifest": True,
+        "before_manifest": False,
+        "publication_bound": True,
+    }

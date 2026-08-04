@@ -1,6 +1,7 @@
 # pyright: reportPrivateUsage=false
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 
 from app.core.broker import BrokerGateway
@@ -70,11 +71,47 @@ def test_quote_context_with_disconnect_event_triggers_hook() -> None:
     ctx = _FakeQuoteContext(supports_disconnect=True)
     gw = _gateway_with_quote_context(ctx)
     calls: list[str] = []
+    called = threading.Event()
 
-    gw.register_disconnect_hook(lambda reason: calls.append(reason))
+    def hook(reason: str) -> None:
+        calls.append(reason)
+        called.set()
+
+    gw.register_disconnect_hook(hook)
     ctx.simulate_disconnect("auth_revoked")
 
+    assert called.wait(1)
     assert calls == ["auth_revoked"]
+
+
+def test_native_disconnect_returns_without_waiting_for_hook() -> None:
+    ctx = _FakeQuoteContext(supports_disconnect=True)
+    gw = _gateway_with_quote_context(ctx)
+    hook_entered = threading.Event()
+    release_hook = threading.Event()
+
+    def blocked_hook(_reason: str) -> None:
+        hook_entered.set()
+        assert release_hook.wait(1)
+
+    gw.register_disconnect_hook(blocked_hook)
+
+    callback_returned = threading.Event()
+
+    def simulate_disconnect() -> None:
+        ctx.simulate_disconnect("network_drop")
+        callback_returned.set()
+
+    callback_thread = threading.Thread(target=simulate_disconnect)
+    callback_thread.start()
+    try:
+        assert hook_entered.wait(1)
+        assert callback_returned.wait(1)
+    finally:
+        release_hook.set()
+        callback_thread.join(timeout=1)
+
+    assert callback_thread.is_alive() is False
 
 
 def test_quote_context_without_disconnect_event_does_not_break() -> None:

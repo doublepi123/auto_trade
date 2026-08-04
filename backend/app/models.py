@@ -1212,6 +1212,12 @@ class TradeEvent(Base):
     __table_args__ = (
         Index("ix_trade_events_symbol_created_at", "symbol", "created_at"),
         Index("ix_trade_events_event_type", "event_type"),
+        Index(
+            "ux_trade_events_source_event_key_nonempty",
+            "source_event_key",
+            unique=True,
+            sqlite_where=text("source_event_key <> ''"),
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -1222,6 +1228,11 @@ class TradeEvent(Base):
     status: Mapped[str] = mapped_column(String(30), default="")
     message: Mapped[str] = mapped_column(Text, default="")
     payload_json: Mapped[str] = mapped_column(Text, default="{}")
+    source_event_key: Mapped[str] = mapped_column(
+        String(64),
+        default="",
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
 
 

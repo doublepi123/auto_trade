@@ -238,6 +238,7 @@ def init_db() -> None:
     _ensure_runtime_state_symbol_uniqueness(engine)
     _ensure_runtime_state_entry_rearm_column(engine)
     _ensure_order_broker_id_uniqueness(engine)
+    _ensure_trade_event_source_event_key(engine)
     _ensure_tracked_entries_table(engine)
     _ensure_tracked_entry_metadata_columns(engine)
     _ensure_audit_log_table(engine)
@@ -832,6 +833,47 @@ def _ensure_order_broker_id_uniqueness(db_engine: Engine) -> None:
         connection.exec_driver_sql(
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_orders_broker_order_id_nonempty "
             "ON orders (broker_order_id) WHERE broker_order_id <> ''"
+        )
+
+
+def _ensure_trade_event_source_event_key(db_engine: Engine) -> None:
+    """Add a database-enforced idempotency key for external event evidence.
+
+    Most trade events are local observations and leave the key empty. Historical
+    broker executions use a provider/account/trade-bound SHA-256 key so two
+    concurrent imports cannot persist the same immutable execution twice.
+    Existing non-empty duplicates are never guessed or merged.
+    """
+    inspector = inspect(db_engine)
+    if "trade_events" not in inspector.get_table_names():
+        return
+    columns = {
+        column["name"]
+        for column in inspector.get_columns("trade_events")
+    }
+    with db_engine.begin() as connection:
+        if "source_event_key" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE trade_events ADD COLUMN source_event_key "
+                "VARCHAR(64) DEFAULT '' NOT NULL"
+            )
+        duplicate_keys = connection.execute(
+            text(
+                "SELECT source_event_key FROM trade_events "
+                "WHERE source_event_key <> '' GROUP BY source_event_key "
+                "HAVING COUNT(*) > 1"
+            )
+        ).scalars().all()
+        if duplicate_keys:
+            raise RuntimeError(
+                "trade_events contains duplicate non-empty source_event_key "
+                "values; refusing to guess historical execution identity"
+            )
+        connection.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "ux_trade_events_source_event_key_nonempty "
+            "ON trade_events (source_event_key) "
+            "WHERE source_event_key <> ''"
         )
 
 

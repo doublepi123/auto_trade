@@ -143,6 +143,21 @@ def test_provider_is_quote_only_no_adjust_and_pages_beyond_3000() -> None:
     assert not hasattr(provider, "submit_order")
 
 
+def test_spawn_fetch_capability_requires_the_exact_bound_deadline() -> None:
+    deadline = QuantV6EvaluationDeadline(60)
+    provider = QuantV6HistoricalBarProvider(evaluation_deadline=deadline)
+
+    assert provider.supports_quant_v6_spawn_fetch(
+        evaluation_deadline=deadline,
+    ) is True
+    assert provider.supports_quant_v6_spawn_fetch(
+        evaluation_deadline=QuantV6EvaluationDeadline(60),
+    ) is False
+    assert QuantV6HistoricalBarProvider().supports_quant_v6_spawn_fetch(
+        evaluation_deadline=deadline,
+    ) is False
+
+
 def test_provider_never_falls_back_when_no_adjust_is_unavailable() -> None:
     module, quote_context_type = _module([], no_adjust=False)
     provider = QuantV6HistoricalBarProvider(module_loader=lambda: module)

@@ -25,6 +25,7 @@ import app.domain.universe_selection.catalog as catalog_module
 import app.domain.universe_selection.membership_history as membership_module
 import app.services.watchlist_quant_v6_deadline as deadline_module
 import app.services.watchlist_quant_v6_historical_provider as provider_module
+import app.services.watchlist_quant_v6_spawn_supervisor as spawn_supervisor_module
 from app.domain.universe_selection import (
     CATALOG_SOURCE_VERSION,
     INDEX_MEMBERSHIP_HISTORY,
@@ -85,7 +86,7 @@ QUANT_V6_SELECTION_RULE_VERSION = (
     "rotation-research-catalog-active-at-first-target-v1"
 )
 QUANT_V6_COHORT_SOURCE = "ROTATION_RESEARCH_CATALOG_PIT"
-QUANT_V6_HISTORICAL_EVALUATOR_MANIFEST_VERSION = 2
+QUANT_V6_HISTORICAL_EVALUATOR_MANIFEST_VERSION = 3
 QUANT_V6_BINDING_CONTRACT = "watchlist-quant-v6-artifact-binding-v1"
 QUANT_V6_DATA_SETTLEMENT_DELAY = timedelta(minutes=15)
 
@@ -103,6 +104,8 @@ _SOURCE_KEYS = (
     "app.services.watchlist_quant_v6_deadline",
     "app.services.watchlist_quant_v6_evaluation_service",
     "app.services.watchlist_quant_v6_historical_provider",
+    "app.services.watchlist_quant_v6_publication_service",
+    "app.services.watchlist_quant_v6_spawn_supervisor",
 )
 _MEMBERSHIP_RESOURCE_KEY = (
     "app/domain/universe_selection/data/index_membership_history.json"
@@ -250,12 +253,25 @@ def _normalized_source_sha256(module: ModuleType) -> str:
 
 
 def quant_v6_historical_evaluator_manifest() -> dict[str, object]:
+    # Publication imports this module for the frozen registration/evaluation
+    # types. Keep the reverse edge lazy so importing evaluation alone remains
+    # cycle-free, while binding the exact closure code invoked by spawn workers.
+    from app.services import (
+        watchlist_quant_v6_publication_service as publication_module,
+    )
+
     modules: Mapping[str, ModuleType] = {
         "app.domain.universe_selection.catalog": catalog_module,
         "app.domain.universe_selection.membership_history": membership_module,
         "app.services.watchlist_quant_v6_evaluation_service": sys.modules[__name__],
         "app.services.watchlist_quant_v6_deadline": deadline_module,
         "app.services.watchlist_quant_v6_historical_provider": provider_module,
+        "app.services.watchlist_quant_v6_publication_service": (
+            publication_module
+        ),
+        "app.services.watchlist_quant_v6_spawn_supervisor": (
+            spawn_supervisor_module
+        ),
     }
     if tuple(sorted(modules)) != _SOURCE_KEYS:
         raise QuantV6HistoricalEvaluationError(

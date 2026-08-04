@@ -274,6 +274,12 @@ _HISTORICAL_EVALUATOR_SOURCE_KEYS_BY_VERSION = {
         *_HISTORICAL_EVALUATOR_SOURCE_KEYS_V1,
         "app.services.watchlist_quant_v6_deadline",
     }),
+    3: frozenset({
+        *_HISTORICAL_EVALUATOR_SOURCE_KEYS_V1,
+        "app.services.watchlist_quant_v6_deadline",
+        "app.services.watchlist_quant_v6_publication_service",
+        "app.services.watchlist_quant_v6_spawn_supervisor",
+    }),
 }
 _DOMAIN_EVALUATOR_SOURCE_KEYS = frozenset({
     "app.core.holiday_calendar",

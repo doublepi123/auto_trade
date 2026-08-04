@@ -257,17 +257,16 @@ class TestPerformanceTrend(_Base):
         self._ensure_config()
         # One live winner and one shadow loser inside the current week.
         now = datetime.now(timezone.utc)
-        live_exit = now - timedelta(days=2)
-        shadow_exit = now - timedelta(days=1)
+        exit_day = now.date()
         self._seed_live_round_trip(
             oid_buy="lb", oid_sell="ls", qty=100.0, entry_price=10.0,
-            exit_price=11.0, entry_day=(live_exit - timedelta(days=2)).date(),
-            exit_day=live_exit.date(),
+            exit_price=11.0, entry_day=exit_day - timedelta(days=2),
+            exit_day=exit_day,
         )
         self._seed_shadow(_shadow_trade(
             symbol="AAPL.US", entry_price=10.0, exit_price=9.0, qty=100.0,
-            entry_day=(shadow_exit - timedelta(days=2)).date(),
-            exit_day=shadow_exit.date(), net_pnl=-100.0,
+            entry_day=exit_day - timedelta(days=2),
+            exit_day=exit_day, net_pnl=-100.0,
         ))
         rows = StrategyHealthService(self._db()).get_performance_trend(
             symbol="AAPL.US", weeks=4

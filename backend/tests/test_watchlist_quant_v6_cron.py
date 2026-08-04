@@ -17,6 +17,7 @@ from app.models import Base
 from app.services import watchlist_quant_v6_evaluation_service
 from app.services import watchlist_quant_v6_historical_provider
 from app.services import watchlist_quant_v6_publication_service
+from app.services import watchlist_quant_v6_spawn_supervisor
 from app.services import durable_job_lease_service
 from app.services.watchlist_quant_v6_deadline import (
     QuantV6EvaluationCancelledError,
@@ -308,7 +309,22 @@ def test_quant_v6_tick_orchestrates_once_and_closes_provider(
     provider = SimpleNamespace(closed=False)
     timestamps: list[object] = []
     provider_deadlines: list[object] = []
-    calls: list[tuple[object, object, object]] = []
+    lifecycle: list[str] = []
+    calls: list[tuple[object, object, object, int, int, object]] = []
+
+    class _MemoryFence:
+        def checkpoint(self) -> None:
+            lifecycle.append("memory-checkpoint")
+
+    memory_fence = _MemoryFence()
+
+    class _MemoryFenceFactory:
+        @classmethod
+        def capture(cls, *, memory_limit_mib: int) -> object:
+            del cls
+            assert memory_limit_mib == 1_024
+            lifecycle.append("memory-capture")
+            return memory_fence
 
     def close_provider() -> None:
         provider.closed = True
@@ -331,10 +347,21 @@ def test_quant_v6_tick_orchestrates_once_and_closes_provider(
             plan: object,
             provider: object,
             evaluation_deadline: object,
+            compute_workers: int,
+            pipeline_memory_limit_mib: int,
+            pipeline_memory_fence: object,
         ) -> object:
             assert callable(self.transaction_fence)
             self.transaction_fence(object())
-            calls.append((plan, provider, evaluation_deadline))
+            lifecycle.append("publication")
+            calls.append((
+                plan,
+                provider,
+                evaluation_deadline,
+                compute_workers,
+                pipeline_memory_limit_mib,
+                pipeline_memory_fence,
+            ))
             return SimpleNamespace(
                 publication_id=7,
                 registration_id=3,
@@ -345,10 +372,12 @@ def test_quant_v6_tick_orchestrates_once_and_closes_provider(
 
     def frozen_plan_builder(*, observed_at: object) -> object:
         # Retain the exact clock value to prove the cron freezes one plan.
+        lifecycle.append("plan-build")
         timestamps.append(observed_at)
         return plan
 
     def provider_factory(*, evaluation_deadline: object) -> object:
+        lifecycle.append("provider-build")
         provider_deadlines.append(evaluation_deadline)
         return provider
 
@@ -356,6 +385,21 @@ def test_quant_v6_tick_orchestrates_once_and_closes_provider(
         main_module.settings,
         "watchlist_quant_v6_evaluation_enabled",
         True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_compute_workers",
+        3,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_pipeline_memory_limit_mib",
+        1_024,
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_spawn_supervisor,
+        "QuantV6PipelineMemoryFence",
+        _MemoryFenceFactory,
     )
     monkeypatch.setattr(
         watchlist_quant_v6_evaluation_service,
@@ -380,13 +424,90 @@ def test_quant_v6_tick_orchestrates_once_and_closes_provider(
     timestamp = timestamps[0]
     assert getattr(timestamp, "tzinfo", None) is not None
     assert provider_deadlines == [deadline]
-    assert calls == [(plan, provider, deadline)]
+    assert calls == [(plan, provider, deadline, 3, 1_024, memory_fence)]
+    assert lifecycle == [
+        "memory-capture",
+        "plan-build",
+        "memory-checkpoint",
+        "provider-build",
+        "publication",
+    ]
     assert provider.closed is True
     assert _successful_durable_job_lease.acquired_keys == [
         main_module._WATCHLIST_QUANT_V6_EVALUATION_LEASE_KEY
     ]
     assert len(_successful_durable_job_lease.fences) == 1
     assert _successful_durable_job_lease.events[-1] == "keepalive-exit"
+
+
+def test_quant_v6_plan_growth_hits_memory_fence_before_provider_creation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lifecycle: list[str] = []
+
+    class _MemoryFence:
+        def checkpoint(self) -> None:
+            lifecycle.append("memory-checkpoint")
+            raise (
+                watchlist_quant_v6_spawn_supervisor
+                .QuantV6SpawnResourceLimitError("plan exceeded memory budget")
+            )
+
+    class _MemoryFenceFactory:
+        @classmethod
+        def capture(cls, *, memory_limit_mib: int) -> object:
+            del cls
+            assert memory_limit_mib == 512
+            lifecycle.append("memory-capture")
+            return _MemoryFence()
+
+    def _build_plan(**_kwargs: object) -> object:
+        lifecycle.append("plan-build")
+        return SimpleNamespace(members=())
+
+    def _unexpected_provider(**_kwargs: object) -> object:
+        lifecycle.append("provider-build")
+        pytest.fail("provider was created after the plan exceeded its budget")
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_pipeline_memory_limit_mib",
+        512,
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_spawn_supervisor,
+        "QuantV6PipelineMemoryFence",
+        _MemoryFenceFactory,
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_evaluation_service,
+        "build_latest_quant_v6_registration_plan",
+        _build_plan,
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_historical_provider,
+        "QuantV6HistoricalBarProvider",
+        _unexpected_provider,
+    )
+
+    with pytest.raises(
+        watchlist_quant_v6_spawn_supervisor.QuantV6SpawnResourceLimitError,
+        match="plan exceeded memory budget",
+    ):
+        main_module._watchlist_quant_v6_evaluation_tick_sync(
+            QuantV6EvaluationDeadline(30)
+        )
+
+    assert lifecycle == [
+        "memory-capture",
+        "plan-build",
+        "memory-checkpoint",
+    ]
 
 
 def test_quant_v6_tick_closes_provider_when_publication_fails(
@@ -708,8 +829,20 @@ def test_quant_v6_tick_only_mutates_immutable_evidence_tables(
     )
 
     class EmptyHistoricalProvider:
-        def __init__(self) -> None:
+        def __init__(
+            self,
+            *,
+            evaluation_deadline: QuantV6EvaluationDeadline,
+        ) -> None:
             self.closed = False
+            self.evaluation_deadline = evaluation_deadline
+
+        def supports_quant_v6_spawn_fetch(
+            self,
+            *,
+            evaluation_deadline: QuantV6EvaluationDeadline,
+        ) -> bool:
+            return self.evaluation_deadline is evaluation_deadline
 
         def fetch_five_minute_no_adjust(
             self,
@@ -729,7 +862,16 @@ def test_quant_v6_tick_only_mutates_immutable_evidence_tables(
         def close(self) -> None:
             self.closed = True
 
-    provider = EmptyHistoricalProvider()
+    evaluation_deadline = QuantV6EvaluationDeadline(60)
+    provider = EmptyHistoricalProvider(
+        evaluation_deadline=evaluation_deadline,
+    )
+    assert provider.supports_quant_v6_spawn_fetch(
+        evaluation_deadline=evaluation_deadline,
+    ) is True
+    assert provider.supports_quant_v6_spawn_fetch(
+        evaluation_deadline=QuantV6EvaluationDeadline(60),
+    ) is False
     protected_tables = (
         "orders",
         "paper_orders",
@@ -772,7 +914,9 @@ def test_quant_v6_tick_only_mutates_immutable_evidence_tables(
         lambda **_kwargs: provider,
     )
 
-    main_module._watchlist_quant_v6_evaluation_tick_sync()
+    main_module._watchlist_quant_v6_evaluation_tick_sync(
+        evaluation_deadline,
+    )
 
     assert protected_counts() == before
     with engine.connect() as connection:

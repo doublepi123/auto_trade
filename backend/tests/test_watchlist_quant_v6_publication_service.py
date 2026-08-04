@@ -4,6 +4,8 @@ import inspect
 import hashlib
 import json
 import logging
+import os
+import pickle
 import threading
 import zlib
 from collections.abc import Callable, Mapping, Sequence
@@ -48,6 +50,7 @@ from app.models import (
     WatchlistQuantV6Registration,
 )
 from app.services import watchlist_quant_v6_publication_service as service_module
+from app.services import watchlist_quant_v6_spawn_supervisor as supervisor_module
 from app.services.watchlist_quant_v6_evaluation_service import (
     ASSESSMENT_ROLE,
     EVENT_ROLE,
@@ -88,12 +91,21 @@ class _Provider:
         pages: int = 1,
         raw_rows: int | None = None,
         rejected_rows: int = 0,
+        spawn_deadline: QuantV6EvaluationDeadline | None = None,
     ) -> None:
         self.calls = 0
         self.bars = bars
         self.pages = pages
         self.raw_rows = len(bars) if raw_rows is None else raw_rows
         self.rejected_rows = rejected_rows
+        self.spawn_deadline = spawn_deadline
+
+    def supports_quant_v6_spawn_fetch(
+        self,
+        *,
+        evaluation_deadline: QuantV6EvaluationDeadline,
+    ) -> bool:
+        return self.spawn_deadline is evaluation_deadline
 
     def fetch_five_minute_no_adjust(
         self,
@@ -156,6 +168,35 @@ def _one_member_plan():
 @cache
 def _missing_evaluations() -> tuple[QuantV6CandidateEvaluation, ...]:
     plan = _one_member_plan()
+    return evaluate_quant_v6_registration(
+        registration=plan,
+        provider=_Provider(),
+    )
+
+
+@cache
+def _two_member_plan():
+    observed = datetime(2026, 7, 31, 23, 0, tzinfo=timezone.utc)
+    full_plan = build_latest_quant_v6_registration_plan(observed_at=observed)
+    candidate_by_symbol = {
+        candidate.symbol: candidate
+        for candidate in ROTATION_RESEARCH_CANDIDATE_CATALOG
+    }
+    return _build_registration_plan(
+        observed_at=observed,
+        market="US",
+        candidates=tuple(
+            candidate_by_symbol[member.symbol]
+            for member in full_plan.members[:2]
+        ),
+        membership_history=INDEX_MEMBERSHIP_HISTORY,
+    )
+
+
+@cache
+def _two_member_missing_evaluations(
+) -> tuple[QuantV6CandidateEvaluation, ...]:
+    plan = _two_member_plan()
     return evaluate_quant_v6_registration(
         registration=plan,
         provider=_Provider(),
@@ -466,6 +507,61 @@ def test_candidate_closure_child_bundle_preserves_exact_cardinality(
     assert prepared.binding_count == 31 + expected_event_count
 
 
+def test_prepare_candidate_publication_freezes_full_verified_closure() -> None:
+    plan = _one_member_plan()
+    evaluation = _missing_evaluations()[0]
+
+    prepared = service_module._prepare_candidate_publication(
+        plan=plan,
+        evaluation=evaluation,
+    )
+
+    assert prepared.registration_identity_sha256 == plan.identity_sha256
+    assert prepared.member == plan.members[0]
+    assert prepared.bindings == evaluation.bindings
+    assert prepared.artifacts == (evaluation.bindings[0].artifact,)
+    assert prepared.assessment_count == 1
+    assert prepared.session_input_count == 0
+    assert prepared.event_count == 0
+    assert prepared.binding_count == 1
+    assert prepared.acquisition_outcome["member_ordinal"] == 0
+    assert prepared.acquisition_outcome["symbol"] == plan.members[0].symbol
+    assert pickle.loads(pickle.dumps(prepared, protocol=5)) == prepared
+
+
+def test_assemble_prepared_publication_orders_candidates_deterministically(
+) -> None:
+    plan = _two_member_plan()
+    evaluations = _two_member_missing_evaluations()
+    prepared_candidates = tuple(
+        service_module._prepare_candidate_publication(
+            plan=plan,
+            evaluation=evaluation,
+        )
+        for evaluation in evaluations
+    )
+
+    assembled = service_module._assemble_prepared_publication(
+        plan=plan,
+        candidates=tuple(reversed(prepared_candidates)),
+    )
+    sequential = service_module._prepare_publication(
+        plan=plan,
+        evaluations=tuple(reversed(evaluations)),
+    )
+
+    assert assembled == sequential
+    assert tuple(
+        binding.member_ordinal for binding in assembled.bindings
+    ) == (0, 1)
+    assert tuple(
+        outcome["member_ordinal"]
+        for outcome in assembled.acquisition_outcomes
+    ) == (0, 1)
+    assert assembled.assessment_count == 2
+    assert assembled.binding_count == 2
+
+
 def test_prepare_publication_logs_bounded_closure_progress(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
@@ -727,10 +823,12 @@ def test_registration_is_committed_before_callback_and_survives_failure(
                 ))
             raise RuntimeError("provider unavailable")
 
+    failed_deadline = QuantV6EvaluationDeadline(60)
     with pytest.raises(RuntimeError, match="provider unavailable"):
         service.register_provider_evaluate_publish(
             plan=_one_member_plan(),
-            provider=_FailingProvider(),
+            provider=_FailingProvider(spawn_deadline=failed_deadline),
+            evaluation_deadline=failed_deadline,
         )
 
     assert observed == [(1, 0)]
@@ -752,14 +850,216 @@ def test_registration_is_committed_before_callback_and_survives_failure(
     assert rebuilt.registration_json == original.registration_json
     assert rebuilt.cohort_observed_at == original.cohort_observed_at
 
-    retry_provider = _Provider()
+    retry_deadline = QuantV6EvaluationDeadline(60)
+    retry_provider = _Provider(spawn_deadline=retry_deadline)
     receipt = service.register_provider_evaluate_publish(
         plan=rebuilt,
         provider=retry_provider,
+        evaluation_deadline=retry_deadline,
     )
     assert receipt.created is True
     assert retry_provider.calls == 1
     assert _counts(engine) == (1, 1, 1, 1)
+
+
+def test_spawn_provider_path_persists_only_parent_prepared_closure(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine(tmp_path)
+    factory = _factory(engine)
+    service = WatchlistQuantV6PublicationService(factory, clock=lambda: _NOW)
+    plan = _one_member_plan()
+    deadline = QuantV6EvaluationDeadline(60)
+    provider = _Provider(spawn_deadline=deadline)
+    memory_fence = supervisor_module.QuantV6PipelineMemoryFence(
+        parent_baseline_bytes=supervisor_module._resident_bytes(os.getpid()),
+        memory_limit_bytes=1_024 * 1024 * 1024,
+    )
+    prepared = service_module._prepare_publication(
+        plan=plan,
+        evaluations=_missing_evaluations(),
+    )
+    calls: list[tuple[object, object, object, int, int]] = []
+
+    def _spawn_prepare(**kwargs: object):
+        worker_count = kwargs["worker_count"]
+        memory_limit_mib = kwargs["memory_limit_mib"]
+        assert type(worker_count) is int
+        assert type(memory_limit_mib) is int
+        assert kwargs["memory_fence"] is memory_fence
+        calls.append((
+            kwargs["registration"],
+            kwargs["provider"],
+            kwargs["evaluation_deadline"],
+            worker_count,
+            memory_limit_mib,
+        ))
+        return prepared
+
+    monkeypatch.setattr(
+        supervisor_module,
+        "evaluate_prepare_quant_v6_registration_spawn",
+        _spawn_prepare,
+    )
+
+    def _unexpected_capture(
+        _cls: object,
+        *,
+        memory_limit_mib: int,
+    ) -> object:
+        del memory_limit_mib
+        pytest.fail("caller-owned pipeline baseline was recaptured")
+
+    monkeypatch.setattr(
+        supervisor_module.QuantV6PipelineMemoryFence,
+        "capture",
+        classmethod(_unexpected_capture),
+    )
+
+    receipt = service.register_provider_evaluate_publish(
+        plan=plan,
+        provider=provider,
+        evaluation_deadline=deadline,
+        compute_workers=3,
+        pipeline_memory_limit_mib=1_024,
+        pipeline_memory_fence=memory_fence,
+    )
+
+    assert calls == [(plan, provider, deadline, 3, 1_024)]
+    assert provider.calls == 0
+    assert receipt.created is True
+    assert receipt.identity_sha256 == prepared.identity_sha256
+    assert receipt.manifest_sha256 == prepared.manifest_sha256
+    assert _counts(engine) == (1, 1, 1, 1)
+
+
+def test_spawn_failure_leaves_only_committed_registration(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = _engine(tmp_path)
+    factory = _factory(engine)
+
+    def _fail_spawn(**_kwargs: object) -> object:
+        raise RuntimeError("spawn worker failed")
+
+    monkeypatch.setattr(
+        supervisor_module,
+        "evaluate_prepare_quant_v6_registration_spawn",
+        _fail_spawn,
+    )
+
+    deadline = QuantV6EvaluationDeadline(60)
+    with pytest.raises(RuntimeError, match="spawn worker failed"):
+        WatchlistQuantV6PublicationService(
+            factory,
+            clock=lambda: _NOW,
+        ).register_provider_evaluate_publish(
+            plan=_one_member_plan(),
+            provider=_Provider(spawn_deadline=deadline),
+            evaluation_deadline=deadline,
+            compute_workers=2,
+        )
+
+    assert _counts(engine) == (1, 0, 0, 0)
+
+
+@pytest.mark.parametrize(
+    ("compute_workers", "memory_limit_mib"),
+    ((0, 2_048), (1, 2_048), (5, 2_048), (2, 511), (2, 8_193)),
+)
+def test_provider_path_rejects_invalid_spawn_bounds_before_registration(
+    tmp_path,
+    compute_workers: int,
+    memory_limit_mib: int,
+) -> None:
+    engine = _engine(tmp_path)
+
+    with pytest.raises(ValueError):
+        WatchlistQuantV6PublicationService(
+            _factory(engine),
+            clock=lambda: _NOW,
+        ).register_provider_evaluate_publish(
+            plan=_one_member_plan(),
+            provider=_Provider(),
+            compute_workers=compute_workers,
+            pipeline_memory_limit_mib=memory_limit_mib,
+        )
+
+    assert _counts(engine) == (0, 0, 0, 0)
+
+
+def test_provider_path_requires_spawn_deadline_before_registration(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+
+    with pytest.raises(
+        ValueError,
+        match="spawn evaluation requires an explicit evaluation_deadline",
+    ):
+        WatchlistQuantV6PublicationService(
+            _factory(engine),
+            clock=lambda: _NOW,
+        ).register_provider_evaluate_publish(
+            plan=_one_member_plan(),
+            provider=_Provider(),
+            compute_workers=2,
+        )
+
+    assert _counts(engine) == (0, 0, 0, 0)
+
+
+def test_provider_path_requires_bounded_spawn_provider_before_registration(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+
+    with pytest.raises(
+        ValueError,
+        match="historical provider with bounded fetches",
+    ):
+        WatchlistQuantV6PublicationService(
+            _factory(engine),
+            clock=lambda: _NOW,
+        ).register_provider_evaluate_publish(
+            plan=_one_member_plan(),
+            provider=_Provider(),
+            evaluation_deadline=QuantV6EvaluationDeadline(60),
+            compute_workers=2,
+        )
+
+    assert _counts(engine) == (0, 0, 0, 0)
+
+
+def test_provider_path_rejects_conflicting_caller_memory_fence(
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+    deadline = QuantV6EvaluationDeadline(60)
+    memory_fence = supervisor_module.QuantV6PipelineMemoryFence(
+        parent_baseline_bytes=supervisor_module._resident_bytes(os.getpid()),
+        memory_limit_bytes=1_024 * 1024 * 1024,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="pipeline_memory_fence conflicts",
+    ):
+        WatchlistQuantV6PublicationService(
+            _factory(engine),
+            clock=lambda: _NOW,
+        ).register_provider_evaluate_publish(
+            plan=_one_member_plan(),
+            provider=_Provider(spawn_deadline=deadline),
+            evaluation_deadline=deadline,
+            compute_workers=2,
+            pipeline_memory_limit_mib=2_048,
+            pipeline_memory_fence=memory_fence,
+        )
+
+    assert _counts(engine) == (0, 0, 0, 0)
 
 
 def test_deadline_after_evaluation_never_starts_publication(
@@ -826,6 +1126,183 @@ def test_generic_callback_cooperatively_observes_cancellation(
         with pytest.raises(QuantV6EvaluationCancelledError):
             result.result(timeout=2)
 
+    assert _counts(engine) == (1, 0, 0, 0)
+
+
+def test_public_publish_matches_explicit_three_stage_path(tmp_path) -> None:
+    plan = _one_member_plan()
+    evaluations = _missing_evaluations()
+    prepared_candidate = service_module._prepare_candidate_publication(
+        plan=plan,
+        evaluation=evaluations[0],
+    )
+    prepared = service_module._assemble_prepared_publication(
+        plan=plan,
+        candidates=(prepared_candidate,),
+    )
+    public_path = tmp_path / "public"
+    prepared_path = tmp_path / "prepared"
+    public_path.mkdir()
+    prepared_path.mkdir()
+    public_engine = _engine(public_path)
+    prepared_engine = _engine(prepared_path)
+    public_service = WatchlistQuantV6PublicationService(
+        _factory(public_engine),
+        clock=lambda: _NOW,
+    )
+    prepared_service = WatchlistQuantV6PublicationService(
+        _factory(prepared_engine),
+        clock=lambda: _NOW,
+    )
+    public_service.register_plan(plan)
+    prepared_service.register_plan(plan)
+
+    public_receipt = public_service.publish_registration(
+        plan=plan,
+        evaluations=evaluations,
+    )
+    prepared_receipt = prepared_service._persist_prepared_publication(
+        plan=plan,
+        prepared=prepared,
+    )
+
+    assert public_receipt.identity_sha256 == prepared_receipt.identity_sha256
+    assert public_receipt.manifest_sha256 == prepared_receipt.manifest_sha256
+    assert public_receipt.binding_count == prepared_receipt.binding_count == 1
+    assert _counts(public_engine) == _counts(prepared_engine) == (1, 1, 1, 1)
+    with Session(public_engine) as public_session, Session(
+        prepared_engine
+    ) as prepared_session:
+        public_row = public_session.scalar(select(WatchlistQuantV6Publication))
+        prepared_row = prepared_session.scalar(
+            select(WatchlistQuantV6Publication)
+        )
+        assert public_row is not None
+        assert prepared_row is not None
+        assert public_row.publication_json == prepared_row.publication_json
+        assert public_row.promotion_eligible is False
+        assert public_row.automatic_promotion_allowed is False
+        assert public_row.order_submission_allowed is False
+        assert public_row.short_entry_allowed is False
+        assert public_row.position_add_on_allowed is False
+
+
+def test_prepared_persistence_final_checkpoint_is_atomic(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+    plan = _one_member_plan()
+    service = WatchlistQuantV6PublicationService(
+        _factory(engine),
+        clock=lambda: _NOW,
+    )
+    service.register_plan(plan)
+    candidate = service_module._prepare_candidate_publication(
+        plan=plan,
+        evaluation=_missing_evaluations()[0],
+    )
+    prepared = service_module._assemble_prepared_publication(
+        plan=plan,
+        candidates=(candidate,),
+    )
+    deadline = QuantV6EvaluationDeadline(60)
+    original_verify = service._verify_complete_publication
+
+    def expire_after_verify(*args: Any, **kwargs: Any) -> Any:
+        receipt = original_verify(*args, **kwargs)
+        deadline.expire()
+        return receipt
+
+    monkeypatch.setattr(
+        service,
+        "_verify_complete_publication",
+        expire_after_verify,
+    )
+
+    with pytest.raises(QuantV6EvaluationDeadlineExceededError):
+        service._persist_prepared_publication(
+            plan=plan,
+            prepared=prepared,
+            evaluation_deadline=deadline,
+        )
+
+    assert _counts(engine) == (1, 0, 0, 0)
+
+
+def test_spawn_pipeline_memory_fence_rolls_back_final_persistence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    engine = _engine(tmp_path)
+    plan = _one_member_plan()
+    service = WatchlistQuantV6PublicationService(
+        _factory(engine),
+        clock=lambda: _NOW,
+    )
+    deadline = QuantV6EvaluationDeadline(60)
+    prepared = service_module._prepare_publication(
+        plan=plan,
+        evaluations=_missing_evaluations(),
+    )
+
+    def _spawn_prepare(**kwargs: object):
+        memory_fence = kwargs["memory_fence"]
+        assert isinstance(
+            memory_fence,
+            supervisor_module.QuantV6PipelineMemoryFence,
+        )
+        return prepared
+
+    monkeypatch.setattr(
+        supervisor_module,
+        "evaluate_prepare_quant_v6_registration_spawn",
+        _spawn_prepare,
+    )
+    persistence_verified = False
+    original_verify = service._verify_complete_publication
+
+    def _mark_persistence_verified(*args: Any, **kwargs: Any) -> Any:
+        nonlocal persistence_verified
+        receipt = original_verify(*args, **kwargs)
+        persistence_verified = True
+        return receipt
+
+    monkeypatch.setattr(
+        service,
+        "_verify_complete_publication",
+        _mark_persistence_verified,
+    )
+    baseline_bytes = 100 * 1024 * 1024
+    limit_bytes = 512 * 1024 * 1024
+
+    def _resident_bytes(pid: int) -> int:
+        assert pid == os.getpid()
+        return (
+            baseline_bytes + limit_bytes + 1
+            if persistence_verified
+            else baseline_bytes
+        )
+
+    monkeypatch.setattr(
+        supervisor_module,
+        "_resident_bytes",
+        _resident_bytes,
+    )
+
+    with pytest.raises(
+        supervisor_module.QuantV6SpawnResourceLimitError,
+        match="exceeded its resident-memory budget",
+    ):
+        service.register_provider_evaluate_publish(
+            plan=plan,
+            provider=_Provider(spawn_deadline=deadline),
+            evaluation_deadline=deadline,
+            compute_workers=2,
+            pipeline_memory_limit_mib=512,
+        )
+
+    assert persistence_verified is True
     assert _counts(engine) == (1, 0, 0, 0)
 
 
@@ -916,10 +1393,16 @@ def test_provider_repeat_replays_persisted_publication_without_quote_io(
         clock=lambda: _NOW,
     )
     original = _one_member_plan()
-    first_provider = _Provider(raw_rows=3, rejected_rows=2)
+    first_deadline = QuantV6EvaluationDeadline(60)
+    first_provider = _Provider(
+        raw_rows=3,
+        rejected_rows=2,
+        spawn_deadline=first_deadline,
+    )
     first = service.register_provider_evaluate_publish(
         plan=original,
         provider=first_provider,
+        evaluation_deadline=first_deadline,
     )
     selected = next(
         candidate
@@ -933,11 +1416,13 @@ def test_provider_repeat_replays_persisted_publication_without_quote_io(
         membership_history=INDEX_MEMBERSHIP_HISTORY,
     )
     assert weekend_plan.identity_sha256 == original.identity_sha256
-    repeated_provider = _Provider()
+    repeated_deadline = QuantV6EvaluationDeadline(60)
+    repeated_provider = _Provider(spawn_deadline=repeated_deadline)
 
     repeated = service.register_provider_evaluate_publish(
         plan=weekend_plan,
         provider=repeated_provider,
+        evaluation_deadline=repeated_deadline,
     )
 
     assert first.created is True
@@ -1006,13 +1491,15 @@ def test_provider_fast_path_deadline_during_replay_is_read_only(
         clock=lambda: _NOW,
     )
     plan = _one_member_plan()
+    initial_deadline = QuantV6EvaluationDeadline(60)
     service.register_provider_evaluate_publish(
         plan=plan,
-        provider=_Provider(),
+        provider=_Provider(spawn_deadline=initial_deadline),
+        evaluation_deadline=initial_deadline,
     )
     before = _counts(engine)
-    provider = _Provider()
     deadline = QuantV6EvaluationDeadline(60)
+    provider = _Provider(spawn_deadline=deadline)
     replay_query_seen = threading.Event()
 
     def expire_after_binding_query(
@@ -1060,9 +1547,11 @@ def test_provider_fast_path_hard_fails_tampered_publication_before_io(
         clock=lambda: _NOW,
     )
     plan = _one_member_plan()
+    initial_deadline = QuantV6EvaluationDeadline(60)
     first = service.register_provider_evaluate_publish(
         plan=plan,
-        provider=_Provider(),
+        provider=_Provider(spawn_deadline=initial_deadline),
+        evaluation_deadline=initial_deadline,
     )
     with Session(engine) as session:
         publication = session.get(
@@ -1082,7 +1571,8 @@ def test_provider_fast_path_hard_fails_tampered_publication_before_io(
             "SET publication_json = ? WHERE id = ?",
             (tampered_json, first.publication_id),
         )
-    provider = _Provider()
+    retry_deadline = QuantV6EvaluationDeadline(60)
+    provider = _Provider(spawn_deadline=retry_deadline)
 
     with pytest.raises(
         QuantV6PublicationConflictError,
@@ -1091,6 +1581,7 @@ def test_provider_fast_path_hard_fails_tampered_publication_before_io(
         service.register_provider_evaluate_publish(
             plan=plan,
             provider=provider,
+            evaluation_deadline=retry_deadline,
         )
 
     assert provider.calls == 0
@@ -1110,9 +1601,11 @@ def test_provider_fast_path_replays_acquisition_projection_before_io(
         clock=lambda: _NOW,
     )
     plan = _one_member_plan()
+    initial_deadline = QuantV6EvaluationDeadline(60)
     first = service.register_provider_evaluate_publish(
         plan=plan,
-        provider=_Provider(),
+        provider=_Provider(spawn_deadline=initial_deadline),
+        evaluation_deadline=initial_deadline,
     )
     with Session(engine) as session:
         publication = session.get(
@@ -1141,7 +1634,8 @@ def test_provider_fast_path_replays_acquisition_projection_before_io(
             "SET publication_json = ?, identity_sha256 = ? WHERE id = ?",
             (tampered_json, tampered_identity, first.publication_id),
         )
-    provider = _Provider()
+    retry_deadline = QuantV6EvaluationDeadline(60)
+    provider = _Provider(spawn_deadline=retry_deadline)
 
     with pytest.raises(
         QuantV6PublicationConflictError,
@@ -1150,6 +1644,7 @@ def test_provider_fast_path_replays_acquisition_projection_before_io(
         service.register_provider_evaluate_publish(
             plan=plan,
             provider=provider,
+            evaluation_deadline=retry_deadline,
         )
 
     assert provider.calls == 0
@@ -1246,13 +1741,15 @@ def test_provider_orchestrator_registers_before_first_provider_io(
                 end_at=end_at,
             )
 
-    provider = _ObservingProvider()
+    deadline = QuantV6EvaluationDeadline(60)
+    provider = _ObservingProvider(spawn_deadline=deadline)
     receipt = WatchlistQuantV6PublicationService(
         factory,
         clock=lambda: _NOW,
     ).register_provider_evaluate_publish(
         plan=_one_member_plan(),
         provider=provider,
+        evaluation_deadline=deadline,
     )
 
     assert provider.calls == 1

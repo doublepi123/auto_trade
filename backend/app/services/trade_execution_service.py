@@ -179,6 +179,14 @@ class _EntryPositionCheck:
     conflicting_symbol: str = ""
 
 
+@dataclass(frozen=True)
+class _FinalSubmissionApproval:
+    """Carry the exact precheck result into the broker commit boundary."""
+
+    submission_price: Decimal | None
+    protective_commit_required: bool = False
+
+
 _EntryPersistCallback = Callable[[str, Decimal, Decimal], None]
 _FillCallback = Callable[[str, str], None]
 _ReductionFillCallback = Callable[[str, str, Decimal], None]
@@ -190,6 +198,11 @@ EntryPolicyCheck = Callable[
     [str, str, str],
     EntryPolicyCheckResult | str | None,
 ]
+_FinalProtectiveExitCheck = Callable[
+    ["BrokerGateway", str, str, Decimal, Mapping[str, object]],
+    str | None,
+]
+_FinalProtectiveExitCommitCheck = _FinalProtectiveExitCheck
 
 
 class TradeExecutionService:
@@ -214,6 +227,10 @@ class TradeExecutionService:
         entry_cutoff_minutes_before_close: int = 0,
         final_order_quote_check: _FinalOrderQuoteCheck | None = None,
         entry_policy_check: EntryPolicyCheck | None = None,
+        final_protective_exit_check: _FinalProtectiveExitCheck | None = None,
+        final_protective_exit_commit_check: (
+            _FinalProtectiveExitCommitCheck | None
+        ) = None,
     ) -> None:
         self._record_order = record_order
         self._update_order_status = update_order_status
@@ -240,6 +257,10 @@ class TradeExecutionService:
         self.entry_cutoff_minutes_before_close = entry_cutoff_minutes_before_close
         self._final_order_quote_check = final_order_quote_check
         self._entry_policy_check = entry_policy_check
+        self._final_protective_exit_check = final_protective_exit_check
+        self._final_protective_exit_commit_check = (
+            final_protective_exit_commit_check
+        )
         self._state_lock = RLock()
         self._submission_lock = RLock()
         self._pending_orders: dict[str, _PendingOrder] = {}
@@ -819,7 +840,11 @@ class TradeExecutionService:
             )
 
         risk_result = risk.check()
-        if not risk_result.approved and not self._risk_rejection_allows_action(action, risk):
+        if not risk_result.approved and not self._risk_rejection_allows_action(
+            action,
+            risk,
+            reduce_only=reduce_only,
+        ):
             logger.warning("execute rejected by risk: %s", risk_result.reason)
             return self._skip_order(symbol, action, risk_result.reason, skip_category="RISK")
         if not risk_result.approved:
@@ -1006,11 +1031,16 @@ class TradeExecutionService:
         )
 
     @staticmethod
-    def _risk_rejection_allows_action(action: str, risk: RiskController) -> bool:
+    def _risk_rejection_allows_action(
+        action: str,
+        risk: RiskController,
+        *,
+        reduce_only: bool,
+    ) -> bool:
         if action not in _POSITION_REDUCING_ACTIONS or risk.kill_switch:
             return False
         if risk.paused and risk.pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES):
-            return risk.protective_exit_permitted
+            return reduce_only and risk.protective_exit_permitted
         return True
 
     def _is_losing_long_add_on(self, symbol: str, price: Decimal) -> bool:
@@ -1700,6 +1730,7 @@ class TradeExecutionService:
             notify_risk_event=notify_risk_event,
             avg_price=pos_avg_price,
             bind_final_executable_price=reduce_only,
+            reduce_only=reduce_only,
             exit_min_profit_amount=min_profit_amount,
             exit_allow_loss_exit=allow_loss_exit,
             exit_fee_rate=fee_rate,
@@ -1914,6 +1945,7 @@ class TradeExecutionService:
             notify_risk_event=notify_risk_event,
             avg_price=pos_avg_price,
             bind_final_executable_price=reduce_only,
+            reduce_only=reduce_only,
             exit_min_profit_amount=min_profit_amount,
             exit_allow_loss_exit=allow_loss_exit,
             exit_fee_rate=fee_rate,
@@ -2002,6 +2034,7 @@ class TradeExecutionService:
         notify_risk_event: _NotifyRiskEvent | None = None,
         avg_price: Decimal | None = None,
         bind_final_executable_price: bool = False,
+        reduce_only: bool = False,
         entry_expected_exit_price: Decimal | float | int | None = None,
         entry_min_profit_amount: Decimal | float | int = Decimal("0"),
         entry_fee_rate: Decimal | float | int = Decimal("0"),
@@ -2041,12 +2074,13 @@ class TradeExecutionService:
                 exit_entry_reference_quantity=exit_entry_reference_quantity,
                 final_entry_policy_check=final_entry_policy_check,
                 market=market,
+                reduce_only=reduce_only,
             )
             if isinstance(precheck_result, OrderStatus):
                 return precheck_result
             submission_price = (
-                precheck_result
-                if isinstance(precheck_result, Decimal)
+                precheck_result.submission_price
+                if precheck_result.submission_price is not None
                 else price
             )
             return self._submit_limit_order_after_precheck(
@@ -2062,6 +2096,9 @@ class TradeExecutionService:
                 restore_engine_snapshot=restore_engine_snapshot,
                 notify_risk_event=notify_risk_event,
                 avg_price=avg_price,
+                protective_commit_required=(
+                    precheck_result.protective_commit_required
+                ),
             )
 
     def _final_submission_precheck(
@@ -2086,7 +2123,9 @@ class TradeExecutionService:
         exit_entry_reference_quantity: Decimal | float | int | None = None,
         final_entry_policy_check: EntryPolicyCheck | None = None,
         market: str = "US",
-    ) -> OrderStatus | Decimal | None:
+        reduce_only: bool = False,
+    ) -> OrderStatus | _FinalSubmissionApproval:
+        protective_commit_required = False
         if action in _ENTRY_ACTIONS:
             position_check = self._entry_position_check(broker, symbol, action)
             if position_check is None:
@@ -2141,6 +2180,66 @@ class TradeExecutionService:
                 "pending order appeared before submission",
                 skip_category="PENDING",
             )
+        if (
+            reduce_only
+            and risk.paused
+            and risk.pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
+        ):
+            # Preserve this fact through every later broker/quote check. The
+            # current pause can change before submission and must never make a
+            # successfully-entered protective path skip its commit gate.
+            protective_commit_required = True
+            if not risk.protective_exit_permitted:
+                risk_result = risk.check()
+                return self._skip_order(
+                    symbol,
+                    action,
+                    risk_result.reason,
+                    skip_category="RISK",
+                )
+            protective_check = self._final_protective_exit_check
+            if protective_check is None:
+                risk.revoke_protective_exits()
+                return self._skip_order(
+                    symbol,
+                    action,
+                    "protective exit final verification is unavailable",
+                    skip_category="RISK",
+                )
+            try:
+                protective_issue = protective_check(
+                    broker,
+                    symbol,
+                    action,
+                    qty,
+                    dict(self._active_execution_context),
+                )
+            except Exception:
+                logger.exception(
+                    "protective exit final verification failed for %s %s",
+                    action,
+                    symbol,
+                )
+                protective_issue = "protective exit final verification raised an exception"
+            if protective_issue is not None:
+                risk.revoke_protective_exits()
+                return self._skip_order(
+                    symbol,
+                    action,
+                    str(protective_issue),
+                    skip_category="RISK",
+                )
+            if not risk.protective_exit_permitted:
+                risk.revoke_protective_exits()
+                return self._skip_order(
+                    symbol,
+                    action,
+                    "protective exit permission changed during final verification",
+                    skip_category="RISK",
+                )
+
+        # The account-wide protective proof must complete before this existing
+        # target-symbol quantity/side gate. Both run under submission_lock.
         if action in _POSITION_REDUCING_ACTIONS:
             position_issue = self._final_reduction_position_issue(
                 broker,
@@ -2250,7 +2349,11 @@ class TradeExecutionService:
         else:
             marketable_price = None
         risk_result = risk.check()
-        if not risk_result.approved and not self._risk_rejection_allows_action(action, risk):
+        if not risk_result.approved and not self._risk_rejection_allows_action(
+            action,
+            risk,
+            reduce_only=reduce_only,
+        ):
             logger.warning(
                 "submission rejected by final risk check for %s %s: %s",
                 action,
@@ -2269,7 +2372,10 @@ class TradeExecutionService:
                 action,
                 risk_result.reason,
             )
-        return marketable_price
+        return _FinalSubmissionApproval(
+            submission_price=marketable_price,
+            protective_commit_required=protective_commit_required,
+        )
 
     @staticmethod
     def _final_reduction_position_issue(
@@ -2384,10 +2490,68 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
         avg_price: Decimal | None = None,
+        protective_commit_required: bool = False,
     ) -> OrderStatus | None:
         submit_started_at = datetime.now(timezone.utc)
         submit_started_monotonic = time.perf_counter()
-        result = broker.submit_limit_order(symbol, side, qty, price)
+        if protective_commit_required:
+            # Runtime invalidation and this commit proof use the same outer
+            # guard.  The inner risk lock then covers the final permission
+            # decision and the only broker mutation, eliminating the physical
+            # post-check/pre-submit window.
+            with risk.protective_submission_guard():
+                commit_check = self._final_protective_exit_commit_check
+                if commit_check is None:
+                    risk.revoke_protective_exits()
+                    return self._skip_order(
+                        symbol,
+                        action,
+                        "protective exit commit verification is unavailable",
+                        skip_category="RISK",
+                    )
+                try:
+                    protective_issue = commit_check(
+                        broker,
+                        symbol,
+                        action,
+                        qty,
+                        dict(self._active_execution_context),
+                    )
+                except Exception:
+                    logger.exception(
+                        "protective exit commit verification failed for %s %s",
+                        action,
+                        symbol,
+                    )
+                    protective_issue = (
+                        "protective exit commit verification raised an exception"
+                    )
+                if protective_issue is not None:
+                    risk.revoke_protective_exits()
+                    return self._skip_order(
+                        symbol,
+                        action,
+                        str(protective_issue),
+                        skip_category="RISK",
+                    )
+                with risk.protective_permission_guard() as permitted:
+                    if permitted:
+                        result = broker.submit_limit_order(
+                            symbol,
+                            side,
+                            qty,
+                            price,
+                        )
+                if not permitted:
+                    risk.revoke_protective_exits()
+                    return self._skip_order(
+                        symbol,
+                        action,
+                        "protective exit permission changed at broker commit",
+                        skip_category="RISK",
+                    )
+        else:
+            result = broker.submit_limit_order(symbol, side, qty, price)
         acknowledged_at = datetime.now(timezone.utc)
         ack_latency_ms = (time.perf_counter() - submit_started_monotonic) * 1000
         ledger_metadata = dict(self._active_execution_context)

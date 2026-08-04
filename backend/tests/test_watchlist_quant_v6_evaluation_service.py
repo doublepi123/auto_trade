@@ -189,7 +189,7 @@ def test_historical_evaluator_manifest_has_exact_source_closure() -> None:
     manifest = quant_v6_historical_evaluator_manifest()
     source_sha256 = manifest["source_sha256"]
 
-    assert manifest["manifest_version"] == 2
+    assert manifest["manifest_version"] == 3
     assert isinstance(source_sha256, dict)
     assert set(source_sha256) == {
         "app.domain.universe_selection.catalog",
@@ -197,6 +197,8 @@ def test_historical_evaluator_manifest_has_exact_source_closure() -> None:
         "app.services.watchlist_quant_v6_deadline",
         "app.services.watchlist_quant_v6_evaluation_service",
         "app.services.watchlist_quant_v6_historical_provider",
+        "app.services.watchlist_quant_v6_publication_service",
+        "app.services.watchlist_quant_v6_spawn_supervisor",
     }
     assert all(
         isinstance(digest, str) and len(digest) == 64
@@ -206,7 +208,7 @@ def test_historical_evaluator_manifest_has_exact_source_closure() -> None:
 
 def test_historical_evaluator_manifest_golden_digest() -> None:
     assert quant_v6_historical_evaluator_digest_sha256() == (
-        "b77335f7ec480fe000330a2c533c04ebcf44d6fb5a3797805c50ed55b635c4ac"
+        "c3e5917a4f05e9477760d8a0e3b037730bdb40b5b00ef284a6e83d3f219c5c2a"
     )
 
 

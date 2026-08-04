@@ -274,6 +274,14 @@ class QuantV6HistoricalBarProvider:
         self._quote_context: Any = None
         self._abandoned_context = False
 
+    def supports_quant_v6_spawn_fetch(
+        self,
+        *,
+        evaluation_deadline: QuantV6EvaluationDeadline,
+    ) -> bool:
+        """Confirm spawn fetches share the caller's bounded cancellation token."""
+        return self._evaluation_deadline is evaluation_deadline
+
     def _cancelled(self) -> bool:
         return (
             (

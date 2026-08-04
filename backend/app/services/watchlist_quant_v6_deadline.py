@@ -4,6 +4,17 @@ import math
 import threading
 import time
 from collections.abc import Callable
+from typing import Protocol, Self
+
+
+class QuantV6StopEvent(Protocol):
+    """Minimal event contract shared by thread and spawn-process deadlines."""
+
+    def is_set(self) -> bool: ...
+
+    def set(self) -> None: ...
+
+    def wait(self, timeout: float | None = None) -> bool: ...
 
 
 class QuantV6EvaluationStoppedError(RuntimeError):
@@ -27,8 +38,9 @@ class QuantV6EvaluationDeadline:
         self,
         timeout_seconds: float,
         *,
-        cancel_event: threading.Event | None = None,
+        cancel_event: QuantV6StopEvent | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        _deadline_at: float | None = None,
     ) -> None:
         if (
             isinstance(timeout_seconds, bool)
@@ -37,13 +49,45 @@ class QuantV6EvaluationDeadline:
             or float(timeout_seconds) <= 0
         ):
             raise ValueError("timeout_seconds must be finite and positive")
+        if _deadline_at is not None and (
+            isinstance(_deadline_at, bool)
+            or not isinstance(_deadline_at, (int, float))
+            or not math.isfinite(float(_deadline_at))
+        ):
+            raise ValueError("deadline_at must be finite")
         self._monotonic = monotonic
         self._cancel_event = cancel_event or threading.Event()
-        self._deadline_at = monotonic() + float(timeout_seconds)
+        self._deadline_at = (
+            monotonic() + float(timeout_seconds)
+            if _deadline_at is None
+            else float(_deadline_at)
+        )
         self._forced_timeout = threading.Event()
 
+    @classmethod
+    def from_deadline_at(
+        cls,
+        deadline_at: float,
+        *,
+        cancel_event: QuantV6StopEvent,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> Self:
+        """Build a child view without granting fresh time after spawn/import."""
+        if (
+            isinstance(deadline_at, bool)
+            or not isinstance(deadline_at, (int, float))
+            or not math.isfinite(float(deadline_at))
+        ):
+            raise ValueError("deadline_at must be finite")
+        return cls(
+            1.0,
+            cancel_event=cancel_event,
+            monotonic=monotonic,
+            _deadline_at=float(deadline_at),
+        )
+
     @property
-    def cancel_event(self) -> threading.Event:
+    def cancel_event(self) -> QuantV6StopEvent:
         return self._cancel_event
 
     @property
@@ -115,4 +159,5 @@ __all__ = [
     "QuantV6EvaluationDeadline",
     "QuantV6EvaluationDeadlineExceededError",
     "QuantV6EvaluationStoppedError",
+    "QuantV6StopEvent",
 ]

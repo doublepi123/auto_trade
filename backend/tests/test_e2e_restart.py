@@ -35,6 +35,7 @@ from app.main import app
 from app.models import (
     AuditLog,
     Base,
+    OpeningMomentumExecution,
     OrderRecord,
     RuntimeState,
     StrategyConfig,
@@ -355,7 +356,6 @@ class TestE2EStartupRestoresTrackedEntries:
             db.commit()
         finally:
             db.close()
-
         fake_broker = _FakeBroker(
             positions=[
                 Position(
@@ -506,10 +506,141 @@ class TestE2EStartupRestoresTrackedEntries:
 
         runner._unknown_submission_proof_at -= 6
         safe, error = runner.permit_protective_exits_after_verification()
+        assert safe is False
+        assert error == (
+            "protective exits require an unchanged durable reduction intent"
+        )
+        assert runner.risk.paused is True
+        assert runner.risk.protective_exit_permitted is False
+
+
+class TestE2EProtectiveOpeningReductionRecovery:
+    def test_restart_can_arm_only_the_persisted_secondary_opening_reduction(
+        self,
+        fresh_runner,
+        monkeypatch,
+    ) -> None:
+        _seed_strategy(symbol="NVDA.US")
+        now = datetime.now(timezone.utc)
+        pause_reason = (
+            "ORDER_RECONCILIATION_UNCERTAIN: empty broker proof requires review"
+        )
+        db = SessionLocal()
+        try:
+            db.add(
+                RuntimeState(
+                    symbol="NVDA.US",
+                    engine_state="flat",
+                    paused=True,
+                    pause_reason=pause_reason,
+                    paused_at=now - timedelta(minutes=5),
+                    pause_auto_resumable=False,
+                )
+            )
+            db.add(
+                RuntimeState(
+                    symbol="ISRG.US",
+                    engine_state="long",
+                    execution_state="REDUCING",
+                    reduction_action="SELL",
+                    reduction_cause="TIME_STOP",
+                    reduction_reason="maximum holding time reached: 60 minutes",
+                    reduction_started_at=now - timedelta(minutes=30),
+                    reduction_trigger_price=368.1,
+                )
+            )
+            db.add(
+                TrackedEntry(
+                    symbol="ISRG.US",
+                    side="LONG",
+                    quantity=704.0,
+                    cost=261528.96,
+                    opened_at=now - timedelta(hours=24),
+                )
+            )
+            db.add(
+                OpeningMomentumExecution(
+                    session_date=now.date(),
+                    algorithm_version="test-opening-v1",
+                    config_version="test-config-v1",
+                    universe_source="TEST",
+                    status="EXITING",
+                    reason="maximum holding time reached: 60 minutes",
+                    symbol="ISRG.US",
+                    signal_at=now - timedelta(hours=24, minutes=1),
+                    armed_at=now - timedelta(hours=24, minutes=1),
+                    entry_due_at=now - timedelta(hours=24),
+                    entry_deadline_at=now - timedelta(hours=23, minutes=59),
+                    reference_entry_price=371.49,
+                    max_price_deviation_bps=100.0,
+                    stop_loss_pct=4.0,
+                    max_holding_minutes=60,
+                    entry_filled_at=now - timedelta(hours=24),
+                    entry_price=371.49,
+                    quantity=704.0,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        fake_broker = _FakeBroker(
+            positions=[
+                Position(
+                    "ISRG.US",
+                    "LONG",
+                    Decimal("704"),
+                    Decimal("371.49"),
+                )
+            ],
+            today_orders=[],
+        )
+        _install_fake_broker(monkeypatch, fake_broker)
+        runner = get_runner()
+        runner._initialize_runner()
+        monkeypatch.setattr(
+            runner,
+            "_protective_exit_runtime_health",
+            lambda: (True, ""),
+        )
+        runner._remember_quote(
+            Quote(
+                "ISRG.US",
+                368.1,
+                368.0,
+                368.2,
+                datetime.now(timezone.utc).isoformat(),
+            )
+        )
+
+        assert "ISRG.US" in runner._opening_execution_policies
+        assert "ISRG.US" in runner._reduction_intents
+        assert runner.risk.paused is True
+
+        safe, error = runner.verify_operational_resume(
+            require_complete_pnl=False,
+        )
+        assert safe is False
+        assert error == (
+            "broker exposure exists outside the primary strategy: ISRG.US"
+        )
+
+        safe, error = runner.permit_protective_exits_after_verification()
+        assert safe is False
+        assert "first coherent empty broker proof" in error
+        assert runner.risk.protective_exit_permitted is False
+
+        runner._unknown_submission_proof_at -= 6
+        safe, error = runner.permit_protective_exits_after_verification()
+
         assert safe is True
         assert error == ""
         assert runner.risk.paused is True
+        assert runner.risk.pause_reason == pause_reason
+        assert runner.risk.check().approved is False
         assert runner.risk.protective_exit_permitted is True
+        assert runner._risk_rejection_allows_action("BUY") is False
+        assert runner._risk_rejection_allows_action("SELL") is True
 
 
 class TestE2EOfflineFillRecovery:

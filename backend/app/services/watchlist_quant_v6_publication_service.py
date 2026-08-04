@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -70,15 +70,20 @@ from app.services.watchlist_quant_v6_evaluation_service import (
     QUANT_V6_SELECTION_RULE_VERSION,
     SESSION_INPUT_ROLE,
     QuantV6CandidateEvaluation,
+    QuantV6CohortMember,
     QuantV6HistoricalProvider,
     QuantV6PendingArtifactBinding,
     QuantV6RegistrationPlan,
-    evaluate_quant_v6_registration,
     validate_quant_v6_registration_plan,
 )
 from app.services.watchlist_quant_v6_deadline import (
     QuantV6EvaluationDeadline,
 )
+
+if TYPE_CHECKING:
+    from app.services.watchlist_quant_v6_spawn_supervisor import (
+        QuantV6PipelineMemoryFence,
+    )
 
 
 logger = logging.getLogger("auto_trade.watchlist_quant_v6_publication_service")
@@ -128,6 +133,35 @@ def _noop_evaluation_checkpoint() -> None:
     return None
 
 
+@dataclass(frozen=True)
+class _PipelineEvaluationCheckpoint:
+    """Compose the exact wall-clock deadline with a parent resource fence."""
+
+    evaluation_deadline: QuantV6EvaluationDeadline
+    resource_checkpoint: Callable[[], None]
+
+    def checkpoint(self) -> None:
+        # Preserve operator/deadline classification when both fences win.
+        self.evaluation_deadline.checkpoint()
+        self.resource_checkpoint()
+
+
+def _pipeline_evaluation_checkpoint(
+    evaluation_deadline: QuantV6EvaluationDeadline,
+    *,
+    resource_checkpoint: Callable[[], None],
+) -> QuantV6EvaluationDeadline:
+    # Publication helpers consume only the ``checkpoint`` contract. Keep their
+    # public deadline type stable while composing the parent-only RSS fence.
+    return cast(
+        QuantV6EvaluationDeadline,
+        _PipelineEvaluationCheckpoint(
+            evaluation_deadline=evaluation_deadline,
+            resource_checkpoint=resource_checkpoint,
+        ),
+    )
+
+
 class QuantV6PublicationError(RuntimeError):
     """Raised when a quant-v6 cohort cannot be published safely."""
 
@@ -152,6 +186,22 @@ class QuantV6PublicationReceipt:
     manifest_sha256: str
     binding_count: int
     created: bool
+
+
+@dataclass(frozen=True)
+class _PreparedCandidatePublication:
+    registration_identity_sha256: str
+    member: QuantV6CohortMember
+    bindings: tuple[QuantV6PendingArtifactBinding, ...]
+    artifacts: tuple[EncodedQuantV6Artifact, ...]
+    acquisition_outcome: dict[str, object]
+    assessment_count: int
+    session_input_count: int
+    event_count: int
+
+    @property
+    def binding_count(self) -> int:
+        return len(self.bindings)
 
 
 @dataclass(frozen=True)
@@ -1721,6 +1771,518 @@ def _validate_candidate_closure(
     _evaluation_checkpoint(evaluation_deadline)
 
 
+def _prepare_candidate_publication(
+    *,
+    plan: QuantV6RegistrationPlan,
+    evaluation: QuantV6CandidateEvaluation,
+    persisted_acquisition_outcome: Mapping[str, object] | None = None,
+    evaluation_deadline: QuantV6EvaluationDeadline | None = None,
+) -> _PreparedCandidatePublication:
+    """Fully replay and freeze one member without any database writes."""
+    _evaluation_checkpoint(evaluation_deadline)
+    if type(evaluation) is not QuantV6CandidateEvaluation:
+        raise QuantV6PublicationError(
+            "publication contains an unsupported evaluation type"
+        )
+    member = evaluation.member
+    if (
+        type(member) is not QuantV6CohortMember
+        or type(member.ordinal) is not int
+        or member.ordinal < 0
+        or member.ordinal >= len(plan.members)
+    ):
+        raise QuantV6PublicationError(
+            "candidate evaluation conflicts with the registration"
+        )
+    expected_member = plan.members[member.ordinal]
+    if (
+        type(member) is not type(expected_member)
+        or member.canonical_payload() != expected_member.canonical_payload()
+        or type(evaluation.recommended_action) is not str
+        or evaluation.recommended_action not in {"AVOID", "WATCH"}
+        or type(evaluation.blockers) is not tuple
+        or any(type(value) is not str for value in evaluation.blockers)
+        or type(evaluation.assessment_artifact_sha256) is not str
+    ):
+        raise QuantV6PublicationError(
+            "candidate evaluation conflicts with the registration"
+        )
+    for field in (
+        "covered_sessions",
+        "event_count",
+        "event_sessions",
+        "fetched_pages",
+        "fetched_raw_rows",
+        "fetched_accepted_bars",
+        "rejected_rows",
+    ):
+        value = getattr(evaluation, field)
+        if type(value) is not int or value < 0:
+            raise QuantV6PublicationError(
+                f"candidate {field} must be a non-negative integer"
+            )
+    if evaluation.fetched_pages < 1:
+        raise QuantV6PublicationError(
+            "candidate fetched page count must be positive"
+        )
+    if (
+        evaluation.fetched_accepted_bars + evaluation.rejected_rows
+        > evaluation.fetched_raw_rows
+    ):
+        raise QuantV6PublicationError(
+            "candidate accepted and rejected rows exceed fetched rows"
+        )
+
+    grids = _scheduled_session_grids(plan)
+    request_start_at = grids[0][1][0]
+    request_end_at = plan.data_cutoff_at.astimezone(timezone.utc)
+    if persisted_acquisition_outcome is None:
+        acquisition_projection = _fresh_acquisition_projection(
+            plan=plan,
+            evaluation=evaluation,
+            grids=grids,
+            request_start_at=request_start_at,
+            request_end_at=request_end_at,
+        )
+    else:
+        acquisition_projection = _projection_from_outcome(
+            persisted_acquisition_outcome,
+            plan=plan,
+            grids=grids,
+            label=(
+                f"persisted {evaluation.member.symbol} acquisition projection"
+            ),
+        )
+        expected_telemetry = {
+            "accepted_bars": evaluation.fetched_accepted_bars,
+            "market": evaluation.member.market,
+            "member_ordinal": evaluation.member.ordinal,
+            "pages": evaluation.fetched_pages,
+            "raw_rows": evaluation.fetched_raw_rows,
+            "rejected_rows": evaluation.rejected_rows,
+            "symbol": evaluation.member.symbol,
+        }
+        if any(
+            acquisition_projection.outcome[key] != value
+            or type(acquisition_projection.outcome[key]) is not type(value)
+            for key, value in expected_telemetry.items()
+        ):
+            raise QuantV6PublicationError(
+                "persisted acquisition projection conflicts with its member"
+            )
+    if type(evaluation.bindings) is not tuple or not evaluation.bindings:
+        raise QuantV6PublicationError(
+            "candidate evaluation requires immutable artifact bindings"
+        )
+
+    binding_by_key: dict[
+        tuple[str, int], QuantV6PendingArtifactBinding
+    ] = {}
+    decoded_by_key: dict[tuple[str, int], dict[str, Any]] = {}
+    decoded_artifacts_by_digest: dict[str, dict[str, Any]] = {}
+    artifacts: dict[str, EncodedQuantV6Artifact] = {}
+    seen_binding_digests: set[str] = set()
+    for binding in evaluation.bindings:
+        _evaluation_checkpoint(evaluation_deadline)
+        if type(binding) is not QuantV6PendingArtifactBinding:
+            raise QuantV6PublicationError(
+                "candidate contains an unsupported binding type"
+            )
+        if (
+            type(binding.member_ordinal) is not int
+            or type(binding.symbol) is not str
+            or type(binding.market) is not str
+            or type(binding.role) is not str
+            or type(binding.artifact_ordinal) is not int
+            or (
+                binding.session_date is not None
+                and type(binding.session_date) is not date
+            )
+            or type(binding.binding_sha256) is not str
+        ):
+            raise QuantV6PublicationError(
+                "binding envelope has unsupported field types"
+            )
+        expected_kind = _KIND_BY_ROLE.get(binding.role)
+        if (
+            binding.member_ordinal != expected_member.ordinal
+            or binding.symbol != expected_member.symbol
+            or binding.market != expected_member.market
+            or binding.artifact_ordinal < 0
+            or expected_kind is None
+            or binding.artifact.kind != expected_kind
+        ):
+            raise QuantV6PublicationError(
+                "binding identity conflicts with its registered member"
+            )
+        if binding.role == ASSESSMENT_ROLE and (
+            binding.artifact_ordinal != 0
+            or binding.session_date is not None
+        ):
+            raise QuantV6PublicationError(
+                "assessment binding identity is invalid"
+            )
+        if binding.role == SESSION_INPUT_ROLE and (
+            binding.artifact_ordinal >= len(plan.target_session_dates)
+            or binding.session_date
+            != plan.target_session_dates[binding.artifact_ordinal]
+        ):
+            raise QuantV6PublicationError(
+                "session input binding is outside the frozen schedule"
+            )
+        if binding.role == EVENT_ROLE and (
+            binding.session_date not in plan.target_session_dates
+        ):
+            raise QuantV6PublicationError(
+                "event binding is outside the frozen schedule"
+            )
+        key = (binding.role, binding.artifact_ordinal)
+        if key in binding_by_key:
+            raise QuantV6PublicationError(
+                "candidate contains a duplicate binding ordinal"
+            )
+        if binding.binding_sha256 in seen_binding_digests:
+            raise QuantV6PublicationError(
+                "cohort contains a duplicate binding identity"
+            )
+        expected_binding_digest = quant_v6_payload_sha256(
+            _binding_preimage(
+                registration_identity_sha256=plan.identity_sha256,
+                binding=binding,
+            )
+        )
+        if not _same_digest(binding.binding_sha256, expected_binding_digest):
+            raise QuantV6PublicationError(
+                "binding digest failed canonical replay"
+            )
+        existing_artifact = artifacts.get(binding.artifact.digest_sha256)
+        if existing_artifact is not None:
+            _compare_encoded_artifacts(
+                existing_artifact,
+                binding.artifact,
+                label="reused in-memory",
+            )
+            _evaluation_checkpoint(evaluation_deadline)
+        else:
+            decoded = _decode_and_verify_artifact(
+                binding.artifact,
+                label=f"{expected_member.symbol} {binding.role}",
+            )
+            _evaluation_checkpoint(evaluation_deadline)
+            artifacts[binding.artifact.digest_sha256] = binding.artifact
+            if binding.role != EVENT_ROLE:
+                decoded_artifacts_by_digest[
+                    binding.artifact.digest_sha256
+                ] = decoded
+        binding_by_key[key] = binding
+        # Event payloads are compared against regenerated canonical artifacts
+        # below, so retaining every decoded event would multiply peak memory.
+        if binding.role != EVENT_ROLE:
+            decoded = decoded_artifacts_by_digest.get(
+                binding.artifact.digest_sha256
+            )
+            if decoded is None:
+                decoded = _decode_and_verify_artifact(
+                    binding.artifact,
+                    label=f"{expected_member.symbol} {binding.role}",
+                )
+                _evaluation_checkpoint(evaluation_deadline)
+                decoded_artifacts_by_digest[
+                    binding.artifact.digest_sha256
+                ] = decoded
+            decoded_by_key[key] = decoded
+        seen_binding_digests.add(binding.binding_sha256)
+
+    if set(key for key in binding_by_key if key[0] == ASSESSMENT_ROLE) != {
+        (ASSESSMENT_ROLE, 0)
+    }:
+        raise QuantV6PublicationError(
+            "candidate requires exactly one assessment binding"
+        )
+    _validate_candidate_closure(
+        plan=plan,
+        evaluation=evaluation,
+        decoded_by_key=decoded_by_key,
+        binding_by_key=binding_by_key,
+        present_grid_starts=acquisition_projection.present_grid_starts,
+        evaluation_deadline=evaluation_deadline,
+    )
+    _evaluation_checkpoint(evaluation_deadline)
+    ordered_bindings = tuple(sorted(
+        evaluation.bindings,
+        key=lambda value: (
+            _ROLE_RANK[value.role],
+            value.artifact_ordinal,
+        ),
+    ))
+    assessment_count = sum(
+        binding.role == ASSESSMENT_ROLE for binding in ordered_bindings
+    )
+    session_input_count = sum(
+        binding.role == SESSION_INPUT_ROLE for binding in ordered_bindings
+    )
+    event_count = sum(
+        binding.role == EVENT_ROLE for binding in ordered_bindings
+    )
+    return _PreparedCandidatePublication(
+        registration_identity_sha256=plan.identity_sha256,
+        member=expected_member,
+        bindings=ordered_bindings,
+        artifacts=tuple(artifacts[key] for key in sorted(artifacts)),
+        acquisition_outcome=acquisition_projection.outcome,
+        assessment_count=assessment_count,
+        session_input_count=session_input_count,
+        event_count=event_count,
+    )
+
+
+def _assemble_prepared_publication(
+    *,
+    plan: QuantV6RegistrationPlan,
+    candidates: Sequence[_PreparedCandidatePublication],
+    evaluation_deadline: QuantV6EvaluationDeadline | None = None,
+) -> _PreparedPublication:
+    """Deterministically assemble fully verified member closures."""
+    _evaluation_checkpoint(evaluation_deadline)
+    normalized = tuple(candidates)
+    if len(normalized) != len(plan.members):
+        raise QuantV6PublicationError(
+            "publication requires exactly every registered member"
+        )
+    if any(type(value) is not _PreparedCandidatePublication for value in normalized):
+        raise QuantV6PublicationError(
+            "publication contains an unsupported prepared candidate type"
+        )
+    ordered_candidates = tuple(
+        sorted(normalized, key=lambda value: value.member.ordinal)
+    )
+    if [value.member.ordinal for value in ordered_candidates] != list(
+        range(len(plan.members))
+    ):
+        raise QuantV6PublicationError(
+            "publication member ordinals are incomplete or duplicated"
+        )
+    if len({value.member.symbol for value in ordered_candidates}) != len(
+        ordered_candidates
+    ):
+        raise QuantV6PublicationError(
+            "publication member symbols are duplicated"
+        )
+
+    grids = _scheduled_session_grids(plan)
+    request_start_at = grids[0][1][0]
+    request_end_at = plan.data_cutoff_at.astimezone(timezone.utc)
+    all_bindings: list[QuantV6PendingArtifactBinding] = []
+    artifacts: dict[str, EncodedQuantV6Artifact] = {}
+    seen_binding_digests: set[str] = set()
+    acquisition_outcomes: list[dict[str, object]] = []
+    assessment_count = 0
+    session_input_count = 0
+    event_count = 0
+    for expected_member, candidate in zip(
+        plan.members,
+        ordered_candidates,
+        strict=True,
+    ):
+        _evaluation_checkpoint(evaluation_deadline)
+        if (
+            not _same_digest(
+                candidate.registration_identity_sha256,
+                plan.identity_sha256,
+            )
+            or type(candidate.member) is not type(expected_member)
+            or candidate.member.canonical_payload()
+            != expected_member.canonical_payload()
+        ):
+            raise QuantV6PublicationError(
+                "prepared candidate conflicts with the registration"
+            )
+        projection = _projection_from_outcome(
+            candidate.acquisition_outcome,
+            plan=plan,
+            grids=grids,
+            label=(
+                f"prepared {expected_member.symbol} acquisition projection"
+            ),
+        )
+        expected_outcome_identity: Mapping[str, object] = {
+            "market": expected_member.market,
+            "member_ordinal": expected_member.ordinal,
+            "symbol": expected_member.symbol,
+        }
+        if any(
+            projection.outcome[key] != value
+            or type(projection.outcome[key]) is not type(value)
+            for key, value in expected_outcome_identity.items()
+        ):
+            raise QuantV6PublicationError(
+                "prepared acquisition projection conflicts with its member"
+            )
+        if type(candidate.bindings) is not tuple or not candidate.bindings:
+            raise QuantV6PublicationError(
+                "prepared candidate requires immutable artifact bindings"
+            )
+        candidate_artifacts: dict[str, EncodedQuantV6Artifact] = {}
+        if type(candidate.artifacts) is not tuple:
+            raise QuantV6PublicationError(
+                "prepared candidate requires immutable artifacts"
+            )
+        for artifact in candidate.artifacts:
+            _evaluation_checkpoint(evaluation_deadline)
+            if type(artifact) is not EncodedQuantV6Artifact:
+                raise QuantV6PublicationError(
+                    "prepared candidate contains an unsupported artifact type"
+                )
+            if artifact.digest_sha256 in candidate_artifacts:
+                raise QuantV6PublicationError(
+                    "prepared candidate contains a duplicate artifact"
+                )
+            candidate_artifacts[artifact.digest_sha256] = artifact
+
+        candidate_counts = {
+            ASSESSMENT_ROLE: 0,
+            SESSION_INPUT_ROLE: 0,
+            EVENT_ROLE: 0,
+        }
+        candidate_artifact_digests: set[str] = set()
+        for binding in candidate.bindings:
+            _evaluation_checkpoint(evaluation_deadline)
+            if type(binding) is not QuantV6PendingArtifactBinding:
+                raise QuantV6PublicationError(
+                    "prepared candidate contains an unsupported binding type"
+                )
+            expected_kind = _KIND_BY_ROLE.get(binding.role)
+            if (
+                binding.member_ordinal != expected_member.ordinal
+                or binding.symbol != expected_member.symbol
+                or binding.market != expected_member.market
+                or expected_kind is None
+                or binding.artifact.kind != expected_kind
+                or binding.artifact_ordinal < 0
+            ):
+                raise QuantV6PublicationError(
+                    "prepared binding conflicts with its registered member"
+                )
+            if binding.binding_sha256 in seen_binding_digests:
+                raise QuantV6PublicationError(
+                    "cohort contains a duplicate binding identity"
+                )
+            expected_binding_digest = quant_v6_payload_sha256(
+                _binding_preimage(
+                    registration_identity_sha256=plan.identity_sha256,
+                    binding=binding,
+                )
+            )
+            if not _same_digest(
+                binding.binding_sha256,
+                expected_binding_digest,
+            ):
+                raise QuantV6PublicationError(
+                    "binding digest failed canonical replay"
+                )
+            prepared_artifact = candidate_artifacts.get(
+                binding.artifact.digest_sha256
+            )
+            if prepared_artifact is None:
+                raise QuantV6PublicationError(
+                    "prepared candidate artifact closure is incomplete"
+                )
+            _compare_encoded_artifacts(
+                prepared_artifact,
+                binding.artifact,
+                label="prepared candidate",
+            )
+            existing_artifact = artifacts.get(binding.artifact.digest_sha256)
+            if existing_artifact is None:
+                artifacts[binding.artifact.digest_sha256] = binding.artifact
+            else:
+                _compare_encoded_artifacts(
+                    existing_artifact,
+                    binding.artifact,
+                    label="reused prepared",
+                )
+            seen_binding_digests.add(binding.binding_sha256)
+            candidate_artifact_digests.add(binding.artifact.digest_sha256)
+            candidate_counts[binding.role] += 1
+            all_bindings.append(binding)
+        if candidate_artifact_digests != set(candidate_artifacts):
+            raise QuantV6PublicationError(
+                "prepared candidate contains an unbound artifact"
+            )
+        expected_counts = (
+            candidate.assessment_count,
+            candidate.session_input_count,
+            candidate.event_count,
+        )
+        if any(type(value) is not int or value < 0 for value in expected_counts):
+            raise QuantV6PublicationError(
+                "prepared candidate artifact counts are invalid"
+            )
+        actual_counts = (
+            candidate_counts[ASSESSMENT_ROLE],
+            candidate_counts[SESSION_INPUT_ROLE],
+            candidate_counts[EVENT_ROLE],
+        )
+        if expected_counts != actual_counts or candidate.assessment_count != 1:
+            raise QuantV6PublicationError(
+                "prepared candidate artifact counts conflict with bindings"
+            )
+        assessment_count += candidate.assessment_count
+        session_input_count += candidate.session_input_count
+        event_count += candidate.event_count
+        acquisition_outcomes.append(projection.outcome)
+
+    ordered_bindings = tuple(sorted(
+        all_bindings,
+        key=lambda value: (
+            value.member_ordinal,
+            _ROLE_RANK[value.role],
+            value.artifact_ordinal,
+        ),
+    ))
+    manifest_sha256 = _manifest_sha256(
+        registration_identity_sha256=plan.identity_sha256,
+        binding_payloads=tuple(
+            _binding_payload(binding) for binding in ordered_bindings
+        ),
+        evaluation_deadline=evaluation_deadline,
+    )
+    if assessment_count != len(plan.members):
+        raise QuantV6PublicationError(
+            "publication assessment count does not match registration"
+        )
+    publication_payload = _publication_payload(
+        registration_identity_sha256=plan.identity_sha256,
+        registered_member_count=len(plan.members),
+        manifest_sha256=manifest_sha256,
+        assessment_count=assessment_count,
+        session_input_count=session_input_count,
+        event_count=event_count,
+        acquisition_outcomes=acquisition_outcomes,
+        request_start_at=request_start_at,
+        request_end_at=request_end_at,
+    )
+    publication_bytes = canonical_quant_v6_json(publication_payload)
+    if len(publication_bytes) > MAX_QUANT_V6_ARTIFACT_RAW_BYTES:
+        raise QuantV6PublicationError(
+            "publication JSON is outside the bounded root size limit"
+        )
+    _evaluation_checkpoint(evaluation_deadline)
+    return _PreparedPublication(
+        bindings=ordered_bindings,
+        artifacts=tuple(artifacts[key] for key in sorted(artifacts)),
+        manifest_sha256=manifest_sha256,
+        publication_json=publication_bytes.decode("utf-8"),
+        identity_sha256=hashlib.sha256(publication_bytes).hexdigest(),
+        assessment_count=assessment_count,
+        session_input_count=session_input_count,
+        event_count=event_count,
+        acquisition_outcomes=tuple(acquisition_outcomes),
+        request_start_at=request_start_at,
+        request_end_at=request_end_at,
+    )
+
+
 def _prepare_publication(
     *,
     plan: QuantV6RegistrationPlan,
@@ -1761,10 +2323,6 @@ def _prepare_publication(
         raise QuantV6PublicationError(
             "publication member symbols are duplicated"
         )
-
-    grids = _scheduled_session_grids(plan)
-    request_start_at = grids[0][1][0]
-    request_end_at = plan.data_cutoff_at.astimezone(timezone.utc)
     persisted_outcomes = (
         None
         if persisted_acquisition_outcomes is None
@@ -1777,296 +2335,23 @@ def _prepare_publication(
         raise QuantV6PublicationError(
             "persisted acquisition projections are incomplete"
         )
-
-    all_bindings: list[QuantV6PendingArtifactBinding] = []
-    artifacts: dict[str, EncodedQuantV6Artifact] = {}
-    seen_binding_digests: set[str] = set()
-    acquisition_outcomes: list[dict[str, object]] = []
-    for expected_member, evaluation in zip(
-        plan.members,
-        ordered_evaluations,
-        strict=True,
-    ):
-        _evaluation_checkpoint(evaluation_deadline)
-        if (
-            type(evaluation.member) is not type(expected_member)
-            or evaluation.member.canonical_payload()
-            != expected_member.canonical_payload()
-            or type(evaluation.recommended_action) is not str
-            or evaluation.recommended_action not in {"AVOID", "WATCH"}
-            or type(evaluation.blockers) is not tuple
-            or any(type(value) is not str for value in evaluation.blockers)
-            or type(evaluation.assessment_artifact_sha256) is not str
-        ):
-            raise QuantV6PublicationError(
-                "candidate evaluation conflicts with the registration"
-            )
-        for field in (
-            "covered_sessions",
-            "event_count",
-            "event_sessions",
-            "fetched_pages",
-            "fetched_raw_rows",
-            "fetched_accepted_bars",
-            "rejected_rows",
-        ):
-            value = getattr(evaluation, field)
-            if type(value) is not int or value < 0:
-                raise QuantV6PublicationError(
-                    f"candidate {field} must be a non-negative integer"
-                )
-        if evaluation.fetched_pages < 1:
-            raise QuantV6PublicationError(
-                "candidate fetched page count must be positive"
-            )
-        if (
-            evaluation.fetched_accepted_bars + evaluation.rejected_rows
-            > evaluation.fetched_raw_rows
-        ):
-            raise QuantV6PublicationError(
-                "candidate accepted and rejected rows exceed fetched rows"
-            )
-        if persisted_outcomes is None:
-            acquisition_projection = _fresh_acquisition_projection(
-                plan=plan,
-                evaluation=evaluation,
-                grids=grids,
-                request_start_at=request_start_at,
-                request_end_at=request_end_at,
-            )
-        else:
-            persisted_outcome = persisted_outcomes[expected_member.ordinal]
-            acquisition_projection = _projection_from_outcome(
-                persisted_outcome,
-                plan=plan,
-                grids=grids,
-                label=(
-                    f"persisted {evaluation.member.symbol} acquisition "
-                    "projection"
-                ),
-            )
-            expected_telemetry = {
-                "accepted_bars": evaluation.fetched_accepted_bars,
-                "market": evaluation.member.market,
-                "member_ordinal": evaluation.member.ordinal,
-                "pages": evaluation.fetched_pages,
-                "raw_rows": evaluation.fetched_raw_rows,
-                "rejected_rows": evaluation.rejected_rows,
-                "symbol": evaluation.member.symbol,
-            }
-            if any(
-                acquisition_projection.outcome[key] != value
-                or type(acquisition_projection.outcome[key]) is not type(value)
-                for key, value in expected_telemetry.items()
-            ):
-                raise QuantV6PublicationError(
-                    "persisted acquisition projection conflicts with its member"
-                )
-        acquisition_outcomes.append(acquisition_projection.outcome)
-        if type(evaluation.bindings) is not tuple or not evaluation.bindings:
-            raise QuantV6PublicationError(
-                "candidate evaluation requires immutable artifact bindings"
-            )
-
-        binding_by_key: dict[
-            tuple[str, int], QuantV6PendingArtifactBinding
-        ] = {}
-        decoded_by_key: dict[tuple[str, int], dict[str, Any]] = {}
-        decoded_artifacts_by_digest: dict[str, dict[str, Any]] = {}
-        for binding in evaluation.bindings:
-            _evaluation_checkpoint(evaluation_deadline)
-            if type(binding) is not QuantV6PendingArtifactBinding:
-                raise QuantV6PublicationError(
-                    "candidate contains an unsupported binding type"
-                )
-            if (
-                type(binding.member_ordinal) is not int
-                or type(binding.symbol) is not str
-                or type(binding.market) is not str
-                or type(binding.role) is not str
-                or type(binding.artifact_ordinal) is not int
-                or (
-                    binding.session_date is not None
-                    and type(binding.session_date) is not date
-                )
-                or type(binding.binding_sha256) is not str
-            ):
-                raise QuantV6PublicationError(
-                    "binding envelope has unsupported field types"
-                )
-            expected_kind = _KIND_BY_ROLE.get(binding.role)
-            if (
-                binding.member_ordinal != expected_member.ordinal
-                or binding.symbol != expected_member.symbol
-                or binding.market != expected_member.market
-                or binding.artifact_ordinal < 0
-                or expected_kind is None
-                or binding.artifact.kind != expected_kind
-            ):
-                raise QuantV6PublicationError(
-                    "binding identity conflicts with its registered member"
-                )
-            if binding.role == ASSESSMENT_ROLE and (
-                binding.artifact_ordinal != 0
-                or binding.session_date is not None
-            ):
-                raise QuantV6PublicationError(
-                    "assessment binding identity is invalid"
-                )
-            if binding.role == SESSION_INPUT_ROLE and (
-                binding.artifact_ordinal >= len(plan.target_session_dates)
-                or binding.session_date
-                != plan.target_session_dates[binding.artifact_ordinal]
-            ):
-                raise QuantV6PublicationError(
-                    "session input binding is outside the frozen schedule"
-                )
-            if binding.role == EVENT_ROLE and (
-                binding.session_date not in plan.target_session_dates
-            ):
-                raise QuantV6PublicationError(
-                    "event binding is outside the frozen schedule"
-                )
-            key = (binding.role, binding.artifact_ordinal)
-            if key in binding_by_key:
-                raise QuantV6PublicationError(
-                    "candidate contains a duplicate binding ordinal"
-                )
-            if binding.binding_sha256 in seen_binding_digests:
-                raise QuantV6PublicationError(
-                    "cohort contains a duplicate binding identity"
-                )
-            expected_binding_digest = quant_v6_payload_sha256(
-                _binding_preimage(
-                    registration_identity_sha256=plan.identity_sha256,
-                    binding=binding,
-                )
-            )
-            if not _same_digest(
-                binding.binding_sha256,
-                expected_binding_digest,
-            ):
-                raise QuantV6PublicationError(
-                    "binding digest failed canonical replay"
-                )
-            existing_artifact = artifacts.get(binding.artifact.digest_sha256)
-            if existing_artifact is not None:
-                _compare_encoded_artifacts(
-                    existing_artifact,
-                    binding.artifact,
-                    label="reused in-memory",
-                )
-                _evaluation_checkpoint(evaluation_deadline)
-            else:
-                decoded = _decode_and_verify_artifact(
-                    binding.artifact,
-                    label=f"{expected_member.symbol} {binding.role}",
-                )
-                _evaluation_checkpoint(evaluation_deadline)
-                artifacts[binding.artifact.digest_sha256] = binding.artifact
-                if binding.role != EVENT_ROLE:
-                    decoded_artifacts_by_digest[
-                        binding.artifact.digest_sha256
-                    ] = decoded
-            binding_by_key[key] = binding
-            # Event payloads are compared against regenerated canonical
-            # artifacts below, so retaining every decoded event would multiply
-            # peak cohort memory without adding validation strength.
-            if binding.role != EVENT_ROLE:
-                decoded = decoded_artifacts_by_digest.get(
-                    binding.artifact.digest_sha256
-                )
-                if decoded is None:
-                    decoded = _decode_and_verify_artifact(
-                        binding.artifact,
-                        label=f"{expected_member.symbol} {binding.role}",
-                    )
-                    _evaluation_checkpoint(evaluation_deadline)
-                    decoded_artifacts_by_digest[
-                        binding.artifact.digest_sha256
-                    ] = decoded
-                decoded_by_key[key] = decoded
-            seen_binding_digests.add(binding.binding_sha256)
-            all_bindings.append(binding)
-
-        if set(key for key in binding_by_key if key[0] == ASSESSMENT_ROLE) != {
-            (ASSESSMENT_ROLE, 0)
-        }:
-            raise QuantV6PublicationError(
-                "candidate requires exactly one assessment binding"
-            )
-        _validate_candidate_closure(
+    candidates = tuple(
+        _prepare_candidate_publication(
             plan=plan,
             evaluation=evaluation,
-            decoded_by_key=decoded_by_key,
-            binding_by_key=binding_by_key,
-            present_grid_starts=(
-                acquisition_projection.present_grid_starts
+            persisted_acquisition_outcome=(
+                None
+                if persisted_outcomes is None
+                else persisted_outcomes[evaluation.member.ordinal]
             ),
             evaluation_deadline=evaluation_deadline,
         )
-        _evaluation_checkpoint(evaluation_deadline)
-
-    ordered_bindings = tuple(sorted(
-        all_bindings,
-        key=lambda value: (
-            value.member_ordinal,
-            _ROLE_RANK[value.role],
-            value.artifact_ordinal,
-        ),
-    ))
-    payload_list: list[dict[str, object]] = []
-    assessment_count = 0
-    session_input_count = 0
-    event_count = 0
-    for binding in ordered_bindings:
-        _evaluation_checkpoint(evaluation_deadline)
-        payload_list.append(_binding_payload(binding))
-        if binding.role == ASSESSMENT_ROLE:
-            assessment_count += 1
-        elif binding.role == SESSION_INPUT_ROLE:
-            session_input_count += 1
-        elif binding.role == EVENT_ROLE:
-            event_count += 1
-    payloads = tuple(payload_list)
-    manifest_sha256 = _manifest_sha256(
-        registration_identity_sha256=plan.identity_sha256,
-        binding_payloads=payloads,
+        for evaluation in ordered_evaluations
+    )
+    prepared = _assemble_prepared_publication(
+        plan=plan,
+        candidates=candidates,
         evaluation_deadline=evaluation_deadline,
-    )
-    if assessment_count != len(plan.members):
-        raise QuantV6PublicationError(
-            "publication assessment count does not match registration"
-        )
-    publication_payload = _publication_payload(
-        registration_identity_sha256=plan.identity_sha256,
-        registered_member_count=len(plan.members),
-        manifest_sha256=manifest_sha256,
-        assessment_count=assessment_count,
-        session_input_count=session_input_count,
-        event_count=event_count,
-        acquisition_outcomes=acquisition_outcomes,
-        request_start_at=request_start_at,
-        request_end_at=request_end_at,
-    )
-    publication_bytes = canonical_quant_v6_json(publication_payload)
-    if len(publication_bytes) > MAX_QUANT_V6_ARTIFACT_RAW_BYTES:
-        raise QuantV6PublicationError(
-            "publication JSON is outside the bounded root size limit"
-        )
-    _evaluation_checkpoint(evaluation_deadline)
-    prepared = _PreparedPublication(
-        bindings=ordered_bindings,
-        artifacts=tuple(artifacts[key] for key in sorted(artifacts)),
-        manifest_sha256=manifest_sha256,
-        publication_json=publication_bytes.decode("utf-8"),
-        identity_sha256=hashlib.sha256(publication_bytes).hexdigest(),
-        assessment_count=assessment_count,
-        session_input_count=session_input_count,
-        event_count=event_count,
-        acquisition_outcomes=tuple(acquisition_outcomes),
-        request_start_at=request_start_at,
-        request_end_at=request_end_at,
     )
     elapsed_ns = max(0, time.monotonic_ns() - started_at)
     logger.info(
@@ -2937,6 +3222,20 @@ class WatchlistQuantV6PublicationService:
             evaluations=evaluations,
             evaluation_deadline=evaluation_deadline,
         )
+        return self._persist_prepared_publication(
+            plan=plan,
+            prepared=prepared,
+            evaluation_deadline=evaluation_deadline,
+        )
+
+    def _persist_prepared_publication(
+        self,
+        *,
+        plan: QuantV6RegistrationPlan,
+        prepared: _PreparedPublication,
+        evaluation_deadline: QuantV6EvaluationDeadline | None = None,
+    ) -> QuantV6PublicationReceipt:
+        """Atomically persist one fully assembled publication closure."""
         for attempt in range(2):
             _evaluation_checkpoint(evaluation_deadline)
             session = self._session_factory()
@@ -3146,30 +3445,83 @@ class WatchlistQuantV6PublicationService:
         plan: QuantV6RegistrationPlan,
         provider: QuantV6HistoricalProvider,
         evaluation_deadline: QuantV6EvaluationDeadline | None = None,
+        compute_workers: int = 4,
+        pipeline_memory_limit_mib: int = 2_048,
+        pipeline_memory_fence: QuantV6PipelineMemoryFence | None = None,
     ) -> QuantV6PublicationReceipt:
         """Run the frozen server evaluator only after registration commits."""
-        self.register_plan(
-            plan,
+        if type(compute_workers) is not int or not 2 <= compute_workers <= 4:
+            raise ValueError("compute_workers must be between 2 and 4")
+        if (
+            type(pipeline_memory_limit_mib) is not int
+            or not 512 <= pipeline_memory_limit_mib <= 8_192
+        ):
+            raise ValueError(
+                "pipeline_memory_limit_mib must be between 512 and 8192"
+            )
+        if evaluation_deadline is None:
+            raise ValueError(
+                "spawn evaluation requires an explicit evaluation_deadline"
+            )
+        from app.services.watchlist_quant_v6_spawn_supervisor import (
+            QuantV6PipelineMemoryFence,
+            validate_quant_v6_spawn_provider,
+        )
+
+        validate_quant_v6_spawn_provider(
+            provider,
             evaluation_deadline=evaluation_deadline,
         )
-        _evaluation_checkpoint(evaluation_deadline)
+        if pipeline_memory_fence is None:
+            memory_fence = QuantV6PipelineMemoryFence.capture(
+                memory_limit_mib=pipeline_memory_limit_mib,
+            )
+        elif type(pipeline_memory_fence) is not QuantV6PipelineMemoryFence:
+            raise TypeError(
+                "pipeline_memory_fence must be a QuantV6PipelineMemoryFence"
+            )
+        else:
+            memory_fence = pipeline_memory_fence
+        if memory_fence.memory_limit_bytes != (
+            pipeline_memory_limit_mib * 1024 * 1024
+        ):
+            raise ValueError(
+                "pipeline_memory_fence conflicts with "
+                "pipeline_memory_limit_mib"
+            )
+        pipeline_checkpoint = _pipeline_evaluation_checkpoint(
+            evaluation_deadline,
+            resource_checkpoint=memory_fence.checkpoint,
+        )
+        self.register_plan(
+            plan,
+            evaluation_deadline=pipeline_checkpoint,
+        )
+        _evaluation_checkpoint(pipeline_checkpoint)
         existing = self._load_trusted_existing_publication(
             plan=plan,
-            evaluation_deadline=evaluation_deadline,
+            evaluation_deadline=pipeline_checkpoint,
         )
         if existing is not None:
             return existing
-        _evaluation_checkpoint(evaluation_deadline)
-        evaluations = evaluate_quant_v6_registration(
+        _evaluation_checkpoint(pipeline_checkpoint)
+        from app.services.watchlist_quant_v6_spawn_supervisor import (
+            evaluate_prepare_quant_v6_registration_spawn,
+        )
+
+        prepared = evaluate_prepare_quant_v6_registration_spawn(
             registration=plan,
             provider=provider,
             evaluation_deadline=evaluation_deadline,
+            worker_count=compute_workers,
+            memory_limit_mib=pipeline_memory_limit_mib,
+            memory_fence=memory_fence,
         )
-        _evaluation_checkpoint(evaluation_deadline)
-        return self.publish_registration(
+        _evaluation_checkpoint(pipeline_checkpoint)
+        return self._persist_prepared_publication(
             plan=plan,
-            evaluations=evaluations,
-            evaluation_deadline=evaluation_deadline,
+            prepared=prepared,
+            evaluation_deadline=pipeline_checkpoint,
         )
 
 

@@ -16,7 +16,7 @@ import pytest
 
 from app import database
 from app import runner as runner_module
-from app.core.broker import OrderResult, Position, Quote
+from app.core.broker import OrderResult, OrderStatusResult, Position, Quote
 from app.core.engine import EngineSnapshot, EngineState, StrategyParams
 from app.runner import (
     AppRunner,
@@ -564,6 +564,155 @@ class TestAppRunner:
         assert runner.risk.paused is False
         assert runner.risk.entry_reconciliation_count == 0
 
+    def test_quote_retries_persisted_opening_reduction_after_auto_permission(
+        self,
+        monkeypatch,
+    ) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.filled = False
+                self.submitted: list[
+                    tuple[str, str, Decimal, Decimal]
+                ] = []
+
+            def get_positions(self) -> list[Position]:
+                if self.filled:
+                    return []
+                return [
+                    Position(
+                        "ISRG.US",
+                        "LONG",
+                        Decimal("704"),
+                        Decimal("371.49"),
+                    )
+                ]
+
+            @staticmethod
+            def get_quotes(symbols: list[str]) -> list[Quote]:
+                return [
+                    Quote(
+                        symbols[0],
+                        368.1,
+                        368.0,
+                        368.2,
+                        _fresh_timestamp(),
+                    )
+                ]
+
+            def submit_limit_order(
+                self,
+                symbol: str,
+                side: str,
+                quantity: Decimal,
+                price: Decimal,
+            ) -> OrderResult:
+                self.submitted.append((symbol, side, quantity, price))
+                self.filled = True
+                return OrderResult(
+                    "opening-protective-exit",
+                    symbol,
+                    side,
+                    quantity,
+                    price,
+                    "FILLED",
+                )
+
+        runner = self._runner_with_primary_quote_runtime()
+        runner._running = True
+        runtime = runner._build_symbol_runtime("ISRG.US", "US")
+        runtime.engine.state = EngineState.LONG
+        runner._symbol_runtimes["ISRG.US"] = runtime
+        runner._opening_execution_policies = {
+            "ISRG.US": _OpeningExecutionPolicy(
+                execution_id=7,
+                symbol="ISRG.US",
+                status="EXITING",
+                stop_loss_pct=4.0,
+                max_holding_minutes=60,
+                reference_entry_price=371.49,
+                max_price_deviation_bps=100.0,
+            )
+        }
+        runner._reduction_intents["ISRG.US"] = _ReductionIntent(
+            action="SELL",
+            cause="TIME_STOP",
+            reason="maximum holding time reached: 60 minutes",
+            trigger_price=368.1,
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=30),
+        )
+        runner._trade_svc.load_tracked_entries({
+            "ISRG.US": (
+                Decimal("704"),
+                Decimal("261528.96"),
+                "LONG",
+                datetime.now(timezone.utc) - timedelta(hours=24),
+            )
+        })
+        broker = Broker()
+        runner.broker = cast(Any, broker)
+        runner.notifier = _NoopNotifier()
+        runner._trade_svc._record_order = lambda *args: None
+        runner._trade_svc._update_order_status = lambda *args, **kwargs: None
+        runner._trade_svc._record_risk_event = lambda reason: None
+        runner._trade_svc._record_order_skipped = lambda *args: None
+        runner._trade_svc._on_fill = None
+        pause_reason = "ORDER_EXECUTION_BLOCKED: operator review"
+        runner.risk.pause(pause_reason, auto_resumable=False)
+        runner._last_order_sync_succeeded = True
+        monkeypatch.setattr(
+            runner,
+            "sync_today_orders_from_broker",
+            lambda *, force: 0,
+        )
+        monkeypatch.setattr(
+            runner,
+            "_protective_exit_runtime_health",
+            lambda: (True, ""),
+        )
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+        completed: list[str] = []
+
+        def complete_reduction(
+            symbol: str,
+            *,
+            cause: str,
+            reason: str,
+        ) -> None:
+            runner._reduction_intents.pop(symbol, None)
+            completed.append(cause)
+
+        monkeypatch.setattr(runner, "_complete_reduction", complete_reduction)
+        quote = Quote(
+            "ISRG.US",
+            368.1,
+            368.0,
+            368.2,
+            _fresh_timestamp(),
+        )
+
+        runner._on_quote(quote)
+
+        assert broker.submitted == []
+        assert runner.risk.paused is True
+        assert runner.risk.protective_exit_permitted is False
+        assert runner._risk_rejection_allows_action("BUY") is False
+
+        runner._protective_reduction_proof_at -= 6
+        runner._on_quote(quote)
+
+        assert broker.submitted == [
+            (
+                "ISRG.US",
+                "SELL",
+                Decimal("704"),
+                Decimal("368.00"),
+            )
+        ]
+        assert completed == ["TIME_STOP"]
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason == pause_reason
+        assert runner._risk_rejection_allows_action("BUY") is False
+
     def test_post_fill_waits_for_all_concurrent_replays_before_resuming(
         self,
         monkeypatch,
@@ -886,6 +1035,389 @@ class TestAppRunner:
         assert "healthy quote loop" in error
         assert runner.risk.protective_exit_permitted is False
 
+    def test_protective_only_verification_allows_managed_opening_reduction(
+        self,
+        monkeypatch,
+    ) -> None:
+        class Broker:
+            @staticmethod
+            def get_positions() -> list[Position]:
+                return [
+                    Position(
+                        "ISRG.US",
+                        "LONG",
+                        Decimal("704"),
+                        Decimal("371.49"),
+                    )
+                ]
+
+        runner = self._runner_with_primary_quote_runtime()
+        runner._symbol_runtimes["ISRG.US"] = runner._build_symbol_runtime(
+            "ISRG.US",
+            "US",
+        )
+        runner._opening_execution_policies = {
+            "ISRG.US": _OpeningExecutionPolicy(
+                execution_id=7,
+                symbol="ISRG.US",
+                status="EXITING",
+                stop_loss_pct=4.0,
+                max_holding_minutes=60,
+                reference_entry_price=371.49,
+                max_price_deviation_bps=100.0,
+            )
+        }
+        runner._reduction_intents["ISRG.US"] = _ReductionIntent(
+            action="SELL",
+            cause="TIME_STOP",
+            reason="maximum holding time reached: 60 minutes",
+            trigger_price=368.1,
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=30),
+        )
+        runner._trade_svc.load_tracked_entries({
+            "ISRG.US": (
+                Decimal("704"),
+                Decimal("261528.96"),
+                "LONG",
+                datetime.now(timezone.utc) - timedelta(hours=24),
+            )
+        })
+        runner.broker = cast(Any, Broker())
+        runner.risk.pause(
+            "ORDER_EXECUTION_BLOCKED: operator review",
+            auto_resumable=False,
+        )
+        runner._last_order_sync_succeeded = True
+        monkeypatch.setattr(
+            runner,
+            "sync_today_orders_from_broker",
+            lambda *, force: 0,
+        )
+        monkeypatch.setattr(
+            runner,
+            "_protective_exit_runtime_health",
+            lambda: (True, ""),
+        )
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+        runner._remember_quote(
+            Quote(
+                "ISRG.US",
+                368.1,
+                368.0,
+                368.2,
+                _fresh_timestamp(),
+            )
+        )
+
+        safe, error = runner.verify_operational_resume(
+            require_complete_pnl=False,
+        )
+        assert safe is False
+        assert error == (
+            "broker exposure exists outside the primary strategy: ISRG.US"
+        )
+
+        safe, error = runner.permit_protective_exits_after_verification()
+
+        assert safe is True
+        assert error == ""
+        assert runner.risk.paused is True
+        assert runner.risk.protective_exit_permitted is True
+        assert runner._risk_rejection_allows_action("BUY") is False
+        assert runner._risk_rejection_allows_action("SELL") is True
+
+    @pytest.mark.parametrize(
+        ("case", "expected_error"),
+        [
+            ("UNRELATED", "outside the verified protective-exit scope"),
+            ("SIDE_MISMATCH", "does not match its durable tracked entry"),
+            ("QUANTITY_MISMATCH", "does not match its durable tracked entry"),
+            ("STALE_QUOTE", "fresh trusted quote is unavailable for ISRG.US"),
+        ],
+    )
+    def test_protective_only_verification_rejects_unmanaged_or_incoherent_exposure(
+        self,
+        monkeypatch,
+        case: str,
+        expected_error: str,
+    ) -> None:
+        broker_symbol = "MSFT.US" if case == "UNRELATED" else "ISRG.US"
+        broker_side = "SHORT" if case == "SIDE_MISMATCH" else "LONG"
+        broker_quantity = (
+            Decimal("703") if case == "QUANTITY_MISMATCH" else Decimal("704")
+        )
+
+        class Broker:
+            @staticmethod
+            def get_positions() -> list[Position]:
+                return [
+                    Position(
+                        broker_symbol,
+                        broker_side,
+                        broker_quantity,
+                        Decimal("371.49"),
+                    )
+                ]
+
+        runner = self._runner_with_primary_quote_runtime()
+        runner._symbol_runtimes["ISRG.US"] = runner._build_symbol_runtime(
+            "ISRG.US",
+            "US",
+        )
+        runner._opening_execution_policies = {
+            "ISRG.US": _OpeningExecutionPolicy(
+                execution_id=7,
+                symbol="ISRG.US",
+                status="EXITING",
+                stop_loss_pct=4.0,
+                max_holding_minutes=60,
+                reference_entry_price=371.49,
+                max_price_deviation_bps=100.0,
+            )
+        }
+        runner._reduction_intents["ISRG.US"] = _ReductionIntent(
+            action="SELL",
+            cause="TIME_STOP",
+            reason="maximum holding time reached: 60 minutes",
+            trigger_price=368.1,
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=30),
+        )
+        runner._trade_svc.load_tracked_entries({
+            "ISRG.US": (
+                Decimal("704"),
+                Decimal("261528.96"),
+                "LONG",
+                datetime.now(timezone.utc) - timedelta(hours=24),
+            )
+        })
+        runner.broker = cast(Any, Broker())
+        runner.risk.pause(
+            "ORDER_EXECUTION_BLOCKED: operator review",
+            auto_resumable=False,
+        )
+        runner._last_order_sync_succeeded = True
+        monkeypatch.setattr(
+            runner,
+            "sync_today_orders_from_broker",
+            lambda *, force: 0,
+        )
+        monkeypatch.setattr(
+            runner,
+            "_protective_exit_runtime_health",
+            lambda: (True, ""),
+        )
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+        if case != "STALE_QUOTE":
+            runner._remember_quote(
+                Quote(
+                    broker_symbol,
+                    368.1,
+                    368.0,
+                    368.2,
+                    _fresh_timestamp(),
+                )
+            )
+
+        safe, error = runner.permit_protective_exits_after_verification()
+
+        assert safe is False
+        assert expected_error in error
+        assert runner.risk.paused is True
+        assert runner.risk.protective_exit_permitted is False
+
+    @pytest.mark.parametrize("hazard", ["PENDING", "KILL_SWITCH"])
+    def test_protective_only_verification_rejects_pending_or_kill_switch(
+        self,
+        monkeypatch,
+        hazard: str,
+    ) -> None:
+        class Broker:
+            @staticmethod
+            def get_positions() -> list[Position]:
+                return []
+
+        runner = self._runner_with_primary_quote_runtime()
+        runner.broker = cast(Any, Broker())
+        runner.risk.pause(
+            "ORDER_EXECUTION_BLOCKED: operator review",
+            auto_resumable=False,
+        )
+        runner._last_order_sync_succeeded = True
+        if hazard == "PENDING":
+            runner._unresolved_live_order_ids = ["pending-1"]
+        else:
+            runner.risk.enable_kill_switch("operator stop")
+        monkeypatch.setattr(
+            runner,
+            "sync_today_orders_from_broker",
+            lambda *, force: 0,
+        )
+        monkeypatch.setattr(
+            runner,
+            "_protective_exit_runtime_health",
+            lambda: (True, ""),
+        )
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+        safe, error = runner.permit_protective_exits_after_verification()
+
+        assert safe is False
+        if hazard == "PENDING":
+            assert "pending-1" in error
+        else:
+            assert "kill switch" in error
+        assert runner.risk.protective_exit_permitted is False
+
+    def test_persisted_reduction_auto_proof_rejects_same_reason_aba(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = self._runner_with_primary_quote_runtime()
+        runner._reduction_intents["NVDA.US"] = _ReductionIntent(
+            action="SELL",
+            cause="TIME_STOP",
+            reason="maximum holding time reached",
+            trigger_price=100.0,
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=30),
+        )
+        runner._trade_svc.load_tracked_entries({
+            "NVDA.US": (
+                Decimal("5"),
+                Decimal("500"),
+                "LONG",
+                datetime.now(timezone.utc) - timedelta(hours=2),
+            )
+        })
+        pause_reason = "ORDER_EXECUTION_BLOCKED: operator review"
+        runner.risk.pause(pause_reason, auto_resumable=False)
+        monkeypatch.setattr(
+            runner,
+            "_protective_exit_runtime_health",
+            lambda: (True, ""),
+        )
+        monkeypatch.setattr(
+            runner,
+            "verify_operational_resume",
+            lambda **_kwargs: (True, ""),
+        )
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+        assert runner._maybe_permit_persisted_reduction() is False
+        old_key = runner._protective_reduction_proof_key
+        runner._protective_reduction_proof_at -= 6
+
+        runner.risk.pause(pause_reason, auto_resumable=False)
+        assert runner._maybe_permit_persisted_reduction() is False
+
+        assert runner._protective_reduction_proof_key != old_key
+        assert runner.risk.protective_exit_permitted is False
+
+        runner._protective_reduction_proof_at -= 6
+        assert runner._maybe_permit_persisted_reduction() is True
+        assert runner.risk.paused is True
+        assert runner.risk.protective_exit_permitted is True
+        assert runner._risk_rejection_allows_action("BUY") is False
+
+    def test_persisted_reduction_auto_permission_requires_two_coherent_proofs(
+        self,
+        monkeypatch,
+    ) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.position_reads = 0
+
+            def get_positions(self) -> list[Position]:
+                self.position_reads += 1
+                return [
+                    Position(
+                        "ISRG.US",
+                        "LONG",
+                        Decimal("704"),
+                        Decimal("371.49"),
+                    )
+                ]
+
+        runner = self._runner_with_primary_quote_runtime()
+        runner._symbol_runtimes["ISRG.US"] = runner._build_symbol_runtime(
+            "ISRG.US",
+            "US",
+        )
+        runner._opening_execution_policies = {
+            "ISRG.US": _OpeningExecutionPolicy(
+                execution_id=7,
+                symbol="ISRG.US",
+                status="EXITING",
+                stop_loss_pct=4.0,
+                max_holding_minutes=60,
+                reference_entry_price=371.49,
+                max_price_deviation_bps=100.0,
+            )
+        }
+        runner._reduction_intents["ISRG.US"] = _ReductionIntent(
+            action="SELL",
+            cause="TIME_STOP",
+            reason="maximum holding time reached: 60 minutes",
+            trigger_price=368.1,
+            started_at=datetime.now(timezone.utc) - timedelta(minutes=30),
+        )
+        runner._trade_svc.load_tracked_entries({
+            "ISRG.US": (
+                Decimal("704"),
+                Decimal("261528.96"),
+                "LONG",
+                datetime.now(timezone.utc) - timedelta(hours=24),
+            )
+        })
+        broker = Broker()
+        runner.broker = cast(Any, broker)
+        pause_reason = "ORDER_RECONCILIATION_UNCERTAIN: operator review"
+        runner.risk.pause(
+            pause_reason,
+            auto_resumable=False,
+            paused_at=datetime.now(timezone.utc) - timedelta(seconds=61),
+        )
+        runner._last_order_sync_succeeded = True
+        monkeypatch.setattr(
+            runner,
+            "sync_today_orders_from_broker",
+            lambda *, force: 0,
+        )
+        monkeypatch.setattr(
+            runner,
+            "_protective_exit_runtime_health",
+            lambda: (True, ""),
+        )
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+        runner._remember_quote(
+            Quote(
+                "ISRG.US",
+                368.1,
+                368.0,
+                368.2,
+                _fresh_timestamp(),
+            )
+        )
+
+        assert runner._maybe_permit_persisted_reduction() is False
+        assert runner.risk.protective_exit_permitted is False
+        assert broker.position_reads == 1
+        assert runner._unknown_submission_proof_at > 0
+
+        assert runner._maybe_permit_persisted_reduction() is False
+        assert broker.position_reads == 1
+
+        runner._protective_reduction_proof_at -= 6
+        runner._unknown_submission_proof_at -= 6
+        assert runner._maybe_permit_persisted_reduction() is True
+
+        assert broker.position_reads == 2
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason == pause_reason
+        assert runner.risk.protective_exit_permitted is True
+        assert runner.risk.check().approved is False
+        assert runner._risk_rejection_allows_action("BUY") is False
+        assert runner._risk_rejection_allows_action("SELL") is True
+
     @pytest.mark.parametrize("pause_kind", ["PNL", "ORDER"])
     def test_incomplete_pnl_can_arm_verified_protective_exits(
         self,
@@ -955,20 +1487,1242 @@ class TestAppRunner:
 
         safe, error = runner.permit_protective_exits_after_verification()
 
-        assert safe is True
-        assert error == ""
+        assert safe is False
+        assert error == (
+            "protective exits require an unchanged durable reduction intent"
+        )
         assert runner.risk.paused is True
         assert runner.risk.pause_reason == reason
         assert runner.risk.check().approved is False
-        assert runner.risk.protective_exit_permitted is True
+        assert runner.risk.protective_exit_permitted is False
         assert runner._risk_rejection_allows_action("BUY") is False
-        assert runner._risk_rejection_allows_action("SELL") is True
+        assert runner._risk_rejection_allows_action("SELL") is False
 
         assert runner._sync_risk_from_order_ledger() is False
         assert runner.risk.pause_reason == reason
-        assert runner.risk.protective_exit_permitted is True
+        assert runner.risk.protective_exit_permitted is False
         assert runner._risk_rejection_allows_action("BUY") is False
-        assert runner._risk_rejection_allows_action("SELL") is True
+        assert runner._risk_rejection_allows_action("SELL") is False
+
+    def test_final_protective_submission_rejects_replaced_intent_scope(
+        self,
+    ) -> None:
+        class Broker:
+            submitted = False
+
+            @staticmethod
+            def get_positions() -> list[Position]:
+                return [
+                    Position(
+                        "NVDA.US",
+                        "LONG",
+                        Decimal("2"),
+                        Decimal("220"),
+                        available_quantity=Decimal("2"),
+                    )
+                ]
+
+            def submit_limit_order(self, *_args: object) -> OrderResult:
+                self.submitted = True
+                raise AssertionError("stale intent scope must block submission")
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = cast(Any, broker)
+        started_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+        runner._trade_svc.load_tracked_entries(
+            {
+                "NVDA.US": (
+                    Decimal("2"),
+                    Decimal("440"),
+                    "LONG",
+                    started_at,
+                )
+            }
+        )
+        runner._reduction_intents["NVDA.US"] = _ReductionIntent(
+            action="SELL",
+            cause="TIME_STOP",
+            reason="first durable intent",
+            trigger_price=215.0,
+            started_at=started_at,
+        )
+        runner.risk.pause("ORDER_EXECUTION_BLOCKED: operator review")
+        pause_reason, generation = runner.risk.pause_verification_snapshot()
+        assert runner.risk.permit_protective_exits(
+            expected_pause_reason=pause_reason,
+            expected_generation=generation,
+        )
+        runner._protective_exit_authorization_scope = (
+            runner._protective_exit_scope_snapshot()
+        )
+        runner._reduction_intents["NVDA.US"] = _ReductionIntent(
+            action="SELL",
+            cause="TIME_STOP",
+            reason="replacement intent must require a new proof",
+            trigger_price=214.0,
+            started_at=datetime.now(timezone.utc),
+        )
+
+        status = runner._trade_svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 214.0, 213.9, 214.1, _fresh_timestamp()),
+            cast(Any, broker),
+            runner.risk,
+            _NoopNotifier(),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+            execution_context={
+                "exit_cause": "TIME_STOP",
+                "exit_reason": "replacement intent must require a new proof",
+                "config_snapshot": json.dumps({"reduce_only": True}),
+            },
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert "scope changed" in status.reason
+        assert runner.risk.protective_exit_permitted is False
+        assert runner._protective_exit_authorization_scope is None
+        assert broker.submitted is False
+
+    def test_final_protective_submission_forces_fresh_global_proof(
+        self,
+        monkeypatch,
+    ) -> None:
+        events: list[str] = []
+
+        class Broker:
+            position_reads = 0
+
+            def get_positions(self) -> list[Position]:
+                self.position_reads += 1
+                events.append(f"positions-{self.position_reads}")
+                return [
+                    Position(
+                        "NVDA.US",
+                        "LONG",
+                        Decimal("2"),
+                        Decimal("220"),
+                        available_quantity=Decimal("2"),
+                    )
+                ]
+
+            @staticmethod
+            def get_quotes(symbols: list[str]) -> list[Quote]:
+                events.append("quote")
+                return [
+                    Quote(
+                        symbols[0],
+                        214.0,
+                        213.9,
+                        214.1,
+                        _fresh_timestamp(),
+                    )
+                ]
+
+            @staticmethod
+            def submit_limit_order(
+                symbol: str,
+                side: str,
+                quantity: Decimal,
+                price: Decimal,
+            ) -> OrderResult:
+                events.append("submit")
+                return OrderResult(
+                    "protective-live",
+                    symbol,
+                    side,
+                    quantity,
+                    price,
+                    "SUBMITTED",
+                )
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = cast(Any, broker)
+        started_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+        runner._trade_svc.load_tracked_entries(
+            {
+                "NVDA.US": (
+                    Decimal("2"),
+                    Decimal("440"),
+                    "LONG",
+                    started_at,
+                )
+            }
+        )
+        intent = _ReductionIntent(
+            action="SELL",
+            cause="TIME_STOP",
+            reason="durable time exit",
+            trigger_price=214.0,
+            started_at=started_at,
+        )
+        runner._reduction_intents["NVDA.US"] = intent
+        runner.risk.pause("ORDER_EXECUTION_BLOCKED: operator review")
+        pause_reason, generation = runner.risk.pause_verification_snapshot()
+        assert runner.risk.permit_protective_exits(
+            expected_pause_reason=pause_reason,
+            expected_generation=generation,
+        )
+        runner._protective_exit_authorization_scope = (
+            runner._protective_exit_scope_snapshot()
+        )
+        runner._trade_svc._record_order = lambda *args: None
+        runner._trade_svc._update_order_status = lambda *args, **kwargs: None
+        original_commit_check = (
+            runner._trade_svc._final_protective_exit_commit_check
+        )
+        assert original_commit_check is not None
+
+        def record_commit_check(*args: object) -> str | None:
+            events.append("commit")
+            return original_commit_check(*args)
+
+        runner._trade_svc._final_protective_exit_commit_check = (
+            record_commit_check
+        )
+        runner._last_order_sync_succeeded = True
+
+        def sync(*, force: bool) -> int:
+            assert force is True
+            events.append("orders")
+            runner._last_order_sync_succeeded = True
+            return 0
+
+        monkeypatch.setattr(runner, "sync_today_orders_from_broker", sync)
+        monkeypatch.setattr(
+            runner,
+            "_protective_exit_runtime_health",
+            lambda: (True, ""),
+        )
+        monkeypatch.setattr(runner, "fresh_market_price", lambda *_args, **_kwargs: 214.0)
+
+        status = runner._trade_svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 214.0, 213.9, 214.1, _fresh_timestamp()),
+            cast(Any, broker),
+            runner.risk,
+            _NoopNotifier(),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+            execution_context={
+                "exit_cause": intent.cause,
+                "exit_reason": intent.reason,
+                "config_snapshot": json.dumps({"reduce_only": True}),
+            },
+        )
+
+        assert status is not None
+        assert status.status == "SUBMITTED"
+        assert events == [
+            "positions-1",
+            "orders",
+            "positions-2",
+            "positions-3",
+            "quote",
+            "commit",
+            "submit",
+        ]
+        assert runner.risk.protective_exit_permitted is True
+
+    def _armed_scoped_protective_runner(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[
+        AppRunner,
+        SimpleNamespace,
+        _ReductionIntent,
+        _OpeningExecutionPolicy,
+        dict[str, bool],
+        dict[str, bool],
+        dict[str, object],
+    ]:
+        started_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+        target_position = Position(
+            "NVDA.US",
+            "LONG",
+            Decimal("2"),
+            Decimal("220"),
+            available_quantity=Decimal("2"),
+        )
+        broker = SimpleNamespace(
+            positions=[target_position],
+            submissions=0,
+        )
+        broker.get_positions = lambda: list(broker.positions)
+        broker.get_quotes = lambda symbols: [
+            Quote(
+                symbols[0],
+                214.0,
+                213.9,
+                214.1,
+                _fresh_timestamp(),
+            )
+        ]
+
+        def submit_limit_order(*_args: object, **_kwargs: object) -> OrderResult:
+            broker.submissions += 1
+            raise AssertionError("changed final state must block broker submission")
+
+        broker.submit_limit_order = submit_limit_order
+
+        runner = AppRunner()
+        runner.broker = cast(Any, broker)
+        runner._trade_svc.load_tracked_entries(
+            {
+                "NVDA.US": (
+                    Decimal("2"),
+                    Decimal("440"),
+                    "LONG",
+                    started_at,
+                )
+            }
+        )
+        intent = _ReductionIntent(
+            action="SELL",
+            cause="TIME_STOP",
+            reason="durable time exit",
+            trigger_price=214.0,
+            started_at=started_at,
+        )
+        policy = _OpeningExecutionPolicy(
+            execution_id=7,
+            symbol="NVDA.US",
+            status="EXITING",
+            stop_loss_pct=4.0,
+            max_holding_minutes=60,
+            reference_entry_price=220.0,
+            max_price_deviation_bps=100.0,
+        )
+        runner._reduction_intents["NVDA.US"] = intent
+        runner._opening_execution_policies["NVDA.US"] = policy
+        runner.risk.pause("ORDER_EXECUTION_BLOCKED: operator review")
+        pause_reason, generation = runner.risk.pause_verification_snapshot()
+        assert runner.risk.permit_protective_exits(
+            expected_pause_reason=pause_reason,
+            expected_generation=generation,
+        )
+        runner._protective_exit_authorization_scope = (
+            runner._protective_exit_scope_snapshot()
+        )
+        runner._last_order_sync_succeeded = True
+        monkeypatch.setattr(
+            runner,
+            "sync_today_orders_from_broker",
+            lambda *, force: 0,
+        )
+        health_state = {"healthy": True}
+        quote_state = {"fresh": True}
+        monkeypatch.setattr(
+            runner,
+            "_protective_exit_runtime_health",
+            lambda: (
+                (True, "")
+                if health_state["healthy"]
+                else (False, "protective runtime is stale")
+            ),
+        )
+        monkeypatch.setattr(
+            runner,
+            "fresh_market_price",
+            lambda *_args, **_kwargs: (
+                214.0 if quote_state["fresh"] else None
+            ),
+        )
+        execution_context: dict[str, object] = {
+            "exit_cause": intent.cause,
+            "exit_reason": intent.reason,
+            "config_snapshot": json.dumps(
+                {
+                    "reduce_only": True,
+                    "execution_signal": {
+                        "strategy_source": "OPENING_MOMENTUM",
+                        "opening_execution_id": policy.execution_id,
+                        "reference_entry_price": policy.reference_entry_price,
+                        "max_price_deviation_bps": policy.max_price_deviation_bps,
+                        "stop_loss_pct": policy.stop_loss_pct,
+                        "max_holding_minutes": policy.max_holding_minutes,
+                    },
+                }
+            ),
+        }
+        return (
+            runner,
+            broker,
+            intent,
+            policy,
+            health_state,
+            quote_state,
+            execution_context,
+        )
+
+    def test_partial_protective_fill_requires_fresh_double_proof_for_remainder(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (
+            runner,
+            broker,
+            _intent,
+            _policy,
+            _health_state,
+            _quote_state,
+            execution_context,
+        ) = self._armed_scoped_protective_runner(monkeypatch)
+        initial_quantity = Decimal("5")
+        partial_fill_quantity = Decimal("2")
+        remaining_quantity = initial_quantity - partial_fill_quantity
+        position_quantity = {"value": initial_quantity}
+        submissions: list[tuple[str, Decimal]] = []
+        persisted_quantities: list[Decimal] = []
+
+        runner._trade_svc.load_tracked_entries(
+            {
+                "NVDA.US": (
+                    initial_quantity,
+                    Decimal("1100"),
+                    "LONG",
+                    datetime.now(timezone.utc) - timedelta(minutes=10),
+                )
+            }
+        )
+
+        def positions() -> list[Position]:
+            quantity = position_quantity["value"]
+            return [
+                Position(
+                    "NVDA.US",
+                    "LONG",
+                    quantity,
+                    Decimal("220"),
+                    available_quantity=quantity,
+                )
+            ]
+
+        broker.get_positions = positions
+
+        def submit_limit_order(
+            symbol: str,
+            side: str,
+            quantity: Decimal,
+            price: Decimal,
+        ) -> OrderResult:
+            submissions.append((side, quantity))
+            if len(submissions) > 2:
+                raise AssertionError("protective remainder was submitted more than once")
+            return OrderResult(
+                f"partial-protective-{len(submissions)}",
+                symbol,
+                side,
+                quantity,
+                price,
+                "SUBMITTED",
+            )
+
+        broker.submit_limit_order = submit_limit_order
+
+        def first_order_terminal_partial(order_id: str) -> OrderStatusResult:
+            assert order_id == "partial-protective-1"
+            position_quantity["value"] = remaining_quantity
+            return OrderStatusResult(
+                broker_order_id=order_id,
+                status="CANCELLED",
+                executed_quantity=partial_fill_quantity,
+                executed_price=Decimal("214"),
+            )
+
+        broker.get_order_status = first_order_terminal_partial
+        runner._trade_svc._record_order = lambda *_args, **_kwargs: None
+        runner._trade_svc._update_order_status = lambda *_args, **_kwargs: None
+        runner._trade_svc._record_order_skipped = lambda *_args, **_kwargs: None
+        runner._trade_svc._persist_entry = (
+            lambda _symbol, quantity, _cost: persisted_quantities.append(quantity)
+        )
+        runner._trade_svc._on_fill = lambda *_args: None
+        runner._trade_svc._order_status_poll_interval_seconds = 0
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+        # Rebind the authorization to the five-share inventory used by this
+        # test.  The first order may consume only two of those shares.
+        initial_scope = runner._protective_exit_scope_snapshot()
+        assert initial_scope is not None
+        runner._protective_exit_authorization_scope = initial_scope
+
+        first = runner._trade_svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 214.0, 213.9, 214.1, _fresh_timestamp()),
+            cast(Any, broker),
+            runner.risk,
+            _NoopNotifier(),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+            execution_context=execution_context,
+        )
+
+        assert first is not None
+        assert first.status == "SUBMITTED"
+        assert submissions == [("SELL", initial_quantity)]
+        assert runner._trade_svc.pending_order_ids() == ["partial-protective-1"]
+
+        runner._trade_svc.reconcile(
+            risk=runner.risk,
+            notifier=_NoopNotifier(),
+        )
+
+        tracked = runner._trade_svc.tracked_position("NVDA.US")
+        assert tracked is not None
+        assert tracked.quantity == remaining_quantity
+        assert persisted_quantities == [remaining_quantity]
+        assert runner._trade_svc.pending_order_ids() == []
+        assert runner.risk.protective_exit_permitted is True
+        assert runner._protective_exit_authorization_scope == initial_scope
+        assert runner._protective_exit_scope_snapshot() != initial_scope
+
+        # Permission alone is insufficient: the old five-share scope must
+        # fail closed before any replacement order reaches the broker.
+        stale_scope_attempt = runner._trade_svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 214.0, 213.9, 214.1, _fresh_timestamp()),
+            cast(Any, broker),
+            runner.risk,
+            _NoopNotifier(),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+            execution_context=execution_context,
+        )
+
+        assert stale_scope_attempt is not None
+        assert stale_scope_attempt.status == "SKIPPED"
+        assert "scope changed" in stale_scope_attempt.reason
+        assert submissions == [("SELL", initial_quantity)]
+        assert runner.risk.protective_exit_permitted is False
+        assert runner._protective_exit_authorization_scope is None
+
+        proof_calls: list[dict[str, object]] = []
+
+        def verified_recovery(**kwargs: object) -> tuple[bool, str]:
+            proof_calls.append(dict(kwargs))
+            return True, ""
+
+        monkeypatch.setattr(
+            runner,
+            "verify_operational_resume",
+            verified_recovery,
+        )
+
+        assert runner._maybe_permit_persisted_reduction() is False
+        assert runner.risk.protective_exit_permitted is False
+        runner._protective_reduction_proof_at -= 6
+        assert runner._maybe_permit_persisted_reduction() is True
+        assert runner.risk.protective_exit_permitted is True
+        assert len(proof_calls) == 2
+        assert all(call.get("protective_only") is True for call in proof_calls)
+        assert all(
+            call.get("require_complete_pnl") is False for call in proof_calls
+        )
+
+        remainder = runner._trade_svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 214.0, 213.9, 214.1, _fresh_timestamp()),
+            cast(Any, broker),
+            runner.risk,
+            _NoopNotifier(),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+            execution_context=execution_context,
+        )
+
+        assert remainder is not None
+        assert remainder.status == "SUBMITTED"
+        assert submissions == [
+            ("SELL", initial_quantity),
+            ("SELL", remaining_quantity),
+        ]
+        assert partial_fill_quantity + submissions[-1][1] == initial_quantity
+        assert runner._trade_svc.pending_order_ids() == ["partial-protective-2"]
+
+        duplicate = runner._trade_svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 214.0, 213.9, 214.1, _fresh_timestamp()),
+            cast(Any, broker),
+            runner.risk,
+            _NoopNotifier(),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+            execution_context=execution_context,
+        )
+
+        assert duplicate is not None
+        assert duplicate.status == "SKIPPED"
+        assert submissions == [
+            ("SELL", initial_quantity),
+            ("SELL", remaining_quantity),
+        ]
+
+    def test_opening_registry_successful_resubscribe_invalidates_protective_runtime(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner = self._runner_with_primary_quote_runtime()
+        runner._running = True
+        runner._quotes_subscribed = True
+        runner._last_quote_at = time.monotonic()
+        runner._last_push_quote_at = time.monotonic()
+        runner.risk.pause("ORDER_EXECUTION_BLOCKED: operator review")
+        assert runner.risk.permit_protective_exits() is True
+        runner._protective_exit_authorization_scope = ("stale-stream",)
+        generation_before = runner._protective_runtime_generation
+        subscriptions: list[list[str]] = []
+
+        runner.broker = cast(
+            Any,
+            SimpleNamespace(
+                unsubscribe_quotes=lambda: None,
+                subscribe_quotes_batch=(
+                    lambda symbols, _callback: subscriptions.append(list(symbols))
+                ),
+            ),
+        )
+
+        @contextmanager
+        def db_session() -> Any:
+            yield SimpleNamespace()
+
+        def add_runtime(_db: object) -> None:
+            runner._symbol_runtimes["AAPL.US"] = runner._build_symbol_runtime(
+                "AAPL.US",
+                "US",
+            )
+
+        monkeypatch.setattr(runner, "_db_session", db_session)
+        monkeypatch.setattr(runner, "_sync_symbol_runtimes", add_runtime)
+        monkeypatch.setattr(
+            runner,
+            "_load_opening_execution_registry",
+            lambda _db: None,
+        )
+
+        runner.refresh_opening_execution_registry()
+
+        assert subscriptions == [["NVDA.US", "AAPL.US"]]
+        assert runner._quotes_subscribed is True
+        assert runner._last_quote_at == 0.0
+        assert runner._last_push_quote_at > 0
+        assert runner._protective_runtime_generation == generation_before + 1
+        assert runner.risk.protective_exit_permitted is False
+        assert runner._protective_exit_authorization_scope is None
+
+    def test_manual_protective_authorization_rejects_stale_atomic_publish(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner, _broker, *_ = self._armed_scoped_protective_runner(monkeypatch)
+        runner.risk.revoke_protective_exits()
+        runner._protective_exit_authorization_scope = None
+        monkeypatch.setattr(
+            runner,
+            "verify_operational_resume",
+            lambda **_kwargs: (True, ""),
+        )
+        original_publish = runner._publish_protective_exit_authorization
+
+        def invalidate_before_publish(scope: tuple[object, ...]) -> bool:
+            with runner._protective_runtime_state_guard():
+                runner._advance_protective_runtime_generation_locked()
+            return original_publish(scope)
+
+        monkeypatch.setattr(
+            runner,
+            "_publish_protective_exit_authorization",
+            invalidate_before_publish,
+        )
+
+        safe, error = runner.permit_protective_exits_after_verification()
+
+        assert safe is False
+        assert error == (
+            "protective exits require an unchanged durable reduction intent"
+        )
+        assert runner.risk.protective_exit_permitted is False
+        assert runner._protective_exit_authorization_scope is None
+
+    def test_auto_protective_authorization_rejects_stale_atomic_publish(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner, _broker, *_ = self._armed_scoped_protective_runner(monkeypatch)
+        runner.risk.revoke_protective_exits()
+        runner._protective_exit_authorization_scope = None
+        monkeypatch.setattr(
+            runner,
+            "verify_operational_resume",
+            lambda **_kwargs: (True, ""),
+        )
+        proof_key = runner._protective_reduction_local_proof_key()
+        assert proof_key is not None
+        runner._protective_reduction_proof_key = proof_key
+        runner._protective_reduction_proof_at = time.monotonic() - 6
+        original_publish = runner._publish_protective_exit_authorization
+
+        def invalidate_before_publish(scope: tuple[object, ...]) -> bool:
+            with runner._protective_runtime_state_guard():
+                runner._advance_protective_runtime_generation_locked()
+            return original_publish(scope)
+
+        monkeypatch.setattr(
+            runner,
+            "_publish_protective_exit_authorization",
+            invalidate_before_publish,
+        )
+
+        assert runner._maybe_permit_persisted_reduction() is False
+        assert runner.risk.protective_exit_permitted is False
+        assert runner._protective_exit_authorization_scope is None
+        assert runner._protective_reduction_proof_key is None
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            "unmanaged_position",
+            "other_pending",
+            "representation",
+            "stale_runtime",
+            "stale_quote",
+            "same_reason_aba",
+            "tracked_quantity",
+            "tracked_cost",
+            "intent",
+            "policy",
+        ],
+    )
+    def test_final_protective_submission_revokes_on_any_scoped_state_change(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        change: str,
+    ) -> None:
+        (
+            runner,
+            broker,
+            intent,
+            policy,
+            health_state,
+            quote_state,
+            execution_context,
+        ) = self._armed_scoped_protective_runner(monkeypatch)
+
+        if change == "unmanaged_position":
+            broker.positions.append(
+                Position(
+                    "AAPL.US",
+                    "LONG",
+                    Decimal("1"),
+                    Decimal("100"),
+                    available_quantity=Decimal("1"),
+                )
+            )
+        elif change == "other_pending":
+            runner._unresolved_live_order_ids = ["other-symbol-live-order"]
+        elif change == "representation":
+            runner._unrepresentable_live_order_issues = [
+                "AAPL.US side is unavailable"
+            ]
+        elif change == "stale_runtime":
+            health_state["healthy"] = False
+        elif change == "stale_quote":
+            quote_state["fresh"] = False
+        elif change == "same_reason_aba":
+            runner.risk.pause(runner.risk.pause_reason, auto_resumable=False)
+        elif change in {"tracked_quantity", "tracked_cost"}:
+            runner._trade_svc.load_tracked_entries(
+                {
+                    "NVDA.US": (
+                        Decimal("3")
+                        if change == "tracked_quantity"
+                        else Decimal("2"),
+                        Decimal("442")
+                        if change == "tracked_cost"
+                        else Decimal("440"),
+                        "LONG",
+                        intent.started_at,
+                    )
+                }
+            )
+        elif change == "intent":
+            runner._reduction_intents["NVDA.US"] = _ReductionIntent(
+                action="SELL",
+                cause=intent.cause,
+                reason="replacement durable intent",
+                trigger_price=213.0,
+                started_at=datetime.now(timezone.utc),
+            )
+        elif change == "policy":
+            runner._opening_execution_policies["NVDA.US"] = (
+                _OpeningExecutionPolicy(
+                    execution_id=policy.execution_id,
+                    symbol=policy.symbol,
+                    status=policy.status,
+                    stop_loss_pct=policy.stop_loss_pct,
+                    max_holding_minutes=policy.max_holding_minutes + 1,
+                    reference_entry_price=policy.reference_entry_price,
+                    max_price_deviation_bps=policy.max_price_deviation_bps,
+                )
+            )
+
+        status = runner._trade_svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 214.0, 213.9, 214.1, _fresh_timestamp()),
+            cast(Any, broker),
+            runner.risk,
+            _NoopNotifier(),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+            execution_context=execution_context,
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert runner.risk.protective_exit_permitted is False
+        assert broker.submissions == 0
+
+    @pytest.mark.parametrize(
+        "change",
+        [
+            "disconnect",
+            "policy",
+            "same_reason_aba",
+            "resume",
+            "different_pause",
+            "intent",
+        ],
+    )
+    def test_protective_commit_gate_rejects_change_after_global_proof(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        change: str,
+    ) -> None:
+        (
+            runner,
+            broker,
+            intent,
+            policy,
+            health_state,
+            _quote_state,
+            execution_context,
+        ) = self._armed_scoped_protective_runner(monkeypatch)
+
+        def quote_after_state_change(symbols: list[str]) -> list[Quote]:
+            if change == "disconnect":
+                runner._on_disconnect("lost during final quote")
+                health_state["healthy"] = False
+            elif change == "policy":
+                runner._opening_execution_policies["NVDA.US"] = (
+                    _OpeningExecutionPolicy(
+                        execution_id=policy.execution_id,
+                        symbol=policy.symbol,
+                        status=policy.status,
+                        stop_loss_pct=policy.stop_loss_pct,
+                        max_holding_minutes=policy.max_holding_minutes + 1,
+                        reference_entry_price=policy.reference_entry_price,
+                        max_price_deviation_bps=policy.max_price_deviation_bps,
+                    )
+                )
+            elif change == "same_reason_aba":
+                runner.risk.begin_entry_reconciliation(
+                    "post-proof reconciliation",
+                    preserve_protective_exits=True,
+                )
+            elif change == "resume":
+                runner.risk.resume()
+            elif change == "different_pause":
+                runner.risk.restore_pause(True, "manual")
+            elif change == "intent":
+                runner._reduction_intents["NVDA.US"] = _ReductionIntent(
+                    action=intent.action,
+                    cause=intent.cause,
+                    reason="replacement after global proof",
+                    trigger_price=213.0,
+                    started_at=datetime.now(timezone.utc),
+                )
+            return [
+                Quote(
+                    symbols[0],
+                    214.0,
+                    213.9,
+                    214.1,
+                    _fresh_timestamp(),
+                )
+            ]
+
+        broker.get_quotes = quote_after_state_change
+
+        status = runner._trade_svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 214.0, 213.9, 214.1, _fresh_timestamp()),
+            cast(Any, broker),
+            runner.risk,
+            _NoopNotifier(),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+            execution_context=execution_context,
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert runner.risk.protective_exit_permitted is False
+        assert runner._protective_exit_authorization_scope is None
+        assert broker.submissions == 0
+
+    @pytest.mark.parametrize("invalidation", ["disconnect", "stop"])
+    def test_protective_commit_gate_observes_cross_thread_runtime_invalidation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        invalidation: str,
+    ) -> None:
+        (
+            runner,
+            broker,
+            _intent,
+            _policy,
+            _health_state,
+            _quote_state,
+            execution_context,
+        ) = self._armed_scoped_protective_runner(monkeypatch)
+        quote_entered = threading.Event()
+        release_quote = threading.Event()
+        invalidation_done = threading.Event()
+        execution_result: dict[str, object] = {}
+
+        def blocked_quote(symbols: list[str]) -> list[Quote]:
+            quote_entered.set()
+            if not release_quote.wait(2):
+                raise AssertionError("test did not release the final quote")
+            return [
+                Quote(
+                    symbols[0],
+                    214.0,
+                    213.9,
+                    214.1,
+                    _fresh_timestamp(),
+                )
+            ]
+
+        broker.get_quotes = blocked_quote
+
+        def execute() -> None:
+            try:
+                execution_result["status"] = runner._trade_svc.execute(
+                    "SELL",
+                    "NVDA.US",
+                    Quote(
+                        "NVDA.US",
+                        214.0,
+                        213.9,
+                        214.1,
+                        _fresh_timestamp(),
+                    ),
+                    cast(Any, broker),
+                    runner.risk,
+                    _NoopNotifier(),
+                    "USD",
+                    allow_loss_exit=True,
+                    reduce_only=True,
+                    execution_context=execution_context,
+                )
+            except BaseException as exc:
+                execution_result["error"] = exc
+
+        def invalidate_runtime() -> None:
+            try:
+                if invalidation == "disconnect":
+                    runner._on_disconnect("cross-thread final-quote disconnect")
+                else:
+                    runner.stop()
+            finally:
+                invalidation_done.set()
+
+        execution_thread = threading.Thread(target=execute)
+        execution_thread.start()
+        assert quote_entered.wait(2)
+        invalidation_thread = threading.Thread(target=invalidate_runtime)
+        invalidation_thread.start()
+        assert invalidation_done.wait(1), (
+            "runtime invalidation waited behind submission_lock"
+        )
+        release_quote.set()
+        execution_thread.join(timeout=2)
+        invalidation_thread.join(timeout=2)
+
+        assert execution_thread.is_alive() is False
+        assert invalidation_thread.is_alive() is False
+        assert "error" not in execution_result
+        status = execution_result.get("status")
+        assert isinstance(status, OrderStatus)
+        assert status.status == "SKIPPED"
+        assert runner.risk.protective_exit_permitted is False
+        assert runner._protective_exit_authorization_scope is None
+        assert broker.submissions == 0
+
+    @pytest.mark.parametrize(
+        "invalidation",
+        ["disconnect", "prepare_stop", "stop"],
+    )
+    def test_protective_runtime_invalidation_wins_linearization_guard(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        invalidation: str,
+    ) -> None:
+        (
+            runner,
+            broker,
+            _intent,
+            _policy,
+            _health_state,
+            _quote_state,
+            execution_context,
+        ) = self._armed_scoped_protective_runner(monkeypatch)
+        broker.close = lambda: None
+        invalidation_holds_guard = threading.Event()
+        release_invalidation = threading.Event()
+        final_proof_attempted = threading.Event()
+        execution_result: dict[str, object] = {}
+        invalidation_result: dict[str, object] = {}
+        threads: dict[str, threading.Thread] = {}
+
+        original_final_check = runner._trade_svc._final_protective_exit_check
+        assert original_final_check is not None
+
+        def observed_final_check(*args: object) -> str | None:
+            final_proof_attempted.set()
+            return original_final_check(*args)
+
+        runner._trade_svc._final_protective_exit_check = observed_final_check
+        original_advance = runner._advance_protective_runtime_generation_locked
+
+        def blocked_advance() -> None:
+            if threading.current_thread() is threads.get("invalidation"):
+                invalidation_holds_guard.set()
+                if not release_invalidation.wait(2):
+                    raise AssertionError("test did not release runtime invalidation")
+            original_advance()
+
+        monkeypatch.setattr(
+            runner,
+            "_advance_protective_runtime_generation_locked",
+            blocked_advance,
+        )
+
+        def invalidate_runtime() -> None:
+            try:
+                if invalidation == "disconnect":
+                    runner._on_disconnect("disconnect wins protective commit")
+                elif invalidation == "prepare_stop":
+                    runner.prepare_stop("prepare-stop wins protective commit")
+                else:
+                    runner.stop()
+            except BaseException as exc:
+                invalidation_result["error"] = exc
+
+        def execute() -> None:
+            try:
+                execution_result["status"] = runner._trade_svc.execute(
+                    "SELL",
+                    "NVDA.US",
+                    Quote(
+                        "NVDA.US",
+                        214.0,
+                        213.9,
+                        214.1,
+                        _fresh_timestamp(),
+                    ),
+                    cast(Any, broker),
+                    runner.risk,
+                    _NoopNotifier(),
+                    "USD",
+                    allow_loss_exit=True,
+                    reduce_only=True,
+                    execution_context=execution_context,
+                )
+            except BaseException as exc:
+                execution_result["error"] = exc
+
+        threads["invalidation"] = threading.Thread(target=invalidate_runtime)
+        threads["invalidation"].start()
+        assert invalidation_holds_guard.wait(2)
+        threads["execution"] = threading.Thread(target=execute)
+        threads["execution"].start()
+        assert final_proof_attempted.wait(2)
+        assert broker.submissions == 0
+        release_invalidation.set()
+        threads["execution"].join(timeout=3)
+        threads["invalidation"].join(timeout=3)
+
+        assert threads["execution"].is_alive() is False
+        assert threads["invalidation"].is_alive() is False
+        assert "error" not in execution_result
+        assert "error" not in invalidation_result
+        status = execution_result.get("status")
+        assert isinstance(status, OrderStatus)
+        assert status.status == "SKIPPED"
+        assert runner.risk.protective_exit_permitted is False
+        assert runner._protective_exit_authorization_scope is None
+        assert broker.submissions == 0
+
+    @pytest.mark.parametrize(
+        "invalidation",
+        ["disconnect", "prepare_stop", "stop"],
+    )
+    def test_protective_commit_wins_then_runtime_invalidation_publishes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        invalidation: str,
+    ) -> None:
+        (
+            runner,
+            broker,
+            _intent,
+            _policy,
+            _health_state,
+            _quote_state,
+            execution_context,
+        ) = self._armed_scoped_protective_runner(monkeypatch)
+        broker.close = lambda: None
+        submit_entered = threading.Event()
+        release_submit = threading.Event()
+        invalidation_started = threading.Event()
+        invalidation_done = threading.Event()
+        execution_result: dict[str, object] = {}
+        invalidation_result: dict[str, object] = {}
+        generation_before = runner._protective_runtime_generation
+
+        runner._trade_svc._record_order = lambda *_args, **_kwargs: None
+        runner._trade_svc._update_order_status = lambda *_args, **_kwargs: None
+
+        def blocked_submit(
+            symbol: str,
+            side: str,
+            quantity: Decimal,
+            price: Decimal,
+        ) -> OrderResult:
+            broker.submissions += 1
+            submit_entered.set()
+            if not release_submit.wait(5):
+                raise AssertionError("test did not release broker submission")
+            return OrderResult(
+                "protective-commit-won",
+                symbol,
+                side,
+                quantity,
+                price,
+                "SUBMITTED",
+            )
+
+        broker.submit_limit_order = blocked_submit
+
+        def execute() -> None:
+            try:
+                execution_result["status"] = runner._trade_svc.execute(
+                    "SELL",
+                    "NVDA.US",
+                    Quote(
+                        "NVDA.US",
+                        214.0,
+                        213.9,
+                        214.1,
+                        _fresh_timestamp(),
+                    ),
+                    cast(Any, broker),
+                    runner.risk,
+                    _NoopNotifier(),
+                    "USD",
+                    allow_loss_exit=True,
+                    reduce_only=True,
+                    execution_context=execution_context,
+                )
+            except BaseException as exc:
+                execution_result["error"] = exc
+
+        def invalidate_runtime() -> None:
+            invalidation_started.set()
+            try:
+                if invalidation == "disconnect":
+                    runner._on_disconnect("disconnect waits for protective commit")
+                elif invalidation == "prepare_stop":
+                    runner.prepare_stop("prepare-stop waits for protective commit")
+                else:
+                    runner.stop()
+            except BaseException as exc:
+                invalidation_result["error"] = exc
+            finally:
+                invalidation_done.set()
+
+        execution_thread = threading.Thread(target=execute)
+        execution_thread.start()
+        assert submit_entered.wait(2)
+        invalidation_thread = threading.Thread(target=invalidate_runtime)
+        invalidation_thread.start()
+        try:
+            assert invalidation_started.wait(2)
+            assert invalidation_done.wait(0.1) is False
+            assert runner._protective_runtime_generation == generation_before
+            assert runner._protective_exit_authorization_scope is not None
+        finally:
+            release_submit.set()
+        execution_thread.join(timeout=3)
+        invalidation_thread.join(timeout=3)
+
+        assert execution_thread.is_alive() is False
+        assert invalidation_thread.is_alive() is False
+        assert "error" not in execution_result
+        assert "error" not in invalidation_result
+        status = execution_result.get("status")
+        assert isinstance(status, OrderStatus)
+        assert status.status == "SUBMITTED"
+        assert broker.submissions == 1
+        assert runner._protective_runtime_generation == generation_before + 1
+        assert runner.risk.protective_exit_permitted is False
+        assert runner._protective_exit_authorization_scope is None
+
+    @pytest.mark.parametrize("action", ["SELL", "BUY", "SELL_SHORT"])
+    def test_armed_protective_scope_never_allows_non_reduce_only_action(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        action: str,
+    ) -> None:
+        runner, broker, *_ = self._armed_scoped_protective_runner(monkeypatch)
+
+        status = runner._trade_svc.execute(
+            action,
+            "NVDA.US",
+            Quote("NVDA.US", 214.0, 213.9, 214.1, _fresh_timestamp()),
+            cast(Any, broker),
+            runner.risk,
+            _NoopNotifier(),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=False,
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert broker.submissions == 0
 
     def test_protective_exit_health_requires_fresh_primary_quote(self) -> None:
         class AliveThread:

@@ -92,6 +92,35 @@ def test_existing_cancel_event_is_shared_with_worker() -> None:
         deadline.remaining_seconds()
 
 
+def test_child_view_preserves_absolute_deadline_without_fresh_budget() -> None:
+    clock = _Clock()
+    event = threading.Event()
+    deadline = QuantV6EvaluationDeadline.from_deadline_at(
+        105.0,
+        cancel_event=event,
+        monotonic=clock,
+    )
+
+    assert deadline.deadline_at == 105.0
+    assert deadline.remaining_seconds() == 5.0
+    clock.value = 105.0
+    with pytest.raises(QuantV6EvaluationDeadlineExceededError):
+        deadline.checkpoint()
+
+
+def test_child_view_observes_shared_cancel_event() -> None:
+    event = threading.Event()
+    deadline = QuantV6EvaluationDeadline.from_deadline_at(
+        time.monotonic() + 30,
+        cancel_event=event,
+    )
+
+    event.set()
+
+    with pytest.raises(QuantV6EvaluationCancelledError):
+        deadline.checkpoint()
+
+
 @pytest.mark.parametrize(
     "value",
     [True, 0, -1, float("inf"), float("nan"), "30"],
@@ -99,3 +128,15 @@ def test_existing_cancel_event_is_shared_with_worker() -> None:
 def test_deadline_rejects_invalid_timeout(value: Any) -> None:
     with pytest.raises(ValueError):
         QuantV6EvaluationDeadline(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, float("inf"), float("nan"), "130"],
+)
+def test_child_view_rejects_invalid_absolute_deadline(value: Any) -> None:
+    with pytest.raises(ValueError):
+        QuantV6EvaluationDeadline.from_deadline_at(
+            value,
+            cancel_event=threading.Event(),
+        )

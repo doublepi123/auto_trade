@@ -868,10 +868,17 @@ class TestAPI:
         assert runner.risk.kill_switch is True
 
     def test_protective_exit_control_keeps_operational_pause(self, monkeypatch) -> None:
-        from app.runner import AppRunner
+        from app.runner import AppRunner, _ReductionIntent
 
         runner = AppRunner()
         runner.risk.pause("ORDER_EXECUTION_BLOCKED: operator review")
+        runner._reduction_intents["NVDA.US"] = _ReductionIntent(
+            action="SELL",
+            cause="MAX_HOLDING_TIME",
+            reason="maximum holding time reached",
+            trigger_price=221.0,
+            started_at=datetime.now(timezone.utc),
+        )
         monkeypatch.setattr(
             runner,
             "verify_operational_resume",

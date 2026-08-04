@@ -10,7 +10,7 @@ import re
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace as dataclass_replace
 from datetime import datetime, timedelta, timezone
@@ -114,6 +114,7 @@ _OPENING_FINAL_QUOTE_UNAVAILABLE_REASONS = frozenset({
 _POST_FILL_SETTLEMENT_GRACE_SECONDS = 60.0
 _UNKNOWN_SUBMISSION_RESUME_GRACE_SECONDS = 60.0
 _UNKNOWN_SUBMISSION_SECOND_PROOF_SECONDS = 5.0
+_PROTECTIVE_REDUCTION_SECOND_PROOF_SECONDS = 5.0
 _ORDER_PROVENANCE_TIME_TOLERANCE_SECONDS = 600.0
 _POSITION_DRIFT_PCT_TOLERANCE = Decimal("0.05")  # 5% position drift tolerance
 _POSITION_DRIFT_SHARE_TOLERANCE = Decimal("1")  # 1 share absolute drift tolerance
@@ -249,6 +250,12 @@ class AppRunner:
             entry_cutoff_minutes_before_close=settings.hard_entry_cutoff_minutes_before_close,
             final_order_quote_check=self._validate_final_order_quote,
             entry_policy_check=self._validate_live_entry_policy,
+            final_protective_exit_check=(
+                self._validate_final_protective_exit_submission
+            ),
+            final_protective_exit_commit_check=(
+                self._validate_protective_exit_commit
+            ),
         )
         self._state_svc = RuntimeStateService()
         self._running = False
@@ -309,6 +316,10 @@ class AppRunner:
         self._unsettled_position_symbols: set[str] = set()
         self._unknown_submission_proof_reason = ""
         self._unknown_submission_proof_at = 0.0
+        self._protective_reduction_proof_key: tuple[object, ...] | None = None
+        self._protective_reduction_proof_at = 0.0
+        self._protective_exit_authorization_scope: tuple[object, ...] | None = None
+        self._protective_runtime_generation = 0
         self._broker_identity_fingerprint = ""
 
     def _mark_fill_processed(self, symbol: str, action: str = "") -> None:
@@ -657,8 +668,10 @@ class AppRunner:
         if symbols and not self._quotes_subscribed:
             try:
                 self._subscribe_quote_symbols(self.broker, symbols)
-                self._quotes_subscribed = True
-                self._last_push_quote_at = time.monotonic()
+                with self._protective_runtime_state_guard():
+                    self._quotes_subscribed = True
+                    self._last_push_quote_at = time.monotonic()
+                    self._advance_protective_runtime_generation_locked()
                 # Observer-only: record the successful initial subscription;
                 # resets the window so old quote age cannot report healthy.
                 self._observe_quote_subscription(True)
@@ -722,6 +735,10 @@ class AppRunner:
             self._opening_execution_policies = policies
 
     def refresh_opening_execution_registry(self) -> None:
+        with self._trade_svc.submission_guard():
+            self._refresh_opening_execution_registry_under_submission_guard()
+
+    def _refresh_opening_execution_registry_under_submission_guard(self) -> None:
         with self._state_lock:
             previous_symbols = set(self._desired_quote_symbols_locked())
         with self._db_session() as db:
@@ -740,6 +757,14 @@ class AppRunner:
                     self.broker,
                     desired_symbols,
                 )
+                with self._protective_runtime_state_guard():
+                    self._quotes_subscribed = True
+                    # A successful replacement subscription begins a new
+                    # runtime window. Do not let an authorization or trusted
+                    # quote from the previous stream survive that boundary.
+                    self._last_quote_at = 0.0
+                    self._last_push_quote_at = time.monotonic()
+                    self._advance_protective_runtime_generation_locked()
                 # Observer-only: a symbol-set refresh starts a fresh window.
                 self._observe_quote_subscription(True)
             except Exception as exc:
@@ -748,8 +773,9 @@ class AppRunner:
                     f"{exc}"
                 )
                 logger.exception(reason)
-                with self._state_lock:
+                with self._protective_runtime_state_guard():
                     self._quotes_subscribed = False
+                    self._advance_protective_runtime_generation_locked()
                 # Observer-only: the refresh failed; stream stays unsubscribed.
                 self._observe_quote_subscription(False)
                 self.risk.pause(reason, auto_resumable=False)
@@ -1080,10 +1106,14 @@ class AppRunner:
             self.risk.enable_kill_switch(reason)
 
     def prepare_stop(self, reason: str) -> None:
+        # Compete with the final protective broker commit before publishing the
+        # stop.  Whichever side acquires the lifecycle guard first completes
+        # its linearized transition first.
+        with self._protective_runtime_state_guard():
+            self._running = False
+            self._advance_protective_runtime_generation_locked()
         with self._trade_svc.submission_guard():
             self.pause_for_manual_control(reason)
-            with self._state_lock:
-                self._running = False
 
     def resume_after_verification(
         self,
@@ -1111,6 +1141,8 @@ class AppRunner:
         """Arm reduce-only execution while retaining the operational pause."""
         with self._trade_svc.submission_guard():
             self.risk.revoke_protective_exits()
+            with self._state_lock:
+                self._protective_exit_authorization_scope = None
             healthy, health_error = self._protective_exit_runtime_health()
             if not healthy:
                 self._broadcast_status()
@@ -1118,6 +1150,7 @@ class AppRunner:
             pause_reason, safety_generation = self.risk.pause_verification_snapshot()
             safe, error = self.verify_operational_resume(
                 require_complete_pnl=False,
+                protective_only=True,
             )
             if not safe:
                 self._broadcast_status()
@@ -1126,14 +1159,255 @@ class AppRunner:
             if not healthy:
                 self._broadcast_status()
                 return False, health_error
+            verified_scope = self._protective_exit_scope_snapshot()
             if not self.risk.permit_protective_exits(
                 expected_pause_reason=pause_reason,
                 expected_generation=safety_generation,
             ):
                 self._broadcast_status()
                 return False, "protective exits require an unchanged operational pause"
+            authorization_scope = self._protective_exit_scope_snapshot()
+            if (
+                authorization_scope is None
+                or verified_scope is None
+                or authorization_scope[0] != pause_reason
+                or authorization_scope[1] != safety_generation + 1
+                or authorization_scope[2:] != verified_scope[2:]
+            ):
+                self.risk.revoke_protective_exits()
+                self._broadcast_status()
+                return (
+                    False,
+                    "protective exits require an unchanged durable reduction intent",
+                )
+            if not self._publish_protective_exit_authorization(
+                authorization_scope
+            ):
+                self.risk.revoke_protective_exits()
+                self._broadcast_status()
+                return (
+                    False,
+                    "protective exits require an unchanged durable reduction intent",
+                )
             self._broadcast_status()
             return True, ""
+
+    def _protective_exit_scope_snapshot(self) -> tuple[object, ...] | None:
+        """Capture the exact account, pause, intent, policy, and tracked scope."""
+        pause_reason, safety_generation = self.risk.pause_verification_snapshot()
+        with self._state_lock:
+            intents = dict(self._reduction_intents)
+            policies = dict(self._opening_execution_policies)
+            primary_symbol = self.engine.params.symbol
+            broker_identity_fingerprint = self._broker_identity_fingerprint
+            broker_instance_id = id(self.broker)
+            protective_runtime_generation = self._protective_runtime_generation
+        if not intents:
+            return None
+
+        intent_snapshot = tuple(
+            (
+                symbol,
+                intent.action,
+                intent.cause,
+                intent.reason,
+                intent.trigger_price,
+                intent.started_at,
+            )
+            for symbol, intent in sorted(intents.items())
+        )
+        policy_snapshot = tuple(
+            (
+                symbol,
+                policy.execution_id,
+                policy.symbol,
+                policy.status,
+                policy.stop_loss_pct,
+                policy.max_holding_minutes,
+                policy.reference_entry_price,
+                policy.max_price_deviation_bps,
+            )
+            for symbol, policy in sorted(policies.items())
+        )
+        tracked_snapshot: list[tuple[object, ...]] = []
+        for symbol in sorted(self._trade_svc.snapshot_tracked_entries()):
+            tracked = self._trade_svc.tracked_position(symbol)
+            if tracked is None:
+                tracked_snapshot.append((symbol, None))
+                continue
+            tracked_snapshot.append(
+                (
+                    symbol,
+                    tracked.side,
+                    tracked.quantity,
+                    tracked.cost,
+                    tracked.opened_at,
+                )
+            )
+        return (
+            pause_reason,
+            safety_generation,
+            broker_identity_fingerprint,
+            broker_instance_id,
+            primary_symbol,
+            intent_snapshot,
+            policy_snapshot,
+            tuple(tracked_snapshot),
+            protective_runtime_generation,
+        )
+
+    def _protective_reduction_local_proof_key(
+        self,
+    ) -> tuple[object, ...] | None:
+        pause_reason, _ = self.risk.pause_verification_snapshot()
+        with self._state_lock:
+            has_reduction_intents = bool(self._reduction_intents)
+            trigger_in_flight = self._trigger_in_flight
+            unresolved_order_ids = tuple(self._unresolved_live_order_ids)
+            representation_issues = tuple(
+                self._unrepresentable_live_order_issues
+            )
+        if (
+            not has_reduction_intents
+            or not self.risk.paused
+            or self.risk.kill_switch
+            or not pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
+            or trigger_in_flight
+            or unresolved_order_ids
+            or representation_issues
+            or self._trade_svc.pending_order_ids()
+        ):
+            return None
+        return self._protective_exit_scope_snapshot()
+
+    def _reset_protective_reduction_proof(self) -> None:
+        with self._state_lock:
+            self._protective_reduction_proof_key = None
+            self._protective_reduction_proof_at = 0.0
+
+    def _maybe_permit_persisted_reduction(self) -> bool:
+        """Automatically arm reduce-only after two coherent broker proofs.
+
+        This path never resumes the operational pause. It merely obtains the
+        same ephemeral protective authorization as the operator control after
+        a durable reduction intent has remained coherent for at least five
+        seconds.
+        """
+        with self._trade_svc.submission_guard():
+            if self.risk.protective_exit_permitted:
+                return True
+            proof_key = self._protective_reduction_local_proof_key()
+            if proof_key is None:
+                self._reset_protective_reduction_proof()
+                return False
+
+            proof_now = time.monotonic()
+            with self._state_lock:
+                previous_key = self._protective_reduction_proof_key
+                previous_at = self._protective_reduction_proof_at
+            if (
+                previous_key == proof_key
+                and previous_at > 0
+                and proof_now - previous_at
+                < _PROTECTIVE_REDUCTION_SECOND_PROOF_SECONDS
+            ):
+                return False
+
+            healthy, _ = self._protective_exit_runtime_health()
+            if not healthy:
+                self._reset_protective_reduction_proof()
+                return False
+            safe, error = self.verify_operational_resume(
+                require_complete_pnl=False,
+                protective_only=True,
+            )
+            first_delayed_proof = error.startswith("first coherent ")
+            if not safe and not first_delayed_proof:
+                self._reset_protective_reduction_proof()
+                return False
+            healthy, _ = self._protective_exit_runtime_health()
+            if not healthy:
+                self._reset_protective_reduction_proof()
+                return False
+
+            current_key = self._protective_reduction_local_proof_key()
+            if current_key != proof_key:
+                self._reset_protective_reduction_proof()
+                return False
+
+            proof_now = time.monotonic()
+            with self._state_lock:
+                if self._protective_reduction_proof_key != proof_key:
+                    self._protective_reduction_proof_key = proof_key
+                    self._protective_reduction_proof_at = proof_now
+                    return False
+                proof_age = proof_now - self._protective_reduction_proof_at
+                if proof_age < _PROTECTIVE_REDUCTION_SECOND_PROOF_SECONDS:
+                    return False
+                if not safe:
+                    self._protective_reduction_proof_at = proof_now
+                    return False
+
+            pause_reason = str(proof_key[0])
+            safety_generation = cast(int, proof_key[1])
+            if not self.risk.permit_protective_exits(
+                expected_pause_reason=pause_reason,
+                expected_generation=safety_generation,
+            ):
+                self._reset_protective_reduction_proof()
+                return False
+            authorization_scope = self._protective_exit_scope_snapshot()
+            if (
+                authorization_scope is None
+                or authorization_scope[0] != proof_key[0]
+                or authorization_scope[1] != safety_generation + 1
+                or authorization_scope[2:] != proof_key[2:]
+            ):
+                self.risk.revoke_protective_exits()
+                self._reset_protective_reduction_proof()
+                return False
+            if not self._publish_protective_exit_authorization(
+                authorization_scope
+            ):
+                self.risk.revoke_protective_exits()
+                self._reset_protective_reduction_proof()
+                return False
+            self._reset_protective_reduction_proof()
+            self._broadcast_status()
+            return True
+
+    def _publish_protective_exit_authorization(
+        self,
+        authorization_scope: tuple[object, ...],
+    ) -> bool:
+        """Atomically confirm and publish one exact protective scope."""
+        with self._state_lock:
+            if (
+                not self.risk.protective_exit_permitted
+                or self._protective_exit_scope_snapshot()
+                != authorization_scope
+            ):
+                self._protective_exit_authorization_scope = None
+                return False
+            self._protective_exit_authorization_scope = authorization_scope
+            return True
+
+    @contextmanager
+    def _protective_runtime_state_guard(self) -> Generator[None, None, None]:
+        """Linearize runtime mutation against a protective broker commit."""
+        with self.risk.protective_submission_guard():
+            with self._state_lock:
+                yield
+
+    def _advance_protective_runtime_generation_locked(self) -> None:
+        """Invalidate every authorization tied to an older runner lifecycle."""
+        self._protective_runtime_generation += 1
+        self._protective_exit_authorization_scope = None
+        self._protective_reduction_proof_key = None
+        self._protective_reduction_proof_at = 0.0
+        # The caller holds _protective_runtime_state_guard(), so the generation
+        # change and revocation publish atomically against the broker commit.
+        self.risk.revoke_protective_exits()
 
     def _protective_exit_runtime_health(self) -> tuple[bool, str]:
         """Require a live runner and a recent trusted quote before arming exits."""
@@ -1161,9 +1435,207 @@ class AppRunner:
             )
         return True, ""
 
+    def _protective_exit_verification_failure(self, detail: str) -> str:
+        with self._state_lock:
+            self._protective_exit_authorization_scope = None
+        return f"protective exit final verification failed: {detail}"
+
+    def _validate_protective_exit_local_submission_scope(
+        self,
+        broker: BrokerGateway,
+        symbol: str,
+        action: str,
+        quantity: Decimal,
+        execution_context: Mapping[str, object],
+        *,
+        expected_authorization_scope: tuple[object, ...] | None = None,
+    ) -> tuple[str | None, tuple[object, ...] | None]:
+        """Validate only in-process state; never perform broker or database I/O."""
+
+        def fail(detail: str) -> tuple[str, None]:
+            return self._protective_exit_verification_failure(detail), None
+
+        normalized_symbol = symbol.strip().upper()
+        with self._state_lock:
+            authorization_scope = self._protective_exit_authorization_scope
+            current_broker = self.broker
+            intent = self._reduction_intents.get(normalized_symbol)
+            policy = self._opening_execution_policies.get(normalized_symbol)
+        if authorization_scope is None:
+            return fail("authorization scope is unavailable")
+        if (
+            expected_authorization_scope is not None
+            and authorization_scope != expected_authorization_scope
+        ):
+            return fail("authorization scope changed during final verification")
+        if broker is not current_broker or id(broker) != authorization_scope[3]:
+            return fail("broker identity changed after authorization")
+        if action not in _POSITION_REDUCING_ACTIONS:
+            return fail("action is not position reducing")
+        if not quantity.is_finite() or quantity <= 0:
+            return fail("target reduction quantity is invalid")
+        if self.risk.kill_switch or not self.risk.protective_exit_permitted:
+            return fail("protective permission is no longer active")
+
+        pause_reason, safety_generation = self.risk.pause_verification_snapshot()
+        if (
+            pause_reason != authorization_scope[0]
+            or safety_generation != authorization_scope[1]
+        ):
+            return fail("operational pause or safety generation changed")
+        if self._protective_exit_scope_snapshot() != authorization_scope:
+            return fail("durable reduction or account scope changed")
+
+        healthy, health_error = self._protective_exit_runtime_health()
+        if not healthy:
+            return fail(health_error)
+        tracked = self._trade_svc.tracked_position(normalized_symbol)
+        if intent is None:
+            return fail("target durable reduction intent is unavailable")
+        if intent.action != action:
+            return fail("target durable reduction action changed")
+        if tracked is None or tracked.quantity != quantity:
+            return fail("target durable reduction quantity changed")
+        if execution_context.get("exit_cause") != intent.cause:
+            return fail("target reduction cause does not match execution context")
+        if execution_context.get("exit_reason") != intent.reason:
+            return fail("target reduction reason does not match execution context")
+        try:
+            config_snapshot = json.loads(
+                str(execution_context.get("config_snapshot") or "")
+            )
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return fail("target reduction policy snapshot is invalid")
+        if not isinstance(config_snapshot, dict) or config_snapshot.get(
+            "reduce_only"
+        ) is not True:
+            return fail("target reduction policy is not reduce-only")
+        execution_signal = config_snapshot.get("execution_signal")
+        if policy is not None:
+            expected_policy = {
+                "strategy_source": "OPENING_MOMENTUM",
+                "opening_execution_id": policy.execution_id,
+                "reference_entry_price": policy.reference_entry_price,
+                "max_price_deviation_bps": policy.max_price_deviation_bps,
+                "stop_loss_pct": policy.stop_loss_pct,
+                "max_holding_minutes": policy.max_holding_minutes,
+            }
+            if not isinstance(execution_signal, dict) or any(
+                execution_signal.get(key) != value
+                for key, value in expected_policy.items()
+            ):
+                return fail("target opening-execution policy scope changed")
+        elif execution_signal is not None:
+            return fail("unexpected opening-execution policy scope")
+
+        final_pause_reason, final_generation = (
+            self.risk.pause_verification_snapshot()
+        )
+        if (
+            final_pause_reason != pause_reason
+            or final_generation != safety_generation
+            or not self.risk.protective_exit_permitted
+            or broker is not self.broker
+            or self._protective_exit_scope_snapshot() != authorization_scope
+        ):
+            return fail("authorization scope changed during final verification")
+        healthy, health_error = self._protective_exit_runtime_health()
+        if not healthy:
+            return fail(health_error)
+        return None, authorization_scope
+
+    def _validate_final_protective_exit_submission(
+        self,
+        broker: BrokerGateway,
+        symbol: str,
+        action: str,
+        quantity: Decimal,
+        execution_context: Mapping[str, object],
+    ) -> str | None:
+        """Re-prove account-wide broker state before the final commit gate."""
+        local_issue, authorization_scope = (
+            self._validate_protective_exit_local_submission_scope(
+                broker,
+                symbol,
+                action,
+                quantity,
+                execution_context,
+            )
+        )
+        if local_issue is not None or authorization_scope is None:
+            return local_issue or "protective exit authorization is unavailable"
+        pause_reason = str(authorization_scope[0])
+
+        # This is deliberately forced for every paused reduce-only submission.
+        # It refreshes broker today-orders before any target position lookup.
+        self.sync_today_orders_from_broker(force=True)
+        with self._state_lock:
+            order_sync_succeeded = self._last_order_sync_succeeded
+            unresolved_order_ids = tuple(self._unresolved_live_order_ids)
+            representation_issues = tuple(self._unrepresentable_live_order_issues)
+        pending_order_ids = tuple(self._trade_svc.pending_order_ids())
+        if not order_sync_succeeded:
+            return self._protective_exit_verification_failure(
+                "broker today-order synchronization failed"
+            )
+        if pending_order_ids or unresolved_order_ids:
+            return self._protective_exit_verification_failure(
+                "live or unresolved broker orders exist"
+            )
+        if representation_issues:
+            return self._protective_exit_verification_failure(
+                "broker orders cannot be represented safely"
+            )
+
+        try:
+            positions = broker.get_positions()
+        except Exception:
+            logger.exception(
+                "cannot verify all broker positions before protective exit"
+            )
+            return self._protective_exit_verification_failure(
+                "broker positions could not be verified"
+            )
+        safe, position_error = self._verify_protective_exit_positions(
+            positions,
+            pause_reason=pause_reason,
+        )
+        if not safe:
+            return self._protective_exit_verification_failure(position_error)
+
+        final_issue, _ = self._validate_protective_exit_local_submission_scope(
+            broker,
+            symbol,
+            action,
+            quantity,
+            execution_context,
+            expected_authorization_scope=authorization_scope,
+        )
+        return final_issue
+
+    def _validate_protective_exit_commit(
+        self,
+        broker: BrokerGateway,
+        symbol: str,
+        action: str,
+        quantity: Decimal,
+        execution_context: Mapping[str, object],
+    ) -> str | None:
+        """Recheck immutable local authorization immediately before submit."""
+        issue, _ = self._validate_protective_exit_local_submission_scope(
+            broker,
+            symbol,
+            action,
+            quantity,
+            execution_context,
+        )
+        return issue
+
     def revoke_protective_exits(self) -> None:
         with self._trade_svc.submission_guard():
             self.risk.revoke_protective_exits()
+            with self._state_lock:
+                self._protective_exit_authorization_scope = None
             self._broadcast_status()
 
     def _register_broker_disconnect_hook(self) -> None:
@@ -1248,6 +1720,14 @@ class AppRunner:
     def _on_disconnect(self, reason: str) -> None:
         """Handle broker SDK disconnect events without auto-pausing trading."""
         reason_text = str(reason)
+        # Native SDK events are forwarded off the SDK callback thread by the
+        # broker gateway.  Compete with a protective commit before publishing
+        # the stream loss; an already-committed broker call finishes first.
+        with self._protective_runtime_state_guard():
+            self._quotes_subscribed = False
+            self._disconnect_retry_count += 1
+            self._advance_protective_runtime_generation_locked()
+            retry_count = self._disconnect_retry_count
         logger.warning("broker_disconnect", extra={"reason": reason_text})
         try:
             self._audit.record(
@@ -1257,10 +1737,6 @@ class AppRunner:
             )
         except Exception as exc:
             logger.warning("audit_record_failed: %s", exc)
-        with self._state_lock:
-            self._quotes_subscribed = False
-            self._disconnect_retry_count += 1
-            retry_count = self._disconnect_retry_count
         # Observer-only health metrics (do not alter control flow).
         self.quote_stream_health.record_disconnect()
         self.quote_stream_health.record_disconnect_retry()
@@ -1289,10 +1765,11 @@ class AppRunner:
             if retry_count >= DISCONNECT_RETRY_EXHAUSTED_THRESHOLD:
                 self._record_broker_retry_exhausted(str(exc))
             raise
-        with self._state_lock:
+        with self._protective_runtime_state_guard():
             self._quotes_subscribed = True
             self._disconnect_retry_count = 0
             self._last_push_quote_at = time.monotonic()
+            self._advance_protective_runtime_generation_locked()
         # Observer-only: a successful resubscribe resets the window.
         self._observe_quote_subscription(True)
 
@@ -1303,7 +1780,9 @@ class AppRunner:
             if loop is not None:
                 self._loop = loop
             if self._thread is not None and self._thread.is_alive():
-                self._running = False
+                with self._protective_runtime_state_guard():
+                    self._running = False
+                    self._advance_protective_runtime_generation_locked()
                 self._thread.join(timeout=10)
                 if self._thread.is_alive():
                     logger.critical(
@@ -1315,9 +1794,15 @@ class AppRunner:
             except Exception:
                 logger.exception("runner initialization failed")
                 return False
-            self._running = True
-            self._thread = threading.Thread(target=self._run_loop, daemon=True)
-            self._thread.start()
+            with self._protective_runtime_state_guard():
+                self._running = True
+                self._thread = threading.Thread(
+                    target=self._run_loop,
+                    daemon=True,
+                )
+                self._advance_protective_runtime_generation_locked()
+                runner_thread = self._thread
+            runner_thread.start()
         logger.info("runner started")
         return True
 
@@ -1541,9 +2026,10 @@ class AppRunner:
     def stop(self) -> None:
         with self._start_lock:
             defer_broker_close = False
-            with self._state_lock:
+            with self._protective_runtime_state_guard():
                 self._running = False
                 self._quotes_subscribed = False
+                self._advance_protective_runtime_generation_locked()
                 if self._trigger_in_flight:
                     self._defer_broker_close = True
                     defer_broker_close = True
@@ -1814,7 +2300,7 @@ class AppRunner:
 
             need_resubscribe = False
             resubscribe_symbols: list[str] = []
-            with self._state_lock:
+            with self._protective_runtime_state_guard():
                 if primary_changed:
                     # Re-check under the same lock used by quote evaluation so
                     # no trigger can appear between the broker proof and swap.
@@ -1835,6 +2321,7 @@ class AppRunner:
                     if self._quotes_subscribed:
                         need_resubscribe = True
                         self._quotes_subscribed = False
+                        self._advance_protective_runtime_generation_locked()
 
             # Observer-only: reset symbol-bound/current-window quote state
             # whenever the primary symbol changed, independently of whether a
@@ -1854,9 +2341,10 @@ class AppRunner:
                 if resubscribe_symbols:
                     try:
                         self._subscribe_quote_symbols(self.broker, resubscribe_symbols)
-                        with self._state_lock:
+                        with self._protective_runtime_state_guard():
                             self._quotes_subscribed = True
                             self._last_push_quote_at = time.monotonic()
+                            self._advance_protective_runtime_generation_locked()
                         # Observer-only: record the successful resubscribe.
                         self._observe_quote_subscription(True)
                         logger.info(
@@ -2418,6 +2906,19 @@ class AppRunner:
                     self._set_last_action_message(reason)
                     self._broadcast_status()
                     return
+
+            if (
+                decision.reduction_intent is not None
+                and decision.result is None
+                and decision.engine_snapshot is not None
+                and self._maybe_permit_persisted_reduction()
+            ):
+                # The first evaluation intentionally restored the engine when
+                # the operational pause rejected the reduction. Re-evaluate
+                # the same trusted quote once after reduce-only authorization
+                # so a durable protective exit does not need a third quote.
+                decision = self._evaluate_quote_trigger(quote, is_push=False)
+                processing_started = decision.processing_started
 
             if decision.early_return:
                 return
@@ -3859,14 +4360,16 @@ class AppRunner:
                 ", ".join(in_session_symbols),
                 exc,
             )
-            with self._state_lock:
+            with self._protective_runtime_state_guard():
                 self._quotes_subscribed = False
+                self._advance_protective_runtime_generation_locked()
             # Observer-only: failed silent-watchdog resubscribe stays unsubscribed.
             self._observe_quote_subscription(False)
             return False
-        with self._state_lock:
+        with self._protective_runtime_state_guard():
             self._quotes_subscribed = True
             self._last_push_quote_at = time.monotonic()
+            self._advance_protective_runtime_generation_locked()
         # Observer-only: successful silent-watchdog resubscribe resets the window.
         self._observe_quote_subscription(True)
         logger.warning(
@@ -4127,8 +4630,15 @@ class AppRunner:
         self,
         *,
         require_complete_pnl: bool = True,
+        protective_only: bool = False,
     ) -> tuple[bool, str]:
-        """Prove broker/order state is coherent before changing pause access."""
+        """Prove broker/order state is coherent before changing pause access.
+
+        ``protective_only`` is deliberately narrower than a full operational
+        resume: it may recognize an exactly tracked opening/reduction exposure,
+        but it never reconciles inventory, persists engine state, or makes the
+        paused runner eligible for entries.
+        """
         with self._state_lock:
             if self.risk.kill_switch:
                 self._unknown_submission_proof_reason = ""
@@ -4211,6 +4721,23 @@ class AppRunner:
         except Exception:
             logger.exception("cannot verify broker positions before operational resume")
             return False, "broker positions could not be verified"
+
+        if protective_only:
+            safe, error = self._verify_protective_exit_positions(
+                positions,
+                pause_reason=pause_reason,
+            )
+            if not safe:
+                return False, error
+            return self._complete_delayed_broker_proof(
+                delayed_resume_proof=delayed_resume_proof,
+                recoverable_position_snapshot_pause=(
+                    recoverable_position_snapshot_pause
+                ),
+                pause_reason=pause_reason,
+                previous_proof_reason=previous_proof_reason,
+                previous_proof_at=previous_proof_at,
+            )
 
         active_positions = [
             position
@@ -4319,6 +4846,173 @@ class AppRunner:
                     f"{pnl_result.trade_day}",
                 )
 
+        return self._complete_delayed_broker_proof(
+            delayed_resume_proof=delayed_resume_proof,
+            recoverable_position_snapshot_pause=(
+                recoverable_position_snapshot_pause
+            ),
+            pause_reason=pause_reason,
+            previous_proof_reason=previous_proof_reason,
+            previous_proof_at=previous_proof_at,
+        )
+
+    def _verify_protective_exit_positions(
+        self,
+        positions: Sequence[Position],
+        *,
+        pause_reason: str,
+    ) -> tuple[bool, str]:
+        """Verify an immutable reduce-only exposure snapshot.
+
+        Unlike full resume verification, this path never repairs tracked
+        inventory from broker data. Every live broker position must already
+        match the durable tracked side and quantity exactly.
+        """
+        with self._state_lock:
+            primary_symbol = (self.engine.params.symbol or "").strip().upper()
+            opening_policies = dict(self._opening_execution_policies)
+            reduction_intents = dict(self._reduction_intents)
+            unsettled_positions = sorted(
+                self._unsettled_position_symbols
+                | set(self._post_fill_expectations)
+            )
+        if unsettled_positions:
+            return (
+                False,
+                "recent fill settlement is still unproven for: "
+                + ", ".join(unsettled_positions),
+            )
+
+        managed_opening_symbols = {
+            symbol
+            for symbol, policy in opening_policies.items()
+            if policy.status != "ARMED"
+        }
+        allowed_symbols = set(managed_opening_symbols)
+        allowed_symbols.update(reduction_intents)
+        if primary_symbol:
+            allowed_symbols.add(primary_symbol)
+
+        broker_positions: dict[str, list[tuple[str, Decimal]]] = {}
+        for position in positions:
+            symbol = str(position.symbol or "").strip().upper()
+            if not symbol:
+                return False, "broker position symbol is unavailable"
+            try:
+                quantity = Decimal(str(position.quantity))
+            except Exception:
+                return False, f"broker position quantity is invalid for {symbol}"
+            if not quantity.is_finite() or quantity < 0:
+                return False, f"broker position quantity is invalid for {symbol}"
+            if quantity == 0:
+                continue
+            side = str(position.side or "").strip().upper()
+            if side not in {"LONG", "SHORT"}:
+                return False, f"broker position side is ambiguous for {symbol}"
+            broker_positions.setdefault(symbol, []).append((side, quantity))
+
+        unexpected_symbols = sorted(set(broker_positions) - allowed_symbols)
+        if unexpected_symbols:
+            return (
+                False,
+                "broker exposure exists outside the verified protective-exit "
+                "scope: " + ", ".join(unexpected_symbols),
+            )
+        if pause_reason.startswith(
+            _REDUCTION_SETTLEMENT_UNCERTAIN_PREFIX
+        ) and broker_positions:
+            return (
+                False,
+                "reduction settlement is still not reflected by broker positions",
+            )
+
+        tracked_symbols = set(self._trade_svc.snapshot_tracked_entries())
+        broker_symbols = set(broker_positions)
+        tracked_without_broker = sorted(tracked_symbols - broker_symbols)
+        if tracked_without_broker:
+            return (
+                False,
+                "durable tracked position has no matching broker exposure: "
+                + ", ".join(tracked_without_broker),
+            )
+        reductions_without_broker = sorted(
+            set(reduction_intents) - broker_symbols
+        )
+        if reductions_without_broker:
+            return (
+                False,
+                "persisted reduction has no matching broker exposure: "
+                + ", ".join(reductions_without_broker),
+            )
+
+        max_quote_age = max(
+            _QUOTE_SOURCE_MAX_AGE_SECONDS,
+            self._active_quote_refresh_interval_seconds * 2,
+        )
+        for symbol in sorted(broker_positions):
+            rows = broker_positions[symbol]
+            sides = {side for side, _ in rows}
+            if len(sides) != 1:
+                return False, f"broker position side is ambiguous for {symbol}"
+            broker_side = next(iter(sides))
+            broker_quantity = sum(
+                (quantity for _, quantity in rows),
+                Decimal("0"),
+            )
+            tracked = self._trade_svc.tracked_position(symbol)
+            if (
+                tracked is None
+                or tracked.side != broker_side
+                or tracked.quantity != broker_quantity
+                or tracked.avg_price <= 0
+                or tracked.opened_at is None
+            ):
+                return (
+                    False,
+                    f"broker position for {symbol} does not match its durable "
+                    "tracked entry",
+                )
+
+            intent = reduction_intents.get(symbol)
+            if intent is not None:
+                expected_action = (
+                    "SELL" if broker_side == "LONG" else "BUY_TO_COVER"
+                )
+                if intent.action != expected_action:
+                    return (
+                        False,
+                        f"persisted reduction action for {symbol} does not match "
+                        "the broker position side",
+                    )
+            elif (
+                symbol != primary_symbol
+                and symbol in managed_opening_symbols
+                and broker_side != "LONG"
+            ):
+                return (
+                    False,
+                    f"managed opening exposure for {symbol} must be LONG",
+                )
+
+            if self.fresh_market_price(
+                symbol,
+                max_age_seconds=max_quote_age,
+            ) is None:
+                return (
+                    False,
+                    f"fresh trusted quote is unavailable for {symbol}",
+                )
+        return True, ""
+
+    def _complete_delayed_broker_proof(
+        self,
+        *,
+        delayed_resume_proof: bool,
+        recoverable_position_snapshot_pause: bool,
+        pause_reason: str,
+        previous_proof_reason: str,
+        previous_proof_at: float,
+    ) -> tuple[bool, str]:
         if delayed_resume_proof:
             proof_now = time.monotonic()
             proof_is_old_enough = (
@@ -5710,7 +6404,7 @@ class AppRunner:
         resubscribe: bool,
         validate_switch: bool = False,
     ) -> None:
-        with self._state_lock:
+        with self._protective_runtime_state_guard():
             symbol = self.engine.params.symbol
             should_resubscribe = resubscribe and bool(symbol)
             sct_key = credentials.sct_key if credentials.sct_key else settings.sct_key
@@ -5804,12 +6498,14 @@ class AppRunner:
 
             if should_resubscribe:
                 self._quotes_subscribed = True
+                self._advance_protective_runtime_generation_locked()
                 self._reset_quote_tracking(clear_history=True)
                 self._last_push_quote_at = time.monotonic()
                 # Observer-only: successful credential-reload resubscribe.
                 self._observe_quote_subscription(True)
             else:
                 self._quotes_subscribed = False
+                self._advance_protective_runtime_generation_locked()
                 # Observer-only: no resubscribe; stream is unsubscribed.
                 self._observe_quote_subscription(False)
 

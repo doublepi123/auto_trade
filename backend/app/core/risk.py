@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import math
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 
 
 _OPERATIONAL_PAUSE_PREFIXES = (
@@ -84,6 +85,12 @@ class RiskController:
         self._kill_switch_reason: str = ""
         self._safety_generation: int = 0
         self._entry_reconciliation_count: int = 0
+        # Serializes the local protective commit proof with runner lifecycle
+        # invalidation.  Keep this separate from ``_lock``: the commit proof
+        # reads runner state, while ordinary runner paths can read risk state
+        # under their own state lock.  A separate outer lock avoids creating a
+        # risk-lock -> runner-lock inversion.
+        self._protective_submission_lock = threading.RLock()
         self._lock = threading.RLock()
 
     def set_trade_day_provider(self, provider: TradeDayProvider) -> None:
@@ -477,6 +484,37 @@ class RiskController:
             self._protective_exit_pause_reason = ""
             self._safety_generation += 1
 
+    @contextmanager
+    def protective_submission_guard(self) -> Iterator[None]:
+        """Serialize a protective commit proof with runtime invalidation.
+
+        Runner lifecycle mutations must acquire this guard *before* the
+        runner state lock.  The order path holds it from its final local proof
+        through the broker call, so either invalidation wins and revokes the
+        permission first, or the already-committed submission completes first.
+        """
+        with self._protective_submission_lock:
+            yield
+
+    @contextmanager
+    def protective_permission_guard(self) -> Iterator[bool]:
+        """Hold risk state stable across the final permission read and submit.
+
+        This is the inner phase of ``protective_submission_guard``.  Yielding
+        the permission while retaining ``_lock`` makes every pause, revoke,
+        and kill-switch mutation wait until the broker mutation returns.
+        """
+        with self._lock:
+            yield self._protective_exit_permitted_locked()
+
+    def _protective_exit_permitted_locked(self) -> bool:
+        return bool(
+            self.paused
+            and not self.kill_switch
+            and self._pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
+            and self._protective_exit_pause_reason == self._pause_reason
+        )
+
     def pause_verification_snapshot(self) -> tuple[str, int]:
         """Return an atomic token binding a verification to the current safety state."""
         with self._lock:
@@ -529,12 +567,7 @@ class RiskController:
     @property
     def protective_exit_permitted(self) -> bool:
         with self._lock:
-            return bool(
-                self.paused
-                and not self.kill_switch
-                and self._pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
-                and self._protective_exit_pause_reason == self._pause_reason
-            )
+            return self._protective_exit_permitted_locked()
 
     @property
     def entry_reconciliation_count(self) -> int:

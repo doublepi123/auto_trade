@@ -1478,6 +1478,9 @@ def _watchlist_quant_v6_evaluation_tick_sync(
     from app.services.watchlist_quant_v6_publication_service import (
         WatchlistQuantV6PublicationService,
     )
+    from app.services.watchlist_quant_v6_spawn_supervisor import (
+        QuantV6PipelineMemoryFence,
+    )
 
     deadline = evaluation_deadline or QuantV6EvaluationDeadline(
         settings.watchlist_quant_v6_evaluation_timeout_seconds
@@ -1518,11 +1521,17 @@ def _watchlist_quant_v6_evaluation_tick_sync(
             try:
                 lease_guard.checkpoint()
                 deadline.checkpoint()
+                pipeline_memory_fence = QuantV6PipelineMemoryFence.capture(
+                    memory_limit_mib=(
+                        settings.watchlist_quant_v6_pipeline_memory_limit_mib
+                    ),
+                )
                 plan = build_latest_quant_v6_registration_plan(
                     observed_at=datetime.now(timezone.utc),
                 )
                 lease_guard.checkpoint()
                 deadline.checkpoint()
+                pipeline_memory_fence.checkpoint()
                 provider = QuantV6HistoricalBarProvider(
                     evaluation_deadline=deadline,
                 )
@@ -1537,6 +1546,14 @@ def _watchlist_quant_v6_evaluation_tick_sync(
                         plan=plan,
                         provider=provider,
                         evaluation_deadline=deadline,
+                        compute_workers=(
+                            settings.watchlist_quant_v6_compute_workers
+                        ),
+                        pipeline_memory_limit_mib=(
+                            settings
+                            .watchlist_quant_v6_pipeline_memory_limit_mib
+                        ),
+                        pipeline_memory_fence=pipeline_memory_fence,
                     )
                     logger.info(
                         "quant-v6 historical publication id=%d "

@@ -946,6 +946,23 @@ class BrokerGateway:
             except Exception as exc:
                 logger.warning("disconnect_hook_failed: %s", exc)
 
+    def _forward_native_disconnect(self, reason: str) -> None:
+        """Move native SDK callbacks off the SDK-owned callback thread.
+
+        A protective order intentionally keeps its final permission stable
+        across ``TradeContext.submit_order``.  Future SDK versions may invoke
+        quote disconnect callbacks on a different thread while waiting for
+        that callback before returning from another RPC.  Dispatching our
+        hooks on a daemon thread prevents that opaque SDK dependency from
+        turning the protective submission guard into a cross-thread deadlock.
+        """
+        threading.Thread(
+            target=self._call_disconnect_hooks,
+            args=(str(reason),),
+            name="broker-disconnect-hooks",
+            daemon=True,
+        ).start()
+
     def _register_native_disconnect_if_available(self) -> None:
         """Attach to the SDK disconnect event when available; watchdog remains the fallback."""
         quote_ctx = self._quote_ctx
@@ -958,7 +975,7 @@ class BrokerGateway:
             logger.info("broker disconnect event unavailable; falling back to quote watchdog")
             return
         try:
-            on_disconnect(self._call_disconnect_hooks)
+            on_disconnect(self._forward_native_disconnect)
         except Exception as exc:
             logger.warning("native_disconnect_register_failed: %s", exc)
 

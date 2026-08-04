@@ -4067,7 +4067,11 @@ class TestTradeExecutionServiceBasics:
         assert skipped, "expected record_order_skipped to be called for risk rejection"
         assert skipped[0][3]["skip_category"] == "RISK"
 
-    def test_paused_risk_allows_position_reducing_sell(self) -> None:
+    @pytest.mark.parametrize("risk_mode", ["manual_pause", "daily_loss"])
+    def test_non_operational_risk_rejection_allows_normal_position_reduction(
+        self,
+        risk_mode: str,
+    ) -> None:
         class Broker:
             def get_positions(self):
                 return [SimpleNamespace(symbol="NVDA.US", side="LONG", quantity=Decimal("10"), avg_price=Decimal("220"))]
@@ -4080,8 +4084,12 @@ class TestTradeExecutionServiceBasics:
             update_order_status=lambda *args: None,
             record_risk_event=lambda *args: None,
         )
-        risk = RiskController()
-        risk.pause("pending order order-entry timed out after 30s")
+        risk = RiskController(RiskConfig(max_daily_loss=1))
+        if risk_mode == "manual_pause":
+            risk.pause("manual operator pause")
+        else:
+            risk.record_trade(-2)
+            assert risk.check().approved is False
 
         status = svc.execute(
             "SELL",
@@ -4096,6 +4104,41 @@ class TestTradeExecutionServiceBasics:
 
         assert status is not None
         assert status.status == "FILLED"
+
+    def test_operational_pause_rejects_non_reduce_only_sell_even_when_armed(
+        self,
+    ) -> None:
+        class Broker:
+            @staticmethod
+            def get_positions() -> list[object]:
+                raise AssertionError(
+                    "non-reduce-only operational exit must fail before broker lookup"
+                )
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+        )
+        risk = RiskController()
+        risk.pause(f"{trade_svc_module.ORDER_EXECUTION_BLOCKED_PREFIX} verified")
+        assert risk.permit_protective_exits() is True
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 215, 214.9, 215.1, ""),
+            Broker(),
+            risk,
+            ServerChanNotifier(""),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=False,
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert "trading is paused" in status.reason
 
     def test_verified_protective_permission_allows_operational_pause_exit(self) -> None:
         class Broker:
@@ -4129,6 +4172,8 @@ class TestTradeExecutionServiceBasics:
             final_order_quote_check=lambda _broker, _symbol, _action, price: (
                 FinalOrderQuoteCheckResult(executable_price=price)
             ),
+            final_protective_exit_check=lambda *_args: None,
+            final_protective_exit_commit_check=lambda *_args: None,
         )
         risk = RiskController()
         risk.pause(
@@ -4152,6 +4197,267 @@ class TestTradeExecutionServiceBasics:
         assert status is not None
         assert status.status == "FILLED"
         assert broker.submitted_quantity == Decimal("10")
+
+    @pytest.mark.parametrize("mode", ["missing", "failure", "exception"])
+    def test_paused_reduce_only_final_proof_fails_closed_and_revokes(
+        self,
+        mode: str,
+    ) -> None:
+        class Broker:
+            submitted = False
+            position_reads = 0
+
+            def get_positions(self) -> list[object]:
+                self.position_reads += 1
+                if self.position_reads > 1:
+                    raise AssertionError(
+                        "target position gate must follow successful global proof"
+                    )
+                return [
+                    SimpleNamespace(
+                        symbol="NVDA.US",
+                        side="LONG",
+                        quantity=Decimal("10"),
+                        available_quantity=Decimal("10"),
+                        avg_price=Decimal("220"),
+                    )
+                ]
+
+            def submit_limit_order(self, *args: object) -> OrderResult:
+                self.submitted = True
+                raise AssertionError("failed global proof must block submission")
+
+        def protective_check(*_args: object) -> str | None:
+            if mode == "exception":
+                raise RuntimeError("proof unavailable")
+            return "account-wide proof failed"
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            final_protective_exit_check=(
+                None if mode == "missing" else protective_check
+            ),
+        )
+        risk = RiskController()
+        risk.pause(f"{trade_svc_module.ORDER_EXECUTION_BLOCKED_PREFIX} verified")
+        assert risk.permit_protective_exits() is True
+        broker = Broker()
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 215, 214.9, 215.1, ""),
+            broker,
+            risk,
+            ServerChanNotifier(""),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert risk.protective_exit_permitted is False
+        assert broker.submitted is False
+
+    @pytest.mark.parametrize("mode", ["missing", "failure", "exception"])
+    def test_paused_reduce_only_commit_proof_fails_closed_and_revokes(
+        self,
+        mode: str,
+    ) -> None:
+        class Broker:
+            submitted = False
+
+            @staticmethod
+            def get_positions() -> list[object]:
+                return [
+                    SimpleNamespace(
+                        symbol="NVDA.US",
+                        side="LONG",
+                        quantity=Decimal("10"),
+                        available_quantity=Decimal("10"),
+                        avg_price=Decimal("220"),
+                    )
+                ]
+
+            def submit_limit_order(self, *args: object) -> OrderResult:
+                self.submitted = True
+                raise AssertionError("failed commit proof must block submission")
+
+        def commit_check(*_args: object) -> str | None:
+            if mode == "exception":
+                raise RuntimeError("commit proof unavailable")
+            return "local authorization changed"
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            final_order_quote_check=lambda _broker, _symbol, _action, price: (
+                FinalOrderQuoteCheckResult(executable_price=price)
+            ),
+            final_protective_exit_check=lambda *_args: None,
+            final_protective_exit_commit_check=(
+                None if mode == "missing" else commit_check
+            ),
+        )
+        risk = RiskController()
+        risk.pause(f"{trade_svc_module.ORDER_EXECUTION_BLOCKED_PREFIX} verified")
+        assert risk.permit_protective_exits() is True
+        broker = Broker()
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 215, 214.9, 215.1, ""),
+            broker,
+            risk,
+            ServerChanNotifier(""),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert risk.protective_exit_permitted is False
+        assert broker.submitted is False
+
+    @pytest.mark.parametrize("state_change", ["resume", "manual_pause"])
+    def test_protective_commit_token_survives_pause_state_change(
+        self,
+        state_change: str,
+    ) -> None:
+        commit_calls = 0
+
+        class Broker:
+            submitted = False
+
+            @staticmethod
+            def get_positions() -> list[object]:
+                return [
+                    SimpleNamespace(
+                        symbol="NVDA.US",
+                        side="LONG",
+                        quantity=Decimal("10"),
+                        available_quantity=Decimal("10"),
+                        avg_price=Decimal("220"),
+                    )
+                ]
+
+            def submit_limit_order(self, *args: object) -> OrderResult:
+                self.submitted = True
+                raise AssertionError("stale protective token must block submission")
+
+        risk = RiskController()
+
+        def change_pause_during_quote(
+            _broker: object,
+            _symbol: str,
+            _action: str,
+            price: Decimal,
+        ) -> FinalOrderQuoteCheckResult:
+            if state_change == "resume":
+                risk.resume()
+            else:
+                risk.restore_pause(True, "manual")
+            return FinalOrderQuoteCheckResult(executable_price=price)
+
+        def commit_check(*_args: object) -> str:
+            nonlocal commit_calls
+            commit_calls += 1
+            return "authorization changed after precheck"
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            final_order_quote_check=change_pause_during_quote,
+            final_protective_exit_check=lambda *_args: None,
+            final_protective_exit_commit_check=commit_check,
+        )
+        risk.pause(f"{trade_svc_module.ORDER_EXECUTION_BLOCKED_PREFIX} verified")
+        assert risk.permit_protective_exits() is True
+        broker = Broker()
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 215, 214.9, 215.1, ""),
+            broker,
+            risk,
+            ServerChanNotifier(""),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+        )
+
+        assert status is not None
+        assert status.status == "SKIPPED"
+        assert commit_calls == 1
+        assert broker.submitted is False
+
+    def test_paused_reduce_only_runs_global_proof_before_target_position_gate(
+        self,
+    ) -> None:
+        events: list[str] = []
+
+        class Broker:
+            def get_positions(self) -> list[object]:
+                events.append("initial" if not events else "target")
+                return [
+                    SimpleNamespace(
+                        symbol="NVDA.US",
+                        side="LONG",
+                        quantity=Decimal("10"),
+                        available_quantity=Decimal("10"),
+                        avg_price=Decimal("220"),
+                    )
+                ]
+
+            def submit_limit_order(
+                self,
+                symbol: str,
+                side: str,
+                quantity: Decimal,
+                price: Decimal,
+            ) -> OrderResult:
+                events.append("submit")
+                return OrderResult("ordered", symbol, side, quantity, price, "FILLED")
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            final_protective_exit_check=lambda *_args: events.append("global"),
+            final_protective_exit_commit_check=(
+                lambda *_args: events.append("commit")
+            ),
+            final_order_quote_check=lambda _broker, _symbol, _action, price: (
+                FinalOrderQuoteCheckResult(executable_price=price)
+            ),
+        )
+        risk = RiskController()
+        risk.pause(f"{trade_svc_module.ORDER_EXECUTION_BLOCKED_PREFIX} verified")
+        assert risk.permit_protective_exits() is True
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", 215, 214.9, 215.1, ""),
+            Broker(),
+            risk,
+            ServerChanNotifier(""),
+            "USD",
+            allow_loss_exit=True,
+            reduce_only=True,
+        )
+
+        assert status is not None
+        assert status.status == "FILLED"
+        assert events == ["initial", "global", "target", "commit", "submit"]
 
     def test_unarmed_pnl_pause_blocks_position_reducing_order(self) -> None:
         class Broker:
@@ -4265,6 +4571,7 @@ class TestTradeExecutionServiceBasics:
             update_order_status=lambda *args: None,
             record_risk_event=lambda *args: None,
             final_order_quote_check=revoke_during_quote_check,
+            final_protective_exit_check=lambda *_args: None,
         )
         broker = Broker()
 

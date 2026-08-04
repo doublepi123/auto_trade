@@ -500,7 +500,7 @@ class Settings(BaseSettings):
             "End-to-end cooperative deadline for one historical "
             "quant-v6 acquisition, evaluation, and publication tick. This "
             "does not alter domain semantics or artifact payloads; its "
-            "control source is bound by historical evaluator manifest v2."
+            "control source is bound by historical evaluator manifest v3."
         ),
     )
     watchlist_quant_v6_provider_page_timeout_seconds: float = Field(
@@ -513,6 +513,29 @@ class Settings(BaseSettings):
         ),
         description=(
             "Hard wall-clock limit for one quote-only historical SDK page."
+        ),
+    )
+    watchlist_quant_v6_compute_workers: int = Field(
+        default=4,
+        ge=2,
+        le=4,
+        validation_alias=(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_COMPUTE_WORKERS"
+        ),
+        description=(
+            "Bounded process-worker count for quote-only quant-v6 compute."
+        ),
+    )
+    watchlist_quant_v6_pipeline_memory_limit_mib: int = Field(
+        default=2_048,
+        ge=512,
+        le=8_192,
+        validation_alias=(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_PIPELINE_MEMORY_LIMIT_MIB"
+        ),
+        description=(
+            "Hard quant-v6 pipeline memory budget in MiB across parent RSS "
+            "growth caused by this job plus total compute-worker RSS."
         ),
     )
     universe_selection_max_symbols: int = Field(

@@ -41,6 +41,7 @@ COPY --from=builder /opt/venv /opt/venv
 COPY --chown=appuser:appuser app/ ./app/
 COPY --chown=appuser:appuser alembic/ ./alembic/
 COPY --chown=appuser:appuser alembic.ini .
+COPY --chown=appuser:appuser scripts/import_historical_order_ledger.py ./scripts/import_historical_order_ledger.py
 COPY --chown=appuser:appuser docker-entrypoint.sh .
 RUN mkdir -p data \
     && chown -R appuser:appuser /app \
