@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from sqlalchemy import create_engine
@@ -38,6 +40,19 @@ _FORWARD_SESSION_OPEN = datetime(
     13,
     30,
     tzinfo=timezone.utc,
+)
+_PAIRED_EXIT_FORWARD_SESSION_OPEN = datetime(
+    2026,
+    8,
+    5,
+    13,
+    30,
+    tzinfo=timezone.utc,
+)
+_PAIRED_EXIT_SYMBOLS = (
+    "ISRG.US",
+    "NVDA.US",
+    *(f"U{index:02d}.US" for index in range(39)),
 )
 _SYMBOLS = tuple(f"S{index}.US" for index in range(8))
 _SNDK_SYMBOL = "SNDK.US"
@@ -87,6 +102,7 @@ _ALL_CHALLENGER_VARIANTS = (
     "WEAK_BREADTH_RELAXED_CHALLENGER",
     "MODERATE_BREADTH_PATH_CHALLENGER",
     "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
+    "WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER",
     "QUALITY_FIRST_PATH_RERANK_CHALLENGER",
     "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
     "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
@@ -343,6 +359,85 @@ def _database() -> tuple[Engine, Session]:
     )
     Base.metadata.create_all(bind=engine)
     return engine, Session(bind=engine)
+
+
+def _paired_exit_test_run(
+    *,
+    algorithm_version: str,
+    config_version: str,
+    universe_source: str,
+    session_date: date,
+    net_return_bps: float | None,
+    status: str = "CLOSED",
+    reason: str = "FIXED_HOLD_EXIT",
+    **overrides: Any,
+) -> OpeningMomentumShadowRun:
+    signal_at = datetime.combine(
+        session_date,
+        datetime.min.time(),
+        tzinfo=timezone.utc,
+    ) + timedelta(hours=13, minutes=32)
+    values: dict[str, object] = {
+        "session_date": session_date,
+        "algorithm_version": algorithm_version,
+        "config_version": config_version,
+        "status": status,
+        "reason": reason,
+        "signal_at": signal_at,
+        "observed_at": signal_at + timedelta(minutes=3, seconds=10),
+        "selection_run_id": 77,
+        "universe_source": universe_source,
+        "universe_size": len(_PAIRED_EXIT_SYMBOLS),
+        "universe_json": json.dumps(list(_PAIRED_EXIT_SYMBOLS)),
+        "excluded_symbols_json": json.dumps({"MISS.US": "NO_BAR"}),
+        "ranking_json": json.dumps([
+            {"symbol": "ISRG.US", "opening_return_bps": 100.0},
+            {"symbol": "NVDA.US", "opening_return_bps": 10.0},
+        ]),
+        "candidate_symbol": "ISRG.US",
+        "market_return_bps": 0.0,
+        "candidate_return_bps": 100.0,
+        "excess_return_bps": 100.0,
+        "candidate_first_five_return_bps": 100.0,
+        "candidate_last_five_return_bps": 80.0,
+        "candidate_path_efficiency": 0.95,
+        "candidate_max_pullback_bps": -5.0,
+        "candidate_opening_range_bps": 110.0,
+        "candidate_breakout_depth_bps": 3.0,
+        "candidate_signal_turnover": 6_000_000.0,
+        "candidate_avg_dollar_volume": 120_000_000.0,
+        "candidate_signal_turnover_ratio": 0.05,
+        "candidate_opening_activity_ratio": 1.2,
+        "candidate_overnight_gap_bps": 25.0,
+        "candidate_prev_close_to_signal_bps": 125.0,
+        "benchmark_qqq_return_bps": 5.0,
+        "benchmark_dia_return_bps": -5.0,
+        "entry_at": signal_at + timedelta(minutes=2),
+        "entry_price": 100.5,
+        "exit_due_at": signal_at + timedelta(minutes=62),
+        "exit_at": signal_at + timedelta(minutes=62),
+        "exit_price": 101.0,
+        "gross_return_bps": 49.75,
+        "estimated_cost_bps": 14.0,
+        "net_return_bps": net_return_bps,
+        "stop_loss_pct": 1.0,
+        "maximum_adverse_excursion_bps": -20.0,
+        "maximum_favorable_excursion_bps": 80.0,
+    }
+    if status == "SKIPPED":
+        values.update({
+            "entry_at": None,
+            "entry_price": None,
+            "exit_due_at": None,
+            "exit_at": None,
+            "exit_price": None,
+            "gross_return_bps": None,
+            "net_return_bps": None,
+            "maximum_adverse_excursion_bps": None,
+            "maximum_favorable_excursion_bps": None,
+        })
+    values.update(overrides)
+    return OpeningMomentumShadowRun(**values)
 
 
 def _seed_universe(
@@ -971,6 +1066,11 @@ def test_tick_records_only_causal_opening_context_telemetry(
         settings,
         "opening_momentum_shadow_enabled",
         True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        False,
     )
     engine, db = _database()
     try:
@@ -1942,6 +2042,7 @@ def test_challenger_variants_isolate_universe_and_entry_gates(
             "WEAK_BREADTH_RELAXED_CHALLENGER",
             "MODERATE_BREADTH_PATH_CHALLENGER",
             "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER",
             "QUALITY_FIRST_PATH_RERANK_CHALLENGER",
             "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
             "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
@@ -2650,6 +2751,465 @@ def test_forward_scorecard_excludes_rows_before_the_frozen_start(
         Base.metadata.drop_all(bind=engine)
 
 
+def test_30m_paired_exit_changes_only_holding_and_reuses_live_universe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_shadow_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    symbols = _PAIRED_EXIT_SYMBOLS
+    engine, db = _database()
+    try:
+        _seed_universe(
+            db,
+            symbols=symbols,
+            as_of_date=date(2026, 8, 4),
+            completed_at=(
+                _PAIRED_EXIT_FORWARD_SESSION_OPEN - timedelta(days=1)
+            ),
+        )
+        for symbol in symbols:
+            db.add(StrategyV2ShadowConfig(
+                symbol=symbol,
+                enabled=True,
+                opening_momentum_execution_eligible=True,
+            ))
+        db.commit()
+
+        service = OpeningMomentumShadowService(
+            db,
+            _FakeCandles(
+                early_opening_returns_bps={symbols[-1]: 100.0},
+                session_open=_PAIRED_EXIT_FORWARD_SESSION_OPEN,
+            ),
+        )
+        identities = {
+            identity.variant: identity
+            for identity in service._variant_identities()
+        }
+        baseline = identities[
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        ]
+        challenger = identities[
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER"
+        ]
+
+        assert baseline.decision_config.holding_minutes == 60
+        assert challenger.decision_config.holding_minutes == 30
+        assert replace(
+            challenger.decision_config,
+            holding_minutes=60,
+        ) == baseline.decision_config
+        for field_name in (
+            "signal_model",
+            "candidate_selection_mode",
+            "require_nonnegative_last_five",
+            "minimum_data_coverage",
+            "minimum_path_efficiency",
+            "maximum_market_return_bps",
+            "exceptional_minimum_path_efficiency",
+            "exceptional_maximum_market_return_bps",
+            "maximum_benchmark_average_return_bps",
+            "opening_range_stop",
+            "required_symbols",
+            "excluded_symbols",
+        ):
+            assert getattr(challenger, field_name) == getattr(
+                baseline,
+                field_name,
+            )
+        assert challenger.forward_evidence_start_date == date(2026, 8, 5)
+        assert challenger.config_version != baseline.config_version
+        assert challenger.universe_source == (
+            "OPENING_EXECUTION_WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT"
+        )
+        assert service.paper_execution_variant_identity() == baseline
+        assert baseline.config_version == (
+            "f7088fadaaaa2adb38163a62ce85637eb10e0ca572f5b003684ca1c6937cbe9f"
+        )
+
+        populated = {
+            variant.variant: variant
+            for variant in service._universe_variants(
+                session_date=date(2026, 8, 5),
+                completed_before=_PAIRED_EXIT_FORWARD_SESSION_OPEN,
+            )
+        }
+        populated_baseline = populated[
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        ]
+        populated_challenger = populated[
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER"
+        ]
+        assert populated_baseline.symbols == symbols
+        assert populated_challenger.symbols == symbols
+        assert len(populated_challenger.symbols) == 41
+
+        status = service.tick(
+            now=(
+                _PAIRED_EXIT_FORWARD_SESSION_OPEN
+                + timedelta(minutes=5, seconds=10)
+            ),
+        )
+        responses = {item.variant: item for item in status.variants}
+        baseline_response = responses[
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        ]
+        challenger_response = responses[
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER"
+        ]
+        assert baseline_response.latest is not None
+        assert challenger_response.latest is not None
+        baseline_run = baseline_response.latest
+        challenger_run = challenger_response.latest
+        assert baseline_run.status == challenger_run.status == "OPEN"
+        assert baseline_run.candidate_symbol == symbols[-1]
+        assert challenger_run.candidate_symbol == baseline_run.candidate_symbol
+        assert challenger_run.entry_at == baseline_run.entry_at
+        assert challenger_run.entry_price == baseline_run.entry_price
+        assert challenger_run.stop_loss_pct == baseline_run.stop_loss_pct == 1.0
+        assert (
+            challenger_run.estimated_cost_bps
+            == baseline_run.estimated_cost_bps
+            == 14.0
+        )
+        assert baseline_run.exit_due_at == (
+            _PAIRED_EXIT_FORWARD_SESSION_OPEN + timedelta(minutes=64)
+        )
+        assert challenger_run.exit_due_at == (
+            _PAIRED_EXIT_FORWARD_SESSION_OPEN + timedelta(minutes=34)
+        )
+        assert status.config.order_submission_allowed is False
+        assert status.config.automatic_promotion_allowed is False
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_30m_paired_exit_requires_a_strict_pre_exit_identity() -> None:
+    session_date = date(2026, 8, 5)
+
+    def baseline_run(**overrides: Any) -> OpeningMomentumShadowRun:
+        return _paired_exit_test_run(
+            algorithm_version="baseline-v1",
+            config_version="baseline-config",
+            universe_source="BASELINE",
+            session_date=session_date,
+            net_return_bps=-10.0,
+            **overrides,
+        )
+
+    def challenger_run(**overrides: Any) -> OpeningMomentumShadowRun:
+        exit_overrides: dict[str, Any] = {
+            "reason": "STOP_LOSS_EXIT",
+            "exit_due_at": datetime(
+                2026,
+                8,
+                5,
+                14,
+                4,
+                tzinfo=timezone.utc,
+            ),
+            "exit_at": datetime(
+                2026,
+                8,
+                5,
+                13,
+                55,
+                tzinfo=timezone.utc,
+            ),
+            "exit_price": 99.495,
+            "gross_return_bps": -100.0,
+            "maximum_adverse_excursion_bps": -100.0,
+            "maximum_favorable_excursion_bps": 25.0,
+            "ranking_json": (
+                '[{"symbol":"ISRG.US","opening_return_bps":100},'
+                '{"symbol":"NVDA.US","opening_return_bps":10}]'
+            ),
+        }
+        exit_overrides.update(overrides)
+        return _paired_exit_test_run(
+            algorithm_version="challenger-v1",
+            config_version="challenger-config",
+            universe_source="CHALLENGER",
+            session_date=session_date,
+            net_return_bps=20.0,
+            **exit_overrides,
+        )
+
+    baseline = baseline_run()
+    assert OpeningMomentumShadowService._paired_exit_entry_identity_matches(
+        baseline,
+        challenger_run(),
+    )
+
+    optional_telemetry_fields = (
+        "market_return_bps",
+        "candidate_return_bps",
+        "excess_return_bps",
+        "candidate_first_five_return_bps",
+        "candidate_last_five_return_bps",
+        "candidate_path_efficiency",
+        "candidate_max_pullback_bps",
+        "candidate_opening_range_bps",
+        "candidate_breakout_depth_bps",
+        "candidate_signal_turnover",
+        "candidate_avg_dollar_volume",
+        "candidate_signal_turnover_ratio",
+        "candidate_opening_activity_ratio",
+        "candidate_overnight_gap_bps",
+        "candidate_prev_close_to_signal_bps",
+        "benchmark_qqq_return_bps",
+        "benchmark_dia_return_bps",
+    )
+    for field_name in optional_telemetry_fields:
+        baseline_value = getattr(baseline, field_name)
+        assert baseline_value is not None
+        assert not (
+            OpeningMomentumShadowService
+            ._paired_exit_entry_identity_matches(
+                baseline,
+                challenger_run(**{field_name: baseline_value + 1.0}),
+            )
+        ), field_name
+
+    signal_at = baseline.signal_at
+    entry_at = baseline.entry_at
+    assert entry_at is not None
+    mismatch_overrides = (
+        {"candidate_symbol": "NVDA.US"},
+        {"signal_at": signal_at + timedelta(minutes=1)},
+        {"selection_run_id": 78},
+        {"universe_size": 40},
+        {"universe_json": json.dumps(list(_PAIRED_EXIT_SYMBOLS[:-1]))},
+        {"universe_json": "[]"},
+        {"universe_json": "not-json"},
+        {"excluded_symbols_json": '{"OTHER.US":"NO_BAR"}'},
+        {"excluded_symbols_json": "not-json"},
+        {"ranking_json": "[]"},
+        {"ranking_json": "not-json"},
+        {"entry_at": entry_at + timedelta(minutes=1)},
+        {"entry_price": 100.6},
+        {"entry_price": math.inf},
+        {"stop_loss_pct": 2.0},
+        {"stop_loss_pct": math.nan},
+        {"estimated_cost_bps": 15.0},
+        {"estimated_cost_bps": math.inf},
+        {"status": "OPEN"},
+    )
+    for overrides in mismatch_overrides:
+        assert not (
+            OpeningMomentumShadowService
+            ._paired_exit_entry_identity_matches(
+                baseline,
+                challenger_run(**overrides),
+            )
+        ), overrides
+
+    skipped_baseline = baseline_run(
+        status="SKIPPED",
+        reason="MARKET_FILTER",
+    )
+    skipped_challenger = challenger_run(
+        status="SKIPPED",
+        reason="MARKET_FILTER",
+    )
+    assert OpeningMomentumShadowService._paired_exit_entry_identity_matches(
+        skipped_baseline,
+        skipped_challenger,
+    )
+    assert not (
+        OpeningMomentumShadowService
+        ._paired_exit_entry_identity_matches(
+            skipped_baseline,
+            challenger_run(
+                status="SKIPPED",
+                reason="CANDIDATE_NOT_POSITIVE",
+            ),
+        )
+    )
+
+
+def test_30m_paired_exit_is_forward_only_and_has_isolated_holm_family(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        service = OpeningMomentumShadowService(db)
+        identities = {
+            identity.variant: identity
+            for identity in service._variant_identities()
+        }
+        baseline = identities[
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        ]
+        challenger = identities[
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER"
+        ]
+        for session_date, baseline_return, challenger_return in (
+            (date(2026, 8, 4), -50.0, 250.0),
+            (date(2026, 8, 5), -10.0, 20.0),
+            (date(2026, 8, 6), 0.0, 1_000_000.0),
+        ):
+            db.add(_paired_exit_test_run(
+                algorithm_version=baseline.algorithm_version,
+                config_version=baseline.config_version,
+                universe_source=baseline.universe_source,
+                session_date=session_date,
+                net_return_bps=baseline_return,
+            ))
+            db.add(_paired_exit_test_run(
+                algorithm_version=challenger.algorithm_version,
+                config_version=challenger.config_version,
+                universe_source=challenger.universe_source,
+                session_date=session_date,
+                net_return_bps=challenger_return,
+                reason="STOP_LOSS_EXIT",
+                exit_due_at=datetime.combine(
+                    session_date,
+                    datetime.min.time(),
+                    tzinfo=timezone.utc,
+                ) + timedelta(hours=14, minutes=4),
+                candidate_symbol=(
+                    "NVDA.US"
+                    if session_date == date(2026, 8, 6)
+                    else "ISRG.US"
+                ),
+            ))
+        skip_date = date(2026, 8, 7)
+        for identity in (baseline, challenger):
+            db.add(_paired_exit_test_run(
+                algorithm_version=identity.algorithm_version,
+                config_version=identity.config_version,
+                universe_source=identity.universe_source,
+                session_date=skip_date,
+                net_return_bps=None,
+                status="SKIPPED",
+                reason="MARKET_FILTER",
+            ))
+        db.commit()
+
+        responses = {
+            item.variant: item
+            for item in service._variant_responses()
+        }
+        paired_exit = responses[
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER"
+        ]
+        assert paired_exit.forward_evidence_start_date == date(2026, 8, 5)
+        assert paired_exit.excluded_pre_forward_sessions == 1
+        assert paired_exit.comparison_baseline == (
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        )
+        assert paired_exit.comparison_sessions == 3
+        assert paired_exit.latest is not None
+        assert paired_exit.latest.session_date == date(2026, 8, 7)
+        assert paired_exit.comparison is not None
+        comparison = paired_exit.comparison
+        assert comparison.resolved_sessions == 2
+        assert comparison.cumulative_delta_bps == 30.0
+        assert comparison.entry_identity_eligible_sessions == 2
+        assert comparison.entry_identity_mismatch_sessions == 1
+        assert comparison.entry_identity_evidence_passed is False
+        assert comparison.policy_displacement_sessions is None
+        assert comparison.minimum_policy_displacement_sessions is None
+        assert comparison.displacement_outperformance_rate is None
+        assert comparison.evidence_gate_passed is None
+        assert comparison.multiple_testing_method == "HOLM_BONFERRONI"
+        assert comparison.multiple_testing_family_size == 1
+        assert comparison.promotion_ready is False
+
+        existing_family = responses[
+            "MODERATE_BREADTH_PATH_CHALLENGER"
+        ].comparison
+        assert existing_family is not None
+        assert existing_family.multiple_testing_family_size == 4
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
+def test_30m_paired_exit_identity_drift_fails_closed_on_promotion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        settings,
+        "opening_momentum_challenger_enabled",
+        True,
+    )
+    engine, db = _database()
+    try:
+        service = OpeningMomentumShadowService(db)
+        identities = {
+            identity.variant: identity
+            for identity in service._variant_identities()
+        }
+        baseline = identities[
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        ]
+        challenger = identities[
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER"
+        ]
+        first_date = date(2026, 8, 5)
+        for offset in range(21):
+            session_date = first_date + timedelta(days=offset)
+            identity_matches = offset < 20
+            db.add(_paired_exit_test_run(
+                algorithm_version=baseline.algorithm_version,
+                config_version=baseline.config_version,
+                universe_source=baseline.universe_source,
+                session_date=session_date,
+                net_return_bps=0.0,
+            ))
+            db.add(_paired_exit_test_run(
+                algorithm_version=challenger.algorithm_version,
+                config_version=challenger.config_version,
+                universe_source=challenger.universe_source,
+                session_date=session_date,
+                net_return_bps=(
+                    100.0 if identity_matches else -1_000_000.0
+                ),
+                candidate_symbol=(
+                    "ISRG.US" if identity_matches else "NVDA.US"
+                ),
+            ))
+        db.commit()
+
+        response = {
+            item.variant: item
+            for item in service._variant_responses()
+        }["WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER"]
+        assert response.comparison is not None
+        comparison = response.comparison
+        assert comparison.resolved_sessions == 20
+        assert comparison.cumulative_delta_bps == 2_000.0
+        assert comparison.mean_delta_bps == 100.0
+        assert comparison.confidence_lower_bps == 100.0
+        assert comparison.entry_identity_eligible_sessions == 20
+        assert comparison.entry_identity_mismatch_sessions == 1
+        assert comparison.entry_identity_evidence_passed is False
+        assert comparison.multiple_testing_evidence_passed is True
+        assert comparison.policy_displacement_sessions is None
+        assert comparison.evidence_gate_passed is None
+        assert comparison.promotion_ready is False
+        assert comparison.recommendation == "INCONCLUSIVE"
+    finally:
+        db.close()
+        Base.metadata.drop_all(bind=engine)
+
+
 def test_opening_return_rerank_excludes_july_28_design_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2994,7 +3554,7 @@ def test_challengers_use_one_market_snapshot_and_close_all_variants(
         assert opened.latest.universe_source == "UNIVERSE_SELECTION"
         assert opened.latest.candidate_symbol == "S1.US"
         assert opened.latest.selection_run_id == run.id
-        assert len(opened.variants) == 46
+        assert len(opened.variants) == 47
         by_variant = {
             item.variant: item for item in opened.variants
         }
@@ -4318,7 +4878,7 @@ def test_breadth_challenger_skips_a_negative_market_snapshot(
         )
 
         assert candles.calls == list(_SYMBOLS[:4])
-        assert len(status.variants) == 46
+        assert len(status.variants) == 47
         by_variant = {
             item.variant: item for item in status.variants
         }

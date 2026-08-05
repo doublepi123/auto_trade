@@ -533,6 +533,7 @@ class OpeningMomentumShadowConfigResponse(BaseModel):
     config_version: str
     mode: Literal["SHADOW"] = "SHADOW"
     order_submission_allowed: Literal[False] = False
+    automatic_promotion_allowed: Literal[False] = False
     signal_minutes: int
     execution_delay_minutes: int
     holding_minutes: int
@@ -641,6 +642,15 @@ class OpeningMomentumPairedComparisonResponse(BaseModel):
     minimum_policy_displacement_sessions: Optional[int] = None
     displacement_outperformance_rate: Optional[float] = None
     evidence_gate_passed: Optional[bool] = None
+    entry_identity_eligible_sessions: Optional[int] = Field(
+        default=None,
+        ge=0,
+    )
+    entry_identity_mismatch_sessions: Optional[int] = Field(
+        default=None,
+        ge=0,
+    )
+    entry_identity_evidence_passed: Optional[bool] = None
     multiple_testing_method: Optional[
         Literal["HOLM_BONFERRONI"]
     ] = None
@@ -679,6 +689,7 @@ class OpeningMomentumShadowVariantResponse(BaseModel):
         "WEAK_BREADTH_RELAXED_CHALLENGER",
         "MODERATE_BREADTH_PATH_CHALLENGER",
         "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
+        "WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER",
         "QUALITY_FIRST_PATH_RERANK_CHALLENGER",
         "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
         "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",

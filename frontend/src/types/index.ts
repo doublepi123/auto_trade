@@ -2142,6 +2142,7 @@ export interface OpeningMomentumShadowConfig {
   config_version: string
   mode: 'SHADOW'
   order_submission_allowed: false
+  automatic_promotion_allowed: false
   signal_minutes: number
   execution_delay_minutes: number
   holding_minutes: number
@@ -2246,6 +2247,9 @@ export interface OpeningMomentumPairedComparison {
   minimum_policy_displacement_sessions: number | null
   displacement_outperformance_rate: number | null
   evidence_gate_passed: boolean | null
+  entry_identity_eligible_sessions: number | null
+  entry_identity_mismatch_sessions: number | null
+  entry_identity_evidence_passed: boolean | null
   multiple_testing_method: 'HOLM_BONFERRONI' | null
   multiple_testing_family_size: number | null
   multiple_testing_adjusted_pvalue: number | null
@@ -2275,6 +2279,7 @@ export interface OpeningMomentumShadowVariant {
     | 'WEAK_BREADTH_RELAXED_CHALLENGER'
     | 'MODERATE_BREADTH_PATH_CHALLENGER'
     | 'WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER'
+    | 'WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER'
     | 'QUALITY_FIRST_PATH_RERANK_CHALLENGER'
     | 'EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER'
     | 'WEAK_BREADTH_INDEX_COHORT_CHALLENGER'

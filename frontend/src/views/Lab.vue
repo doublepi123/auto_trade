@@ -819,10 +819,22 @@
                       {{ row.comparison?.resolved_sessions ?? '-' }}
                     </template>
                   </el-table-column>
-                  <el-table-column label="有效换选" min-width="100">
+                  <el-table-column label="有效换选" min-width="180">
                     <template #default="{ row }">
                       <el-tag
-                        v-if="row.comparison?.policy_displacement_sessions != null"
+                        v-if="row.comparison?.entry_identity_eligible_sessions != null"
+                        :type="row.comparison.entry_identity_evidence_passed === true
+                          ? 'success'
+                          : row.comparison.entry_identity_evidence_passed === false
+                            ? 'danger'
+                            : 'info'"
+                        effect="plain"
+                      >
+                        严格配对 {{ row.comparison.entry_identity_eligible_sessions }} /
+                        漂移 {{ row.comparison.entry_identity_mismatch_sessions }}
+                      </el-tag>
+                      <el-tag
+                        v-else-if="row.comparison?.policy_displacement_sessions != null"
                         :type="row.comparison.evidence_gate_passed ? 'success' : 'info'"
                         effect="plain"
                       >
@@ -2675,6 +2687,9 @@ function openingMomentumVariantLabel(
   if (variant === 'WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER') {
     return '弱广度 + 强路径例外'
   }
+  if (variant === 'WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER') {
+    return '强路径例外 + 30 分钟配对退出'
+  }
   if (variant === 'QUALITY_FIRST_PATH_RERANK_CHALLENGER') {
     return '质量优先重排'
   }
@@ -2725,6 +2740,7 @@ function openingMomentumVariantTagType(
     || variant === 'WEAK_BREADTH_RELAXED_CHALLENGER'
     || variant === 'MODERATE_BREADTH_PATH_CHALLENGER'
     || variant === 'WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER'
+    || variant === 'WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER'
     || variant === 'QUALITY_FIRST_PATH_RERANK_CHALLENGER'
     || variant === 'EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER'
     || variant === 'WEAK_BREADTH_INDEX_COHORT_CHALLENGER'

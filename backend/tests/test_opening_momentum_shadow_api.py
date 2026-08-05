@@ -136,6 +136,7 @@ class TestOpeningMomentumShadowApi:
         assert body["state"] == "DISABLED"
         assert body["config"]["mode"] == "SHADOW"
         assert body["config"]["order_submission_allowed"] is False
+        assert body["config"]["automatic_promotion_allowed"] is False
         assert body["config"]["signal_minutes"] == 30
         assert body["config"]["execution_delay_minutes"] == 1
         assert body["config"]["holding_minutes"] == 30
@@ -171,6 +172,9 @@ class TestOpeningMomentumShadowApi:
         ]
         weak_breadth_exceptional_path = variants[
             "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        ]
+        exceptional_path_30m_exit = variants[
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER"
         ]
         quality_first_path_rerank = variants[
             "QUALITY_FIRST_PATH_RERANK_CHALLENGER"
@@ -228,7 +232,7 @@ class TestOpeningMomentumShadowApi:
             "OPENING_RETURN_DEPTH10_CHALLENGER"
         ]
         execution_sndk = variants["EXECUTION_SNDK_CHALLENGER"]
-        assert len(variants) == 46
+        assert len(variants) == 47
         assert early["universe_source"] == "OPENING_EARLY_BROAD"
         assert early["signal_minutes"] == 3
         assert early["minimum_market_return_bps"] == -50.0
@@ -434,6 +438,54 @@ class TestOpeningMomentumShadowApi:
             exceptional_comparison["multiple_testing_family_size"]
             == 7
         )
+        assert exceptional_path_30m_exit["universe_source"] == (
+            "OPENING_EXECUTION_WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT"
+        )
+        assert exceptional_path_30m_exit["signal_minutes"] == 3
+        assert exceptional_path_30m_exit["holding_minutes"] == 30
+        assert exceptional_path_30m_exit["stop_loss_pct"] == 1.0
+        assert exceptional_path_30m_exit["minimum_path_efficiency"] == 0.70
+        assert exceptional_path_30m_exit["maximum_market_return_bps"] == 0.0
+        assert (
+            exceptional_path_30m_exit[
+                "exceptional_minimum_path_efficiency"
+            ]
+            == 0.90
+        )
+        assert (
+            exceptional_path_30m_exit[
+                "exceptional_maximum_market_return_bps"
+            ]
+            == 5.0
+        )
+        assert exceptional_path_30m_exit["forward_evidence_start_date"] == (
+            "2026-08-05"
+        )
+        assert exceptional_path_30m_exit["comparison_baseline"] == (
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER"
+        )
+        assert exceptional_path_30m_exit["comparison"] is not None
+        assert exceptional_path_30m_exit["comparison"][
+            "entry_identity_eligible_sessions"
+        ] == 0
+        assert exceptional_path_30m_exit["comparison"][
+            "entry_identity_mismatch_sessions"
+        ] == 0
+        assert exceptional_path_30m_exit["comparison"][
+            "entry_identity_evidence_passed"
+        ] is None
+        assert exceptional_path_30m_exit["comparison"][
+            "policy_displacement_sessions"
+        ] is None
+        assert exceptional_path_30m_exit["comparison"][
+            "evidence_gate_passed"
+        ] is None
+        assert exceptional_path_30m_exit["comparison"][
+            "multiple_testing_family_size"
+        ] == 1
+        assert exceptional_path_30m_exit["comparison"][
+            "promotion_ready"
+        ] is False
         assert quality_first_path_rerank["universe_source"] == (
             "OPENING_EXECUTION_QUALITY_FIRST_PATH_RERANK"
         )

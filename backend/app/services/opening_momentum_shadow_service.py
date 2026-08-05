@@ -186,6 +186,29 @@ _WEAK_BREADTH_EXCEPTIONAL_PATH_ALGORITHM_VERSION = (
     f"{ALGORITHM_VERSION}+"
     f"{_WEAK_BREADTH_EXCEPTIONAL_PATH_VERSION}"
 )
+# The historical 15/30/45-minute sweep was mixed and does not count as
+# evidence for this hypothesis. Pre-register a fresh observation-only 30m
+# paired exit before the 2026-08-05 US open; only later sessions are evidence.
+# Entry, gates, stop, and costs remain frozen to the 60m paper policy.
+_WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_VERSION = (
+    "forward-only-paired-exit-hold30-vs-hold60-"
+    "exceptional-path-precommitted-20260805-v1"
+)
+_WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_SOURCE = (
+    "OPENING_EXECUTION_WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT"
+)
+_WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_ALGORITHM_VERSION = (
+    f"{ALGORITHM_VERSION}+"
+    f"{_WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_VERSION}"
+)
+_WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_FORWARD_START_DATE = date(
+    2026,
+    8,
+    5,
+)
+_PAIRED_EXIT_30M_MULTIPLE_TESTING_FAMILY = (
+    "opening-execution-paired-exit-30m"
+)
 # Discovery retained four actual candidate displacements and improved the
 # 30bp-cost result, lower tail, and drawdown by choosing the strongest path-
 # eligible name instead of rejecting the absolute opening leader. Historical
@@ -496,6 +519,7 @@ _VariantName = Literal[
     "WEAK_BREADTH_RELAXED_CHALLENGER",
     "MODERATE_BREADTH_PATH_CHALLENGER",
     "WEAK_BREADTH_EXCEPTIONAL_PATH_CHALLENGER",
+    "WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER",
     "QUALITY_FIRST_PATH_RERANK_CHALLENGER",
     "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
     "WEAK_BREADTH_INDEX_COHORT_CHALLENGER",
@@ -2608,6 +2632,14 @@ class OpeningMomentumShadowService:
             symbols=active_broad_symbols,
             selection_run_id=run.id,
         ))
+        exceptional_path_30m_exit_identity = identities_by_variant[
+            "WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER"
+        ]
+        variants.append(replace(
+            exceptional_path_30m_exit_identity,
+            symbols=active_broad_symbols,
+            selection_run_id=run.id,
+        ))
         quality_first_path_rerank_identity = identities_by_variant[
             "QUALITY_FIRST_PATH_RERANK_CHALLENGER"
         ]
@@ -2969,6 +3001,9 @@ class OpeningMomentumShadowService:
             ))
             variants.append(
                 self._weak_breadth_exceptional_path_variant_identity()
+            )
+            variants.append(
+                self._weak_breadth_exceptional_path_30m_exit_variant_identity()
             )
             variants.append(
                 self._quality_first_path_rerank_variant_identity()
@@ -3610,6 +3645,41 @@ class OpeningMomentumShadowService:
             raise RuntimeError("paper execution variant identity mismatch")
         return identity
 
+    def _weak_breadth_exceptional_path_30m_exit_variant_identity(
+        self,
+    ) -> _UniverseVariant:
+        # Derive from the frozen paper policy so entry, gates, stop, and cost
+        # semantics cannot drift; the paired challenger changes only holding.
+        baseline = self._weak_breadth_exceptional_path_variant_identity()
+        config = replace(
+            baseline.decision_config,
+            holding_minutes=30,
+        )
+        return replace(
+            baseline,
+            variant=(
+                "WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER"
+            ),
+            algorithm_version=(
+                _WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_ALGORITHM_VERSION
+            ),
+            config_version=self._evidence_config_version(
+                f"{config.version_hash()}:"
+                f"{_WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_VERSION}:"
+                f"{_EXECUTION_PATH_EFFICIENCY_MINIMUM:.2f}:"
+                f"{_WEAK_BREADTH_MAXIMUM_MARKET_RETURN_BPS:.1f}:"
+                f"{EXCEPTIONAL_MINIMUM_PATH_EFFICIENCY:.2f}:"
+                f"{EXCEPTIONAL_MAXIMUM_MARKET_RETURN_BPS:.1f}"
+            ),
+            universe_source=(
+                _WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_SOURCE
+            ),
+            decision_config=config,
+            forward_evidence_start_date=(
+                _WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_FORWARD_START_DATE
+            ),
+        )
+
     def _quality_first_path_rerank_variant_identity(
         self,
     ) -> _UniverseVariant:
@@ -4070,6 +4140,7 @@ class OpeningMomentumShadowService:
             )
             uses_exceptional_path_baseline = identity.variant in {
                 "MODERATE_BREADTH_PATH_CHALLENGER",
+                "WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER",
                 "EXCEPTIONAL_PATH_PANW_COHORT_CHALLENGER",
                 "QUALITY_FIRST_PATH_RERANK_CHALLENGER",
                 "FIVE_MINUTE_ORB_CHALLENGER",
@@ -4109,6 +4180,13 @@ class OpeningMomentumShadowService:
                 or uses_index_catalog_five_minute_orb_baseline
                 or uses_relative_volume_orb_baseline
                 or uses_relative_volume_opening_return_baseline
+            )
+            is_paired_exit_entry_identity = identity.variant == (
+                "WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER"
+            )
+            requires_displacement_evidence = (
+                requires_displacement_evidence
+                and not is_paired_exit_entry_identity
             )
             identity_rows_by_date = rows_by_date[
                 identity.config_version
@@ -4231,6 +4309,21 @@ class OpeningMomentumShadowService:
                         is not None
                     )
                 ]
+                entry_identity_mismatch_sessions: int | None = None
+                if is_paired_exit_entry_identity:
+                    return_resolved_dates = resolved_comparison_dates
+                    resolved_comparison_dates = [
+                        session_date
+                        for session_date in return_resolved_dates
+                        if self._paired_exit_entry_identity_matches(
+                            comparison_rows_by_date[session_date],
+                            identity_rows_by_date[session_date],
+                        )
+                    ]
+                    entry_identity_mismatch_sessions = (
+                        len(return_resolved_dates)
+                        - len(resolved_comparison_dates)
+                    )
                 incumbent_returns = [
                     cast(
                         float,
@@ -4266,6 +4359,40 @@ class OpeningMomentumShadowService:
                         asdict(comparison)
                     )
                 )
+                if is_paired_exit_entry_identity:
+                    mismatch_sessions = cast(
+                        int,
+                        entry_identity_mismatch_sessions,
+                    )
+                    entry_identity_evidence_passed = (
+                        mismatch_sessions == 0
+                        if return_resolved_dates
+                        else None
+                    )
+                    recommendation = comparison_response.recommendation
+                    if (
+                        mismatch_sessions > 0
+                        and comparison_response.promotion_ready
+                    ):
+                        recommendation = "INCONCLUSIVE"
+                    comparison_response = comparison_response.model_copy(
+                        update={
+                            "entry_identity_eligible_sessions": len(
+                                resolved_comparison_dates
+                            ),
+                            "entry_identity_mismatch_sessions": (
+                                mismatch_sessions
+                            ),
+                            "entry_identity_evidence_passed": (
+                                entry_identity_evidence_passed
+                            ),
+                            "promotion_ready": (
+                                comparison_response.promotion_ready
+                                and entry_identity_evidence_passed is True
+                            ),
+                            "recommendation": recommendation,
+                        }
+                    )
                 if requires_displacement_evidence:
                     comparison_response = (
                         self._apply_extension_evidence_gate(
@@ -4404,6 +4531,10 @@ class OpeningMomentumShadowService:
                 "INDEX_CATALOG_RELATIVE_VOLUME_ORB_TOP5_CHALLENGER"
             ):
                 family_name = "index-catalog-relative-volume"
+            elif response.variant == (
+                "WEAK_BREADTH_EXCEPTIONAL_PATH_30M_EXIT_CHALLENGER"
+            ):
+                family_name = _PAIRED_EXIT_30M_MULTIPLE_TESTING_FAMILY
             family_indices.setdefault(
                 (response.comparison_baseline, family_name),
                 [],
@@ -4467,6 +4598,154 @@ class OpeningMomentumShadowService:
                     "comparison": updated_comparison,
                 })
         return updated_responses
+
+    @staticmethod
+    def _paired_exit_entry_identity_matches(
+        baseline: OpeningMomentumShadowRun,
+        challenger: OpeningMomentumShadowRun,
+    ) -> bool:
+        """Verify both horizon rows froze the same pre-exit decision."""
+
+        if baseline.session_date != challenger.session_date:
+            return False
+        if baseline.status != challenger.status:
+            return False
+        if baseline.status not in {"CLOSED", "SKIPPED"}:
+            return False
+        if baseline.candidate_symbol != challenger.candidate_symbol:
+            return False
+        if _as_utc(baseline.signal_at) != _as_utc(challenger.signal_at):
+            return False
+        if baseline.selection_run_id != challenger.selection_run_id:
+            return False
+        if baseline.selection_run_id is None:
+            return False
+        if baseline.universe_size != challenger.universe_size:
+            return False
+        if not _json_semantically_equal(
+            baseline.universe_json,
+            challenger.universe_json,
+        ):
+            return False
+        if not _json_semantically_equal(
+            baseline.excluded_symbols_json,
+            challenger.excluded_symbols_json,
+        ):
+            return False
+        if not _json_semantically_equal(
+            baseline.ranking_json,
+            challenger.ranking_json,
+        ):
+            return False
+        baseline_universe = _json_value(baseline.universe_json, None)
+        challenger_universe = _json_value(challenger.universe_json, None)
+        baseline_excluded = _json_value(
+            baseline.excluded_symbols_json,
+            None,
+        )
+        challenger_excluded = _json_value(
+            challenger.excluded_symbols_json,
+            None,
+        )
+        baseline_ranking = _json_value(baseline.ranking_json, None)
+        challenger_ranking = _json_value(challenger.ranking_json, None)
+        if (
+            not isinstance(baseline_universe, list)
+            or not isinstance(challenger_universe, list)
+            or not baseline_universe
+            or any(
+                not isinstance(symbol, str) or not symbol
+                for symbol in baseline_universe
+            )
+            or any(
+                not isinstance(symbol, str) or not symbol
+                for symbol in challenger_universe
+            )
+            or len(set(baseline_universe)) != len(baseline_universe)
+            or len(set(challenger_universe)) != len(challenger_universe)
+            or len(baseline_universe) != baseline.universe_size
+            or len(challenger_universe) != challenger.universe_size
+            or not isinstance(baseline_excluded, dict)
+            or not isinstance(challenger_excluded, dict)
+            or not isinstance(baseline_ranking, list)
+            or not isinstance(challenger_ranking, list)
+            or (
+                baseline.candidate_symbol is not None
+                and baseline.candidate_symbol not in baseline_universe
+            )
+            or (
+                challenger.candidate_symbol is not None
+                and challenger.candidate_symbol not in challenger_universe
+            )
+        ):
+            return False
+
+        optional_telemetry_fields = (
+            "market_return_bps",
+            "candidate_return_bps",
+            "excess_return_bps",
+            "candidate_first_five_return_bps",
+            "candidate_last_five_return_bps",
+            "candidate_path_efficiency",
+            "candidate_max_pullback_bps",
+            "candidate_opening_range_bps",
+            "candidate_breakout_depth_bps",
+            "candidate_signal_turnover",
+            "candidate_avg_dollar_volume",
+            "candidate_signal_turnover_ratio",
+            "candidate_opening_activity_ratio",
+            "candidate_overnight_gap_bps",
+            "candidate_prev_close_to_signal_bps",
+            "benchmark_qqq_return_bps",
+            "benchmark_dia_return_bps",
+        )
+        if any(
+            not _optional_finite_float_matches(
+                getattr(baseline, field_name),
+                getattr(challenger, field_name),
+            )
+            for field_name in optional_telemetry_fields
+        ):
+            return False
+        if (
+            baseline.stop_loss_pct is None
+            or challenger.stop_loss_pct is None
+            or not _optional_finite_float_matches(
+                baseline.stop_loss_pct,
+                challenger.stop_loss_pct,
+            )
+        ):
+            return False
+        if not _finite_float_matches(
+            baseline.estimated_cost_bps,
+            challenger.estimated_cost_bps,
+        ):
+            return False
+
+        baseline_entry_at = _optional_utc(baseline.entry_at)
+        challenger_entry_at = _optional_utc(challenger.entry_at)
+        if baseline.status == "SKIPPED":
+            return (
+                baseline.reason == challenger.reason
+                and baseline_entry_at is None
+                and challenger_entry_at is None
+                and baseline.entry_price is None
+                and challenger.entry_price is None
+            )
+
+        if (
+            baseline.candidate_symbol is None
+            or baseline_entry_at is None
+            or challenger_entry_at is None
+            or baseline_entry_at != challenger_entry_at
+            or baseline.entry_price is None
+            or challenger.entry_price is None
+        ):
+            return False
+        return _optional_finite_float_matches(
+            baseline.entry_price,
+            challenger.entry_price,
+        )
 
     @classmethod
     def _apply_extension_evidence_gate(
@@ -5004,6 +5283,82 @@ def _as_utc(value: datetime) -> datetime:
 
 def _optional_utc(value: datetime | None) -> datetime | None:
     return _as_utc(value) if value is not None else None
+
+
+def _finite_float_matches(left: object, right: object) -> bool:
+    try:
+        left_value = float(cast(Any, left))
+        right_value = float(cast(Any, right))
+    except (TypeError, ValueError):
+        return False
+    return (
+        math.isfinite(left_value)
+        and math.isfinite(right_value)
+        and math.isclose(
+            left_value,
+            right_value,
+            rel_tol=0.0,
+            abs_tol=1e-9,
+        )
+    )
+
+
+def _optional_finite_float_matches(
+    left: object | None,
+    right: object | None,
+) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    return _finite_float_matches(left, right)
+
+
+def _json_semantically_equal(left: str, right: str) -> bool:
+    try:
+        left_value = json.loads(left)
+        right_value = json.loads(right)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return _json_values_semantically_equal(left_value, right_value)
+
+
+def _json_values_semantically_equal(left: Any, right: Any) -> bool:
+    if left is None or right is None:
+        return left is None and right is None
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and left is right
+    if isinstance(left, (int, float)) or isinstance(right, (int, float)):
+        return (
+            isinstance(left, (int, float))
+            and isinstance(right, (int, float))
+            and _finite_float_matches(left, right)
+        )
+    if isinstance(left, str) or isinstance(right, str):
+        return isinstance(left, str) and left == right
+    if isinstance(left, list) or isinstance(right, list):
+        return (
+            isinstance(left, list)
+            and isinstance(right, list)
+            and len(left) == len(right)
+            and all(
+                _json_values_semantically_equal(left_item, right_item)
+                for left_item, right_item in zip(
+                    left,
+                    right,
+                    strict=True,
+                )
+            )
+        )
+    if isinstance(left, dict) or isinstance(right, dict):
+        return (
+            isinstance(left, dict)
+            and isinstance(right, dict)
+            and left.keys() == right.keys()
+            and all(
+                _json_values_semantically_equal(left[key], right[key])
+                for key in left
+            )
+        )
+    return False
 
 
 def _json_value(raw: str, fallback: Any) -> Any:
