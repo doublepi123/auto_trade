@@ -26,13 +26,14 @@ from app.domain.universe_selection import (
 from app.services.universe_selection_service import (
     historical_membership_end,
     historical_research_before,
+    historical_research_alias_provenance,
     historical_research_candlesticks,
     research_candidate_uses_recent_candlesticks,
     selection_config_from_settings,
 )
 
 
-_CLI_SCHEMA_VERSION = "rotation-walk-forward-research-cli-v2"
+_CLI_SCHEMA_VERSION = "rotation-walk-forward-research-cli-v3"
 _PERFORMANCE_SUMMARY_FIELDS = (
     "periods",
     "annualized_return_pct",
@@ -135,6 +136,9 @@ def _summary(payload: Mapping[str, object]) -> dict[str, object]:
         "data_scope": payload.get("data_scope"),
         "survivorship_bias": payload.get("survivorship_bias"),
         "validation_periods": payload.get("validation_periods"),
+        "evaluation_warmup_bars": payload.get(
+            "evaluation_warmup_bars"
+        ),
         "expanding_validation_min_training_periods": (
             payload.get(
                 "expanding_validation_min_training_periods"
@@ -156,6 +160,18 @@ def _summary(payload: Mapping[str, object]) -> dict[str, object]:
         "promotion_blockers": payload.get("promotion_blockers"),
         "point_in_time_data_missing_symbols": payload.get(
             "point_in_time_data_missing_symbols"
+        ),
+        "point_in_time_required_missing_symbols": payload.get(
+            "point_in_time_required_missing_symbols"
+        ),
+        "point_in_time_out_of_window_missing_symbols": payload.get(
+            "point_in_time_out_of_window_missing_symbols"
+        ),
+        "evaluation_first_signal_date": payload.get(
+            "evaluation_first_signal_date"
+        ),
+        "evaluation_last_signal_date": payload.get(
+            "evaluation_last_signal_date"
         ),
         "variants": compact_variants,
     }
@@ -405,6 +421,7 @@ def _report(
     current_candidate_count: int,
     historical_candidate_count: int,
     full: bool,
+    symbol_aliases: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     raw_primary_blockers = point_in_time_payload.get(
         "promotion_blockers"
@@ -454,6 +471,10 @@ def _report(
             "benchmark_symbols": list(
                 ROTATION_BENCHMARK_SYMBOLS
             ),
+            "symbol_alias_count": len(symbol_aliases),
+            "symbol_aliases": [
+                dict(alias) for alias in symbol_aliases
+            ],
             "error_count": len(acquisition_errors),
             "errors": [dict(error) for error in acquisition_errors],
         },
@@ -532,6 +553,16 @@ def main() -> int:
         membership_metadata = INDEX_MEMBERSHIP_HISTORY.metadata(
             candidates
         )
+        symbol_aliases = [
+            provenance
+            for candidate in candidates
+            if candidate.symbol not in current_symbols
+            if (
+                provenance := historical_research_alias_provenance(
+                    candidate
+                )
+            ) is not None
+        ]
         report = _report(
             current_payload=current_payload,
             point_in_time_payload=point_in_time_payload,
@@ -546,6 +577,7 @@ def main() -> int:
                 len(candidates) - len(INDEX_CANDIDATE_CATALOG)
             ),
             full=args.full,
+            symbol_aliases=symbol_aliases,
         )
         print(
             json.dumps(

@@ -63,6 +63,7 @@ def _evaluation_payload(
         "data_scope": data_scope,
         "survivorship_bias": True,
         "validation_periods": 12,
+        "evaluation_warmup_bars": 253,
         "expanding_validation_min_training_periods": 12,
         "expanding_validation_fold_periods": 12,
         "selected_variant": "variant-a",
@@ -73,6 +74,12 @@ def _evaluation_payload(
             "ROTATION_FORWARD_OBSERVATIONS_REQUIRED"
         ],
         "point_in_time_data_missing_symbols": missing_symbols or [],
+        "point_in_time_required_missing_symbols": (
+            missing_symbols or []
+        ),
+        "point_in_time_out_of_window_missing_symbols": [],
+        "evaluation_first_signal_date": "2022-01-31",
+        "evaluation_last_signal_date": "2024-12-31",
         "variants": [
             {
                 "variant": {
@@ -107,6 +114,13 @@ def test_compact_summary_keeps_decision_fields_without_fold_details() -> None:
     summary = cli._summary(payload)
 
     assert summary["point_in_time_data_missing_symbols"] == ["OLD.US"]
+    assert summary["point_in_time_required_missing_symbols"] == [
+        "OLD.US"
+    ]
+    assert summary["point_in_time_out_of_window_missing_symbols"] == []
+    assert summary["evaluation_warmup_bars"] == 253
+    assert summary["evaluation_first_signal_date"] == "2022-01-31"
+    assert summary["evaluation_last_signal_date"] == "2024-12-31"
     assert "selected_variant_periods" not in summary
     variant = summary["variants"][0]
     assert "expanding_folds" not in variant
@@ -148,6 +162,14 @@ def test_report_marks_pit_primary_and_merges_fail_closed_blockers() -> None:
         current_candidate_count=123,
         historical_candidate_count=48,
         full=False,
+        symbol_aliases=[
+            {
+                "logical_symbol": "FB.US",
+                "provider_symbol": "META.US",
+                "ticker_change_effective_date": "2022-06-09",
+                "provenance": "same security ticker rename",
+            }
+        ],
     )
 
     assert report["primary_evidence"] == "point_in_time_primary"
@@ -158,6 +180,15 @@ def test_report_marks_pit_primary_and_merges_fail_closed_blockers() -> None:
         "source_version": "history-v1"
     }
     assert report["acquisition"]["error_count"] == 2
+    assert report["acquisition"]["symbol_alias_count"] == 1
+    assert report["acquisition"]["symbol_aliases"] == [
+        {
+            "logical_symbol": "FB.US",
+            "provider_symbol": "META.US",
+            "ticker_change_effective_date": "2022-06-09",
+            "provenance": "same security ticker rename",
+        }
+    ]
     assert report["fail_closed_blockers"] == [
         "POINT_IN_TIME_MEMBER_DATA_PARTIAL",
         "ROTATION_HISTORICAL_MEMBER_DATA_ACQUISITION_PARTIAL",

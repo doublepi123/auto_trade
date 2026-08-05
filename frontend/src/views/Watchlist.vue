@@ -1095,7 +1095,13 @@
                 信号日排除尚未入指的股票
                 · 快照补录 {{ universeRotationPointInTime.membership_history.snapshot_only_symbols.length }}
                 · 历史名单缺失 {{ universeRotationPointInTime.membership_history.historical_symbols_missing.length }}
-                · 同期行情缺失 {{ universeRotationPointInTime.evaluation?.point_in_time_data_missing_symbols.length ?? 0 }}
+                · 评估期行情缺失 {{ universeRotationPointInTime.evaluation?.point_in_time_required_missing_symbols?.length
+                  ?? universeRotationPointInTime.evaluation?.point_in_time_data_missing_symbols.length
+                  ?? 0 }}
+                · 窗外行情缺失 {{ universeRotationPointInTime.evaluation?.point_in_time_out_of_window_missing_symbols?.length ?? 0 }}
+                <template v-if="universeRotationPointInTime.evaluation?.evaluation_warmup_bars">
+                  · 全局预热 {{ universeRotationPointInTime.evaluation.evaluation_warmup_bars }} 个共同交易日
+                </template>
               </span>
               <strong>
                 历史成员清单已独立补入研究池；受行情缺口与起始年份限制，仍仅作敏感性诊断，不参与晋级或下单。
@@ -2710,6 +2716,31 @@ function isRotationWalkForwardEvaluation(
       && Number.isFinite(value.expanding_validation_fold_periods)
     )
   )
+  const evaluationWindowFields = [
+    value.evaluation_warmup_bars,
+    value.point_in_time_required_missing_symbols,
+    value.point_in_time_out_of_window_missing_symbols,
+    value.evaluation_first_signal_date,
+    value.evaluation_last_signal_date,
+  ]
+  const evaluationWindowFieldsValid = (
+    evaluationWindowFields.every((field) => field === undefined)
+    || (
+      typeof value.evaluation_warmup_bars === 'number'
+      && Number.isFinite(value.evaluation_warmup_bars)
+      && value.evaluation_warmup_bars >= 1
+      && Array.isArray(value.point_in_time_required_missing_symbols)
+      && value.point_in_time_required_missing_symbols.every(
+        (symbol) => typeof symbol === 'string',
+      )
+      && Array.isArray(value.point_in_time_out_of_window_missing_symbols)
+      && value.point_in_time_out_of_window_missing_symbols.every(
+        (symbol) => typeof symbol === 'string',
+      )
+      && isNullableString(value.evaluation_first_signal_date)
+      && isNullableString(value.evaluation_last_signal_date)
+    )
+  )
   return (
     typeof value.algorithm_version === 'string'
     && typeof value.status === 'string'
@@ -2720,6 +2751,7 @@ function isRotationWalkForwardEvaluation(
     && typeof value.validation_periods === 'number'
     && Number.isFinite(value.validation_periods)
     && expandingRootFieldsValid
+    && evaluationWindowFieldsValid
     && isNullableString(value.selected_variant)
     && typeof value.selected_variant_validation_passed === 'boolean'
     && isNullableString(value.validated_challenger_variant)

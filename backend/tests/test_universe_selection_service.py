@@ -37,7 +37,9 @@ from app.services.universe_selection_service import (
     _HISTORICAL_RESEARCH_BARS_CACHE,
     UniverseSelectionLeaseBusyError,
     historical_membership_end,
+    historical_research_alias_provenance,
     historical_research_candlesticks,
+    historical_research_symbol_alias,
     research_candidate_uses_recent_candlesticks,
     UniverseSelectionService,
     minimum_peer_observation_dollar_volume,
@@ -206,6 +208,185 @@ def test_historical_research_empty_response_is_not_cached() -> None:
     assert first == []
     assert len(second or []) == 1
     assert broker.calls == 2
+
+
+def test_fb_historical_research_uses_audited_meta_ticker_alias() -> None:
+    candidate = next(
+        row
+        for row in HISTORICAL_INDEX_CANDIDATE_CATALOG
+        if row.symbol == "FB.US"
+    )
+
+    class _HistoricalBroker:
+        def __init__(self) -> None:
+            self.requests: list[
+                tuple[str, str, int, datetime]
+            ] = []
+
+        def get_candlesticks(
+            self,
+            symbol: str,
+            period: str,
+            count: int,
+        ) -> list[BrokerCandle]:
+            raise AssertionError("latest bars must not be used")
+
+        def get_forward_adjusted_history_candlesticks_before(
+            self,
+            symbol: str,
+            period: str,
+            count: int,
+            before: datetime,
+        ) -> list[BrokerCandle]:
+            self.requests.append((symbol, period, count, before))
+            return [
+                BrokerCandle(
+                    timestamp=datetime(
+                        2022,
+                        6,
+                        8,
+                        tzinfo=timezone.utc,
+                    ),
+                    open=200,
+                    high=205,
+                    low=198,
+                    close=204,
+                    volume=1_000_000,
+                    turnover=204_000_000,
+                ),
+                # Defensive contract: even if an inclusive provider leaks the
+                # first META bar, it must never be cached under FB.
+                BrokerCandle(
+                    timestamp=datetime(
+                        2022,
+                        6,
+                        9,
+                        4,
+                        tzinfo=timezone.utc,
+                    ),
+                    open=205,
+                    high=206,
+                    low=203,
+                    close=204,
+                    volume=1_000_000,
+                    turnover=204_000_000,
+                ),
+            ]
+
+    broker = _HistoricalBroker()
+    _HISTORICAL_RESEARCH_BARS_CACHE.clear()
+    try:
+        first = historical_research_candlesticks(
+            broker,
+            candidate,
+            count=1000,
+        )
+        second = historical_research_candlesticks(
+            broker,
+            candidate,
+            count=1000,
+        )
+        cache_keys = tuple(_HISTORICAL_RESEARCH_BARS_CACHE)
+    finally:
+        _HISTORICAL_RESEARCH_BARS_CACHE.clear()
+
+    alias = historical_research_symbol_alias(candidate)
+    provenance = historical_research_alias_provenance(candidate)
+    assert alias is not None
+    assert alias.logical_symbol == "FB.US"
+    assert alias.provider_symbol == "META.US"
+    assert alias.ticker_change_effective_date == date(2022, 6, 9)
+    assert alias.alias_version == "same-security-ticker-alias-v1"
+    assert alias.adjustment == "ForwardAdjust"
+    assert alias.data_provider == "LONGPORT"
+    assert "same Meta Platforms security" in alias.provenance
+    assert first == second
+    assert first is not None
+    assert [bar.timestamp.date() for bar in first] == [
+        date(2022, 6, 8)
+    ]
+    assert provenance is not None
+    assert provenance["logical_membership_end_exclusive"] == (
+        "2022-06-09"
+    )
+    assert provenance["fetch_before"] == (
+        "2022-06-09T00:00:00+00:00"
+    )
+    assert broker.requests == [
+        (
+            "META.US",
+            "DAY",
+            1000,
+            datetime(2022, 6, 9, 0, tzinfo=timezone.utc),
+        )
+    ]
+    assert cache_keys == (
+        (
+            "FB.US",
+            "META.US",
+            "ForwardAdjust",
+            "same-security-ticker-alias-v1",
+            1000,
+            date(2022, 6, 9),
+        ),
+    )
+
+
+def test_historical_research_does_not_alias_acquired_companies() -> None:
+    by_symbol = {
+        row.symbol: row
+        for row in HISTORICAL_INDEX_CANDIDATE_CATALOG
+    }
+
+    assert historical_research_symbol_alias(by_symbol["ATVI.US"]) is None
+    assert historical_research_symbol_alias(by_symbol["SGEN.US"]) is None
+    assert historical_research_symbol_alias(by_symbol["SPLK.US"]) is None
+    assert historical_research_symbol_alias(by_symbol["XLNX.US"]) is None
+
+
+def test_universe_parameters_persist_historical_alias_provenance() -> None:
+    current = IndexCandidate(
+        "META.US",
+        "Meta Platforms",
+        "Communication Services",
+        ("NASDAQ_100",),
+    )
+    historical = next(
+        row
+        for row in HISTORICAL_INDEX_CANDIDATE_CATALOG
+        if row.symbol == "FB.US"
+    )
+    db = _db()
+    try:
+        service = UniverseSelectionService(
+            db,
+            _FakeBroker(),
+            catalog=(current,),
+            rotation_research_catalog=(current, historical),
+            config=_config(),
+            minimum_evaluable_ratio=0.5,
+            minimum_residency_days=1,
+            apply_to_watchlist=False,
+            enable_shadow=False,
+            now=_NOW,
+        )
+
+        aliases = service._parameters()[
+            "rotation_historical_symbol_aliases"
+        ]
+    finally:
+        db.close()
+
+    assert isinstance(aliases, list)
+    assert len(aliases) == 1
+    assert aliases[0]["logical_symbol"] == "FB.US"
+    assert aliases[0]["provider_symbol"] == "META.US"
+    assert aliases[0]["alias_version"] == (
+        "same-security-ticker-alias-v1"
+    )
+    assert aliases[0]["fetch_before"] == (
+        "2022-06-09T00:00:00+00:00"
+    )
 
 
 def test_recent_research_fallback_requires_active_snapshot_membership() -> None:
@@ -1567,7 +1748,7 @@ def test_refresh_persists_rotation_shadow_evidence() -> None:
         parameters = json.loads(result.run.parameters_json)
         evaluation = parameters["rotation_evaluation"]
         assert evaluation["algorithm_version"] == (
-            "rotation-monthly-open-walk-forward-v6"
+            ROTATION_WALK_FORWARD_VERSION
         )
         assert evaluation["benchmark_symbols"] == [
             "QQQ.US",

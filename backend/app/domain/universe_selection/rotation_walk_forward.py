@@ -22,7 +22,7 @@ from app.domain.universe_selection.selector import (
 )
 
 
-ROTATION_WALK_FORWARD_VERSION = "rotation-monthly-open-walk-forward-v6"
+ROTATION_WALK_FORWARD_VERSION = "rotation-monthly-open-walk-forward-v7"
 ROTATION_BENCHMARK_SYMBOLS = ("QQQ.US", "DIA.US")
 _CASH = "__CASH__"
 _EXPANDING_VALIDATION_MIN_TRAINING_PERIODS = 12
@@ -261,12 +261,17 @@ class RotationWalkForwardResult:
     validation_periods: int
     expanding_validation_min_training_periods: int
     expanding_validation_fold_periods: int
+    evaluation_warmup_bars: int
     selected_variant: str | None
     selected_variant_validation_passed: bool
     validated_challenger_variant: str | None
     automatic_promotion_allowed: bool
     promotion_blockers: tuple[str, ...]
     point_in_time_data_missing_symbols: tuple[str, ...]
+    point_in_time_required_missing_symbols: tuple[str, ...]
+    point_in_time_out_of_window_missing_symbols: tuple[str, ...]
+    evaluation_first_signal_date: date | None
+    evaluation_last_signal_date: date | None
     variants: tuple[RotationVariantEvaluation, ...]
     selected_variant_periods: tuple[RotationPeriod, ...]
     validated_challenger_periods: tuple[RotationPeriod, ...]
@@ -317,6 +322,16 @@ class RotationWalkForwardResult:
             }
             for period in self.validated_challenger_periods
         ]
+        payload["evaluation_first_signal_date"] = (
+            self.evaluation_first_signal_date.isoformat()
+            if self.evaluation_first_signal_date is not None
+            else None
+        )
+        payload["evaluation_last_signal_date"] = (
+            self.evaluation_last_signal_date.isoformat()
+            if self.evaluation_last_signal_date is not None
+            else None
+        )
         return payload
 
 
@@ -343,13 +358,15 @@ def _bar_map(bars: Sequence[DailyBar]) -> dict[date, DailyBar]:
     return result
 
 
-def _point_in_time_data_missing_symbols(
+def _point_in_time_missing_symbol_classification(
     *,
     candidates: Sequence[IndexCandidate],
     candidate_maps: Mapping[str, Mapping[date, DailyBar]],
     membership_history: IndexMembershipHistory,
-) -> tuple[str, ...]:
-    missing: list[str] = []
+    signal_dates: Sequence[date],
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    required_missing: list[str] = []
+    out_of_window_missing: list[str] = []
     for candidate in candidates:
         symbol = candidate.symbol.removesuffix(".US")
         has_authoritative_history = any(
@@ -361,15 +378,31 @@ def _point_in_time_data_missing_symbols(
         )
         if not has_authoritative_history:
             continue
+        available_dates = candidate_maps.get(candidate.symbol, {})
+        active_signal_dates = tuple(
+            signal_date
+            for signal_date in signal_dates
+            if membership_history.is_active(candidate, signal_date)
+        )
+        if active_signal_dates:
+            if any(
+                signal_date not in available_dates
+                for signal_date in active_signal_dates
+            ):
+                required_missing.append(candidate.symbol)
+            continue
         if not any(
             membership_history.is_active(candidate, session_date)
-            for session_date in candidate_maps.get(
-                candidate.symbol,
-                {},
-            )
+            for session_date in available_dates
         ):
-            missing.append(candidate.symbol)
-    return tuple(sorted(missing))
+            out_of_window_missing.append(candidate.symbol)
+    required = tuple(sorted(required_missing))
+    out_of_window = tuple(sorted(out_of_window_missing))
+    return (
+        tuple(sorted((*required, *out_of_window))),
+        required,
+        out_of_window,
+    )
 
 
 def _monthly_rebalance_dates(
@@ -649,11 +682,6 @@ def _simulate_variant(
             ),
             selection_config,
         )
-        if not any(
-            row.rotation.momentum_pct is not None
-            for row in selections
-        ):
-            continue
         spread_bps_by_symbol = {
             row.candidate.symbol: (
                 row.metrics.relative_spread_bps
@@ -1015,6 +1043,14 @@ def evaluate_rotation_walk_forward(
         raise ValueError(
             "expanding validation folds need at least 6 periods"
         )
+    evaluation_warmup_bars = max(
+        max(
+            base_config.min_completed_bars,
+            variant.lookback_bars + 1,
+            variant.sma_bars,
+        )
+        for variant in variants
+    )
     benchmark_maps = {
         symbol: _bar_map(bars)
         for symbol, bars in benchmark_bars_by_symbol.items()
@@ -1038,6 +1074,19 @@ def evaluate_rotation_walk_forward(
     common_dates, rebalance_dates = _monthly_rebalance_dates(
         benchmark_maps,
     )
+    common_date_positions = {
+        session_date: position
+        for position, session_date in enumerate(common_dates)
+    }
+    evaluation_rebalance_dates = tuple(
+        entry_date
+        for entry_date in rebalance_dates
+        if common_date_positions[entry_date] >= evaluation_warmup_bars
+    )
+    evaluation_signal_dates = tuple(
+        common_dates[common_date_positions[entry_date] - 1]
+        for entry_date in evaluation_rebalance_dates[:-1]
+    )
     data_scope = (
         "POINT_IN_TIME_RESEARCH_CATALOG"
         if membership_history is not None
@@ -1049,6 +1098,13 @@ def evaluate_rotation_walk_forward(
         else ["CURRENT_CONSTITUENTS_SURVIVORSHIP_BIAS"]
     )
     point_in_time_data_missing_symbols: tuple[str, ...] = ()
+    point_in_time_required_missing_symbols: tuple[str, ...] = ()
+    point_in_time_out_of_window_missing_symbols: tuple[str, ...] = ()
+    evaluation_first_signal_date: date | None = None
+    evaluation_last_signal_date: date | None = None
+    if evaluation_signal_dates:
+        evaluation_first_signal_date = evaluation_signal_dates[0]
+        evaluation_last_signal_date = evaluation_signal_dates[-1]
     if membership_history is not None:
         coverage = membership_history.coverage(candidates)
         if coverage.historical_symbols_missing:
@@ -1062,18 +1118,18 @@ def evaluate_rotation_walk_forward(
             scope_blockers.append(
                 "POINT_IN_TIME_MEMBERSHIP_HISTORY_PARTIAL"
             )
-        point_in_time_data_missing_symbols = (
-            _point_in_time_data_missing_symbols(
+    if len(rebalance_dates) < 2:
+        if membership_history is not None:
+            (
+                point_in_time_data_missing_symbols,
+                point_in_time_required_missing_symbols,
+                point_in_time_out_of_window_missing_symbols,
+            ) = _point_in_time_missing_symbol_classification(
                 candidates=candidates,
                 candidate_maps=candidate_maps,
                 membership_history=membership_history,
+                signal_dates=(),
             )
-        )
-        if point_in_time_data_missing_symbols:
-            scope_blockers.append(
-                "POINT_IN_TIME_MEMBER_DATA_PARTIAL"
-            )
-    if len(rebalance_dates) < 2:
         return RotationWalkForwardResult(
             algorithm_version=ROTATION_WALK_FORWARD_VERSION,
             status="BENCHMARK_HISTORY_UNAVAILABLE",
@@ -1087,6 +1143,7 @@ def evaluate_rotation_walk_forward(
             expanding_validation_fold_periods=(
                 expanding_validation_fold_periods
             ),
+            evaluation_warmup_bars=evaluation_warmup_bars,
             selected_variant=None,
             selected_variant_validation_passed=False,
             validated_challenger_variant=None,
@@ -1099,6 +1156,16 @@ def evaluate_rotation_walk_forward(
             point_in_time_data_missing_symbols=(
                 point_in_time_data_missing_symbols
             ),
+            point_in_time_required_missing_symbols=(
+                point_in_time_required_missing_symbols
+            ),
+            point_in_time_out_of_window_missing_symbols=(
+                point_in_time_out_of_window_missing_symbols
+            ),
+            evaluation_first_signal_date=(
+                evaluation_first_signal_date
+            ),
+            evaluation_last_signal_date=evaluation_last_signal_date,
             variants=(),
             selected_variant_periods=(),
             validated_challenger_periods=(),
@@ -1113,31 +1180,29 @@ def evaluate_rotation_walk_forward(
                 candidate_maps=candidate_maps,
                 benchmark_maps=benchmark_maps,
                 common_dates=common_dates,
-                rebalance_dates=rebalance_dates,
+                rebalance_dates=evaluation_rebalance_dates,
                 base_config=base_config,
                 variant=variant,
                 membership_history=membership_history,
             )
         )
 
-    non_empty_period_dates = [
-        {period.entry_date for period in periods}
-        for periods in raw_periods_by_variant.values()
-        if periods
-    ]
-    common_period_dates = (
-        set.intersection(*non_empty_period_dates)
-        if non_empty_period_dates
-        else set()
-    )
-    periods_by_variant = {
-        name: tuple(
-            period
-            for period in periods
-            if period.entry_date in common_period_dates
+    periods_by_variant = raw_periods_by_variant
+    if membership_history is not None:
+        (
+            point_in_time_data_missing_symbols,
+            point_in_time_required_missing_symbols,
+            point_in_time_out_of_window_missing_symbols,
+        ) = _point_in_time_missing_symbol_classification(
+            candidates=candidates,
+            candidate_maps=candidate_maps,
+            membership_history=membership_history,
+            signal_dates=evaluation_signal_dates,
         )
-        for name, periods in raw_periods_by_variant.items()
-    }
+        if point_in_time_required_missing_symbols:
+            scope_blockers.append(
+                "POINT_IN_TIME_MEMBER_DATA_PARTIAL"
+            )
 
     evaluations: list[RotationVariantEvaluation] = []
     for variant in variants:
@@ -1250,6 +1315,7 @@ def evaluate_rotation_walk_forward(
         expanding_validation_fold_periods=(
             expanding_validation_fold_periods
         ),
+        evaluation_warmup_bars=evaluation_warmup_bars,
         selected_variant=selected.variant.name if selected else None,
         selected_variant_validation_passed=(
             selected.validation_passed if selected else False
@@ -1264,6 +1330,14 @@ def evaluate_rotation_walk_forward(
         point_in_time_data_missing_symbols=(
             point_in_time_data_missing_symbols
         ),
+        point_in_time_required_missing_symbols=(
+            point_in_time_required_missing_symbols
+        ),
+        point_in_time_out_of_window_missing_symbols=(
+            point_in_time_out_of_window_missing_symbols
+        ),
+        evaluation_first_signal_date=evaluation_first_signal_date,
+        evaluation_last_signal_date=evaluation_last_signal_date,
         variants=tuple(evaluations),
         selected_variant_periods=(
             periods_by_variant.get(selected.variant.name, ())

@@ -1675,6 +1675,7 @@ export interface UniverseRotationWalkForwardEvaluation {
   data_scope: string
   survivorship_bias: boolean
   validation_periods: number
+  evaluation_warmup_bars?: number
   expanding_validation_min_training_periods?: number
   expanding_validation_fold_periods?: number
   selected_variant: string | null
@@ -1683,6 +1684,10 @@ export interface UniverseRotationWalkForwardEvaluation {
   automatic_promotion_allowed: false
   promotion_blockers: string[]
   point_in_time_data_missing_symbols: string[]
+  point_in_time_required_missing_symbols?: string[]
+  point_in_time_out_of_window_missing_symbols?: string[]
+  evaluation_first_signal_date?: string | null
+  evaluation_last_signal_date?: string | null
   variants: UniverseRotationVariantEvaluation[]
 }
 

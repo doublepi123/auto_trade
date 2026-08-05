@@ -105,10 +105,59 @@ _PEER_ONLY_ELIGIBLE_REASONS = frozenset(
     {"DOLLAR_VOLUME_BELOW_MINIMUM"}
 )
 _HISTORICAL_RESEARCH_BARS_CACHE: dict[
-    tuple[str, int, date],
+    tuple[str, str, str, str, int, date],
     tuple[BrokerCandle, ...],
 ] = {}
 _HISTORICAL_RESEARCH_BARS_CACHE_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class HistoricalResearchSymbolAlias:
+    """Auditable same-security ticker alias for historical research only."""
+
+    logical_symbol: str
+    provider_symbol: str
+    ticker_change_effective_date: date
+    alias_version: str
+    adjustment: str
+    data_provider: str
+    provenance: str
+    source_url: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "logical_symbol": self.logical_symbol,
+            "provider_symbol": self.provider_symbol,
+            "ticker_change_effective_date": (
+                self.ticker_change_effective_date.isoformat()
+            ),
+            "alias_version": self.alias_version,
+            "adjustment": self.adjustment,
+            "data_provider": self.data_provider,
+            "provenance": self.provenance,
+            "source_url": self.source_url,
+        }
+
+
+_HISTORICAL_RESEARCH_SYMBOL_ALIASES = {
+    "FB.US": HistoricalResearchSymbolAlias(
+        logical_symbol="FB.US",
+        provider_symbol="META.US",
+        ticker_change_effective_date=date(2022, 6, 9),
+        alias_version="same-security-ticker-alias-v1",
+        adjustment="ForwardAdjust",
+        data_provider="LONGPORT",
+        provenance=(
+            "same Meta Platforms security; FB changed its trading symbol "
+            "to META effective 2022-06-09"
+        ),
+        source_url=(
+            "https://investor.atmeta.com/investor-news/"
+            "press-release-details/2022/Meta-Platforms-Inc.-to-Change-"
+            "Ticker-Symbol-to-META-on-June-9/default.aspx"
+        ),
+    ),
+}
 
 
 class UniverseMarketDataProvider(Protocol):
@@ -171,6 +220,19 @@ def historical_research_before(
     membership_end = historical_membership_end(candidate)
     if membership_end is None:
         return None
+    alias = _HISTORICAL_RESEARCH_SYMBOL_ALIASES.get(candidate.symbol)
+    if (
+        alias is not None
+        and membership_end == alias.ticker_change_effective_date
+    ):
+        # The Longport backward cursor is inclusive.  Midnight UTC is after
+        # the prior US session but before the effective-date daily candle, so
+        # it preserves ``count`` without relabelling META's first bar as FB.
+        return datetime.combine(
+            membership_end,
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        )
     return datetime.combine(
         membership_end,
         datetime.min.time(),
@@ -185,6 +247,52 @@ def research_candidate_uses_recent_candlesticks(
         candidate,
         INDEX_MEMBERSHIP_HISTORY.catalog_snapshot_date,
     )
+
+
+def historical_research_symbol_alias(
+    candidate: IndexCandidate,
+) -> HistoricalResearchSymbolAlias | None:
+    """Resolve a proven same-security alias at an exact ticker boundary.
+
+    Acquirers and successor companies are intentionally absent.  A configured
+    alias fails closed if point-in-time membership no longer ends at the
+    documented ticker-change date, preventing silent reuse outside its audited
+    boundary.
+    """
+
+    alias = _HISTORICAL_RESEARCH_SYMBOL_ALIASES.get(candidate.symbol)
+    if alias is None:
+        return None
+    membership_end = historical_membership_end(candidate)
+    if membership_end != alias.ticker_change_effective_date:
+        raise ValueError(
+            "historical research symbol alias boundary mismatch for "
+            f"{candidate.symbol}: membership_end={membership_end}, "
+            "ticker_change_effective_date="
+            f"{alias.ticker_change_effective_date}"
+        )
+    return alias
+
+
+def historical_research_alias_provenance(
+    candidate: IndexCandidate,
+) -> dict[str, str] | None:
+    alias = historical_research_symbol_alias(candidate)
+    if alias is None:
+        return None
+    boundary = historical_research_before(candidate)
+    if boundary is None:
+        raise ValueError(
+            "historical research alias is missing a fetch boundary for "
+            f"{candidate.symbol}"
+        )
+    return {
+        **alias.to_dict(),
+        "logical_membership_end_exclusive": (
+            alias.ticker_change_effective_date.isoformat()
+        ),
+        "fetch_before": boundary.isoformat(),
+    }
 
 
 def historical_research_candlesticks(
@@ -206,7 +314,22 @@ def historical_research_candlesticks(
         or not callable(history_reader)
     ):
         return None
-    cache_key = (candidate.symbol, count, membership_end)
+    alias = historical_research_symbol_alias(candidate)
+    provider_symbol = (
+        alias.provider_symbol if alias is not None else candidate.symbol
+    )
+    cache_key = (
+        candidate.symbol,
+        provider_symbol,
+        alias.adjustment if alias is not None else "ForwardAdjust",
+        (
+            alias.alias_version
+            if alias is not None
+            else "direct-symbol-v1"
+        ),
+        count,
+        membership_end,
+    )
     with _HISTORICAL_RESEARCH_BARS_CACHE_LOCK:
         cached = _HISTORICAL_RESEARCH_BARS_CACHE.get(cache_key)
     if cached is not None:
@@ -214,12 +337,19 @@ def historical_research_candlesticks(
     bars = cast(
         list[BrokerCandle],
         history_reader(
-            candidate.symbol,
+            provider_symbol,
             "DAY",
             count,
             boundary,
         ),
     )
+    if alias is not None:
+        bars = [
+            candle
+            for candle in bars
+            if trade_day_for(candidate.market, candle.timestamp)
+            < alias.ticker_change_effective_date
+        ]
     if bars:
         with _HISTORICAL_RESEARCH_BARS_CACHE_LOCK:
             _HISTORICAL_RESEARCH_BARS_CACHE[cache_key] = tuple(bars)
@@ -2869,6 +2999,15 @@ class UniverseSelectionService:
                 self.rotation_research_catalog
             )
         )
+        historical_symbol_aliases = [
+            provenance
+            for candidate in self.rotation_research_catalog
+            if (
+                provenance := historical_research_alias_provenance(
+                    candidate
+                )
+            ) is not None
+        ]
         return {
             **asdict(self.config),
             "catalog_size": len(self.catalog),
@@ -2944,6 +3083,9 @@ class UniverseSelectionService:
             ],
             "rotation_point_in_time_membership_history": (
                 membership_history_metadata
+            ),
+            "rotation_historical_symbol_aliases": (
+                historical_symbol_aliases
             ),
             "exploration_algorithm_version": (
                 _EXPLORATION_ALGORITHM_VERSION

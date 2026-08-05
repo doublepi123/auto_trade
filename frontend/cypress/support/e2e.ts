@@ -24,7 +24,7 @@ interface StatusStub {
 }
 
 const rotationPerformanceStub = {
-  periods: 47,
+  periods: 35,
   total_return_pct: 216.4,
   annualized_return_pct: 34.2,
   annualized_volatility_pct: 21.7,
@@ -47,12 +47,13 @@ const rotationPerformanceStub = {
 }
 
 const rotationEvaluationStub = {
-  algorithm_version: 'rotation-monthly-open-walk-forward-v6',
+  algorithm_version: 'rotation-monthly-open-walk-forward-v7',
   status: 'COMPLETE',
   benchmark_symbols: ['QQQ.US', 'DIA.US'],
   data_scope: 'CURRENT_CONSTITUENTS_ONLY',
   survivorship_bias: true,
   validation_periods: 12,
+  evaluation_warmup_bars: 253,
   expanding_validation_min_training_periods: 12,
   expanding_validation_fold_periods: 12,
   selected_variant: 'concentrated_top6_12_1',
@@ -64,6 +65,10 @@ const rotationEvaluationStub = {
     'ROTATION_FORWARD_OBSERVATIONS_REQUIRED',
   ],
   point_in_time_data_missing_symbols: [],
+  point_in_time_required_missing_symbols: [],
+  point_in_time_out_of_window_missing_symbols: [],
+  evaluation_first_signal_date: '2023-08-31',
+  evaluation_last_signal_date: '2026-06-30',
   variants: [
     {
       variant: {
@@ -187,9 +192,16 @@ const rotationPointInTimeSensitivityStub = {
     ],
     point_in_time_data_missing_symbols: [
       'ATVI.US',
-      'FB.US',
       'SGEN.US',
       'SPLK.US',
+      'XLNX.US',
+    ],
+    point_in_time_required_missing_symbols: [
+      'SGEN.US',
+      'SPLK.US',
+    ],
+    point_in_time_out_of_window_missing_symbols: [
+      'ATVI.US',
       'XLNX.US',
     ],
     variants: [

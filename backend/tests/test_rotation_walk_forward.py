@@ -29,6 +29,27 @@ def _sessions(count: int) -> list[datetime]:
     return result
 
 
+def _month_starts(
+    *,
+    year: int,
+    month: int,
+    count: int,
+) -> list[datetime]:
+    result: list[datetime] = []
+    for offset in range(count):
+        absolute_month = year * 12 + month - 1 + offset
+        result.append(
+            datetime(
+                absolute_month // 12,
+                absolute_month % 12 + 1,
+                1,
+                17,
+                tzinfo=timezone.utc,
+            )
+        )
+    return result
+
+
 _DATES = _sessions(1100)
 
 
@@ -129,6 +150,10 @@ def _evaluate(
 def test_rotation_walk_forward_uses_prior_close_and_next_month_open() -> None:
     result = _evaluate()
 
+    assert result.algorithm_version == (
+        "rotation-monthly-open-walk-forward-v7"
+    )
+    assert result.evaluation_warmup_bars == 253
     assert result.status == "COMPLETE"
     assert result.selected_variant == "baseline"
     assert result.validated_challenger_variant == "baseline"
@@ -199,6 +224,8 @@ def test_point_in_time_membership_filters_future_periods() -> None:
         result.promotion_blockers
     )
     assert result.point_in_time_data_missing_symbols == ()
+    assert result.point_in_time_required_missing_symbols == ()
+    assert result.point_in_time_out_of_window_missing_symbols == ()
     assert "CURRENT_CONSTITUENTS_SURVIVORSHIP_BIAS" not in (
         result.promotion_blockers
     )
@@ -256,10 +283,212 @@ def test_point_in_time_reports_member_without_overlapping_data() -> None:
     assert result.point_in_time_data_missing_symbols == (
         "MISSING.US",
     )
+    assert result.point_in_time_required_missing_symbols == (
+        "MISSING.US",
+    )
+    assert result.point_in_time_out_of_window_missing_symbols == ()
+    assert result.evaluation_first_signal_date == (
+        result.selected_variant_periods[0].signal_date
+    )
+    assert result.evaluation_last_signal_date == (
+        result.selected_variant_periods[-1].signal_date
+    )
     assert "POINT_IN_TIME_MEMBER_DATA_PARTIAL" in (
         result.promotion_blockers
     )
     assert "HISTORICAL_CONSTITUENTS_OMITTED" not in (
+        result.promotion_blockers
+    )
+
+
+def test_point_in_time_all_missing_still_uses_canonical_signal_window(
+) -> None:
+    missing = _candidate("MISSING.US", "Healthcare")
+    history = IndexMembershipHistory(
+        source_version="test-history",
+        effective_start_date=date(2021, 1, 1),
+        catalog_snapshot_date=date(2021, 1, 1),
+        sources=(),
+        intervals={
+            "NASDAQ_100": {
+                "MISSING": (
+                    MembershipInterval(date(2021, 1, 1), None),
+                ),
+            },
+        },
+        snapshot_overrides={},
+    )
+
+    result = evaluate_rotation_walk_forward(
+        candidates=(missing,),
+        bars_by_symbol={"MISSING.US": ()},
+        benchmark_bars_by_symbol={
+            "QQQ.US": _bars(drift=0.0005),
+            "DIA.US": _bars(drift=0.0003),
+        },
+        base_config=_config(),
+        variants=(
+            RotationVariant(
+                name="baseline",
+                lookback_bars=252,
+                skip_bars=21,
+                sma_bars=200,
+                max_selected=2,
+                max_per_risk_group=1,
+            ),
+        ),
+        validation_periods=12,
+        membership_history=history,
+    )
+
+    assert result.evaluation_first_signal_date is not None
+    assert result.evaluation_last_signal_date is not None
+    assert result.point_in_time_required_missing_symbols == (
+        "MISSING.US",
+    )
+    assert result.point_in_time_out_of_window_missing_symbols == ()
+    assert "POINT_IN_TIME_MEMBER_DATA_PARTIAL" in (
+        result.promotion_blockers
+    )
+    assert result.variants[0].full.periods > 0
+    assert result.selected_variant_periods
+    assert all(
+        not period.selected_symbols
+        and not period.target_weights_pct
+        and period.gross_return_pct == 0
+        and period.net_return_pct == 0
+        for period in result.selected_variant_periods
+    )
+
+
+def test_point_in_time_reports_out_of_window_missing_member_without_blocking(
+) -> None:
+    available = _candidate("FAST.US", "Semiconductors")
+    historical = _candidate("OLD.US", "Healthcare")
+    history = IndexMembershipHistory(
+        source_version="test-history",
+        effective_start_date=date(2019, 1, 1),
+        catalog_snapshot_date=date(2021, 1, 1),
+        sources=(),
+        intervals={
+            "NASDAQ_100": {
+                "FAST": (
+                    MembershipInterval(date(2021, 1, 1), None),
+                ),
+                "OLD": (
+                    MembershipInterval(
+                        date(2019, 1, 1),
+                        date(2020, 1, 1),
+                    ),
+                ),
+            },
+        },
+        snapshot_overrides={},
+    )
+
+    result = evaluate_rotation_walk_forward(
+        candidates=(available, historical),
+        bars_by_symbol={
+            "FAST.US": _bars(drift=0.0025),
+            "OLD.US": (),
+        },
+        benchmark_bars_by_symbol={
+            "QQQ.US": _bars(drift=0.0005),
+            "DIA.US": _bars(drift=0.0003),
+        },
+        base_config=_config(),
+        variants=(
+            RotationVariant(
+                name="baseline",
+                lookback_bars=252,
+                skip_bars=21,
+                sma_bars=200,
+                max_selected=2,
+                max_per_risk_group=1,
+            ),
+        ),
+        validation_periods=12,
+        membership_history=history,
+    )
+
+    assert result.evaluation_first_signal_date is not None
+    assert result.evaluation_last_signal_date is not None
+    assert result.evaluation_first_signal_date > date(2020, 1, 1)
+    assert result.point_in_time_data_missing_symbols == ("OLD.US",)
+    assert result.point_in_time_required_missing_symbols == ()
+    assert result.point_in_time_out_of_window_missing_symbols == (
+        "OLD.US",
+    )
+    assert "POINT_IN_TIME_MEMBER_DATA_PARTIAL" not in (
+        result.promotion_blockers
+    )
+
+
+def test_point_in_time_reentry_stale_signal_is_required_missing() -> None:
+    reentered = _candidate("REENTRY.US", "Healthcare")
+    history = IndexMembershipHistory(
+        source_version="test-history",
+        effective_start_date=date(2020, 1, 1),
+        catalog_snapshot_date=date(2021, 1, 1),
+        sources=(),
+        intervals={
+            "NASDAQ_100": {
+                "REENTRY": (
+                    MembershipInterval(
+                        date(2020, 1, 1),
+                        date(2020, 2, 1),
+                    ),
+                    MembershipInterval(date(2022, 1, 1), None),
+                ),
+            },
+        },
+        snapshot_overrides={},
+    )
+
+    result = evaluate_rotation_walk_forward(
+        candidates=(reentered,),
+        bars_by_symbol={
+            "REENTRY.US": _bars(
+                drift=0.0025,
+                dates=[
+                    datetime(
+                        2020,
+                        1,
+                        6,
+                        5,
+                        tzinfo=timezone.utc,
+                    ),
+                ],
+            ),
+        },
+        benchmark_bars_by_symbol={
+            "QQQ.US": _bars(drift=0.0005),
+            "DIA.US": _bars(drift=0.0003),
+        },
+        base_config=_config(),
+        variants=(
+            RotationVariant(
+                name="baseline",
+                lookback_bars=252,
+                skip_bars=21,
+                sma_bars=200,
+                max_selected=2,
+                max_per_risk_group=1,
+            ),
+        ),
+        membership_history=history,
+    )
+
+    assert result.evaluation_first_signal_date is not None
+    assert result.evaluation_last_signal_date is not None
+    assert result.point_in_time_data_missing_symbols == (
+        "REENTRY.US",
+    )
+    assert result.point_in_time_required_missing_symbols == (
+        "REENTRY.US",
+    )
+    assert result.point_in_time_out_of_window_missing_symbols == ()
+    assert "POINT_IN_TIME_MEMBER_DATA_PARTIAL" in (
         result.promotion_blockers
     )
 
@@ -346,6 +575,154 @@ def test_rotation_walk_forward_aligns_variant_evaluation_periods() -> None:
         for evaluation in result.variants
     }
     assert len(period_counts) == 1
+
+
+def test_rotation_walk_forward_rejects_entry_one_bar_before_warmup(
+) -> None:
+    dates = [
+        datetime(2021, 1, day, 17, tzinfo=timezone.utc)
+        for day in range(1, 22)
+    ] + _month_starts(year=2021, month=2, count=2)
+    missing = _candidate("MISSING.US", "Healthcare")
+    history = IndexMembershipHistory(
+        source_version="test-history",
+        effective_start_date=date(2021, 1, 1),
+        catalog_snapshot_date=date(2021, 1, 1),
+        sources=(),
+        intervals={
+            "NASDAQ_100": {
+                "MISSING": (
+                    MembershipInterval(date(2021, 1, 1), None),
+                ),
+            },
+        },
+        snapshot_overrides={},
+    )
+    variant = RotationVariant(
+        name="needs_22_bars",
+        lookback_bars=21,
+        skip_bars=1,
+        sma_bars=2,
+        max_selected=1,
+        max_per_risk_group=1,
+    )
+
+    result = evaluate_rotation_walk_forward(
+        candidates=(missing,),
+        bars_by_symbol={"MISSING.US": ()},
+        benchmark_bars_by_symbol={
+            "QQQ.US": _bars(drift=0.0005, dates=dates),
+            "DIA.US": _bars(drift=0.0003, dates=dates),
+        },
+        base_config=_config(),
+        variants=(variant,),
+        membership_history=history,
+    )
+
+    assert result.evaluation_warmup_bars == 22
+    assert result.status == "HISTORY_INSUFFICIENT"
+    assert result.variants[0].full.periods == 0
+    assert result.evaluation_first_signal_date is None
+    assert result.evaluation_last_signal_date is None
+    assert result.point_in_time_required_missing_symbols == ()
+    assert result.point_in_time_out_of_window_missing_symbols == (
+        "MISSING.US",
+    )
+    assert "POINT_IN_TIME_MEMBER_DATA_PARTIAL" not in (
+        result.promotion_blockers
+    )
+
+
+def test_rotation_walk_forward_accepts_entry_exactly_at_warmup() -> None:
+    dates = [
+        datetime(2021, 1, day, 17, tzinfo=timezone.utc)
+        for day in range(1, 23)
+    ] + _month_starts(year=2021, month=2, count=2)
+    variant = RotationVariant(
+        name="needs_22_bars",
+        lookback_bars=21,
+        skip_bars=1,
+        sma_bars=2,
+        max_selected=1,
+        max_per_risk_group=1,
+    )
+
+    result = evaluate_rotation_walk_forward(
+        candidates=(_candidate("FAST.US", "Semiconductors"),),
+        bars_by_symbol={
+            "FAST.US": _bars(drift=0.0025, dates=dates),
+        },
+        benchmark_bars_by_symbol={
+            "QQQ.US": _bars(drift=0.0005, dates=dates),
+            "DIA.US": _bars(drift=0.0003, dates=dates),
+        },
+        base_config=_config(),
+        variants=(variant,),
+    )
+
+    assert result.evaluation_warmup_bars == 22
+    assert result.variants[0].full.periods == 1
+    assert result.evaluation_first_signal_date == date(2021, 1, 22)
+    assert result.evaluation_last_signal_date == date(2021, 1, 22)
+
+
+def test_rotation_walk_forward_uses_largest_variant_warmup_for_all(
+) -> None:
+    dates = [
+        datetime(2021, 1, day, 17, tzinfo=timezone.utc)
+        for day in range(1, 23)
+    ]
+    dates.extend(
+        datetime(2021, 2, day, 17, tzinfo=timezone.utc)
+        for day in range(1, 5)
+    )
+    dates.extend(_month_starts(year=2021, month=3, count=30))
+    fast = RotationVariant(
+        name="needs_22_bars",
+        lookback_bars=21,
+        skip_bars=1,
+        sma_bars=2,
+        max_selected=1,
+        max_per_risk_group=1,
+    )
+    slow = replace(
+        fast,
+        name="needs_25_bars",
+        lookback_bars=24,
+    )
+    common: dict[str, Any] = {
+        "candidates": (_candidate("FAST.US", "Semiconductors"),),
+        "bars_by_symbol": {
+            "FAST.US": _bars(drift=0.0025, dates=dates),
+        },
+        "benchmark_bars_by_symbol": {
+            "QQQ.US": _bars(drift=0.0005, dates=dates),
+            "DIA.US": _bars(drift=0.0003, dates=dates),
+        },
+        "base_config": _config(),
+        "validation_periods": 12,
+    }
+
+    fast_only = evaluate_rotation_walk_forward(
+        **common,
+        variants=(fast,),
+    )
+    aligned = evaluate_rotation_walk_forward(
+        **common,
+        variants=(fast, slow),
+    )
+
+    assert fast_only.evaluation_warmup_bars == 22
+    assert fast_only.evaluation_first_signal_date == date(2021, 1, 22)
+    assert aligned.evaluation_warmup_bars == 25
+    assert aligned.evaluation_first_signal_date == date(2021, 2, 4)
+    assert {
+        evaluation.full.periods
+        for evaluation in aligned.variants
+    } == {29}
+    assert aligned.variants[0].full.periods == (
+        fast_only.variants[0].full.periods - 1
+    )
 
 
 def test_rotation_walk_forward_reports_missing_benchmarks() -> None:
@@ -575,12 +952,26 @@ def test_return_to_variance_variant_prefers_steadier_formation_period() -> None:
 
 
 def test_rotation_walk_forward_serializes_expanding_fold_dates() -> None:
-    payload = _evaluate().to_dict()
+    result = _evaluate()
+    payload = result.to_dict()
 
     serialized = json.dumps(payload)
 
     assert "training_end_date" in serialized
     assert "validation_start_date" in serialized
+    assert payload["evaluation_warmup_bars"] == (
+        result.evaluation_warmup_bars
+    )
+    assert payload["evaluation_first_signal_date"] == (
+        result.evaluation_first_signal_date.isoformat()
+        if result.evaluation_first_signal_date is not None
+        else None
+    )
+    assert payload["evaluation_last_signal_date"] == (
+        result.evaluation_last_signal_date.isoformat()
+        if result.evaluation_last_signal_date is not None
+        else None
+    )
 
 
 def test_rotation_variant_rejects_invalid_weighting_controls() -> None:

@@ -207,6 +207,29 @@
     <!-- 主内容区 -->
     <el-main :class="{ 'mobile-main': isMobile }">
       <el-alert
+        v-if="appVersion.updateAvailable.value"
+        class="app-version-alert"
+        data-testid="app-version-update"
+        type="warning"
+        show-icon
+        :closable="false"
+        :title="appVersion.updateTitle.value"
+      >
+        <div class="app-version-alert-content">
+          <span>请先保存正在编辑的配置或凭证，再刷新加载最新页面。</span>
+          <el-button
+            size="small"
+            type="warning"
+            plain
+            :loading="reloadConfirming"
+            data-testid="app-version-reload"
+            @click="confirmAppReload"
+          >
+            刷新到新版本
+          </el-button>
+        </div>
+      </el-alert>
+      <el-alert
         v-if="sessionBannerVisible"
         class="session-banner"
         data-testid="session-banner"
@@ -257,7 +280,7 @@
 <script setup lang="ts">
 import { defineAsyncComponent, computed, ref, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Clock, Key, List, Moon, Odometer, Setting, Sunny, TrendCharts } from '@element-plus/icons-vue'
 import { useNotificationStream } from './composables/useNotificationStream'
 import { useNotificationBadge } from './composables/useNotificationBadge'
@@ -267,6 +290,7 @@ import { useCommandPalette } from './composables/useCommandPalette'
 import { useRecentPages } from './composables/useRecentPages'
 import { useDensity } from './composables/useDensity'
 import { useTheme } from './composables/useTheme'
+import { useAppVersion } from './composables/useAppVersion'
 import MetricStat from './components/MetricStat.vue'
 import CommandPalette from './components/CommandPalette.vue'
 import { engineStateLabel } from './utils/labels'
@@ -287,6 +311,8 @@ const palette = useCommandPalette()
 const { recordVisit } = useRecentPages()
 const { size: densitySize, cycleDensity } = useDensity()
 const { isDark, toggleTheme } = useTheme()
+const appVersion = useAppVersion()
+const reloadConfirming = ref(false)
 const densityLabel = computed(() => {
   switch (densitySize.value) {
     case 'small':
@@ -297,6 +323,22 @@ const densityLabel = computed(() => {
       return '标准'
   }
 })
+
+async function confirmAppReload(): Promise<void> {
+  if (reloadConfirming.value) return
+  reloadConfirming.value = true
+  const confirmed = await ElMessageBox.confirm(
+    '刷新会丢失尚未保存的页面输入，但不会停止后台交易与研究任务。确认现在刷新吗？',
+    '刷新到新版本',
+    {
+      type: 'warning',
+      confirmButtonText: '刷新页面',
+      cancelButtonText: '稍后处理',
+    },
+  ).then(() => true).catch(() => false)
+  reloadConfirming.value = false
+  if (confirmed) window.location.reload()
+}
 // Track page visits for the command palette's "recent" ordering.
 watch(
   () => route.path,
@@ -494,6 +536,19 @@ onUnmounted(() => {
 .app-container {
   min-height: 100vh;
   background: var(--app-background);
+}
+
+.app-version-alert {
+  margin-bottom: 12px;
+}
+
+.app-version-alert-content {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  width: 100%;
 }
 
 .app-header {
