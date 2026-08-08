@@ -29,7 +29,7 @@ from app.services.watchlist_quant_v6_deadline import (
 logger = logging.getLogger("auto_trade.watchlist_quant_v6_historical_provider")
 
 QUANT_V6_HISTORICAL_PROVIDER_CONTRACT_VERSION = (
-    "watchlist-quant-v6-longport-quote-only-history-v2"
+    "watchlist-quant-v6-longport-quote-only-history-v3"
 )
 QUANT_V6_HISTORICAL_PERIOD = "MIN_5"
 QUANT_V6_HISTORICAL_ADJUSTMENT_MODE = "NO_ADJUST"
@@ -640,14 +640,18 @@ class QuantV6HistoricalBarProvider:
                     1 for _item, timestamp in parsed_rows if timestamp is None
                 )
                 if not advancing:
-                    # Longport's forward paging can repeat its inclusive
-                    # boundary once the requested range is exhausted.  Treat
-                    # only one exact, valid copy of the already accepted
-                    # terminal bar as EOF.  Every other non-advancing response
-                    # remains a fail-closed paging error.
+                    # Longport's forward paging repeats its inclusive
+                    # boundary once the available history is exhausted.
+                    # Treat only one exact, valid copy of the already
+                    # accepted terminal bar as EOF, wherever the stream
+                    # ends: a halted or delisted symbol can exhaust its
+                    # exchange history before the requested window closes,
+                    # and the evaluator records those absent sessions as
+                    # honest SESSION_MISSING evidence.  Every other
+                    # non-advancing response remains a fail-closed paging
+                    # error.
                     if (
-                        cursor + _BAR_DURATION >= end
-                        and bars
+                        bars
                         and bars[-1].start_at == cursor
                         and len(parsed_rows) == 1
                     ):

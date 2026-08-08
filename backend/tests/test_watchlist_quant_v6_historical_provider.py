@@ -326,6 +326,78 @@ def test_provider_treats_terminal_boundary_repeat_as_end_of_range() -> None:
     assert len(quote_context_type.instances[0].calls) == 2
 
 
+def test_provider_treats_mid_window_terminal_repeat_as_end_of_history() -> None:
+    # A halted or delisted symbol can end its exchange history before the
+    # requested evaluation window closes.  Longport signals the exhausted
+    # stream with the same inclusive boundary repeat it uses at the window
+    # end: one exact copy of the last accepted bar.  The provider must
+    # terminate with the accepted bars so the evaluator can emit honest
+    # SESSION_MISSING evidence for the absent sessions instead of failing
+    # the whole cohort.
+    start = datetime(2026, 1, 2, 14, 30, tzinfo=timezone.utc)
+    terminal = start + timedelta(minutes=5)
+    module, quote_context_type = _module([
+        [_Candle(start), _Candle(terminal)],
+        [_Candle(terminal)],
+    ])
+
+    result = QuantV6HistoricalBarProvider(
+        module_loader=lambda: module,
+    ).fetch_five_minute_no_adjust(
+        "AAPL.US",
+        start_at=start,
+        end_at=start + timedelta(days=2),
+    )
+
+    assert [bar.start_at for bar in result.bars] == [start, terminal]
+    assert result.pages == 2
+    assert result.raw_rows == 3
+    assert result.rejected_rows == 0
+    assert len(quote_context_type.instances[0].calls) == 2
+
+
+def test_provider_rejects_mid_window_terminal_repeat_when_bar_changed() -> None:
+    start = datetime(2026, 1, 2, 14, 30, tzinfo=timezone.utc)
+    terminal = start + timedelta(minutes=5)
+    module, _quote_context_type = _module([
+        [_Candle(start), _Candle(terminal)],
+        [_Candle(terminal, close="999")],
+    ])
+
+    with pytest.raises(
+        QuantV6HistoricalProviderError,
+        match="did not advance",
+    ):
+        QuantV6HistoricalBarProvider(
+            module_loader=lambda: module,
+        ).fetch_five_minute_no_adjust(
+            "AAPL.US",
+            start_at=start,
+            end_at=start + timedelta(days=2),
+        )
+
+
+def test_provider_rejects_mid_window_non_singleton_stale_page() -> None:
+    start = datetime(2026, 1, 2, 14, 30, tzinfo=timezone.utc)
+    terminal = start + timedelta(minutes=5)
+    module, _quote_context_type = _module([
+        [_Candle(start), _Candle(terminal)],
+        [_Candle(terminal), _Candle(start)],
+    ])
+
+    with pytest.raises(
+        QuantV6HistoricalProviderError,
+        match="did not advance",
+    ):
+        QuantV6HistoricalBarProvider(
+            module_loader=lambda: module,
+        ).fetch_five_minute_no_adjust(
+            "AAPL.US",
+            start_at=start,
+            end_at=start + timedelta(days=2),
+        )
+
+
 def test_provider_rejects_terminal_repeat_when_boundary_bar_was_invalid() -> None:
     start = datetime(2026, 1, 2, 14, 30, tzinfo=timezone.utc)
     module, _quote_context_type = _module([

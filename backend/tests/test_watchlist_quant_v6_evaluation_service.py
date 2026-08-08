@@ -208,7 +208,7 @@ def test_historical_evaluator_manifest_has_exact_source_closure() -> None:
 
 def test_historical_evaluator_manifest_golden_digest() -> None:
     assert quant_v6_historical_evaluator_digest_sha256() == (
-        "17ee12ea1897b9e0ec465d251688f1554d69e1fbe260771fb9faf0692f8c3c40"
+        "e9670068afed9354dd0a965759827d583734995516e043fe5a335fcee439040d"
     )
 
 
@@ -266,6 +266,32 @@ def test_complete_zero_event_sessions_still_bind_every_session_input() -> None:
     assert roles.count(EVENT_ROLE) == 0
     assert len({binding.binding_sha256 for binding in result.bindings}) == 31
     assert len(provider.calls) == 1
+
+
+def test_truncated_history_yields_missing_target_sessions_not_failure() -> None:
+    # A halted symbol can end its exchange history before the frozen window
+    # closes.  The evaluator must turn the truncated acquisition into honest
+    # SESSION_MISSING leaves instead of failing the whole registration, so a
+    # single halted member cannot deadlock the publication retry loop.
+    plan = _one_member_plan()
+    halted_target = plan.target_session_dates[-1]
+    cutoff = quant_v6_expected_rth_bar_starts(plan.market, halted_target)[0]
+    truncated = tuple(
+        bar for bar in _all_bars(plan) if bar.start_at < cutoff
+    )
+
+    result = evaluate_quant_v6_candidate(
+        registration=plan,
+        member=plan.members[0],
+        provider=_Provider(truncated),
+    )
+
+    assert result.covered_sessions == len(plan.target_session_dates) - 1
+    roles = [binding.role for binding in result.bindings]
+    assert roles.count(ASSESSMENT_ROLE) == 1
+    # Session input artifacts are bound only for covered sessions, so the
+    # halted day appears as MISSING coverage evidence rather than an artifact.
+    assert roles.count(SESSION_INPUT_ROLE) == result.covered_sessions
 
 
 def test_candidate_fused_assessment_runs_one_complete_replay(

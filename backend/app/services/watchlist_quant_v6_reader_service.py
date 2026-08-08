@@ -219,6 +219,9 @@ _PROVIDER_PAGE_BOUNDARY_BY_VERSION = {
     "watchlist-quant-v6-longport-quote-only-history-v2": (
         "EXCLUSIVE_AFTER_CURSOR_WITH_EXACT_VALID_SINGLETON_TERMINAL_REPEAT"
     ),
+    "watchlist-quant-v6-longport-quote-only-history-v3": (
+        "EXCLUSIVE_AFTER_CURSOR_WITH_EXACT_VALID_SINGLETON_TERMINAL_REPEAT"
+    ),
 }
 _REGISTRATION_POLICY_KEYS = frozenset({
     "automatic_promotion_allowed",
