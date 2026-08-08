@@ -169,28 +169,28 @@ _ROUTING_SPECS = (
         policy="ROTATION_IV_WEIGHTED_ZSCORE_POOL",
         algorithm_version=(
             "strategy-v2-portfolio-rotation-inverse-vol-weighted-"
-            "zscore-observed-cost-75bps-v3"
+            "zscore-observed-cost-75bps-v4"
         ),
     ),
     _RoutingSpec(
         policy="ROTATION_IV_NET_EDGE_ZSCORE_POOL",
         algorithm_version=(
             "strategy-v2-portfolio-rotation-inverse-vol-target-net-"
-            "vwap-edge-zscore-observed-cost-75bps-v3"
+            "vwap-edge-zscore-observed-cost-75bps-v4"
         ),
     ),
     _RoutingSpec(
         policy="PIT_SHRINK_WEIGHTED_ZSCORE_POOL",
         algorithm_version=(
             "strategy-v2-portfolio-rotation-pit-shrinkage-weighted-"
-            "zscore-observed-cost-75bps-v4"
+            "zscore-observed-cost-75bps-v5"
         ),
     ),
     _RoutingSpec(
         policy="PIT_SHRINK_NET_EDGE_ZSCORE_POOL",
         algorithm_version=(
             "strategy-v2-portfolio-rotation-pit-shrinkage-target-net-"
-            "vwap-edge-zscore-observed-cost-75bps-v4"
+            "vwap-edge-zscore-observed-cost-75bps-v5"
         ),
     ),
 )

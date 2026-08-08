@@ -628,13 +628,17 @@ class TestStrategyV2PortfolioService:
             assert sum(
                 row.algorithm_version.endswith("-v3")
                 for row in report.variants
-            ) == 11
+            ) == 9
             assert sum(
                 row.algorithm_version.endswith("-v2")
                 for row in report.variants
             ) == 7
             assert sum(
                 row.algorithm_version.endswith("-v4")
+                for row in report.variants
+            ) == 2
+            assert sum(
+                row.algorithm_version.endswith("-v5")
                 for row in report.variants
             ) == 2
             assert any(
@@ -644,7 +648,7 @@ class TestStrategyV2PortfolioService:
                 for row in report.variants
             )
             assert any(
-                row.algorithm_version.endswith("-v4")
+                row.algorithm_version.endswith("-v5")
                 and row.policy == "PIT_SHRINK_WEIGHTED_ZSCORE_POOL"
                 for row in report.variants
             )
