@@ -333,6 +333,30 @@ class TestRiskController:
         assert ctrl.cumulative_realized_pnl == 49.0
         assert ctrl.consume_drawdown_limit_reason() == ctrl.pause_reason
 
+    def test_restored_drawdown_continuously_blocks_risk_and_resume(self) -> None:
+        ctrl = RiskController(RiskConfig(max_drawdown_amount=50.0))
+        ctrl.restore_drawdown_state(
+            cumulative_realized_pnl=-75.0,
+            peak_realized_pnl=0.0,
+        )
+        ctrl.pause("manual review")
+
+        eligibility = ctrl.resume_eligibility()
+
+        assert eligibility.approved is False
+        assert eligibility.reason == (
+            "drawdown limit reached: drawdown=75.00, limit=50.00"
+        )
+        assert ctrl.resume_if_pause_reason(
+            "manual review",
+            expected_generation=ctrl.pause_verification_snapshot()[1],
+        ) is False
+        assert ctrl.paused is True
+
+        ctrl.resume()
+        assert ctrl.check().approved is False
+        assert ctrl.check().reason == eligibility.reason
+
     def test_disable_kill_switch(self) -> None:
         ctrl = RiskController()
         ctrl.enable_kill_switch()

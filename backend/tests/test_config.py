@@ -332,7 +332,7 @@ class TestSettings:
         assert s.llm_max_interval_bound_deviation_pct == 5
         assert s.llm_max_order_price_deviation_pct == 1
 
-    def test_full_buying_power_usage_requires_explicit_environment_opt_in(
+    def test_full_buying_power_usage_opt_in_is_ignored(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -343,7 +343,7 @@ class TestSettings:
 
         settings = Settings()
 
-        assert settings.full_buying_power_usage_enabled is True
+        assert settings.full_buying_power_usage_enabled is False
         assert settings.hard_max_position_quantity == 100
         assert settings.hard_max_position_notional == 5000
         assert settings.hard_max_risk_per_trade == 250
@@ -566,7 +566,7 @@ class TestSettings:
         ):
             Settings()
 
-    def test_opening_momentum_execution_requires_challenger(
+    def test_opening_momentum_execution_opt_in_is_observation_only(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -579,11 +579,10 @@ class TestSettings:
             "false",
         )
 
-        with pytest.raises(
-            ValidationError,
-            match="opening momentum execution requires the paired challenger",
-        ):
-            Settings()
+        configured = Settings()
+
+        assert configured.opening_momentum_execution_enabled is False
+        assert configured.full_buying_power_usage_enabled is False
 
     def test_opening_momentum_execution_requires_paper_confirmation(
         self,
@@ -611,11 +610,10 @@ class TestSettings:
             "true",
         )
 
-        with pytest.raises(
-            ValidationError,
-            match="explicit paper-account confirmation",
-        ):
-            Settings()
+        configured = Settings()
+
+        assert configured.opening_momentum_execution_enabled is False
+        assert configured.full_buying_power_usage_enabled is False
 
     def test_opening_momentum_execution_requires_full_buying_power_mode(
         self,
@@ -643,13 +641,12 @@ class TestSettings:
             "false",
         )
 
-        with pytest.raises(
-            ValidationError,
-            match="full buying-power paper mode",
-        ):
-            Settings()
+        configured = Settings()
 
-    def test_opening_momentum_execution_accepts_explicit_paper_mode(
+        assert configured.opening_momentum_execution_enabled is False
+        assert configured.full_buying_power_usage_enabled is False
+
+    def test_opening_momentum_execution_rejects_explicit_paper_mode(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -685,9 +682,9 @@ class TestSettings:
 
         configured = Settings()
 
-        assert configured.opening_momentum_execution_enabled is True
+        assert configured.opening_momentum_execution_enabled is False
         assert configured.opening_momentum_execution_paper_confirmed is True
-        assert configured.full_buying_power_usage_enabled is True
+        assert configured.full_buying_power_usage_enabled is False
         assert (
             configured.opening_momentum_execution_max_entry_delay_seconds
             == 45

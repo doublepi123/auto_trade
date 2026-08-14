@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from collections.abc import Generator
@@ -9,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi.responses import JSONResponse
 
 from app import main as main_module
 from app.core.engine import StrategyParams
@@ -18,6 +20,83 @@ from app.services import strategy_v2_shadow_service
 from app.services.universe_selection_service import (
     UniverseSelectionLeaseBusyError,
 )
+
+
+class _ReadyConnection:
+    def __enter__(self) -> "_ReadyConnection":
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def execute(self, _statement: object) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+async def test_readiness_requires_successful_representable_order_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import database
+
+    monkeypatch.setattr(
+        database.engine,
+        "connect",
+        lambda: _ReadyConnection(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "get_runner",
+        lambda: SimpleNamespace(
+            diagnostics=lambda: {
+                "runner_running": True,
+                "quotes_subscribed": True,
+                "order_sync_succeeded": False,
+                "unrepresentable_live_order_issues": ["unsupported order"],
+            }
+        ),
+    )
+
+    response = await main_module.ready()
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 503
+    payload = json.loads(bytes(response.body))
+    assert payload["ready"] is False
+    assert payload["checks"]["runner"]["order_sync_succeeded"] is False
+    assert payload["checks"]["runner"]["unrepresentable_live_order_issues"] == [
+        "unsupported order"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_readiness_accepts_successful_empty_order_sync(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app import database
+
+    monkeypatch.setattr(
+        database.engine,
+        "connect",
+        lambda: _ReadyConnection(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "get_runner",
+        lambda: SimpleNamespace(
+            diagnostics=lambda: {
+                "runner_running": True,
+                "quotes_subscribed": True,
+                "order_sync_succeeded": True,
+                "unrepresentable_live_order_issues": [],
+            }
+        ),
+    )
+
+    response = await main_module.ready()
+
+    assert isinstance(response, dict)
+    assert response["ready"] is True
 
 
 @pytest.fixture(autouse=True)

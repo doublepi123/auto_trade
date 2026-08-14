@@ -2780,6 +2780,33 @@ class TestAppRunner:
         assert runner.risk.paused is True
         assert runner.risk.protective_exit_permitted is False
 
+    def test_resume_rejects_persisted_drawdown_before_broker_verification(
+        self,
+        monkeypatch,
+    ) -> None:
+        runner = AppRunner()
+        runner.risk.config.max_drawdown_amount = 50.0
+        runner.risk.restore_drawdown_state(
+            cumulative_realized_pnl=-75.0,
+            peak_realized_pnl=0.0,
+        )
+        runner.risk.pause("manual review")
+        verification_calls = 0
+
+        def verify() -> tuple[bool, str]:
+            nonlocal verification_calls
+            verification_calls += 1
+            return True, ""
+
+        monkeypatch.setattr(runner, "verify_operational_resume", verify)
+
+        safe, error = runner.resume_after_verification()
+
+        assert safe is False
+        assert error == "drawdown limit reached: drawdown=75.00, limit=50.00"
+        assert runner.risk.paused is True
+        assert verification_calls == 0
+
     def test_resume_verification_does_not_clear_changed_operational_pause(
         self,
         monkeypatch,
@@ -6070,7 +6097,7 @@ class TestAppRunner:
         assert resumed is True
         assert runner.risk.paused is False
 
-    def test_auto_resumed_drawdown_pause_retriggers_with_retained_peak(self) -> None:
+    def test_auto_resume_keeps_drawdown_pause_latched(self) -> None:
         runner = AppRunner()
         now = datetime(2026, 7, 19, 10, 3, tzinfo=timezone.utc)
         runner.engine.params = StrategyParams(
@@ -6090,12 +6117,13 @@ class TestAppRunner:
             paused_at=now - timedelta(minutes=2),
         )
 
-        assert runner._auto_resume_pause_if_due(now=now) is True
-        runner.risk.record_trade(-1.0)
+        assert runner._auto_resume_pause_if_due(now=now) is False
 
         assert runner.risk.paused is True
         assert runner.risk.peak_realized_pnl == 100.0
-        assert runner.risk.consume_drawdown_limit_reason() == runner.risk.pause_reason
+        assert runner.risk.resume_eligibility().reason == (
+            "drawdown limit reached: drawdown=25.00, limit=25.00"
+        )
 
     def test_auto_resume_persistence_failure_keeps_pause(
         self,

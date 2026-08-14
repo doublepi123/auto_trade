@@ -792,7 +792,7 @@ auto_trade/
 | `AUTO_TRADE_HARD_MAX_POSITION_QUANTITY` | 单标的最大持仓数量硬上限 | `100` |
 | `AUTO_TRADE_HARD_MAX_POSITION_NOTIONAL` | 单标的最大名义金额硬上限（报价币种） | `5000` |
 | `AUTO_TRADE_HARD_MAX_RISK_PER_TRADE` | 单笔最大价格风险硬上限（报价币种） | `250` |
-| `AUTO_TRADE_FULL_BUYING_POWER_USAGE_ENABLED` | 仅模拟账户使用；按券商最大保证金购买力的 100% 开仓，并绕过数量、名义金额和单笔风险三项定仓上限 | `false` |
+| `AUTO_TRADE_FULL_BUYING_POWER_USAGE_ENABLED` | 兼容字段；P0 固定为 `false`，不能绕过数量、名义金额和单笔风险三项定仓上限 | `false` |
 | `AUTO_TRADE_ENTRY_ROUND_TRIP_SLIPPAGE_BPS` | 入场净边际估算采用的往返总滑点（bp）；另计实时 BBO 价差与双边费率 | `4` |
 | `AUTO_TRADE_MIN_ENTRY_EDGE_COST_RATIO` | 入场目标毛利与估算总成本的最低比值 | `2` |
 | `AUTO_TRADE_MIN_ENTRY_REWARD_RISK_RATIO` | 入场目标净收益与止损价格损失加往返成本的最低比值；不改变下单数量 | `1` |

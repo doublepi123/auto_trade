@@ -166,7 +166,7 @@ class RiskController:
             self.config.max_daily_loss,
             name="max_daily_loss",
         )
-        self._validated_limit(
+        max_drawdown_amount = self._validated_limit(
             self.config.max_drawdown_amount,
             name="max_drawdown_amount",
         )
@@ -176,6 +176,20 @@ class RiskController:
         # which would permanently block trading.
         if max_daily_loss > 0 and self.daily_pnl <= -max_daily_loss:
             return RiskResult(approved=False, reason=f"daily loss limit reached: {self.daily_pnl}")
+
+        drawdown_amount = max(
+            0.0,
+            self.peak_realized_pnl - self.cumulative_realized_pnl,
+        )
+        if max_drawdown_amount > 0 and drawdown_amount >= max_drawdown_amount:
+            return RiskResult(
+                approved=False,
+                reason=(
+                    "drawdown limit reached: "
+                    f"drawdown={drawdown_amount:.2f}, "
+                    f"limit={max_drawdown_amount:.2f}"
+                ),
+            )
 
         if self.consecutive_losses >= self.config.max_consecutive_losses:
             return RiskResult(approved=False, reason=f"max consecutive losses reached: {self.consecutive_losses}")
@@ -347,6 +361,22 @@ class RiskController:
             self._paused_at = None
             self._pause_auto_resumable = False
 
+    def resume_eligibility(self) -> RiskResult:
+        """Check persistent risk limits without clearing the pause latch."""
+        with self._lock:
+            self._maybe_rollover_day()
+            if self.kill_switch:
+                return RiskResult(
+                    approved=False,
+                    reason="kill switch must be disabled before trading can resume",
+                )
+            if self._entry_reconciliation_count > 0:
+                return RiskResult(
+                    approved=False,
+                    reason="post-fill PnL reconciliation is still in progress",
+                )
+            return self._check_limits()
+
     def resume_if_pause_reason(
         self,
         expected_pause_reason: str,
@@ -378,6 +408,7 @@ class RiskController:
                 self.kill_switch
                 or self._entry_reconciliation_count > 0
                 or self._pause_reason != expected_pause_reason
+                or not self._check_limits().approved
             ):
                 self._protective_exit_pause_reason = ""
                 self._safety_generation += 1

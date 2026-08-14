@@ -308,10 +308,9 @@ class Settings(BaseSettings):
         default=False,
         validation_alias="AUTO_TRADE_FULL_BUYING_POWER_USAGE_ENABLED",
         description=(
-            "Explicit operator opt-in that sizes new entries at 100% of the "
-            "broker-reported maximum quantity and bypasses the fixed quantity, "
-            "notional, and per-trade-risk sizing caps. Intended for paper "
-            "accounts only; position add-ons and short entries remain disabled."
+            "Compatibility field. P0 permanently disables full buying-power "
+            "sizing so fixed quantity, notional, and per-trade-risk caps cannot "
+            "be bypassed."
         ),
     )
     universe_selection_enabled: bool = Field(
@@ -360,8 +359,8 @@ class Settings(BaseSettings):
             "AUTO_TRADE_OPENING_MOMENTUM_EXECUTION_ENABLED"
         ),
         description=(
-            "Submit at most one fixed-risk opening-momentum entry per US "
-            "session through the normal broker, ledger, and risk pipeline."
+            "Compatibility field. Opening momentum remains observation-only "
+            "and cannot submit orders."
         ),
     )
     opening_momentum_execution_paper_confirmed: bool = Field(
@@ -732,6 +731,18 @@ class Settings(BaseSettings):
         self.allow_short_entries = False
         self.hard_allow_position_addons = False
         self.llm_shadow_mode = True
+        if self.opening_momentum_execution_enabled:
+            logger.warning(
+                "opening momentum order execution is permanently disabled; "
+                "the configured opt-in is being ignored"
+            )
+        if self.full_buying_power_usage_enabled:
+            logger.warning(
+                "full buying-power usage is permanently disabled; the configured "
+                "opt-in is being ignored"
+            )
+        self.opening_momentum_execution_enabled = False
+        self.full_buying_power_usage_enabled = False
         self.hard_max_position_quantity = min(self.hard_max_position_quantity, 100)
         self.hard_max_position_notional = min(self.hard_max_position_notional, 5000.0)
         self.hard_max_risk_per_trade = min(self.hard_max_risk_per_trade, 250.0)
@@ -849,12 +860,6 @@ class Settings(BaseSettings):
             self.llm_max_order_price_deviation_pct,
             1.0,
         )
-        if self.full_buying_power_usage_enabled:
-            logger.warning(
-                "FULL BUYING-POWER USAGE ENABLED: entries may consume 100% of "
-                "broker-reported buying power; use this deployment mode only "
-                "with a paper account"
-            )
         self.longbridge_app_key = self.longbridge_app_key or self.longport_app_key or self.legacy_longbridge_app_key
         self.longbridge_app_secret = (
             self.longbridge_app_secret or self.longport_app_secret or self.legacy_longbridge_app_secret

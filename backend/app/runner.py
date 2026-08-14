@@ -1122,6 +1122,10 @@ class AppRunner:
     ) -> tuple[bool, str]:
         with self._trade_svc.submission_guard():
             self.risk.revoke_protective_exits()
+            eligibility = self.risk.resume_eligibility()
+            if not eligibility.approved:
+                self._broadcast_status()
+                return False, eligibility.reason
             pause_reason, safety_generation = self.risk.pause_verification_snapshot()
             safe, error = self.verify_operational_resume()
             if not safe:

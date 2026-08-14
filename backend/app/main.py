@@ -2164,19 +2164,27 @@ async def ready() -> JSONResponse | dict[str, Any]:
         ready_status["checks"]["database"] = "error"
 
     runner_ok = False
+    order_sync_ok = False
     try:
         runner = get_runner()
         diag = runner.diagnostics()
         runner_ok = bool(diag.get("runner_running", False))
+        order_sync_succeeded = bool(diag.get("order_sync_succeeded", False))
+        representation_issues = list(
+            diag.get("unrepresentable_live_order_issues", []) or []
+        )
+        order_sync_ok = order_sync_succeeded and not representation_issues
         ready_status["checks"]["runner"] = {
             "initialized": runner_ok,
             "quotes_subscribed": diag.get("quotes_subscribed", False),
+            "order_sync_succeeded": order_sync_succeeded,
+            "unrepresentable_live_order_issues": representation_issues,
         }
     except Exception:
         logger.exception("readiness check runner probe failed")
         ready_status["checks"]["runner"] = "unavailable"
 
-    if not (db_ok and runner_ok):
+    if not (db_ok and runner_ok and order_sync_ok):
         ready_status["ready"] = False
         return JSONResponse(status_code=503, content=ready_status)
     return ready_status
