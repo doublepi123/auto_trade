@@ -1,7 +1,7 @@
 from sqlalchemy.orm import Session
 
 from app import database
-from app.models import OrderRecord, RiskEvent, RuntimeState, StrategyConfig
+from app.models import OrderRecord, ReconciliationEvidence, RiskEvent, RuntimeState, StrategyConfig
 
 
 database.init_db()
@@ -96,6 +96,38 @@ class TestModels:
             assert result.cumulative_realized_pnl == 0.0
             assert result.peak_realized_pnl == 0.0
             assert result.last_price == 0.0
+            assert result.reconciliation_gate == "passed"
             assert result.updated_at is not None
+        finally:
+            db.close()
+
+    def test_reconciliation_evidence_persistence(self) -> None:
+        db = self._get_db()
+        try:
+            self._cleanup_tables(db)
+            db.query(ReconciliationEvidence).delete()
+            db.commit()
+            row = ReconciliationEvidence(
+                event_type="startup",
+                details='{"source":"startup"}',
+                operator=None,
+                snapshot_id="snap-1",
+                position_count=2,
+                order_count=1,
+                drift_summary=None,
+                passed=False,
+            )
+            db.add(row)
+            db.commit()
+            result = db.query(ReconciliationEvidence).first()
+            assert result is not None
+            assert result.event_type == "startup"
+            assert result.details == '{"source":"startup"}'
+            assert result.operator is None
+            assert result.snapshot_id == "snap-1"
+            assert result.position_count == 2
+            assert result.order_count == 1
+            assert result.passed is False
+            assert result.timestamp is not None
         finally:
             db.close()

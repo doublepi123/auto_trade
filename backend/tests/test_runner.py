@@ -9621,3 +9621,68 @@ class TestOpeningMomentumExecution:
         assert decision.reduce_only is True
         assert decision.allow_loss_exit is True
         assert decision.reduction_cause == "PRICE_STOP"
+
+
+def test_set_reconciliation_gate_mirrors_engine_attribute() -> None:
+    runner = AppRunner()
+    runner._set_reconciliation_gate("pending")
+    assert runner.engine.reconciliation_gate == "pending"
+    runner._set_reconciliation_gate("failed")
+    assert runner.engine.reconciliation_gate == "failed"
+    runner._set_reconciliation_gate("passed")
+    assert runner.engine.reconciliation_gate == "passed"
+
+
+def test_execute_triggered_order_skips_when_gate_not_passed() -> None:
+    from app.core.engine import TriggerResult
+    from app.runner import _QuoteTriggerDecision
+
+    runner = AppRunner()
+    TestAppRunner()._stub_trade_callbacks(runner)
+    executed: list[str] = []
+    runner._trade_svc.execute = lambda **_kwargs: executed.append("called") or None
+    runner._set_reconciliation_gate("pending")
+    decision = _QuoteTriggerDecision(
+        result=TriggerResult(triggered=True, action="BUY", description="buy"),
+        trigger_symbol="AAPL.US",
+        trigger_engine=runner.engine,
+        trigger_market="US",
+    )
+    quote = Quote(
+        symbol="AAPL.US",
+        last_price=100.0,
+        bid=99.9,
+        ask=100.1,
+        timestamp=_fresh_timestamp(),
+    )
+
+    runner._execute_triggered_order(decision, quote)
+
+    assert executed == []
+    assert "reconciliation gate is pending" in runner._last_action_message
+
+
+def test_force_resume_writes_reconciliation_evidence() -> None:
+    from app.database import SessionLocal
+    from app.models import ReconciliationEvidence
+
+    runner = AppRunner()
+    runner._set_reconciliation_gate("failed")
+    with SessionLocal() as db:
+        db.query(ReconciliationEvidence).delete()
+        db.commit()
+
+    runner.force_resume_reconciliation_gate("operator verified positions")
+
+    assert runner.engine.reconciliation_gate == "passed"
+    with SessionLocal() as db:
+        row = (
+            db.query(ReconciliationEvidence)
+            .order_by(ReconciliationEvidence.id.desc())
+            .first()
+        )
+        assert row is not None
+        assert row.event_type == "force_resume"
+        assert row.operator == "admin"
+        assert row.passed is True
+        assert row.drift_summary == "operator verified positions"

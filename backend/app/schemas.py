@@ -2608,8 +2608,16 @@ class ControlRequest(BaseModel):
     reason: str = Field(default="manual")
 
 
+class ForceResumeRequest(BaseModel):
+    reason: str = Field(..., min_length=1, description="Reason for force-resuming the reconciliation gate")
+
+
 class MessageResponse(BaseModel):
     message: str
+
+
+class ForceResumeResponse(BaseModel):
+    status: str
 
 
 class CashBalanceSchema(BaseModel):
@@ -5180,6 +5188,50 @@ class SymbolAttributionRow(BaseModel):
     contribution_share: float
     largest_win: Optional[float] = None
     largest_loss: Optional[float] = None
+
+
+class ReconciliationEvidenceSchema(BaseModel):
+    """Schema for a single reconciliation evidence record."""
+
+    id: int
+    timestamp: datetime
+    event_type: str
+    details: str = "{}"
+    operator: Optional[str] = None
+    snapshot_id: Optional[str] = None
+    position_count: Optional[int] = None
+    order_count: Optional[int] = None
+    drift_summary: Optional[str] = None
+    passed: bool = False
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ReconciliationStatusResponse(BaseModel):
+    """Current reconciliation gate status and evidence."""
+
+    reconciliation_gate: str  # pending / passed / failed
+    last_evidence: Optional[ReconciliationEvidenceSchema] = None
+    recent_evidence: list[ReconciliationEvidenceSchema] = []
+    force_resume_available: bool = False
+
+
+class ReconciliationBrokerSnapshot(BaseModel):
+    """Lightweight broker snapshot freshness for the evidence surface."""
+
+    broker_connected: bool = False
+    last_sync_age_seconds: Optional[float] = None
+    position_count: Optional[int] = None
+    order_count: Optional[int] = None
+    order_certainty: str = "unknown"
+    position_certainty: str = "unknown"
+
+
+class ReconciliationEvidenceSurfaceResponse(BaseModel):
+    """Aggregated evidence surface for the operator dashboard."""
+
+    gate: ReconciliationStatusResponse
+    broker_snapshot: ReconciliationBrokerSnapshot
 
 
 class SymbolAttributionResponse(BaseModel):

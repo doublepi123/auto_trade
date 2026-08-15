@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time as time_mod
 from datetime import date, datetime, time, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -48,6 +49,9 @@ def hard_floor_int(value: object, hard_value: int) -> int:
 
 
 class RuntimeStateService:
+    def __init__(self) -> None:
+        self._last_snapshot_log_at: float = 0.0
+        self._last_snapshot_state: tuple = ()
     def load(self, db: Any, engine: StrategyEngine, risk: RiskController) -> Any:
         from app.services.strategy_service import StrategyService
 
@@ -295,6 +299,35 @@ class RuntimeStateService:
         )
         self._stage_snapshot_if_needed(db, snapshot)
         db.commit()
+
+        now = time_mod.monotonic()
+        current_state = (
+            engine.state.value,
+            risk.paused,
+            risk.kill_switch,
+            risk.daily_pnl,
+            risk.consecutive_losses,
+            getattr(runtime_state, "execution_state", "IDLE"),
+            getattr(runtime_state, "reconciliation_gate", ""),
+        )
+        if (
+            current_state != self._last_snapshot_state
+            or now - self._last_snapshot_log_at >= 300.0
+        ):
+            self._last_snapshot_log_at = now
+            self._last_snapshot_state = current_state
+            logger.info(
+                "reconciliation snapshot restored: engine=%s paused=%s kill=%s "
+                "pnl=%.2f losses=%d exec=%s gate=%s symbol=%s",
+                engine.state.value,
+                risk.paused,
+                risk.kill_switch,
+                risk.daily_pnl,
+                risk.consecutive_losses,
+                getattr(runtime_state, "execution_state", "IDLE"),
+                getattr(runtime_state, "reconciliation_gate", ""),
+                (symbol or "primary"),
+            )
 
     @classmethod
     def _stage_snapshot_if_needed(

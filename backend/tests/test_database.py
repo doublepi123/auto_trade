@@ -1587,6 +1587,7 @@ def test_init_db_adds_missing_runtime_state_daily_pnl_date_column(tmp_path, monk
     assert "pause_reason" in columns
     assert "paused_at" in columns
     assert "pause_auto_resumable" in columns
+    assert "reconciliation_gate" in columns
 
     # The migration must backfill daily_pnl_date WITHOUT resetting P&L/losses.
     with engine.connect() as db:

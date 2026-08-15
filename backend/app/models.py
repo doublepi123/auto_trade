@@ -1316,6 +1316,9 @@ class RuntimeState(Base):
     reduction_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
     reduction_started_at: Mapped[Optional[datetime]] = mapped_column(_TZDateTime, nullable=True)
     reduction_trigger_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    reconciliation_gate: Mapped[str] = mapped_column(
+        String(16), default="passed", nullable=False
+    )
     updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
 
 
@@ -1355,6 +1358,28 @@ class RuntimeStateSnapshot(Base):
     execution_state: Mapped[str] = mapped_column(String(20), default="IDLE", nullable=False)
     reduction_reason: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+
+
+class ReconciliationEvidence(Base):
+    """Append-only audit log for the P0 reconciliation gate.
+
+    One row per reconciliation pass (or per drift event).  The ``passed``
+    flag records whether the gate allowed the strategy to proceed; when
+    ``passed=False`` the ``drift_summary`` column carries the reason.
+    """
+
+    __tablename__ = "reconciliation_evidence"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    timestamp: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+    event_type: Mapped[str] = mapped_column(String(32))
+    details: Mapped[str] = mapped_column(Text, default="{}")
+    operator: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    snapshot_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    position_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    order_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    drift_summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    passed: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
 class StrategyV2ShadowState(Base):

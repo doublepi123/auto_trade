@@ -31,7 +31,7 @@ from app.core.notifiers.multi_channel import MultiChannelNotifier
 from app.core.notifiers.serverchan import ServerChanNotifier
 from app.core.risk import DailyLossSnapshot, RiskConfig, RiskController
 from app.database import SessionLocal
-from app.models import OrderRecord, TrackedEntry, TradeEvent
+from app.models import OrderRecord, ReconciliationEvidence, TrackedEntry, TradeEvent
 from app.services.daily_pnl_service import DailyPnlService
 from app.services.notification_log_service import get_notification_sink
 from app.services.opening_momentum_execution_service import (
@@ -321,6 +321,103 @@ class AppRunner:
         self._protective_exit_authorization_scope: tuple[object, ...] | None = None
         self._protective_runtime_generation = 0
         self._broker_identity_fingerprint = ""
+        self._reconciliation_gate: str = "passed"
+        self.engine.reconciliation_gate = "passed"
+        self._last_reconciliation_gate_log_at: float = 0.0
+
+    def _set_reconciliation_gate(self, value: str) -> None:
+        """Set the reconciliation gate and rate-limit the log message."""
+        now = time.monotonic()
+        prev = self._reconciliation_gate
+        self._reconciliation_gate = value
+        self.engine.reconciliation_gate = value
+        if prev != value or now - self._last_reconciliation_gate_log_at >= 300.0:
+            self._last_reconciliation_gate_log_at = now
+            logger.info("reconciliation gate: %s -> %s", prev, value)
+
+    def _record_reconciliation_evidence(
+        self,
+        db: Session,
+        *,
+        event_type: str,
+        passed: bool,
+        operator: str | None = None,
+        drift_summary: str | None = None,
+        details: dict[str, object] | None = None,
+        snapshot_id: str | None = None,
+        position_count: int | None = None,
+        order_count: int | None = None,
+    ) -> None:
+        """Append one reconciliation_evidence row. Caller owns the commit."""
+        db.add(
+            ReconciliationEvidence(
+                event_type=event_type,
+                details=json.dumps(details or {}, ensure_ascii=False, default=str),
+                operator=operator,
+                snapshot_id=snapshot_id,
+                position_count=position_count,
+                order_count=order_count,
+                drift_summary=drift_summary,
+                passed=passed,
+            )
+        )
+
+    def _apply_reconciliation_outcome(
+        self,
+        db: Session,
+        *,
+        failed: bool,
+        source: str,
+    ) -> None:
+        """Persist the gate, write evidence, and update in-memory state."""
+        gate = "failed" if failed else "passed"
+        if self._reconciliation_gate == gate:
+            return
+        svc = StrategyService(db)
+        svc.update_primary_runtime_state(reconciliation_gate=gate)
+        self._record_reconciliation_evidence(
+            db,
+            event_type=gate,
+            passed=not failed,
+            drift_summary=(self.risk.pause_reason or "reconciliation failed") if failed else None,
+            details={"source": source},
+        )
+        db.commit()
+        self._set_reconciliation_gate(gate)
+
+    def _check_reconciliation_gate(self) -> bool:
+        """Return True if the reconciliation gate is passed (safe to trade)."""
+        return self._reconciliation_gate == "passed"
+
+    def force_resume_reconciliation_gate(self, reason: str) -> None:
+        """Force-set the reconciliation gate to 'passed'.
+
+        Used by the /api/force-resume endpoint when a human operator has
+        verified that reconciliation is acceptable and wants to unblock
+        order placement. Writes an evidence record.
+        """
+        previous_gate = self._reconciliation_gate
+        with self._db_session() as db:
+            svc = StrategyService(db)
+            svc.update_primary_runtime_state(reconciliation_gate="passed")
+            record_trade_event(
+                db,
+                event_type="RECONCILIATION_GATE_FORCE_RESUME",
+                status="INFO",
+                message=f"reconciliation gate force-resumed: {reason}",
+                payload={"reason": reason, "previous_gate": previous_gate},
+            )
+            self._record_reconciliation_evidence(
+                db,
+                event_type="force_resume",
+                passed=True,
+                operator="admin",
+                drift_summary=reason,
+                details={"reason": reason, "previous_gate": previous_gate},
+            )
+            db.commit()
+        self._set_reconciliation_gate("passed")
+        logger.warning("reconciliation gate force-resumed: %s", reason)
 
     def _mark_fill_processed(self, symbol: str, action: str = "") -> None:
         tracked = self._trade_svc.tracked_position(symbol)
@@ -606,6 +703,24 @@ class AppRunner:
         self._refresh_trading_session_mode()
 
         self._defer_incomplete_pnl_latch = True
+        # Reconciliation gate: mark as pending at startup
+        try:
+            with self._db_session() as db:
+                svc = StrategyService(db)
+                svc.update_primary_runtime_state(reconciliation_gate="pending")
+                self._record_reconciliation_evidence(
+                    db,
+                    event_type="startup",
+                    passed=False,
+                    details={"source": "startup"},
+                )
+                db.commit()
+                self._set_reconciliation_gate("pending")
+                logger.info("reconciliation gate set to pending")
+        except Exception:
+            logger.warning("reconciliation gate initialization skipped (db unavailable)")
+
+        reconciliation_failed = False
         try:
             self.sync_today_orders_from_broker(force=True)
             with self._db_session() as db:
@@ -627,6 +742,8 @@ class AppRunner:
                     position_snapshot=position_snapshot,
                     position_snapshot_error=position_snapshot_error,
                 )
+            if self.risk.paused and self.risk.pause_reason:
+                reconciliation_failed = True
             # Force an engine-vs-broker position sync BEFORE the quote
             # subscription is set up below. Without this, the engine state we
             # just loaded from DB can be stale for the first quote decisions.
@@ -649,10 +766,29 @@ class AppRunner:
                         self._state_svc.persist(db, self.engine, self.risk)
             except Exception:
                 logger.exception("initial engine state sync with broker positions failed")
+                reconciliation_failed = True
+        except Exception:
+            logger.exception("startup reconciliation failed")
+            reconciliation_failed = True
         finally:
             self._defer_incomplete_pnl_latch = False
         self._sync_risk_from_order_ledger()
         self._resume_stale_post_fill_pause_after_startup()
+
+        # Set reconciliation gate based on outcome
+        try:
+            with self._db_session() as db:
+                self._apply_reconciliation_outcome(
+                    db,
+                    failed=reconciliation_failed,
+                    source="startup",
+                )
+            if reconciliation_failed:
+                logger.warning("reconciliation gate set to failed — orders will be blocked")
+            else:
+                logger.info("reconciliation gate set to passed")
+        except Exception:
+            logger.warning("reconciliation gate finalization skipped (db unavailable)")
 
         try:
             self._loop = asyncio.get_running_loop()
@@ -2572,6 +2708,22 @@ class AppRunner:
         )
         self._set_last_action_message(result.description)
 
+        # Reconciliation gate: block order placement if reconciliation has not passed
+        if not self._check_reconciliation_gate():
+            logger.warning(
+                "order blocked: reconciliation gate is %s (action=%s symbol=%s)",
+                self._reconciliation_gate,
+                result.action,
+                decision.trigger_symbol or quote.symbol,
+            )
+            self._set_last_action_message(
+                f"{result.action} blocked: reconciliation gate is {self._reconciliation_gate}"
+            )
+            if decision.engine_snapshot is not None:
+                trigger_engine.restore(decision.engine_snapshot)
+            self._broadcast_status()
+            return
+
         restore_engine_snapshot = lambda snapshot, eng=trigger_engine: eng.restore(snapshot)
         restore_engine_state_preserve_trigger = (
             lambda snapshot, eng=trigger_engine: eng.restore_preserving_trigger(snapshot)
@@ -3241,6 +3393,14 @@ class AppRunner:
             return {"executed": False, "status": "NO_ACTION", "order_id": None, "action": ""}
         if not self._running:
             return {"executed": False, "status": "RUNNER_STOPPED", "order_id": None, "action": ""}
+        if not self._check_reconciliation_gate():
+            return {
+                "executed": False,
+                "status": "RECONCILIATION_GATE_BLOCKED",
+                "order_id": None,
+                "action": action,
+                "reason": f"reconciliation gate is {self._reconciliation_gate}",
+            }
 
         requested_symbol = str(decision.get("symbol") or self.engine.params.symbol).upper()
         if requested_symbol != self.engine.params.symbol:
@@ -3784,6 +3944,7 @@ class AppRunner:
             data["reduction_started_at"] = (
                 reduction_started_at.isoformat() if reduction_started_at is not None else None
             )
+            data["reconciliation_gate"] = self._reconciliation_gate
             if self._loop and self._loop.is_running():
                 asyncio.run_coroutine_threadsafe(manager.broadcast(data), self._loop)
         except Exception:
@@ -5728,6 +5889,17 @@ class AppRunner:
                 )
                 if self.risk.paused:
                     self._state_svc.persist(db, self.engine, self.risk)
+                    self._apply_reconciliation_outcome(
+                        db,
+                        failed=True,
+                        source="runtime_position_reconcile",
+                    )
+                elif self._reconciliation_gate != "passed":
+                    self._apply_reconciliation_outcome(
+                        db,
+                        failed=False,
+                        source="runtime_position_reconcile",
+                    )
             state_changed = False
             if position_snapshot is not None:
                 state_changed = (

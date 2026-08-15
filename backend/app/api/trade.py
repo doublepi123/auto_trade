@@ -20,7 +20,7 @@ from app.core.audit import AuditLogger
 from app.database import SessionLocal, get_db
 from app.models import AuditLog, OrderRecord, TradeEvent
 from app.runner import get_runner
-from app.schemas import AccountResponse, CashBalanceSchema, ControlRequest, MessageResponse, OrderCancelAllRequest, OrderCancelAllResponse, OrderCancelFailure, OrderCancelResponse, OrderPageResponse, OrderResponse, PositionSchema, TradeEventPageResponse
+from app.schemas import AccountResponse, CashBalanceSchema, ControlRequest, ForceResumeRequest, ForceResumeResponse, MessageResponse, OrderCancelAllRequest, OrderCancelAllResponse, OrderCancelFailure, OrderCancelResponse, OrderPageResponse, OrderResponse, PositionSchema, TradeEventPageResponse
 from app.services.event_list_service import list_timeline_events
 from app.services.strategy_service import StrategyService
 from app.services.trade_event_service import decode_event_payload, record_trade_event
@@ -1306,3 +1306,55 @@ def disable_kill_switch(
             )
         except Exception:
             logger.exception("failed to record control disable-kill-switch trace")
+
+
+@router.post("/force-resume", response_model=ForceResumeResponse, dependencies=[Depends(require_api_key())])
+def force_resume_reconciliation_gate(
+    request: Request,
+    payload: ForceResumeRequest,
+    audit: AuditLogger = Depends(get_audit_logger),
+) -> ForceResumeResponse:
+    """Force-set the reconciliation gate to 'passed'.
+
+    When the reconciliation gate is not 'passed' (e.g., because broker
+    position reconciliation failed), order placement is blocked. A human
+    operator can use this endpoint after verifying the state is safe to
+    resume trading.
+    """
+    actor_hash, source_ip = extract_actor(request)
+    result = "SUCCESS"
+    detail: dict[str, Any] = {"reason": payload.reason}
+    try:
+        runner = get_runner()
+        force_resume = getattr(runner, "force_resume_reconciliation_gate", None)
+        if force_resume is None:
+            raise HTTPException(status_code=501, detail="force-resume not supported by this runner")
+        runner.force_resume_reconciliation_gate(payload.reason)
+        return ForceResumeResponse(status="ok")
+    except HTTPException:
+        result = "FAILED"
+        raise
+    except Exception as exc:
+        result = "FAILED"
+        detail = {"detail": str(exc), "reason": payload.reason}
+        logger.exception("unexpected force-resume reconciliation gate failure")
+        raise HTTPException(status_code=500, detail="force-resume reconciliation gate failed") from exc
+    finally:
+        audit.record(
+            "FORCE_RESUME",
+            severity="WARNING",
+            actor_hash=actor_hash,
+            source_ip=source_ip,
+            request_summary=detail,
+            result=result,
+        )
+
+
+@router.post("/control/force-resume", response_model=ForceResumeResponse, dependencies=[Depends(require_api_key())])
+def force_resume_reconciliation_gate_alias(
+    request: Request,
+    payload: ForceResumeRequest,
+    audit: AuditLogger = Depends(get_audit_logger),
+) -> ForceResumeResponse:
+    """Compatibility alias for POST /api/force-resume."""
+    return force_resume_reconciliation_gate(request, payload, audit)

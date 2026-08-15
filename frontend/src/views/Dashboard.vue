@@ -400,6 +400,10 @@
       </div>
     </section>
 
+    <section class="detail-panel recon-panel" data-testid="reconciliation-panel">
+      <ReconciliationStatus @force-resume="handleForceResumeReconciliation" />
+    </section>
+
     <section class="detail-panel multi-symbol-panel" data-testid="multi-symbol-snapshots" v-loading="multiSymbolLoading">
       <div class="section-title">
         <h4>多标的观察</h4>
@@ -858,6 +862,8 @@ import { useStatusHistorySeries } from '../composables/useStatusHistorySeries'
 import { useSymbolStore } from '../composables/useSymbolStore'
 import { usePinnedSymbols } from '../composables/usePinnedSymbols'
 import { useRegisterViewRefresh } from '../composables/useViewRefreshRegistry'
+import ReconciliationStatus from '../components/ReconciliationStatus.vue'
+import { useReconciliationStatus } from '../composables/useReconciliationStatus'
 import { useDiagnosticsSnapshot } from '../composables/useDiagnosticsSnapshot'
 import { startTrading, stopTrading, pauseTrading, resumeTrading, enableProtectiveExits, disableProtectiveExits, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getNotifications, getOrders, getTradeEvents, getMetricsSummary, getDatabaseHealth, getCronHealth, getQuoteStreamHealth, type QuoteStreamHealthResult } from '../api'
 import type { CronHealthSnapshot, DatabaseHealthSnapshot, LLMIntervalStatus, NotificationLogOut, OrderRecord, Position, StatisticsQuality, StatusHistoryPoint, TradeEventRecord } from '../types'
@@ -900,6 +906,8 @@ useRegisterViewRefresh(() => {
   void refreshStatus()
 })
 const { account, accountError, accountLoading, accountRefreshing, refresh: refreshAccount } = useAccountRefresh(accountRefreshIntervalMs)
+
+const { forceResume: forceResumeReconciliation } = useReconciliationStatus()
 
 const router = useRouter()
 const llmStatus = ref<LLMIntervalStatus | null>(null)
@@ -1226,6 +1234,15 @@ async function handleRetry() {
     await loadStatusHistory()
   } catch {
     void 0
+  }
+}
+
+async function handleForceResumeReconciliation(reason: string) {
+  try {
+    await forceResumeReconciliation(reason)
+    ElMessage.success('对账门禁已强制恢复')
+  } catch {
+    ElMessage.error('强制恢复对账门禁失败')
   }
 }
 

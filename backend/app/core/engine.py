@@ -74,6 +74,7 @@ class StrategyEngine:
         self._last_trigger_monotonic: float = 0.0
         self._cooldown_seconds: int = settings.engine_cooldown_seconds
         self._lock = threading.Lock()
+        self.reconciliation_gate: str = "passed"
 
     def update_price(self, price: float) -> TriggerResult:
         with self._lock:

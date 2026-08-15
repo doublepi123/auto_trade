@@ -82,6 +82,7 @@ export interface StatusData {
   execution_state: 'IDLE' | 'REDUCING'
   reduction_reason: string
   reduction_started_at: string | null
+  reconciliation_gate: string
 }
 
 export interface StatusHistoryPoint {
@@ -3063,4 +3064,38 @@ export interface StrategyShadowAdxChallengerResponse {
   blockers: string[]
   candidates: StrategyShadowAdxChallengerCandidate[]
   warmup_diagnostic: StrategyShadowWarmupDiagnostic | null
+}
+
+export interface ReconciliationEvidence {
+  id: number
+  timestamp: string
+  event_type: string
+  details: string
+  operator: string | null
+  snapshot_id: string | null
+  position_count: number | null
+  order_count: number | null
+  drift_summary: string | null
+  passed: boolean
+}
+
+export interface ReconciliationStatus {
+  reconciliation_gate: string
+  last_evidence: ReconciliationEvidence | null
+  recent_evidence: ReconciliationEvidence[]
+  force_resume_available: boolean
+}
+
+export interface ReconciliationBrokerSnapshot {
+  broker_connected: boolean
+  last_sync_age_seconds: number | null
+  position_count: number | null
+  order_count: number | null
+  order_certainty: string
+  position_certainty: string
+}
+
+export interface ReconciliationEvidenceSurface {
+  gate: ReconciliationStatus
+  broker_snapshot: ReconciliationBrokerSnapshot
 }

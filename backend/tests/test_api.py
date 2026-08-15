@@ -2965,3 +2965,30 @@ def test_llm_analyze_rejects_positive_but_stale_persisted_price(monkeypatch) -> 
 
     assert response.status_code == 400
     assert "current price unavailable" in response.json()["detail"]
+
+
+def test_force_resume_endpoint_returns_ok_and_writes_evidence(monkeypatch) -> None:
+    from app.database import SessionLocal
+    from app.models import ReconciliationEvidence
+
+    runner = trade_api.get_runner()
+    runner._set_reconciliation_gate("failed")
+    with SessionLocal() as db:
+        db.query(ReconciliationEvidence).delete()
+        db.commit()
+
+    resp = client.post("/api/force-resume", json={"reason": "manual override after review"})
+
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "ok"}
+    assert runner.engine.reconciliation_gate == "passed"
+    with SessionLocal() as db:
+        row = (
+            db.query(ReconciliationEvidence)
+            .order_by(ReconciliationEvidence.id.desc())
+            .first()
+        )
+        assert row is not None
+        assert row.event_type == "force_resume"
+        assert row.operator == "admin"
+        assert row.passed is True

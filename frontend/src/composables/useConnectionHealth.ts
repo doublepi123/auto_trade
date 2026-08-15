@@ -28,6 +28,7 @@ const wsStatusMessageSchema = object({
   execution_state: optionalString,
   reduction_reason: optionalString,
   reduction_started_at: optionalString,
+  reconciliation_gate: optionalString,
 })
 
 type RealtimeStatus = 'connecting' | 'connected' | 'reconnecting' | 'polling'
@@ -54,6 +55,7 @@ export const defaultStatus: StatusData = {
   execution_state: 'IDLE',
   reduction_reason: '',
   reduction_started_at: null,
+  reconciliation_gate: 'pending',
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +164,8 @@ function connectWebSocket(): void {
           reduction_reason: data.reduction_reason ?? status.value.reduction_reason,
           reduction_started_at:
             data.reduction_started_at ?? status.value.reduction_started_at,
+          reconciliation_gate:
+            (data.reconciliation_gate as string | undefined) ?? status.value.reconciliation_gate,
         }
         markFresh()
       }

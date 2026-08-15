@@ -234,6 +234,8 @@ def init_db() -> None:
     _ensure_runtime_state_daily_pnl_date_column(engine)
     _ensure_runtime_state_symbol_columns(engine)
     _ensure_runtime_reduction_columns(engine)
+    _ensure_reconciliation_gate(engine)
+    _ensure_reconciliation_evidence(engine)
     _backfill_primary_runtime_state_symbols(engine)
     _ensure_runtime_state_symbol_uniqueness(engine)
     _ensure_runtime_state_entry_rearm_column(engine)
@@ -605,6 +607,48 @@ def _ensure_runtime_reduction_columns(db_engine: Engine) -> None:
                     "ALTER TABLE runtime_state_snapshots ADD COLUMN "
                     "reduction_reason TEXT NOT NULL DEFAULT ''"
                 )
+
+
+def _ensure_reconciliation_gate(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    if "runtime_state" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"] for column in inspector.get_columns("runtime_state")}
+    with db_engine.begin() as connection:
+        if "reconciliation_gate" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE runtime_state ADD COLUMN "
+                "reconciliation_gate VARCHAR(16) DEFAULT 'pending' NOT NULL"
+            )
+
+
+def _ensure_reconciliation_evidence(db_engine: Engine) -> None:
+    """Defensive explicit create for reconciliation_evidence (P0.2 audit log).
+
+    One row per reconciliation pass (or per drift event).  The ``passed``
+    flag records whether the gate allowed the strategy to proceed.
+    """
+    inspector = inspect(db_engine)
+    if "reconciliation_evidence" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS reconciliation_evidence (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp DATETIME,
+                event_type VARCHAR(32) NOT NULL,
+                details TEXT NOT NULL DEFAULT '{}',
+                operator VARCHAR(64),
+                snapshot_id VARCHAR(64),
+                position_count INTEGER,
+                order_count INTEGER,
+                drift_summary TEXT,
+                passed BOOLEAN NOT NULL DEFAULT 0
+            )
+            """
+        )
 
 
 def _backfill_primary_runtime_state_symbols(db_engine: Engine) -> None:

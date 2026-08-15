@@ -47,6 +47,7 @@ from app.api.opening_momentum_shadow import (
 from app.api.indicators import router as indicators_router
 from app.api.performance import router as performance_router
 from app.api.llm_advisor import router as llm_advisor_router
+from app.api.reconciliation import router as reconciliation_router
 from app.api.reports import router as reports_router
 from app.api.review import router as review_router
 from app.api.strategy import router as strategy_router
@@ -2078,6 +2079,7 @@ app.include_router(llm_usage_router)
 app.include_router(notifications_router)
 app.include_router(experiments_router)
 app.include_router(performance_router)
+app.include_router(reconciliation_router)
 app.include_router(reports_router)
 app.include_router(indicators_router)
 app.include_router(review_router)
@@ -2187,6 +2189,69 @@ async def health() -> dict[str, Any]:
         health_status["runner"] = "unavailable"
 
     return health_status
+
+
+@app.get("/api/health/db-stats")
+async def health_db_stats() -> dict[str, Any]:
+    """Return database size and row counts for key tables.
+
+    Useful for monitoring data growth over time (P2.1).
+    """
+    import os
+
+    from app.database import engine
+
+    from sqlalchemy import text
+
+    stats: dict[str, Any] = {"ok": True, "db_size_bytes": 0, "tables": {}}
+
+    # Database file size
+    db_url = settings.database_url
+    if db_url.startswith("sqlite:///"):
+        db_path = db_url[len("sqlite:///"):]
+        # Handle relative paths like ./data/auto_trade.db
+        if db_path.startswith("./"):
+            db_path = os.path.join(os.getcwd(), db_path[2:])
+        try:
+            stats["db_size_bytes"] = os.path.getsize(db_path)
+        except OSError:
+            stats["db_size_bytes"] = 0
+
+    # Row counts for key tables
+    KEY_TABLES = [
+        "runtime_state_snapshots",
+        "trade_events",
+        "orders",
+        "risk_events",
+        "audit_logs",
+        "llm_interactions",
+        "strategy_v2_shadow_decisions",
+        "strategy_v2_shadow_trades",
+        "strategy_v2_shadow_state",
+        "strategy_v2_shadow_config",
+        "reconciliation_evidence",
+        "tracked_entries",
+        "watchlist_items",
+        "watchlist_scores",
+        "backtest_runs",
+        "trade_notes",
+    ]
+
+    try:
+        with engine.connect() as conn:
+            for table in KEY_TABLES:
+                try:
+                    result = conn.execute(
+                        text(f"SELECT COUNT(*) FROM \"{table}\"")
+                    ).scalar()
+                    stats["tables"][table] = result
+                except Exception:
+                    stats["tables"][table] = None
+    except Exception:
+        logger.exception("db-stats query failed")
+        stats["ok"] = False
+
+    return stats
 
 
 @app.get("/api/ready", response_model=None)

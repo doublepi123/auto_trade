@@ -187,6 +187,7 @@ class StrategyService:
         "long_entry_rearm_required",
         "execution_state", "reduction_action", "reduction_cause",
         "reduction_reason", "reduction_started_at", "reduction_trigger_price",
+        "reconciliation_gate",
     })
 
     def update_runtime_state(self, symbol: str = "", **kwargs: object) -> RuntimeState:
