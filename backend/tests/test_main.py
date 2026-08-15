@@ -128,6 +128,39 @@ async def test_lifespan_fails_startup_when_runner_cannot_start(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
+async def test_lifespan_stops_runner_when_watchdog_cannot_start(monkeypatch) -> None:
+    stopped = False
+
+    class RecordingRunner:
+        def start(self, *, loop=None) -> bool:
+            del loop
+            return True
+
+        def stop(self) -> None:
+            nonlocal stopped
+            stopped = True
+
+    class FailingWatchdog:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def start(self) -> None:
+            raise RuntimeError("watchdog thread unavailable")
+
+    monkeypatch.setattr(main_module, "init_db", lambda: None)
+    monkeypatch.setattr(main_module, "get_runner", lambda: RecordingRunner())
+    monkeypatch.setattr(main_module, "LivenessWatchdog", FailingWatchdog)
+    monkeypatch.setattr(main_module.settings, "liveness_enabled", True)
+
+    with pytest.raises(RuntimeError, match="watchdog thread unavailable"):
+        async with main_module.lifespan(main_module.app):
+            pass
+
+    assert stopped is True
+    assert main_module.get_liveness_watchdog() is None
+
+
+@pytest.mark.asyncio
 async def test_lifespan_passes_application_loop_to_runner(monkeypatch) -> None:
     started_with = []
 
@@ -141,12 +174,14 @@ async def test_lifespan_passes_application_loop_to_runner(monkeypatch) -> None:
 
     monkeypatch.setattr(main_module, "init_db", lambda: None)
     monkeypatch.setattr(main_module, "get_runner", lambda: RecordingRunner())
+    monkeypatch.setattr(main_module.settings, "liveness_enabled", True)
 
     current_loop = asyncio.get_running_loop()
     async with main_module.lifespan(main_module.app):
-        pass
+        assert main_module.get_liveness_watchdog() is not None
 
     assert started_with == [current_loop]
+    assert main_module.get_liveness_watchdog() is None
 
 
 @pytest.mark.asyncio

@@ -58,6 +58,12 @@ from app.api.watchlist import router as watchlist_router
 from app.api.watchlist_quant_v6 import router as watchlist_quant_v6_router
 from app.api.ws import router as ws_router
 from app.api.ws import manager as ws_manager
+from app.core.liveness import (
+    LivenessWatchdog,
+    clear_liveness_watchdog,
+    get_liveness_watchdog,
+    init_liveness_watchdog,
+)
 from app.api.signal_consensus import router as signal_consensus_router
 from app.api.universe_explainer import router as universe_explainer_router
 from app.api.risk_timeline import router as risk_timeline_router
@@ -570,6 +576,22 @@ async def _ws_cleanup_task() -> None:
             _cron_record_failure(_CRON_WS_CLEANUP, sys.exc_info()[1])  # type: ignore[arg-type]
 
 
+async def _liveness_heartbeat_task() -> None:
+    """Prove the event loop still schedules callbacks by beating regularly.
+
+    If any synchronous call blocks the loop (the 2026-08-08 freeze), beats
+    stop and the independent watchdog thread takes over (traceback dump,
+    then hard exit so Docker restarts the container).
+    """
+    watchdog = get_liveness_watchdog()
+    if watchdog is None:
+        return
+    interval = settings.liveness_beat_interval_seconds
+    while True:
+        watchdog.beat()
+        await asyncio.sleep(interval)
+
+
 async def _llm_analysis_tick() -> None:
     if _opening_research_quiet_window():
         logger.debug("LLM analysis deferred during opening research quiet window")
@@ -709,7 +731,12 @@ async def _llm_analysis_tick() -> None:
 
                 runtime = getattr(runner, "_symbol_runtimes", {}).get(symbol)
                 params = getattr(engine, "params", config)
-                current_price = runner.fresh_market_price(symbol)
+                # Off-loop: fresh_market_price waits on the runner's
+                # threading.Lock; a runner thread hung inside a broker SDK
+                # call must never freeze the event loop (2026-08-08 freeze).
+                current_price = await asyncio.to_thread(
+                    runner.fresh_market_price, symbol
+                )
                 if (
                     current_price is None
                     or not math.isfinite(current_price)
@@ -1927,7 +1954,26 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     _register_cron_health_jobs()
     _activate_cron_health_jobs()
 
+    liveness_watchdog: LivenessWatchdog | None = None
+    if settings.liveness_enabled:
+        liveness_watchdog = init_liveness_watchdog(
+            LivenessWatchdog(
+                stale_after_seconds=settings.liveness_stale_after_seconds,
+                hard_exit_after_seconds=settings.liveness_hard_exit_after_seconds,
+                beat_interval_seconds=settings.liveness_beat_interval_seconds,
+                dump_traceback_enabled=settings.liveness_dump_traceback_enabled,
+                hard_exit_enabled=settings.liveness_hard_exit_enabled,
+            )
+        )
+        try:
+            liveness_watchdog.start()
+        except Exception:
+            clear_liveness_watchdog(liveness_watchdog)
+            await asyncio.to_thread(runner.stop)
+            raise
+
     background_tasks = (
+        asyncio.create_task(_liveness_heartbeat_task()),
         asyncio.create_task(_ws_cleanup_task()),
         asyncio.create_task(_llm_analysis_cron()),
         asyncio.create_task(_report_schedule_cron()),
@@ -1951,7 +1997,13 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
                 pass
             except Exception:
                 logger.exception("error during task cleanup")
-        await asyncio.to_thread(runner.stop)
+        try:
+            if liveness_watchdog is not None:
+                liveness_watchdog.stop()
+        finally:
+            if liveness_watchdog is not None:
+                clear_liveness_watchdog(liveness_watchdog)
+            await asyncio.to_thread(runner.stop)
 
 
 _OPENAPI_TAGS: list[dict[str, str]] = [
@@ -2188,3 +2240,30 @@ async def ready() -> JSONResponse | dict[str, Any]:
         ready_status["ready"] = False
         return JSONResponse(status_code=503, content=ready_status)
     return ready_status
+
+
+@app.get("/api/live", response_model=None)
+async def live() -> JSONResponse:
+    """Liveness probe: event-loop heartbeat freshness (2026-08-08 freeze).
+
+    Unlike ``/api/ready`` (which checks dependencies), this only answers
+    "is the event loop still scheduling callbacks". A fully frozen loop
+    cannot answer at all, so callers must enforce their own timeout; a
+    partially stalled loop gets an explicit 503 with the heartbeat age.
+    """
+    watchdog = get_liveness_watchdog()
+    if watchdog is None or not settings.liveness_enabled:
+        return JSONResponse(
+            status_code=200,
+            content={"alive": True, "watchdog": "disabled"},
+        )
+    age = watchdog.beat_age_seconds()
+    alive = watchdog.is_alive()
+    return JSONResponse(
+        status_code=200 if alive else 503,
+        content={
+            "alive": alive,
+            "heartbeat_age_seconds": round(age, 3),
+            "stale_after_seconds": watchdog.stale_after_seconds,
+        },
+    )

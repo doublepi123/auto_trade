@@ -56,6 +56,44 @@ class Settings(BaseSettings):
         le=1200,
         validation_alias="AUTO_TRADE_JOB_LEASE_HEARTBEAT_SECONDS",
     )
+    liveness_enabled: bool = Field(
+        default=True,
+        validation_alias="AUTO_TRADE_LIVENESS_ENABLED",
+        description=(
+            "Event-loop liveness watchdog. On a frozen loop it dumps all "
+            "thread tracebacks to stderr, then optionally exits the process "
+            "so the container restart policy recovers it."
+        ),
+    )
+    liveness_beat_interval_seconds: float = Field(
+        default=5.0,
+        gt=0,
+        le=60,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_LIVENESS_BEAT_INTERVAL_SECONDS",
+    )
+    liveness_stale_after_seconds: float = Field(
+        default=120.0,
+        gt=0,
+        le=3600,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_LIVENESS_STALE_AFTER_SECONDS",
+    )
+    liveness_dump_traceback_enabled: bool = Field(
+        default=True,
+        validation_alias="AUTO_TRADE_LIVENESS_DUMP_TRACEBACK_ENABLED",
+    )
+    liveness_hard_exit_enabled: bool = Field(
+        default=True,
+        validation_alias="AUTO_TRADE_LIVENESS_HARD_EXIT_ENABLED",
+    )
+    liveness_hard_exit_after_seconds: float = Field(
+        default=300.0,
+        gt=0,
+        le=7200,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_LIVENESS_HARD_EXIT_AFTER_SECONDS",
+    )
 
     longbridge_app_key: str = ""
     longbridge_app_secret: str = ""
@@ -849,6 +887,20 @@ class Settings(BaseSettings):
         if self.job_lease_heartbeat_seconds >= self.job_lease_ttl_seconds:
             raise ValueError(
                 "job lease heartbeat interval must be shorter than its TTL"
+            )
+        if (
+            self.liveness_beat_interval_seconds
+            >= self.liveness_stale_after_seconds
+        ):
+            raise ValueError(
+                "liveness heartbeat interval must be shorter than its stale threshold"
+            )
+        if (
+            self.liveness_hard_exit_after_seconds
+            <= self.liveness_stale_after_seconds
+        ):
+            raise ValueError(
+                "liveness hard-exit threshold must exceed its stale threshold"
             )
         self.llm_min_confidence = max(self.llm_min_confidence, 0.7)
         self.llm_max_stripe_width_pct = min(self.llm_max_stripe_width_pct, 8.0)
