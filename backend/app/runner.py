@@ -4704,6 +4704,7 @@ class AppRunner:
                         changed += 1
                     if changed:
                         db.commit()
+                        self._load_tracked_entries(db)
         except Exception:
             logger.exception("broker today order sync could not be persisted")
             self._latch_live_order_reconciliation(
@@ -5394,6 +5395,11 @@ class AppRunner:
                 message="broker order discovered during today-order sync",
                 payload=self._broker_order_payload(broker_order, old_status=None),
             )
+            self._apply_synced_execution_to_tracked_entry(
+                db,
+                order=order,
+                previous_executed_quantity=0.0,
+            )
             return True
 
         old_status = str(order.status or "").upper()
@@ -5514,7 +5520,99 @@ class AppRunner:
                 "old_executed_price": old_executed_price,
             },
         )
+        self._apply_synced_execution_to_tracked_entry(
+            db,
+            order=order,
+            previous_executed_quantity=float(old_executed_quantity or 0),
+        )
         return True
+
+    def _apply_synced_execution_to_tracked_entry(
+        self,
+        db: Session,
+        *,
+        order: OrderRecord,
+        previous_executed_quantity: float,
+    ) -> None:
+        """Apply newly discovered broker fills onto the durable cost basis.
+
+        Today-order sync previously persisted the order row without updating
+        ``tracked_entries``. Local submissions already book through
+        ``TradeExecutionService``; those pending fills must not be applied
+        again here.
+        """
+        if self._trade_svc.pending_order_for(order.symbol) is not None:
+            pending = self._trade_svc.pending_order_for(order.symbol)
+            if (
+                pending is not None
+                and str(pending.broker_order_id) == str(order.broker_order_id)
+            ):
+                return
+        action = str(order.side or "").upper()
+        if action not in (_ENTRY_ACTIONS | _POSITION_REDUCING_ACTIONS):
+            return
+        try:
+            previous_qty = Decimal(str(previous_executed_quantity or 0))
+            current_qty = Decimal(str(order.executed_quantity or 0))
+        except Exception:
+            return
+        if not current_qty.is_finite() or current_qty <= 0:
+            return
+        if previous_qty.is_finite() and previous_qty > 0:
+            fill_qty = current_qty - previous_qty
+        else:
+            fill_qty = current_qty
+        if not fill_qty.is_finite() or fill_qty <= 0:
+            return
+        try:
+            fill_price = Decimal(str(order.executed_price or order.price or 0))
+        except Exception:
+            return
+        if not fill_price.is_finite() or fill_price <= 0:
+            return
+
+        row = (
+            db.query(TrackedEntry)
+            .filter(TrackedEntry.symbol == order.symbol)
+            .first()
+        )
+        try:
+            row_qty = Decimal(str(row.quantity)) if row is not None else Decimal("0")
+            row_cost = Decimal(str(row.cost)) if row is not None else Decimal("0")
+        except Exception:
+            return
+        if row is not None and (not row_qty.is_finite() or not row_cost.is_finite()):
+            return
+
+        now = datetime.now(timezone.utc)
+        fill_at = order.filled_at or order.created_at or now
+        if action in _ENTRY_ACTIONS:
+            desired_qty = row_qty + fill_qty
+            desired_cost = row_cost + fill_qty * fill_price
+            if desired_qty <= 0 or desired_cost <= 0:
+                return
+            if row is None:
+                row = TrackedEntry(symbol=order.symbol)
+                db.add(row)
+                row.opened_at = self._as_utc(fill_at)
+            row.side = "SHORT" if action == "SELL_SHORT" else "LONG"
+            row.quantity = float(desired_qty)
+            row.cost = float(desired_cost)
+            row.updated_at = now
+            return
+
+        if row is None or row_qty <= 0 or row_cost <= 0:
+            return
+        consumed = min(fill_qty, row_qty)
+        average = row_cost / row_qty
+        desired_qty = row_qty - consumed
+        desired_cost = average * desired_qty
+        if desired_qty <= 0 or desired_cost <= 0:
+            db.delete(row)
+            return
+        row.quantity = float(desired_qty)
+        row.cost = float(desired_cost)
+        row.updated_at = now
 
     @staticmethod
     def _order_event_type_for_status(status: str) -> str:

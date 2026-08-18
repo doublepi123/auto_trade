@@ -10,8 +10,9 @@ from app.core.broker import BrokerOrder
 from app.core.engine import StrategyParams
 from app.core.market_calendar import trade_day_for
 from app.database import SessionLocal
-from app.models import OrderRecord, TradeEvent
+from app.models import OrderRecord, TrackedEntry, TradeEvent
 from app.runner import AppRunner
+from app.services.trade_execution_service import _PendingOrder
 from app import database
 
 database.init_db()
@@ -22,6 +23,7 @@ def _clean() -> None:
     try:
         db.query(TradeEvent).delete()
         db.query(OrderRecord).delete()
+        db.query(TrackedEntry).delete()
         db.commit()
     finally:
         db.close()
@@ -608,4 +610,122 @@ class TestTradeEventSync:
             "ORDER_RECONCILIATION_UNCERTAIN:"
         )
         assert runner.risk.check().approved is False
+        _clean()
+
+    def test_sync_today_orders_applies_discovered_fill_to_tracked_entry(self) -> None:
+        _clean()
+        created_at = datetime(2026, 6, 5, 13, 30, tzinfo=timezone.utc)
+
+        class Broker:
+            def get_today_orders(self) -> list[BrokerOrder]:
+                return [
+                    BrokerOrder(
+                        broker_order_id="synced-buy-fill",
+                        symbol="NVDA.US",
+                        side="BUY",
+                        quantity=Decimal("81"),
+                        price=Decimal("208.14"),
+                        executed_quantity=Decimal("81"),
+                        executed_price=Decimal("208.14"),
+                        status="FILLED",
+                        created_at=created_at,
+                        filled_at=created_at,
+                    )
+                ]
+
+        runner = AppRunner()
+        runner.broker = Broker()
+        with SessionLocal() as db:
+            db.add(
+                TrackedEntry(
+                    symbol="NVDA.US",
+                    side="LONG",
+                    quantity=1150.0,
+                    cost=245053.5,
+                    opened_at=created_at - timedelta(hours=4),
+                    updated_at=created_at - timedelta(hours=4),
+                )
+            )
+            db.commit()
+        runner._load_tracked_entries(SessionLocal())
+
+        assert runner.sync_today_orders_from_broker(force=True) == 1
+
+        with SessionLocal() as db:
+            row = db.query(TrackedEntry).filter(TrackedEntry.symbol == "NVDA.US").one()
+            assert row.quantity == 1231.0
+            assert row.cost == pytest.approx(261912.84)
+        snapshot = runner._trade_svc.snapshot_tracked_entries()
+        assert snapshot["NVDA.US"][0] == Decimal("1231.0")
+        assert snapshot["NVDA.US"][1] == Decimal("261912.84")
+
+    def test_sync_today_orders_does_not_double_book_pending_fill(self) -> None:
+        _clean()
+        created_at = datetime(2026, 6, 5, 17, 34, tzinfo=timezone.utc)
+        with SessionLocal() as db:
+            db.add(
+                OrderRecord(
+                    broker_order_id="pending-buy",
+                    symbol="NVDA.US",
+                    side="BUY",
+                    quantity=81,
+                    price=208.14,
+                    status="SUBMITTED",
+                    created_at=created_at,
+                )
+            )
+            db.add(
+                TrackedEntry(
+                    symbol="NVDA.US",
+                    side="LONG",
+                    quantity=1150.0,
+                    cost=245053.5,
+                    opened_at=created_at - timedelta(hours=4),
+                    updated_at=created_at - timedelta(hours=4),
+                )
+            )
+            db.commit()
+
+        class Broker:
+            def get_today_orders(self) -> list[BrokerOrder]:
+                return [
+                    BrokerOrder(
+                        broker_order_id="pending-buy",
+                        symbol="NVDA.US",
+                        side="BUY",
+                        quantity=Decimal("81"),
+                        price=Decimal("208.14"),
+                        executed_quantity=Decimal("81"),
+                        executed_price=Decimal("208.14"),
+                        status="FILLED",
+                        created_at=created_at,
+                        filled_at=created_at,
+                    )
+                ]
+
+        runner = AppRunner()
+        runner.broker = Broker()
+        runner._load_tracked_entries(SessionLocal())
+        runner._trade_svc.load_pending_orders(
+            [
+                _PendingOrder(
+                    broker=runner.broker,
+                    broker_order_id="pending-buy",
+                    symbol="NVDA.US",
+                    action="BUY",
+                    quantity=Decimal("81"),
+                    price=Decimal("208.14"),
+                    engine_snapshot=None,
+                    next_status_check_at=0.0,
+                    submitted_at=0.0,
+                )
+            ]
+        )
+
+        assert runner.sync_today_orders_from_broker(force=True) == 1
+
+        with SessionLocal() as db:
+            row = db.query(TrackedEntry).filter(TrackedEntry.symbol == "NVDA.US").one()
+            assert row.quantity == 1150.0
+            assert row.cost == pytest.approx(245053.5)
         _clean()
