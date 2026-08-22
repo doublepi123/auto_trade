@@ -2612,6 +2612,21 @@ class ForceResumeRequest(BaseModel):
     reason: str = Field(..., min_length=1, description="Reason for force-resuming the reconciliation gate")
 
 
+class DrawdownResetRequest(BaseModel):
+    reason: str = Field(
+        ...,
+        min_length=1,
+        description="Reason for clearing the realized-PnL high-water mark",
+    )
+
+
+class DrawdownResetResponse(BaseModel):
+    status: str = "ok"
+    previous_cumulative_realized_pnl: float = 0.0
+    previous_peak_realized_pnl: float = 0.0
+    previous_drawdown_amount: float = 0.0
+
+
 class MessageResponse(BaseModel):
     message: str
 

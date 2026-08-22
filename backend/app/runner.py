@@ -204,6 +204,10 @@ class CredentialSwitchBlockedError(RuntimeError):
     """Raised when a broker identity change could abandon live account state."""
 
 
+class DrawdownResetBlockedError(RuntimeError):
+    """Raised when clearing the drawdown high-water mark could hide live loss."""
+
+
 class DurableFillReconciliationError(RuntimeError):
     """Raised when recent fills cannot be proved from the durable ledger."""
 
@@ -418,6 +422,60 @@ class AppRunner:
             db.commit()
         self._set_reconciliation_gate("passed")
         logger.warning("reconciliation gate force-resumed: %s", reason)
+
+    def reset_drawdown_state(self, reason: str) -> dict[str, float]:
+        """Clear the realized-PnL high-water mark that gates drawdown pauses.
+
+        The drawdown limit compares ``peak_realized_pnl`` against
+        ``cumulative_realized_pnl``, so a historical loss keeps blocking
+        auto-resume forever once the limit is exceeded. Operators need this
+        after the cause of that loss is fixed. The limit itself is untouched,
+        and this refuses to run while exposure exists so a live position can
+        never have its accumulated loss hidden.
+        """
+        if self._trade_svc.snapshot_tracked_entries():
+            raise DrawdownResetBlockedError(
+                "drawdown state cannot be reset while positions are tracked"
+            )
+        if self._trade_svc.pending_order_ids():
+            raise DrawdownResetBlockedError(
+                "drawdown state cannot be reset while orders are pending"
+            )
+        with self._state_lock:
+            if self._trigger_in_flight:
+                raise DrawdownResetBlockedError(
+                    "drawdown state cannot be reset while a trigger is in flight"
+                )
+
+        before = {
+            "cumulative_realized_pnl": float(self.risk.cumulative_realized_pnl),
+            "peak_realized_pnl": float(self.risk.peak_realized_pnl),
+            "drawdown_amount": float(self.risk.drawdown_amount),
+        }
+        self.risk.restore_drawdown_state(
+            cumulative_realized_pnl=0.0,
+            peak_realized_pnl=0.0,
+        )
+        with self._db_session() as db:
+            StrategyService(db).update_primary_runtime_state(
+                cumulative_realized_pnl=0.0,
+                peak_realized_pnl=0.0,
+            )
+            record_trade_event(
+                db,
+                event_type="DRAWDOWN_STATE_RESET",
+                status="WARNING",
+                message=f"drawdown high-water mark reset: {reason}",
+                payload={"reason": reason, "before": before},
+            )
+            db.commit()
+        logger.warning(
+            "drawdown state reset (%s): before=%s",
+            reason,
+            before,
+        )
+        self._broadcast_status()
+        return before
 
     def _mark_fill_processed(self, symbol: str, action: str = "") -> None:
         tracked = self._trade_svc.tracked_position(symbol)

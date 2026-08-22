@@ -19,8 +19,8 @@ from app.api.deps import extract_actor, get_audit_logger
 from app.core.audit import AuditLogger
 from app.database import SessionLocal, get_db
 from app.models import AuditLog, OrderRecord, TradeEvent
-from app.runner import get_runner
-from app.schemas import AccountResponse, CashBalanceSchema, ControlRequest, ForceResumeRequest, ForceResumeResponse, MessageResponse, OrderCancelAllRequest, OrderCancelAllResponse, OrderCancelFailure, OrderCancelResponse, OrderPageResponse, OrderResponse, PositionSchema, TradeEventPageResponse
+from app.runner import DrawdownResetBlockedError, get_runner
+from app.schemas import AccountResponse, CashBalanceSchema, ControlRequest, DrawdownResetRequest, DrawdownResetResponse, ForceResumeRequest, ForceResumeResponse, MessageResponse, OrderCancelAllRequest, OrderCancelAllResponse, OrderCancelFailure, OrderCancelResponse, OrderPageResponse, OrderResponse, PositionSchema, TradeEventPageResponse
 from app.services.event_list_service import list_timeline_events
 from app.services.strategy_service import StrategyService
 from app.services.trade_event_service import decode_event_payload, record_trade_event
@@ -1358,3 +1358,67 @@ def force_resume_reconciliation_gate_alias(
 ) -> ForceResumeResponse:
     """Compatibility alias for POST /api/force-resume."""
     return force_resume_reconciliation_gate(request, payload, audit)
+
+
+@router.post(
+    "/control/reset-drawdown",
+    response_model=DrawdownResetResponse,
+    dependencies=[Depends(require_api_key())],
+)
+def reset_drawdown_state(
+    request: Request,
+    payload: DrawdownResetRequest,
+    audit: AuditLogger = Depends(get_audit_logger),
+) -> DrawdownResetResponse:
+    """Clear the realized-PnL high-water mark that gates drawdown pauses.
+
+    Once the drawdown limit is exceeded, auto-resume stays blocked forever
+    because the high-water mark is persisted. After the root cause of that
+    loss is fixed, an operator needs a supported way to clear it. The limit
+    itself is preserved, and the runner refuses while exposure exists.
+    """
+    actor_hash, source_ip = extract_actor(request)
+    result = "SUCCESS"
+    detail: dict[str, Any] = {"reason": payload.reason}
+    try:
+        runner = get_runner()
+        reset = getattr(runner, "reset_drawdown_state", None)
+        if reset is None:
+            raise HTTPException(
+                status_code=501,
+                detail="drawdown reset not supported by this runner",
+            )
+        before = runner.reset_drawdown_state(payload.reason)
+        detail = {"reason": payload.reason, "before": before}
+        return DrawdownResetResponse(
+            status="ok",
+            previous_cumulative_realized_pnl=before.get(
+                "cumulative_realized_pnl", 0.0
+            ),
+            previous_peak_realized_pnl=before.get("peak_realized_pnl", 0.0),
+            previous_drawdown_amount=before.get("drawdown_amount", 0.0),
+        )
+    except HTTPException:
+        result = "FAILED"
+        raise
+    except DrawdownResetBlockedError as exc:
+        result = "FAILED"
+        detail = {"reason": payload.reason, "detail": str(exc)}
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        result = "FAILED"
+        detail = {"reason": payload.reason, "detail": str(exc)}
+        logger.exception("unexpected drawdown state reset failure")
+        raise HTTPException(
+            status_code=500,
+            detail="drawdown state reset failed",
+        ) from exc
+    finally:
+        audit.record(
+            "DRAWDOWN_STATE_RESET",
+            severity="CRITICAL",
+            actor_hash=actor_hash,
+            source_ip=source_ip,
+            request_summary=detail,
+            result=result,
+        )

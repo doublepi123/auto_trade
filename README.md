@@ -458,6 +458,7 @@ auto_trade/
 | `POST` | `/api/control/resume` | 恢复交易 |
 | `POST` | `/api/control/kill-switch` | 紧急停止 |
 | `POST` | `/api/control/disable-kill-switch` | 解除紧急停止 |
+| `POST` | `/api/control/reset-drawdown` | 清零已实现盈亏高水位（`max_drawdown_amount` 限额本身保留）；body 必填 `reason`。存在持仓、挂单或在途触发时返回 `409`；写 `DRAWDOWN_STATE_RESET` 审计与交易事件 |
 
 ### LLM 区间顾问
 

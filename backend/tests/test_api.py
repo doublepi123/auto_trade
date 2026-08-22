@@ -2992,3 +2992,84 @@ def test_force_resume_endpoint_returns_ok_and_writes_evidence(monkeypatch) -> No
         assert row.event_type == "force_resume"
         assert row.operator == "admin"
         assert row.passed is True
+
+
+def test_reset_drawdown_clears_high_water_mark_and_audits() -> None:
+    from app.database import SessionLocal
+    from app.models import AuditLog, TradeEvent
+
+    runner = trade_api.get_runner()
+    runner._trade_svc.load_tracked_entries({})
+    runner._trade_svc.load_pending_orders([])
+    runner.risk.restore_drawdown_state(
+        cumulative_realized_pnl=-6402.10,
+        peak_realized_pnl=513.03,
+    )
+    assert runner.risk.drawdown_amount > 0
+
+    resp = client.post(
+        "/api/control/reset-drawdown",
+        json={"reason": "root cause fixed; broker flat"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["previous_cumulative_realized_pnl"] == pytest.approx(-6402.10)
+    assert body["previous_peak_realized_pnl"] == pytest.approx(513.03)
+    assert body["previous_drawdown_amount"] == pytest.approx(6915.13)
+
+    assert runner.risk.cumulative_realized_pnl == 0.0
+    assert runner.risk.peak_realized_pnl == 0.0
+    assert runner.risk.drawdown_amount == 0.0
+
+    with SessionLocal() as db:
+        event = (
+            db.query(TradeEvent)
+            .filter(TradeEvent.event_type == "DRAWDOWN_STATE_RESET")
+            .order_by(TradeEvent.id.desc())
+            .first()
+        )
+        assert event is not None
+        assert "root cause fixed" in event.message
+        audit = (
+            db.query(AuditLog)
+            .filter(AuditLog.action == "DRAWDOWN_STATE_RESET")
+            .order_by(AuditLog.id.desc())
+            .first()
+        )
+        assert audit is not None
+        assert audit.severity == "CRITICAL"
+        assert audit.result == "SUCCESS"
+
+
+def test_reset_drawdown_is_blocked_while_position_is_tracked() -> None:
+    from decimal import Decimal
+
+    runner = trade_api.get_runner()
+    runner.risk.restore_drawdown_state(
+        cumulative_realized_pnl=-500.0,
+        peak_realized_pnl=100.0,
+    )
+    runner._trade_svc.load_tracked_entries(
+        {"NVDA.US": (Decimal("10"), Decimal("2000"))}
+    )
+    try:
+        resp = client.post(
+            "/api/control/reset-drawdown",
+            json={"reason": "should be refused"},
+        )
+        assert resp.status_code == 409
+        assert "positions are tracked" in resp.json()["detail"]
+        assert runner.risk.cumulative_realized_pnl == -500.0
+    finally:
+        runner._trade_svc.load_tracked_entries({})
+        runner.risk.restore_drawdown_state(
+            cumulative_realized_pnl=0.0,
+            peak_realized_pnl=0.0,
+        )
+
+
+def test_reset_drawdown_requires_reason() -> None:
+    resp = client.post("/api/control/reset-drawdown", json={"reason": ""})
+    assert resp.status_code == 422

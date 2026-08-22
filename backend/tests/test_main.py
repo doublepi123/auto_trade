@@ -16,6 +16,7 @@ from app import main as main_module
 from app.core.engine import StrategyParams
 from app.services import durable_job_lease_service
 from app.services import llm_interaction_service
+from app.services import risk_history_service
 from app.services import strategy_v2_shadow_service
 from app.services.universe_selection_service import (
     UniverseSelectionLeaseBusyError,
@@ -407,6 +408,15 @@ def test_storage_maintenance_uses_one_lease_for_all_writers_and_closes_first(
             _exercise_callbacks("wait-prune", self.kwargs)
             return SimpleNamespace(deleted=1, batches=1)
 
+    class FakeRiskHistoryService:
+        def __init__(self, session: object, **kwargs: object) -> None:
+            assert session is db
+            self.kwargs = kwargs
+
+        def prune_expired_snapshots(self, **_kwargs: object) -> object:
+            _exercise_callbacks("snapshot-prune", self.kwargs)
+            return SimpleNamespace(deleted=1, batches=1)
+
     session_calls = 0
 
     def session_factory_stub() -> FakeSession:
@@ -433,6 +443,11 @@ def test_storage_maintenance_uses_one_lease_for_all_writers_and_closes_first(
         "StrategyV2ShadowService",
         FakeShadowService,
     )
+    monkeypatch.setattr(
+        risk_history_service,
+        "RiskHistoryService",
+        FakeRiskHistoryService,
+    )
 
     assert main_module._llm_storage_maintenance_tick_sync() is None
 
@@ -448,13 +463,16 @@ def test_storage_maintenance_uses_one_lease_for_all_writers_and_closes_first(
         "llm-compact",
         "lease-checkpoint",
         "lease-fence",
-        "wait-prune",
-        "lease-checkpoint",
-        "lease-fence",
-        "lease-checkpoint",
-        "business-session-close",
-        "keepalive-exit",
-    ]
+            "wait-prune",
+            "lease-checkpoint",
+            "lease-fence",
+            "snapshot-prune",
+            "lease-checkpoint",
+            "lease-fence",
+            "lease-checkpoint",
+            "business-session-close",
+            "keepalive-exit",
+        ]
 
 
 async def test_universe_selection_waits_for_worker_during_cancel(

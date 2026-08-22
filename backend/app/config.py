@@ -222,6 +222,18 @@ class Settings(BaseSettings):
         le=5000,
         validation_alias="AUTO_TRADE_LLM_STORAGE_MAINTENANCE_BATCH_SIZE",
     )
+    runtime_state_snapshot_retention_days: int = Field(
+        default=30,
+        ge=0,
+        le=3650,
+        validation_alias="AUTO_TRADE_RUNTIME_STATE_SNAPSHOT_RETENTION_DAYS",
+    )
+    runtime_state_snapshot_maintenance_batch_size: int = Field(
+        default=5000,
+        ge=10,
+        le=50000,
+        validation_alias="AUTO_TRADE_RUNTIME_STATE_SNAPSHOT_MAINTENANCE_BATCH_SIZE",
+    )
     strategy_v2_wait_retention_days: int = Field(
         default=45,
         ge=0,

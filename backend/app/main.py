@@ -1041,6 +1041,7 @@ def _llm_storage_maintenance_tick_sync() -> object | None:
     from app.services.durable_job_lease_service import (
         DurableJobLeaseService,
     )
+    from app.services.risk_history_service import RiskHistoryService
     from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 
     lease_service = DurableJobLeaseService(
@@ -1091,6 +1092,17 @@ def _llm_storage_maintenance_tick_sync() -> object | None:
                 batch_size=settings.strategy_v2_wait_maintenance_batch_size,
                 max_batches=8,
             )
+            snapshots_pruned = RiskHistoryService(
+                db,
+                transaction_fence=lease_guard.fence_in_transaction,
+                operation_checkpoint=lease_guard.checkpoint,
+            ).prune_expired_snapshots(
+                retention_days=settings.runtime_state_snapshot_retention_days,
+                batch_size=(
+                    settings.runtime_state_snapshot_maintenance_batch_size
+                ),
+                max_batches=8,
+            )
             lease_guard.checkpoint()
             if pruned.deleted or compacted.compacted:
                 logger.info(
@@ -1108,6 +1120,12 @@ def _llm_storage_maintenance_tick_sync() -> object | None:
                     "deleted=%d batches=%d",
                     shadow_pruned.deleted,
                     shadow_pruned.batches,
+                )
+            if snapshots_pruned.deleted:
+                logger.info(
+                    "runtime state snapshot maintenance: deleted=%d batches=%d",
+                    snapshots_pruned.deleted,
+                    snapshots_pruned.batches,
                 )
         finally:
             db.close()

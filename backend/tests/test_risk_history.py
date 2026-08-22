@@ -106,3 +106,120 @@ class TestRiskHistoryAPI(_Base):
         resp = self.client.get("/api/risk/history")
         assert resp.status_code == 200
         assert resp.json()["points"] == []
+
+
+class TestRuntimeStateSnapshotPruning(_Base):
+    def _seed_aged(self, symbol: str, ages_days: list[int]) -> None:
+        now = datetime.now(timezone.utc)
+        db = self._db()
+        for age in ages_days:
+            db.add(RuntimeStateSnapshot(
+                symbol=symbol,
+                engine_state="flat",
+                daily_pnl=0.0,
+                consecutive_losses=0,
+                last_price=100.0,
+                last_trigger_price=0.0,
+                created_at=now - timedelta(days=age),
+            ))
+        db.commit()
+        db.close()
+
+    def _count(self, symbol: str | None = None) -> int:
+        db = self._db()
+        try:
+            query = db.query(RuntimeStateSnapshot)
+            if symbol is not None:
+                query = query.filter(RuntimeStateSnapshot.symbol == symbol)
+            return query.count()
+        finally:
+            db.close()
+
+    def test_prunes_rows_older_than_retention(self) -> None:
+        self._seed_aged("AAPL.US", [60, 45, 40, 5, 1])
+        result = RiskHistoryService(self._db()).prune_expired_snapshots(
+            retention_days=30,
+            batch_size=100,
+        )
+        assert result.deleted == 3
+        assert result.batches == 1
+        assert self._count("AAPL.US") == 2
+
+    def test_retains_latest_snapshot_per_symbol_even_when_expired(self) -> None:
+        self._seed_aged("AAPL.US", [90, 80, 70])
+        result = RiskHistoryService(self._db()).prune_expired_snapshots(
+            retention_days=30,
+            batch_size=100,
+        )
+        assert result.deleted == 2
+        remaining = self._count("AAPL.US")
+        assert remaining == 1
+        resp = RiskHistoryService(self._db()).get_history(symbol="AAPL.US")
+        assert resp.latest is not None
+
+    def test_retention_zero_disables_pruning(self) -> None:
+        self._seed_aged("AAPL.US", [365, 200])
+        result = RiskHistoryService(self._db()).prune_expired_snapshots(
+            retention_days=0,
+            batch_size=100,
+        )
+        assert result.deleted == 0
+        assert result.batches == 0
+        assert self._count("AAPL.US") == 2
+
+    def test_prunes_each_symbol_independently(self) -> None:
+        self._seed_aged("AAPL.US", [60, 50])
+        self._seed_aged("NVDA.US", [70, 2])
+        result = RiskHistoryService(self._db()).prune_expired_snapshots(
+            retention_days=30,
+            batch_size=100,
+        )
+        assert result.deleted == 2
+        assert self._count("AAPL.US") == 1
+        assert self._count("NVDA.US") == 1
+
+    def test_respects_batch_and_max_batches(self) -> None:
+        self._seed_aged("AAPL.US", [60, 59, 58, 57, 56, 1])
+        result = RiskHistoryService(self._db()).prune_expired_snapshots(
+            retention_days=30,
+            batch_size=2,
+            max_batches=2,
+        )
+        assert result.deleted == 4
+        assert result.batches == 2
+        assert self._count("AAPL.US") == 2
+
+    def test_invokes_lease_callbacks(self) -> None:
+        self._seed_aged("AAPL.US", [60, 50])
+        fenced: list[object] = []
+        checkpoints: list[int] = []
+        service = RiskHistoryService(
+            self._db(),
+            transaction_fence=lambda session: fenced.append(session),
+            operation_checkpoint=lambda: checkpoints.append(1),
+        )
+        service.prune_expired_snapshots(retention_days=30, batch_size=100)
+        assert fenced
+        assert checkpoints
+
+    def test_rejects_invalid_arguments(self) -> None:
+        service = RiskHistoryService(self._db())
+        try:
+            service.prune_expired_snapshots(retention_days=-1, batch_size=10)
+            raise AssertionError("negative retention must raise")
+        except ValueError:
+            pass
+        try:
+            service.prune_expired_snapshots(retention_days=30, batch_size=0)
+            raise AssertionError("non-positive batch must raise")
+        except ValueError:
+            pass
+
+    def test_noop_when_nothing_expired(self) -> None:
+        self._seed_aged("AAPL.US", [3, 2, 1])
+        result = RiskHistoryService(self._db()).prune_expired_snapshots(
+            retention_days=30,
+            batch_size=100,
+        )
+        assert result.deleted == 0
+        assert self._count("AAPL.US") == 3
