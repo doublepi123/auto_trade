@@ -476,3 +476,93 @@ def test_get_latest_builds_service_without_acquiring_durable_lease(
         client.close()
         db.close()
         engine.dispose()
+
+
+def test_range_fitness_endpoint_reports_trend_unsuitable_symbol() -> None:
+    import json
+
+    from app.models import StrategyV2ShadowDecision
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    api = FastAPI()
+    api.include_router(universe_api.router)
+
+    def override_db() -> Generator[Session, None, None]:
+        yield db
+
+    api.dependency_overrides[get_db] = override_db
+    api.dependency_overrides[get_audit_logger] = lambda: _Audit()
+    client = TestClient(api)
+    try:
+        db.add(StrategyConfig(symbol="NVDA.US", market="US"))
+        now = datetime.now(timezone.utc)
+        for i in range(80):
+            db.add(StrategyV2ShadowDecision(
+                idempotency_key=f"api-nvda-{i}",
+                symbol="NVDA.US",
+                config_version="v1",
+                session_date=now.date(),
+                bar_at=now - timedelta(minutes=i + 1),
+                action="WAIT",
+                gate_passed=False,
+                gate_reasons_json=json.dumps(["ADX_REGIME_BLOCKED"]),
+                adx_5m=41.6,
+            ))
+        db.commit()
+
+        response = client.get(
+            "/api/universe/range-fitness",
+            params={"lookback_days": 3, "min_samples": 60},
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["lookback_days"] == 3
+        item = next(i for i in body["items"] if i["symbol"] == "NVDA.US")
+        assert item["verdict"] == "TREND_UNSUITABLE"
+        assert item["is_primary"] is True
+        assert item["trend_blocked"] == 80
+
+        # Read-only contract: the interval must be untouched.
+        config = db.query(StrategyConfig).one()
+        assert config.symbol == "NVDA.US"
+        assert db.query(StrategyV2ShadowDecision).count() == 80
+    finally:
+        client.close()
+        db.close()
+        engine.dispose()
+
+
+def test_range_fitness_endpoint_rejects_inverted_bands() -> None:
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    db = sessionmaker(bind=engine)()
+    api = FastAPI()
+    api.include_router(universe_api.router)
+
+    def override_db() -> Generator[Session, None, None]:
+        yield db
+
+    api.dependency_overrides[get_db] = override_db
+    api.dependency_overrides[get_audit_logger] = lambda: _Audit()
+    client = TestClient(api)
+    try:
+        response = client.get(
+            "/api/universe/range-fitness",
+            params={"trend_unsuitable_pct": 20, "range_suitable_pct": 50},
+        )
+        assert response.status_code == 422
+    finally:
+        client.close()
+        db.close()
+        engine.dispose()

@@ -9,6 +9,7 @@ notifier, respecting a per-rule cooldown. Never touches the live order path
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
@@ -26,6 +27,10 @@ from app.schemas import (
 logger = logging.getLogger(__name__)
 
 PRICE_RULES = {"price_above", "price_below"}
+# Needs a live quote AND the active StrategyConfig interval, so it is quoted
+# like a price rule but projected as a deviation percentage instead of a price.
+INTERVAL_RULES = {"interval_stale"}
+QUOTED_RULES = PRICE_RULES | INTERVAL_RULES
 # Account-wide-only rule types that read the authoritative account state
 # (latest StrategyConfig symbol -> that symbol's RuntimeState, falling back to
 # the legacy ``symbol == ""`` row). They never bind to a secondary symbol's
@@ -101,7 +106,7 @@ class AlertRuleService:
         notifier: _NotifierLike | None = getattr(runner, "notifier", None)
 
         rules = list(self._db.scalars(select(AlertRule).where(AlertRule.enabled.is_(True))))
-        symbols = sorted({r.symbol for r in rules if r.rule_type in PRICE_RULES and r.symbol})
+        symbols = sorted({r.symbol for r in rules if r.rule_type in QUOTED_RULES and r.symbol})
         quote_map = _fetch_quotes(quote_provider, symbols)
 
         fired = 0
@@ -277,6 +282,8 @@ class AlertRuleService:
     def _current_value(self, rule: AlertRule, quote_map: dict[str, float]) -> float | None:
         if rule.rule_type in PRICE_RULES:
             return quote_map.get(rule.symbol)
+        if rule.rule_type in INTERVAL_RULES:
+            return self._interval_deviation_pct(rule, quote_map)
         if rule.rule_type == "daily_loss":
             # daily_loss keeps its pre-c566e76 contract: read the RuntimeState
             # row matching rule.symbol; a blank symbol with no blank row falls
@@ -301,6 +308,44 @@ class AlertRuleService:
                 # kill switch can satisfy ``value >= threshold``.
                 return 1.0 if state.kill_switch else 0.0
         return None
+
+    def _interval_deviation_pct(
+        self,
+        rule: AlertRule,
+        quote_map: dict[str, float],
+    ) -> float | None:
+        """Project how far price sits outside the symbol's active interval.
+
+        A sustained trend keeps LLM confidence below the apply gate, so the
+        live interval stops being refreshed and eventually drifts so far from
+        price that it can never trigger. Price sitting outside the interval is
+        the observable signature of that dead state. Returns 0.0 while price is
+        inside the interval so a rule can only fire on real drift.
+        """
+        price = quote_map.get(rule.symbol)
+        if price is None or price <= 0:
+            return None
+        config = self._db.scalar(
+            select(StrategyConfig)
+            .where(StrategyConfig.symbol == rule.symbol)
+            .order_by(StrategyConfig.id.desc())
+        )
+        if config is None:
+            return None
+        try:
+            buy_low = float(config.buy_low)
+            sell_high = float(config.sell_high)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(buy_low) or not math.isfinite(sell_high):
+            return None
+        if buy_low <= 0 or sell_high <= 0 or sell_high <= buy_low:
+            return None
+        if price > sell_high:
+            return (price - sell_high) / sell_high * 100
+        if price < buy_low:
+            return (buy_low - price) / buy_low * 100
+        return 0.0
 
     def _daily_loss_state(self, rule: AlertRule) -> RuntimeState | None:
         """Resolve the ``RuntimeState`` row a daily_loss rule reads from.
@@ -393,6 +438,15 @@ def _check(rule: AlertRule, value: float) -> tuple[bool, str]:
         triggered = value >= rule.threshold
         status = "已触发" if triggered else "未触发"
         return triggered, f"账户熔断开关 {status}"
+    if rule.rule_type == "interval_stale":
+        # value is the deviation percentage of price outside the active
+        # interval (0.0 while price is inside), so a positive threshold can
+        # never fire on a healthy interval.
+        triggered = value >= rule.threshold
+        return triggered, (
+            f"{rule.symbol} 现价已偏离活动区间 {value:.2f}% ≥ 阈值 "
+            f"{rule.threshold:.2f}%，区间可能已失效需人工复核"
+        )
     return False, ""
 
 

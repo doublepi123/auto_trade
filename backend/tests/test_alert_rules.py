@@ -1038,3 +1038,144 @@ class TestAlertRuleEffectiveness(_Base):
         assert e.never_fired is True
         assert e.last_fired_at is None
 
+
+class TestIntervalStaleRule(_Base):
+    def setup_method(self) -> None:
+        super().setup_method()
+        db = self._db()
+        db.query(StrategyConfig).delete()
+        db.commit()
+        db.close()
+
+    def _seed_interval(self, symbol: str, buy_low: float, sell_high: float) -> None:
+        db = self._db()
+        db.add(StrategyConfig(
+            symbol=symbol,
+            market="US",
+            buy_low=buy_low,
+            sell_high=sell_high,
+        ))
+        db.commit()
+        db.close()
+
+    def _rule(self, *, symbol: str = "NVDA.US", threshold: float = 5.0) -> int:
+        out = AlertRuleService(self._db()).create(AlertRuleCreate(
+            name="interval drift",
+            symbol=symbol,
+            rule_type="interval_stale",
+            threshold=threshold,
+            severity="WARNING",
+            enabled=True,
+            cooldown_seconds=0,
+        ))
+        return out.id
+
+    def _evaluate(self, price: float) -> tuple[int, FakeNotifier]:
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(
+            FakeRunner(FakeBroker({"NVDA.US": price}), notifier)
+        )
+        return result.fired, notifier
+
+    def test_fires_when_price_far_above_interval(self) -> None:
+        # The live NVDA case: interval [191, 196.5] while price traded near 210.
+        self._seed_interval("NVDA.US", 191.0, 196.5)
+        self._rule(threshold=5.0)
+        fired, notifier = self._evaluate(210.0)
+        assert fired == 1
+        assert "偏离活动区间" in notifier.calls[0][1]
+
+    def test_fires_when_price_far_below_interval(self) -> None:
+        self._seed_interval("NVDA.US", 191.0, 196.5)
+        self._rule(threshold=5.0)
+        fired, _ = self._evaluate(170.0)
+        assert fired == 1
+
+    def test_silent_while_price_inside_interval(self) -> None:
+        self._seed_interval("NVDA.US", 191.0, 196.5)
+        self._rule(threshold=5.0)
+        fired, notifier = self._evaluate(194.0)
+        assert fired == 0
+        assert notifier.calls == []
+
+    def test_silent_when_drift_below_threshold(self) -> None:
+        # 198 is outside [191, 196.5] but only ~0.76% above sell_high.
+        self._seed_interval("NVDA.US", 191.0, 196.5)
+        self._rule(threshold=5.0)
+        fired, _ = self._evaluate(198.0)
+        assert fired == 0
+
+    def test_silent_without_matching_strategy_config(self) -> None:
+        self._rule(threshold=5.0)
+        fired, _ = self._evaluate(210.0)
+        assert fired == 0
+
+    def test_silent_when_quote_unavailable(self) -> None:
+        self._seed_interval("NVDA.US", 191.0, 196.5)
+        self._rule(threshold=5.0)
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(
+            FakeRunner(FakeBroker({}), notifier)
+        )
+        assert result.fired == 0
+
+    def test_silent_when_interval_bounds_are_invalid(self) -> None:
+        self._seed_interval("NVDA.US", 200.0, 190.0)
+        self._rule(threshold=5.0)
+        fired, _ = self._evaluate(300.0)
+        assert fired == 0
+
+    def test_does_not_modify_the_interval(self) -> None:
+        self._seed_interval("NVDA.US", 191.0, 196.5)
+        self._rule(threshold=5.0)
+        self._evaluate(210.0)
+        db = self._db()
+        try:
+            cfg = db.query(StrategyConfig).order_by(
+                StrategyConfig.id.desc()
+            ).first()
+            assert cfg is not None
+            assert cfg.buy_low == 191.0
+            assert cfg.sell_high == 196.5
+        finally:
+            db.close()
+
+    def test_records_firing_history_with_deviation_value(self) -> None:
+        self._seed_interval("NVDA.US", 191.0, 196.5)
+        rid = self._rule(threshold=5.0)
+        self._evaluate(210.0)
+        db = self._db()
+        try:
+            firing = db.query(AlertFiring).filter(
+                AlertFiring.rule_id == rid
+            ).one()
+            assert firing.rule_type == "interval_stale"
+            assert firing.trigger_value > 5.0
+        finally:
+            db.close()
+
+    def test_rejects_blank_symbol(self) -> None:
+        try:
+            AlertRuleCreate(
+                name="bad",
+                symbol="",
+                rule_type="interval_stale",
+                threshold=5.0,
+            )
+            raise AssertionError("blank symbol must be rejected")
+        except ValueError:
+            pass
+
+    def test_rejects_non_positive_threshold(self) -> None:
+        for bad in (0.0, -1.0):
+            try:
+                AlertRuleCreate(
+                    name="bad",
+                    symbol="NVDA.US",
+                    rule_type="interval_stale",
+                    threshold=bad,
+                )
+                raise AssertionError("non-positive threshold must be rejected")
+            except ValueError:
+                pass
+

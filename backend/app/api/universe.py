@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import date
+from dataclasses import asdict
+from datetime import date, datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
@@ -19,6 +20,8 @@ from app.models import (
 )
 from app.runner import get_runner
 from app.schemas import (
+    RangeFitnessItem,
+    RangeFitnessResponse,
     UniverseCatalogItem,
     UniverseObservationHealthResponse,
     UniversePromotionReadinessResponse,
@@ -33,6 +36,7 @@ from app.services.durable_job_lease_service import (
     LeaseBackendError,
     LeaseLostError,
 )
+from app.services.range_fitness_service import RangeFitnessService
 from app.services.universe_promotion_service import UniversePromotionService
 from app.services.rotation_forward_scorecard_service import (
     RotationForwardScorecardService,
@@ -235,6 +239,41 @@ def list_universe_runs(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get(
+    "/range-fitness",
+    response_model=RangeFitnessResponse,
+)
+def get_range_fitness(
+    lookback_days: int = Query(default=3, ge=1, le=30),
+    min_samples: int = Query(default=60, ge=1, le=100000),
+    trend_unsuitable_pct: float = Query(default=60.0, ge=0, le=100),
+    range_suitable_pct: float = Query(default=30.0, ge=0, le=100),
+    db: Session = Depends(get_db),
+) -> RangeFitnessResponse:
+    """Report whether each shadow-observed symbol still behaves range-like.
+
+    Read-only aggregation over existing Strategy v2 shadow evidence: it never
+    promotes a symbol, changes the interval, or places an order.
+    """
+    try:
+        rows = RangeFitnessService(db).assess(
+            lookback_days=lookback_days,
+            min_samples=min_samples,
+            trend_unsuitable_pct=trend_unsuitable_pct,
+            range_suitable_pct=range_suitable_pct,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return RangeFitnessResponse(
+        generated_at=datetime.now(timezone.utc),
+        lookback_days=lookback_days,
+        min_samples=min_samples,
+        trend_unsuitable_pct=trend_unsuitable_pct,
+        range_suitable_pct=range_suitable_pct,
+        items=[RangeFitnessItem(**asdict(row)) for row in rows],
+    )
 
 
 @router.get(

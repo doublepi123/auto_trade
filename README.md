@@ -562,7 +562,9 @@ auto_trade/
 | `GET` | `/api/alert-rules/{id}/history` | 该规则的 append-only 触发历史（`rule_id`/`trigger_value`/`threshold`/`severity`/`message`/`fired_at`，最近优先）；`?from_date=&to_date=&limit=`（最多 500） |
 | `GET` | `/api/alert-firings` | 跨规则触发时间线（最近优先）；`?rule_id=&limit=` |
 
-> 规则类型：`price_above` / `price_below`（实时行情）、`daily_loss`（`runtime_state.daily_pnl`）。触发经 `MultiChannelNotifier` 推送，按 `cooldown_seconds` 节流（`last_fired_at`）。每次成功触发同步 append 一行到 `alert_firings`（无 FK，删规则留历史）。**只读评估 + 通知，不发单。** Web UI：「告警规则」页（新建/编辑/启停/立即评估/触发历史弹窗）。
+> 规则类型：`price_above` / `price_below`（实时行情）、`daily_loss`（`runtime_state.daily_pnl`）、`interval_stale`（现价偏离该标的活动区间的百分比 ≥ `threshold`；区间内投影为 `0.0`，故 `threshold` 必须为正且 `symbol` 必填）。触发经 `MultiChannelNotifier` 推送，按 `cooldown_seconds` 节流（`last_fired_at`）。每次成功触发同步 append 一行到 `alert_firings`（无 FK，删规则留历史）。**只读评估 + 通知，不发单、不改区间。** Web UI：「告警规则」页（新建/编辑/启停/立即评估/触发历史弹窗）。
+
+> `interval_stale` 的用途：持续趋势会让 LLM 置信度长期低于应用门槛，活动区间因此停止刷新并逐渐远离现价，最终永不触发（P0 固定 `llm_shadow_mode=true`，LLM 不会自动改实盘区间）。该规则把这种「区间僵死」状态显式暴露出来交人工复核，本身不改任何交易参数。
 
 ### 策略预设（Strategy Presets）
 
@@ -622,6 +624,7 @@ auto_trade/
 | `GET` | `/api/universe/latest` | 最近一次候选池运行结果 |
 | `POST` | `/api/universe/refresh` | 触发幂等刷新（受配置与权限约束） |
 | `GET` | `/api/universe/promotion-readiness` | 入选标的前向证据汇总；仅供人工复核，不自动晋级 |
+| `GET` | `/api/universe/range-fitness` | 按标的汇总 Strategy v2 影子证据中的 `ADX_REGIME_BLOCKED` 占比，判断该标的当前是否仍适合区间策略（`RANGE_SUITABLE` / `MIXED` / `TREND_UNSUITABLE` / `INSUFFICIENT_DATA`）；`?lookback_days=&min_samples=&trend_unsuitable_pct=&range_suitable_pct=`。只读聚合，不切换主标的、不改区间、不下单 |
 
 ### 开盘动量影子
 

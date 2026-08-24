@@ -3145,6 +3145,14 @@ class AlertRuleCreate(BaseModel):
         ``threshold`` must be exactly ``1.0`` (the numeric storage contract is
         preserved, but a fixed threshold guarantees a false state can never
         trigger because of threshold 0). ``symbol`` must be blank.
+      - ``interval_stale``: notification-only; fires when the live quote sits
+        outside that symbol's active ``StrategyConfig`` interval by at least
+        ``threshold`` percent. A sustained trend keeps LLM confidence below the
+        apply gate, so the interval stops being refreshed and can drift until it
+        never triggers; this surfaces that dead state for human review. The
+        projected value is ``0.0`` while price is inside the interval, so
+        ``threshold`` must be a positive percentage and ``symbol`` is required.
+        Read-only: it never changes the interval or places orders.
 
     The authoritative account state is resolved from the latest
     ``StrategyConfig`` symbol, then that symbol's ``RuntimeState`` row; if no
@@ -3164,6 +3172,7 @@ class AlertRuleCreate(BaseModel):
         "daily_loss",
         "consecutive_losses",
         "kill_switch_engaged",
+        "interval_stale",
     ]
     threshold: float = Field(allow_inf_nan=False)
     severity: Literal["INFO", "WARNING", "CRITICAL"] = "WARNING"
@@ -3187,6 +3196,13 @@ class AlertRuleCreate(BaseModel):
             # never satisfy ``value >= threshold`` and accidentally fire.
             if self.threshold != 1.0:
                 raise ValueError("kill_switch_engaged threshold must be exactly 1.0")
+        if self.rule_type == "interval_stale":
+            # The projected value is 0.0 while price sits inside the interval,
+            # so a zero or negative threshold would fire on a healthy interval.
+            if self.threshold <= 0:
+                raise ValueError(
+                    "interval_stale threshold must be a positive deviation percentage"
+                )
         return self
 
     @model_validator(mode="after")
@@ -3202,6 +3218,11 @@ class AlertRuleCreate(BaseModel):
                 raise ValueError(
                     f"{self.rule_type} is account-wide-only; symbol must be blank"
                 )
+        # interval_stale resolves both a live quote and that symbol's
+        # StrategyConfig interval. A blank symbol would silently never fire
+        # (no quote key, no config row), so require an explicit symbol.
+        if self.rule_type == "interval_stale" and not self.symbol.strip():
+            raise ValueError("interval_stale requires an explicit symbol")
         return self
 
 
@@ -4334,6 +4355,42 @@ class UniversePromotionReadinessItem(BaseModel):
     review_ready: bool
     mature_evidence: bool
     automatic_promotion_allowed: Literal[False] = False
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class RangeFitnessItem(BaseModel):
+    symbol: str = Field(min_length=1, max_length=50)
+    is_primary: bool = False
+    samples: int = Field(ge=0)
+    trend_blocked: int = Field(ge=0)
+    trend_blocked_pct: float = Field(ge=0, le=100, allow_inf_nan=False)
+    gate_passed: int = Field(ge=0)
+    gate_passed_pct: float = Field(ge=0, le=100, allow_inf_nan=False)
+    avg_adx_5m: Optional[float] = Field(default=None, allow_inf_nan=False)
+    verdict: Literal[
+        "INSUFFICIENT_DATA",
+        "TREND_UNSUITABLE",
+        "MIXED",
+        "RANGE_SUITABLE",
+    ]
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class RangeFitnessResponse(BaseModel):
+    """Read-only range-strategy fitness per shadow-observed symbol.
+
+    Derived from existing Strategy v2 shadow evidence; it never promotes a
+    symbol, changes the interval, or places an order.
+    """
+
+    generated_at: datetime
+    lookback_days: int = Field(ge=1, le=30)
+    min_samples: int = Field(ge=1)
+    trend_unsuitable_pct: float = Field(ge=0, le=100, allow_inf_nan=False)
+    range_suitable_pct: float = Field(ge=0, le=100, allow_inf_nan=False)
+    items: list[RangeFitnessItem] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="forbid")
 
