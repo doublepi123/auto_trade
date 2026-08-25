@@ -264,3 +264,36 @@ def test_backend_image_includes_index_membership_snapshot() -> None:
     assert "COPY --chown=appuser:appuser app/ ./app/" in dockerfile
     assert "chmod -R a+rX /app" in dockerfile
     assert snapshot.is_file()
+
+
+def test_docker_compose_passes_auto_primary_switch_settings() -> None:
+    """A settings flag absent from compose is silently ignored at runtime.
+
+    The switch was first deployed with the flag set in .env but missing here,
+    so the container kept the default and never evaluated a switch.
+    """
+    compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+    dockerhub_compose = (
+        ROOT / "docker-compose.dockerhub.yaml"
+    ).read_text(encoding="utf-8")
+
+    keys = (
+        "AUTO_TRADE_AUTO_PRIMARY_SWITCH_ENABLED=",
+        "AUTO_TRADE_AUTO_PRIMARY_SWITCH_INTERVAL_MINUTES=",
+        "AUTO_TRADE_AUTO_PRIMARY_SWITCH_LOOKBACK_DAYS=",
+        "AUTO_TRADE_AUTO_PRIMARY_SWITCH_MIN_SAMPLES=",
+        "AUTO_TRADE_AUTO_PRIMARY_SWITCH_INCUMBENT_TREND_PCT=",
+        "AUTO_TRADE_AUTO_PRIMARY_SWITCH_CANDIDATE_TREND_PCT=",
+    )
+    for key in keys:
+        assert key in compose, key
+        assert key in dockerhub_compose, key
+
+
+def test_auto_primary_switch_defaults_to_disabled_in_compose() -> None:
+    compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+
+    assert (
+        "AUTO_TRADE_AUTO_PRIMARY_SWITCH_ENABLED="
+        "${AUTO_TRADE_AUTO_PRIMARY_SWITCH_ENABLED:-false}"
+    ) in compose
