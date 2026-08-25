@@ -106,7 +106,7 @@ flowchart LR
 ### 策略复盘与观察列表
 
 - **复盘**（`/#/review`，`GET /api/review`）：按交易日 × 标的聚合订单、事件、运行时快照与 LLM 交互；支持导出
-- **观察列表**（`/#/watchlist`）：多标的行情与量化评分；动态候选池结果可同步为只读 watchlist，**不会自动切换主交易标的**
+- **观察列表**（`/#/watchlist`）：多标的行情与量化评分；动态候选池结果可同步为只读 watchlist，**默认不会自动切换主交易标的**（仅在显式开启 `AUTO_TRADE_AUTO_PRIMARY_SWITCH_ENABLED` 后才会，见下）
 - **交易报告**（`/#/reports`）：区间报告与定时日报（可选推送）
 - **告警 / 通知中心**：条件告警规则 + 已发送通知分发日志
 
@@ -821,6 +821,12 @@ auto_trade/
 | `AUTO_TRADE_UNIVERSE_SELECTION_EXPLORATION_MAX_SYMBOLS` | 先补足已入选风险组的残差基准同伴（可使用仅成交额处于实盘门槛 75%-100% 的 peer-only 标的），再保留冻结轮动与最高分新挑战者，剩余容量用于细行业和长期观察；自动新增或重新启用的标的仅观察、不会获得开仓资格，已启用的开仓池独立保留且不占探索配额，`0` 表示关闭 | `24` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_EXPLORATION_TOP_SCORE_CHALLENGERS` | 同伴与轮动覆盖完成后、长期观察标的占用容量前，优先保留的最高分硬门槛通过者数量；只收集前向证据，不会正式入选、切换主标的或下单 | `2` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_MAX_PER_SECTOR` | 每行业最多入选标的数 | `2` |
+| `AUTO_TRADE_AUTO_PRIMARY_SWITCH_ENABLED` | **刻意放宽既有约定**：允许按 range-fitness 适配度证据自动更换主交易标的。仅凭适配度晋级，**不要求** promotion-readiness 的前向盈亏证据；候选必须来自最近一次完成的候选池运行且标记 `selected`，切换必须通过 `assert_primary_switch_safe`（持仓/挂单/在途触发/未决对账/非 FLAT 一律拒绝），并按候选最新收盘价重设区间。要求 `UNIVERSE_SELECTION_ENABLED` 与 `UNIVERSE_SELECTION_ENABLE_SHADOW` | `false` |
+| `AUTO_TRADE_AUTO_PRIMARY_SWITCH_INTERVAL_MINUTES` | 自动换标的评估周期（分钟） | `60` |
+| `AUTO_TRADE_AUTO_PRIMARY_SWITCH_LOOKBACK_DAYS` | 适配度证据回看天数 | `3` |
+| `AUTO_TRADE_AUTO_PRIMARY_SWITCH_MIN_SAMPLES` | 在任与候选各自要求的最少证据条数 | `60` |
+| `AUTO_TRADE_AUTO_PRIMARY_SWITCH_INCUMBENT_TREND_PCT` | 在任标的趋势占比达此阈值才考虑更换 | `60` |
+| `AUTO_TRADE_AUTO_PRIMARY_SWITCH_CANDIDATE_TREND_PCT` | 候选标的趋势占比上限；必须严格小于在任阈值以防来回抖动 | `30` |
 | `AUTO_TRADE_LIVE_REGIME_GATE_ENABLED` | live 开仓前要求当前主标的最新 Strategy v2 shadow 门禁通过；减仓不受影响 | `false` |
 | `AUTO_TRADE_LIVE_REGIME_MAX_DATA_AGE_SECONDS` | live regime 证据最大允许延迟（秒） | `600` |
 | `AUTO_TRADE_LIVE_MAX_ENTRIES_PER_SYMBOL_PER_DAY` | 每标的、每交易日最大开仓次数；`0` 关闭此限制 | `1` |

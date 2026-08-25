@@ -4374,6 +4374,11 @@ class RangeFitnessItem(BaseModel):
         "MIXED",
         "RANGE_SUITABLE",
     ]
+    last_close_price: Optional[float] = Field(
+        default=None,
+        gt=0,
+        allow_inf_nan=False,
+    )
 
     model_config = ConfigDict(extra="forbid")
 

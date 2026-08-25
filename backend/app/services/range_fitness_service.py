@@ -39,6 +39,7 @@ class RangeFitnessRow:
     gate_passed_pct: float
     avg_adx_5m: float | None
     verdict: str
+    last_close_price: float | None = None
 
 
 class RangeFitnessService:
@@ -70,12 +71,15 @@ class RangeFitnessService:
                 StrategyV2ShadowDecision.gate_passed,
                 StrategyV2ShadowDecision.gate_reasons_json,
                 StrategyV2ShadowDecision.adx_5m,
+                StrategyV2ShadowDecision.bar_at,
+                StrategyV2ShadowDecision.close_price,
             ).where(StrategyV2ShadowDecision.bar_at >= cutoff)
         ).all()
 
         primary = self._primary_symbol()
         stats: dict[str, dict[str, float]] = {}
-        for symbol, gate_passed, reasons_json, adx_5m in rows:
+        latest_close: dict[str, tuple[datetime, float]] = {}
+        for symbol, gate_passed, reasons_json, adx_5m, bar_at, close_price in rows:
             key = str(symbol or "")
             if not key:
                 continue
@@ -91,6 +95,10 @@ class RangeFitnessService:
             if adx_5m is not None:
                 bucket["adx_sum"] += float(adx_5m)
                 bucket["adx_n"] += 1
+            if close_price is not None and float(close_price) > 0 and bar_at is not None:
+                current = latest_close.get(key)
+                if current is None or bar_at > current[0]:
+                    latest_close[key] = (bar_at, float(close_price))
 
         out: list[RangeFitnessRow] = []
         for symbol, bucket in stats.items():
@@ -117,6 +125,9 @@ class RangeFitnessService:
                     min_samples=min_samples,
                     trend_unsuitable_pct=trend_unsuitable_pct,
                     range_suitable_pct=range_suitable_pct,
+                ),
+                last_close_price=(
+                    latest_close[symbol][1] if symbol in latest_close else None
                 ),
             ))
 

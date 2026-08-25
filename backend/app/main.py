@@ -189,6 +189,7 @@ _CRON_LLM_STORAGE_MAINTENANCE = "llm_storage_maintenance"
 _CRON_STRATEGY_V2_SHADOW = "strategy_v2_shadow"
 _CRON_OPENING_MOMENTUM_SHADOW = "opening_momentum_shadow"
 _CRON_UNIVERSE_SELECTION = "universe_selection"
+_CRON_AUTO_PRIMARY_SWITCH = "auto_primary_switch"
 _CRON_WATCHLIST_QUANT = "watchlist_quant"
 _CRON_WATCHLIST_QUANT_V6_EVALUATION = "watchlist_quant_v6_evaluation"
 _CRON_WS_CLEANUP = "ws_cleanup"
@@ -243,6 +244,13 @@ def _register_cron_health_jobs() -> None:
                 settings.universe_selection_interval_minutes * 60
             ),
             enabled_provider=lambda: bool(settings.universe_selection_enabled),
+        )
+        service.register(
+            _CRON_AUTO_PRIMARY_SWITCH,
+            expected_interval_seconds=float(
+                settings.auto_primary_switch_interval_minutes * 60
+            ),
+            enabled_provider=lambda: bool(settings.auto_primary_switch_enabled),
         )
         service.register(
             _CRON_WATCHLIST_QUANT,
@@ -1923,6 +1931,76 @@ async def _universe_selection_cron() -> None:
         await asyncio.sleep(delay_seconds)
 
 
+_AUTO_PRIMARY_SWITCH_LEASE_KEY = "auto_primary_switch"
+
+
+def _auto_primary_switch_tick_sync() -> object | None:
+    """Evaluate one automatic primary-symbol switch under a durable lease.
+
+    The lease matters more here than for observational jobs: this tick can
+    change the live trading symbol, so two processes evaluating concurrently
+    could switch twice off one signal.
+    """
+    if not settings.auto_primary_switch_enabled:
+        return None
+    from app.runner import get_runner
+    from app.services.auto_primary_switch_service import (
+        AutoPrimarySwitchService,
+        OUTCOME_SWITCHED,
+    )
+    from app.services.durable_job_lease_service import DurableJobLeaseService
+
+    lease_service = DurableJobLeaseService(
+        session_factory=SessionLocal,
+        default_ttl_seconds=settings.job_lease_ttl_seconds,
+    )
+    lease = lease_service.try_acquire(_AUTO_PRIMARY_SWITCH_LEASE_KEY)
+    if lease is None:
+        return _JOB_LEASE_BUSY_DEFERRED
+
+    with lease_service.keepalive(
+        lease,
+        interval_seconds=settings.job_lease_heartbeat_seconds,
+    ):
+        db = SessionLocal()
+        try:
+            result = AutoPrimarySwitchService(db).evaluate(get_runner())
+        finally:
+            db.close()
+    if result.outcome == OUTCOME_SWITCHED:
+        logger.warning(
+            "automatic primary switch applied: %s -> %s",
+            result.incumbent,
+            result.candidate,
+        )
+    else:
+        logger.debug("automatic primary switch outcome: %s", result.outcome)
+    return None
+
+
+async def _auto_primary_switch_cron() -> None:
+    if not settings.auto_primary_switch_enabled:
+        return
+    await asyncio.sleep(60)
+    while True:
+        deferred = False
+        try:
+            outcome = await asyncio.to_thread(_auto_primary_switch_tick_sync)
+            deferred = outcome is _JOB_LEASE_BUSY_DEFERRED
+            _cron_record_success(_CRON_AUTO_PRIMARY_SWITCH)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("automatic primary switch cron failed")
+            _cron_record_failure(_CRON_AUTO_PRIMARY_SWITCH, sys.exc_info()[1])  # type: ignore[arg-type]
+        delay_seconds = (
+            _JOB_LEASE_RETRY_SECONDS
+            if deferred
+            else settings.auto_primary_switch_interval_minutes * 60
+        )
+        await asyncio.sleep(delay_seconds)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     from app.api.deps import init_audit_logger
@@ -2001,6 +2079,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(_strategy_v2_shadow_cron()),
         asyncio.create_task(_opening_momentum_shadow_cron()),
         asyncio.create_task(_universe_selection_cron()),
+        asyncio.create_task(_auto_primary_switch_cron()),
         asyncio.create_task(_watchlist_quant_cron()),
         asyncio.create_task(_watchlist_quant_v6_evaluation_cron()),
     )

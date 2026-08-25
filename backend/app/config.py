@@ -690,6 +690,42 @@ class Settings(BaseSettings):
         allow_inf_nan=False,
         validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_MAX_ATR_PCT",
     )
+    auto_primary_switch_enabled: bool = Field(
+        default=False,
+        validation_alias="AUTO_TRADE_AUTO_PRIMARY_SWITCH_ENABLED",
+    )
+    auto_primary_switch_interval_minutes: int = Field(
+        default=60,
+        ge=5,
+        le=10080,
+        validation_alias="AUTO_TRADE_AUTO_PRIMARY_SWITCH_INTERVAL_MINUTES",
+    )
+    auto_primary_switch_lookback_days: int = Field(
+        default=3,
+        ge=1,
+        le=30,
+        validation_alias="AUTO_TRADE_AUTO_PRIMARY_SWITCH_LOOKBACK_DAYS",
+    )
+    auto_primary_switch_min_samples: int = Field(
+        default=60,
+        ge=1,
+        le=100000,
+        validation_alias="AUTO_TRADE_AUTO_PRIMARY_SWITCH_MIN_SAMPLES",
+    )
+    auto_primary_switch_incumbent_trend_pct: float = Field(
+        default=60.0,
+        ge=0,
+        le=100,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_AUTO_PRIMARY_SWITCH_INCUMBENT_TREND_PCT",
+    )
+    auto_primary_switch_candidate_trend_pct: float = Field(
+        default=30.0,
+        ge=0,
+        le=100,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_AUTO_PRIMARY_SWITCH_CANDIDATE_TREND_PCT",
+    )
     live_regime_gate_enabled: bool = Field(
         default=False,
         validation_alias="AUTO_TRADE_LIVE_REGIME_GATE_ENABLED",
@@ -833,6 +869,30 @@ class Settings(BaseSettings):
             raise ValueError(
                 "universe selection shadow requires watchlist application"
             )
+        if self.auto_primary_switch_enabled:
+            # The switch reads Strategy v2 shadow evidence for both the
+            # incumbent and the candidate, and only accepts candidates the
+            # selection run already approved.
+            if not self.universe_selection_enabled:
+                raise ValueError(
+                    "automatic primary switching requires universe selection"
+                )
+            if not self.universe_selection_enable_shadow:
+                raise ValueError(
+                    "automatic primary switching requires universe selection "
+                    "shadow evidence"
+                )
+            # Equal thresholds would let a symbol qualify as both a failing
+            # incumbent and an acceptable candidate, which flip-flops the live
+            # primary symbol every cycle.
+            if (
+                self.auto_primary_switch_candidate_trend_pct
+                >= self.auto_primary_switch_incumbent_trend_pct
+            ):
+                raise ValueError(
+                    "automatic primary switching requires the candidate trend "
+                    "ceiling to be below the incumbent trend threshold"
+                )
         if (
             self.opening_momentum_shadow_enabled
             and not self.universe_selection_enabled

@@ -557,6 +557,7 @@ class TestMainRegistersCronJobs:
             main_module._CRON_STRATEGY_V2_SHADOW,
             main_module._CRON_OPENING_MOMENTUM_SHADOW,
             main_module._CRON_UNIVERSE_SELECTION,
+            main_module._CRON_AUTO_PRIMARY_SWITCH,
             main_module._CRON_WATCHLIST_QUANT,
             main_module._CRON_WATCHLIST_QUANT_V6_EVALUATION,
             main_module._CRON_WS_CLEANUP,
@@ -656,7 +657,7 @@ class TestRepeatedLifecycleIsolation:
         from app import main as main_module
 
         main_module._register_cron_health_jobs()
-        assert len(s1.snapshot()) == 10
+        assert len(s1.snapshot()) == 11
         # Reset to None (simulating teardown).
         set_cron_health_service(None)
         # Second lifecycle with a fresh service.
@@ -664,7 +665,7 @@ class TestRepeatedLifecycleIsolation:
         set_cron_health_service(s2)
         main_module._register_cron_health_jobs()
         # s2 must have exactly 10 jobs (not contaminated by s1, not empty).
-        assert len(s2.snapshot()) == 10
+        assert len(s2.snapshot()) == 11
         names = {row.name for row in s2.snapshot()}
         assert names == {row.name for row in s1.snapshot()}
         set_cron_health_service(None)

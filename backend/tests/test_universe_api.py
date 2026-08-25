@@ -528,6 +528,20 @@ def test_range_fitness_endpoint_reports_trend_unsuitable_symbol() -> None:
         assert item["verdict"] == "TREND_UNSUITABLE"
         assert item["is_primary"] is True
         assert item["trend_blocked"] == 80
+        # Guards against a service field the response schema forgot to expose,
+        # which surfaces as a 500 rather than a missing key.
+        assert set(item) == {
+            "symbol",
+            "is_primary",
+            "samples",
+            "trend_blocked",
+            "trend_blocked_pct",
+            "gate_passed",
+            "gate_passed_pct",
+            "avg_adx_5m",
+            "verdict",
+            "last_close_price",
+        }
 
         # Read-only contract: the interval must be untouched.
         config = db.query(StrategyConfig).one()
