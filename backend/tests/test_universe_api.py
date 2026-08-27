@@ -538,10 +538,13 @@ def test_range_fitness_endpoint_reports_trend_unsuitable_symbol() -> None:
             "trend_blocked_pct",
             "gate_passed",
             "gate_passed_pct",
-            "avg_adx_5m",
-            "verdict",
-            "last_close_price",
-        }
+                "avg_adx_5m",
+                "verdict",
+                "last_close_price",
+                "closed_trades",
+                "reach_count",
+                "reach_rate_pct",
+            }
 
         # Read-only contract: the interval must be untouched.
         config = db.query(StrategyConfig).one()

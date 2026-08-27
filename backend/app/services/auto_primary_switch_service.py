@@ -32,6 +32,7 @@ from app.models import (
     UniverseSelectionRun,
 )
 from app.services.range_fitness_service import (
+    RangeFitnessRow,
     RangeFitnessService,
     VERDICT_RANGE_SUITABLE,
 )
@@ -112,6 +113,15 @@ class AutoPrimarySwitchService:
             # never trigger — a switch into an immediately dead interval.
             if row.last_close_price is None or row.last_close_price <= 0:
                 continue
+            # Reach-rate gate. A low ADX trend share only says price is not
+            # trending; it does not say the swings are big enough to clear the
+            # round-trip cost. Measured over 247 closed shadow trades, reach-rate
+            # separated winners from losers with no exceptions (85% vs 22%) while
+            # trend share ranked them barely better than chance -- its top-ranked
+            # symbol was a net loser. Require BOTH so a quiet-but-too-tight
+            # symbol can never be promoted on trend share alone.
+            if not self._reach_rate_ok(row):
+                continue
             if best is None or row.trend_blocked_pct < best.trend_blocked_pct:
                 best = row
         if best is None:
@@ -119,7 +129,10 @@ class AutoPrimarySwitchService:
                 OUTCOME_NO_ELIGIBLE_CANDIDATE,
                 incumbent=incumbent,
                 incumbent_trend_pct=incumbent_row.trend_blocked_pct,
-                detail="no selected candidate is range-suitable",
+                detail=(
+                    "no selected candidate is range-suitable with sufficient "
+                    "reach evidence"
+                ),
             )
 
         market = eligible[best.symbol]
@@ -244,6 +257,21 @@ class AutoPrimarySwitchService:
                     exc_info=True,
                 )
             raise
+
+    @staticmethod
+    def _reach_rate_ok(row: RangeFitnessRow) -> bool:
+        """Require measured reach evidence at or above the configured floor.
+
+        A symbol with no closed shadow trades yet has ``reach_rate_pct is None``
+        and is rejected: promoting on absent evidence is what made trend share
+        alone unsafe. The closed-trade floor keeps a single lucky trade from
+        reading as a 100% reach-rate.
+        """
+        if row.reach_rate_pct is None:
+            return False
+        if row.closed_trades < settings.auto_primary_switch_min_closed_trades:
+            return False
+        return row.reach_rate_pct >= settings.auto_primary_switch_min_reach_rate_pct
 
     def _eligible_candidates(self) -> dict[str, str]:
         run = self._db.scalar(

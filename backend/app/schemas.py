@@ -4379,6 +4379,17 @@ class RangeFitnessItem(BaseModel):
         gt=0,
         allow_inf_nan=False,
     )
+    closed_trades: int = Field(default=0, ge=0)
+    reach_count: int = Field(default=0, ge=0)
+    # None means "no closed trades in the window", which is distinct from a
+    # measured 0% reach-rate; the switch gate rejects both but a reader must be
+    # able to tell absent evidence from negative evidence.
+    reach_rate_pct: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=100,
+        allow_inf_nan=False,
+    )
 
     model_config = ConfigDict(extra="forbid")
 

@@ -19,6 +19,7 @@ from app.models import (
     Base,
     StrategyConfig,
     StrategyV2ShadowDecision,
+    StrategyV2ShadowTrade,
     UniverseSelectionCandidate,
     UniverseSelectionRun,
 )
@@ -61,6 +62,7 @@ class _Base:
     def setup_method(self) -> None:
         db = Session(bind=self.engine)
         db.query(StrategyV2ShadowDecision).delete()
+        db.query(StrategyV2ShadowTrade).delete()
         db.query(UniverseSelectionCandidate).delete()
         db.query(UniverseSelectionRun).delete()
         db.query(StrategyConfig).delete()
@@ -107,6 +109,34 @@ class _Base:
                     adx_5m=30.0,
                     close_price=close_price,
                 ))
+        db.commit()
+        db.close()
+
+    def _reach(
+        self,
+        symbol: str,
+        *,
+        closed: int,
+        reached: int,
+    ) -> None:
+        """Seed closed shadow trades so the reach-rate gate has evidence.
+
+        The gate rejects candidates without measured reach evidence, so any test
+        that expects a switch must supply it explicitly.
+        """
+        db = self._db()
+        now = datetime.now(timezone.utc)
+        for i in range(closed):
+            db.add(StrategyV2ShadowTrade(
+                symbol=symbol,
+                config_version="v1",
+                status="CLOSED",
+                entry_at=now - timedelta(minutes=30 + i),
+                exit_at=now - timedelta(minutes=i),
+                entry_price=100.0,
+                quantity=1.0,
+                mfe_pct=0.009 if i < reached else 0.0005,
+            ))
         db.commit()
         db.close()
 
@@ -186,6 +216,8 @@ class TestAutoPrimarySwitch(_Base):
         self._primary("NVDA.US")
         self._evidence("NVDA.US", trend_bars=70, calm_bars=10)
         self._selection_run(["AAPL.US", "CSCO.US"])
+        self._reach("AAPL.US", closed=6, reached=5)
+        self._reach("CSCO.US", closed=6, reached=5)
         self._evidence("AAPL.US", trend_bars=8, calm_bars=72)
         self._evidence("CSCO.US", trend_bars=0, calm_bars=80)
 
@@ -232,6 +264,7 @@ class TestAutoPrimarySwitch(_Base):
         self._evidence("NVDA.US", trend_bars=70, calm_bars=10)
         self._selection_run(["AAPL.US"])
         self._evidence("AAPL.US", trend_bars=0, calm_bars=80)
+        self._reach("AAPL.US", closed=6, reached=5)
 
         runner = _Runner(block=RuntimeError("positions are tracked"))
         result = AutoPrimarySwitchService(self._db()).evaluate(runner)
@@ -261,6 +294,7 @@ class TestAutoPrimarySwitch(_Base):
         self._evidence("NVDA.US", trend_bars=70, calm_bars=10, close_price=210.0)
         self._selection_run(["CSCO.US"])
         self._evidence("CSCO.US", trend_bars=0, calm_bars=80, close_price=111.0)
+        self._reach("CSCO.US", closed=6, reached=5)
 
         result = AutoPrimarySwitchService(self._db()).evaluate(_Runner())
         assert result.outcome == OUTCOME_SWITCHED
@@ -322,3 +356,81 @@ class TestAutoPrimarySwitchConfigGuards:
             raise AssertionError("missing universe selection must be rejected")
         except ValueError:
             pass
+
+
+class TestReachRateGate(_Base):
+    """The reach-rate gate: a candidate must prove its swings clear costs.
+
+    A low ADX trend share only says price is not trending; it does not say the
+    moves are large enough to pay the round-trip cost. Across 247 closed shadow
+    trades, reach-rate separated winners from losers with no exceptions
+    (85% vs 22%) while trend share ranked them barely better than chance -- its
+    top-ranked symbol, GS.US at 0.0% trend, was a net loser. Both are required.
+    """
+
+    def _calm_candidate(self, symbol: str, *, close_price: float = 111.0) -> None:
+        self._primary("NVDA.US")
+        self._evidence("NVDA.US", trend_bars=70, calm_bars=10)
+        self._selection_run([symbol])
+        self._evidence(symbol, trend_bars=0, calm_bars=80, close_price=close_price)
+
+    def test_calm_candidate_without_reach_evidence_is_rejected(self) -> None:
+        """This is the GS.US case: perfect trend share, no proven reach."""
+        self._calm_candidate("GS.US")
+
+        result = AutoPrimarySwitchService(self._db()).evaluate(_Runner())
+
+        assert result.outcome == OUTCOME_NO_ELIGIBLE_CANDIDATE
+        assert "reach" in result.detail
+
+    def test_calm_candidate_with_low_reach_rate_is_rejected(self) -> None:
+        self._calm_candidate("ASML.US")
+        # 2/8 == 25%, near the measured 22% loser average.
+        self._reach("ASML.US", closed=8, reached=2)
+
+        result = AutoPrimarySwitchService(self._db()).evaluate(_Runner())
+
+        assert result.outcome == OUTCOME_NO_ELIGIBLE_CANDIDATE
+
+    def test_calm_candidate_with_high_reach_rate_is_promoted(self) -> None:
+        self._calm_candidate("TER.US")
+        # 7/9 == 77.8%, near the measured 85% winner average.
+        self._reach("TER.US", closed=9, reached=7)
+
+        result = AutoPrimarySwitchService(self._db()).evaluate(_Runner())
+
+        assert result.outcome == OUTCOME_SWITCHED
+        assert result.candidate == "TER.US"
+
+    def test_high_reach_rate_on_too_few_trades_is_rejected(self) -> None:
+        """One lucky trade reads as 100%; the closed-trade floor blocks it."""
+        self._calm_candidate("STX.US")
+        self._reach("STX.US", closed=2, reached=2)
+
+        result = AutoPrimarySwitchService(self._db()).evaluate(_Runner())
+
+        assert result.outcome == OUTCOME_NO_ELIGIBLE_CANDIDATE
+
+    def test_reach_rate_at_the_floor_is_inclusive(self) -> None:
+        self._calm_candidate("MU.US")
+        # 3/5 == 60.0%, exactly the configured floor.
+        self._reach("MU.US", closed=5, reached=3)
+
+        result = AutoPrimarySwitchService(self._db()).evaluate(_Runner())
+
+        assert result.outcome == OUTCOME_SWITCHED
+
+    def test_trend_share_cannot_outvote_reach_rate(self) -> None:
+        """A calmer symbol must not win if it lacks reach evidence."""
+        self._primary("NVDA.US")
+        self._evidence("NVDA.US", trend_bars=70, calm_bars=10)
+        self._selection_run(["GS.US", "TER.US"])
+        # GS looks better on trend share (0 trend bars vs 8) but has no reach.
+        self._evidence("GS.US", trend_bars=0, calm_bars=80, close_price=1055.0)
+        self._evidence("TER.US", trend_bars=8, calm_bars=72, close_price=180.0)
+        self._reach("TER.US", closed=9, reached=7)
+
+        result = AutoPrimarySwitchService(self._db()).evaluate(_Runner())
+
+        assert result.outcome == OUTCOME_SWITCHED
+        assert result.candidate == "TER.US"

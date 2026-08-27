@@ -726,6 +726,28 @@ class Settings(BaseSettings):
         allow_inf_nan=False,
         validation_alias="AUTO_TRADE_AUTO_PRIMARY_SWITCH_CANDIDATE_TREND_PCT",
     )
+    auto_primary_switch_min_reach_rate_pct: float = Field(
+        default=60.0,
+        ge=0,
+        le=100,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_AUTO_PRIMARY_SWITCH_MIN_REACH_RATE_PCT",
+        description=(
+            "Minimum share of closed shadow trades whose peak favourable "
+            "excursion reached the reach threshold. Measured winners averaged "
+            "85% and losers 22%, so the default sits between them."
+        ),
+    )
+    auto_primary_switch_min_closed_trades: int = Field(
+        default=5,
+        ge=1,
+        le=1000,
+        validation_alias="AUTO_TRADE_AUTO_PRIMARY_SWITCH_MIN_CLOSED_TRADES",
+        description=(
+            "Minimum closed shadow trades before a reach-rate counts as "
+            "evidence. Matches the repo's existing 5-trade first-pass bar."
+        ),
+    )
     live_regime_gate_enabled: bool = Field(
         default=False,
         validation_alias="AUTO_TRADE_LIVE_REGIME_GATE_ENABLED",

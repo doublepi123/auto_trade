@@ -284,6 +284,8 @@ def test_docker_compose_passes_auto_primary_switch_settings() -> None:
         "AUTO_TRADE_AUTO_PRIMARY_SWITCH_MIN_SAMPLES=",
         "AUTO_TRADE_AUTO_PRIMARY_SWITCH_INCUMBENT_TREND_PCT=",
         "AUTO_TRADE_AUTO_PRIMARY_SWITCH_CANDIDATE_TREND_PCT=",
+        "AUTO_TRADE_AUTO_PRIMARY_SWITCH_MIN_REACH_RATE_PCT=",
+        "AUTO_TRADE_AUTO_PRIMARY_SWITCH_MIN_CLOSED_TRADES=",
     )
     for key in keys:
         assert key in compose, key

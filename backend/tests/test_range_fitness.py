@@ -13,7 +13,12 @@ os.environ["AUTO_TRADE_DATABASE_URL"] = (
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.models import Base, StrategyConfig, StrategyV2ShadowDecision
+from app.models import (
+    Base,
+    StrategyConfig,
+    StrategyV2ShadowDecision,
+    StrategyV2ShadowTrade,
+)
 from app.services.range_fitness_service import (
     RangeFitnessService,
     VERDICT_INSUFFICIENT_DATA,
@@ -208,5 +213,105 @@ class TestRangeFitnessValidation(_Base):
         db = self._db()
         try:
             assert db.query(StrategyV2ShadowDecision).count() == 70
+        finally:
+            db.close()
+
+
+class TestReachRate(_Base):
+    """Reach-rate: share of closed shadow trades whose peak favourable
+    excursion cleared the round-trip cost with margin.
+
+    Measured across 247 closed trades, this separated profitable symbols from
+    unprofitable ones with no exceptions (85% vs 22%) while the ADX trend share
+    ranked them barely better than chance, so the switch gate requires both.
+    """
+
+    def setup_method(self) -> None:
+        super().setup_method()
+        db = self._db()
+        db.query(StrategyV2ShadowTrade).delete()
+        db.commit()
+        db.close()
+
+    def _trade(
+        self,
+        symbol: str,
+        *,
+        mfe_pct: float | None,
+        status: str = "CLOSED",
+        age_days: float = 0.0,
+        seq: int = 0,
+    ) -> None:
+        db = self._db()
+        exit_at = datetime.now(timezone.utc) - timedelta(days=age_days)
+        db.add(StrategyV2ShadowTrade(
+            symbol=symbol,
+            config_version="v1",
+            status=status,
+            entry_at=exit_at - timedelta(minutes=30),
+            exit_at=None if status == "OPEN" else exit_at,
+            entry_price=100.0,
+            quantity=1.0,
+            mfe_pct=mfe_pct,
+        ))
+        db.commit()
+        db.close()
+
+    def test_reach_rate_counts_only_trades_clearing_the_threshold(self) -> None:
+        self._seed("TER.US", trend_bars=10, other_bars=50)
+        for i, mfe in enumerate((0.009, 0.006, 0.004, 0.0039, 0.001)):
+            self._trade("TER.US", mfe_pct=mfe, seq=i)
+        row = self._row("TER.US", min_samples=60)
+        # 0.004 is inclusive; 0.0039 and 0.001 fall short.
+        assert row.closed_trades == 5
+        assert row.reach_count == 3
+        assert row.reach_rate_pct == 60.0
+
+    def test_open_trades_are_excluded(self) -> None:
+        self._seed("APP.US", trend_bars=10, other_bars=50)
+        self._trade("APP.US", mfe_pct=0.009, seq=0)
+        self._trade("APP.US", mfe_pct=0.0, status="OPEN", seq=1)
+        row = self._row("APP.US", min_samples=60)
+        assert row.closed_trades == 1
+        assert row.reach_rate_pct == 100.0
+
+    def test_missing_mfe_is_not_counted_as_a_miss(self) -> None:
+        """A backfill gap must not fabricate an unreachable symbol."""
+        self._seed("MU.US", trend_bars=10, other_bars=50)
+        self._trade("MU.US", mfe_pct=0.009, seq=0)
+        self._trade("MU.US", mfe_pct=None, seq=1)
+        row = self._row("MU.US", min_samples=60)
+        assert row.closed_trades == 1
+        assert row.reach_rate_pct == 100.0
+
+    def test_trades_outside_the_window_are_ignored(self) -> None:
+        self._seed("GS.US", trend_bars=10, other_bars=50)
+        self._trade("GS.US", mfe_pct=0.009, age_days=10.0, seq=0)
+        row = self._row("GS.US", min_samples=60, lookback_days=3)
+        assert row.closed_trades == 0
+        assert row.reach_rate_pct is None
+
+    def test_no_closed_trades_reports_none_not_zero(self) -> None:
+        """None (absent evidence) must stay distinguishable from 0% (measured)."""
+        self._seed("CAT.US", trend_bars=10, other_bars=50)
+        row = self._row("CAT.US", min_samples=60)
+        assert row.closed_trades == 0
+        assert row.reach_count == 0
+        assert row.reach_rate_pct is None
+
+    def test_measured_zero_reach_rate_is_zero_not_none(self) -> None:
+        self._seed("ASML.US", trend_bars=10, other_bars=50)
+        self._trade("ASML.US", mfe_pct=0.001, seq=0)
+        row = self._row("ASML.US", min_samples=60)
+        assert row.closed_trades == 1
+        assert row.reach_rate_pct == 0.0
+
+    def test_reach_rate_does_not_mutate_trades(self) -> None:
+        self._seed("NVDA.US", trend_bars=70)
+        self._trade("NVDA.US", mfe_pct=0.009, seq=0)
+        RangeFitnessService(self._db()).assess(min_samples=60)
+        db = self._db()
+        try:
+            assert db.query(StrategyV2ShadowTrade).count() == 1
         finally:
             db.close()
