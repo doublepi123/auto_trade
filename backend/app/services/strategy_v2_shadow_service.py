@@ -299,7 +299,6 @@ class StrategyV2ShadowService:
         cutoff = (now or datetime.now(timezone.utc)) - timedelta(
             days=retention_days
         )
-        protected_sessions = self._forward_sessions_requiring_replay_source()
         expired = (
             StrategyV2ShadowDecision.action == StrategyV2Action.WAIT.value,
             StrategyV2ShadowDecision.bar_at < cutoff,
@@ -342,6 +341,19 @@ class StrategyV2ShadowService:
                 if not rows:
                     exhausted = True
                     break
+                candidate_sessions = {
+                    (
+                        str(row.symbol),
+                        str(row.config_version),
+                        row.session_date,
+                    )
+                    for row in rows
+                }
+                protected_sessions = (
+                    self._forward_sessions_requiring_replay_source(
+                        candidate_sessions=candidate_sessions,
+                    )
+                )
                 for row in rows:
                     cursor_id = int(row.id)
                     cursor_bar_at = _as_utc(row.bar_at)
@@ -367,9 +379,8 @@ class StrategyV2ShadowService:
                     # A forward registration may have appeared after the
                     # pre-fence scan. Revalidate protection while holding the
                     # writer lock before deleting immutable replay sources.
-                    protected_sessions = (
-                        self._forward_sessions_requiring_replay_source()
-                    )
+                    # Scope the expensive artifact validation to this batch so
+                    # unrelated evidence cannot extend the SQLite write lock.
                     candidates = (
                         self.db.query(
                             StrategyV2ShadowDecision.id,
@@ -382,6 +393,19 @@ class StrategyV2ShadowService:
                             *expired,
                         )
                         .all()
+                    )
+                    candidate_sessions = {
+                        (
+                            str(row.symbol),
+                            str(row.config_version),
+                            row.session_date,
+                        )
+                        for row in candidates
+                    }
+                    protected_sessions = (
+                        self._forward_sessions_requiring_replay_source(
+                            candidate_sessions=candidate_sessions,
+                        )
                     )
                     ids = [
                         int(row.id)
@@ -3259,9 +3283,14 @@ class StrategyV2ShadowService:
 
     def _forward_sessions_requiring_replay_source(
         self,
+        *,
+        candidate_sessions: set[tuple[str, str, date]] | None = None,
     ) -> set[tuple[str, str, date]]:
+        if candidate_sessions is not None and not candidate_sessions:
+            return set()
+
         protected: set[tuple[str, str, date]] = set()
-        rows = self.db.query(
+        query = self.db.query(
             StrategyV2ForwardEvidence,
             StrategyV2ForwardRegistration,
         ).join(
@@ -3270,23 +3299,58 @@ class StrategyV2ShadowService:
             == StrategyV2ForwardEvidence.registration_id,
         ).filter(
             StrategyV2ForwardEvidence.disposition == "INCLUDED",
-        ).all()
+        )
+        if candidate_sessions is not None:
+            symbols = sorted({item[0] for item in candidate_sessions})
+            config_versions = sorted({item[1] for item in candidate_sessions})
+            session_days = [item[2] for item in candidate_sessions]
+            first_session_day = min(session_days)
+            last_session_day = max(session_days)
+            query = query.filter(
+                StrategyV2ForwardRegistration.symbol.in_(symbols),
+                StrategyV2ForwardRegistration.source_config_version.in_(
+                    config_versions
+                ),
+                or_(
+                    and_(
+                        StrategyV2ForwardEvidence.seed_session_date
+                        >= first_session_day,
+                        StrategyV2ForwardEvidence.seed_session_date
+                        <= last_session_day,
+                    ),
+                    and_(
+                        StrategyV2ForwardEvidence.target_session_date
+                        >= first_session_day,
+                        StrategyV2ForwardEvidence.target_session_date
+                        <= last_session_day,
+                    ),
+                ),
+            )
+
+        rows = query.all()
         for evidence, registration in rows:
+            relevant_sessions = {
+                (
+                    registration.symbol,
+                    registration.source_config_version,
+                    session_day,
+                )
+                for session_day in (
+                    evidence.seed_session_date,
+                    evidence.target_session_date,
+                )
+                if session_day is not None
+            }
+            if candidate_sessions is not None:
+                relevant_sessions.intersection_update(candidate_sessions)
+            if not relevant_sessions:
+                continue
             if self._forward_replay_artifact_is_prune_safe(
                 evidence,
                 registration,
             ):
                 continue
-            for session_day in (
-                evidence.seed_session_date,
-                evidence.target_session_date,
-            ):
-                if session_day is not None:
-                    protected.add((
-                        registration.symbol,
-                        registration.source_config_version,
-                        session_day,
-                    ))
+            protected.update(relevant_sessions)
         return protected
 
     @staticmethod
