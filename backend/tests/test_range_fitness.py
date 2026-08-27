@@ -315,3 +315,89 @@ class TestReachRate(_Base):
             assert db.query(StrategyV2ShadowTrade).count() == 1
         finally:
             db.close()
+
+
+class TestReachLookbackWindow(_Base):
+    """Reach evidence uses its own, never-shorter window.
+
+    Bars accumulate ~100x faster than closed trades: the live system had 4
+    closed trades in 3 days but 212 in 30. A shared window either starves the
+    reach gate or, if widened, blunts the trend read that must stay fresh.
+    """
+
+    def setup_method(self) -> None:
+        super().setup_method()
+        db = self._db()
+        db.query(StrategyV2ShadowTrade).delete()
+        db.commit()
+        db.close()
+
+    def _trade(self, symbol: str, *, mfe_pct: float, age_days: float) -> None:
+        db = self._db()
+        exit_at = datetime.now(timezone.utc) - timedelta(days=age_days)
+        db.add(StrategyV2ShadowTrade(
+            symbol=symbol,
+            config_version="v1",
+            status="CLOSED",
+            entry_at=exit_at - timedelta(minutes=30),
+            exit_at=exit_at,
+            entry_price=100.0,
+            quantity=1.0,
+            mfe_pct=mfe_pct,
+        ))
+        db.commit()
+        db.close()
+
+    def test_longer_reach_window_admits_older_trades(self) -> None:
+        self._seed("TER.US", trend_bars=10, other_bars=50)
+        for age in (1.0, 8.0, 15.0, 22.0, 28.0):
+            self._trade("TER.US", mfe_pct=0.009, age_days=age)
+
+        tight = self._row("TER.US", min_samples=60, lookback_days=3)
+        assert tight.closed_trades == 1
+
+        wide = self._row(
+            "TER.US", min_samples=60, lookback_days=3, reach_lookback_days=30
+        )
+        assert wide.closed_trades == 5
+        assert wide.reach_rate_pct == 100.0
+
+    def test_bar_window_stays_narrow_when_reach_window_widens(self) -> None:
+        """Widening reach evidence must not drag stale bars into the trend read."""
+        self._seed("NVDA.US", trend_bars=70, other_bars=10, age_days=0.0)
+        self._seed("NVDA.US", trend_bars=0, other_bars=80, age_days=20.0)
+
+        row = self._row(
+            "NVDA.US", min_samples=60, lookback_days=3, reach_lookback_days=30
+        )
+        # Only the fresh 80 bars count; the 20-day-old calm bars stay excluded,
+        # so the trend verdict is unaffected by the wider reach window.
+        assert row.samples == 80
+        assert row.trend_blocked == 70
+        assert row.verdict == VERDICT_TREND_UNSUITABLE
+
+    def test_reach_window_never_shorter_than_the_bar_window(self) -> None:
+        self._seed("APP.US", trend_bars=10, other_bars=50)
+        self._trade("APP.US", mfe_pct=0.009, age_days=5.0)
+
+        # A reach window below the bar window would silently discard evidence the
+        # bar window already covers; it is clamped up instead.
+        row = self._row(
+            "APP.US", min_samples=60, lookback_days=14, reach_lookback_days=1
+        )
+        assert row.closed_trades == 1
+
+    def test_rejects_non_positive_reach_window(self) -> None:
+        svc = RangeFitnessService(self._db())
+        try:
+            svc.assess(reach_lookback_days=0)
+            raise AssertionError("expected ValueError")
+        except ValueError:
+            pass
+
+    def test_defaults_to_the_bar_window_when_unset(self) -> None:
+        self._seed("MU.US", trend_bars=10, other_bars=50)
+        self._trade("MU.US", mfe_pct=0.009, age_days=10.0)
+
+        row = self._row("MU.US", min_samples=60, lookback_days=3)
+        assert row.closed_trades == 0

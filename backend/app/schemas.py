@@ -4406,6 +4406,9 @@ class RangeFitnessResponse(BaseModel):
     min_samples: int = Field(ge=1)
     trend_unsuitable_pct: float = Field(ge=0, le=100, allow_inf_nan=False)
     range_suitable_pct: float = Field(ge=0, le=100, allow_inf_nan=False)
+    # Reach evidence uses its own, never-shorter window: closed shadow trades
+    # accumulate far slower than bars, so sharing one window would starve it.
+    reach_lookback_days: int = Field(default=30, ge=1, le=90)
     items: list[RangeFitnessItem] = Field(default_factory=list)
 
     model_config = ConfigDict(extra="forbid")

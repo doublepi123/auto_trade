@@ -726,6 +726,19 @@ class Settings(BaseSettings):
         allow_inf_nan=False,
         validation_alias="AUTO_TRADE_AUTO_PRIMARY_SWITCH_CANDIDATE_TREND_PCT",
     )
+    auto_primary_switch_reach_lookback_days: int = Field(
+        default=30,
+        ge=1,
+        le=90,
+        validation_alias="AUTO_TRADE_AUTO_PRIMARY_SWITCH_REACH_LOOKBACK_DAYS",
+        description=(
+            "Separate, longer window for reach-rate evidence. Trend share must "
+            "stay fresh (a regime change matters within days), but closed "
+            "shadow trades accumulate far more slowly: the live system produced "
+            "4 closed trades in 3 days versus 212 in 30. Sharing one window "
+            "would either starve the reach gate or blunt the trend read."
+        ),
+    )
     auto_primary_switch_min_reach_rate_pct: float = Field(
         default=60.0,
         ge=0,

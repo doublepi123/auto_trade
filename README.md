@@ -827,6 +827,7 @@ auto_trade/
 | `AUTO_TRADE_AUTO_PRIMARY_SWITCH_MIN_SAMPLES` | 在任与候选各自要求的最少证据条数 | `60` |
 | `AUTO_TRADE_AUTO_PRIMARY_SWITCH_INCUMBENT_TREND_PCT` | 在任标的趋势占比达此阈值才考虑更换 | `60` |
 | `AUTO_TRADE_AUTO_PRIMARY_SWITCH_CANDIDATE_TREND_PCT` | 候选标的趋势占比上限；必须严格小于在任阈值以防来回抖动 | `30` |
+| `AUTO_TRADE_AUTO_PRIMARY_SWITCH_REACH_LOOKBACK_DAYS` | reach-rate 证据的**独立回看窗口**（不得短于 `LOOKBACK_DAYS`，短则自动上钳）。已平仓影子交易的累积速度比 bar 慢约两个量级——线上 3 天仅 4 笔、30 天 212 笔——共用一个窗口会导致要么 reach 闸门永远无证据、要么趋势判定被陈旧 bar 钝化 | `30` |
 | `AUTO_TRADE_AUTO_PRIMARY_SWITCH_MIN_REACH_RATE_PCT` | 候选的 **reach-rate** 下限（已平仓影子交易中最大有利波动达到 0.4% 的占比）。趋势占比低只说明不趋势，不代表波动够得着成本；实测 247 笔中 reach-rate 无例外地分离盈亏（盈利均值 85% / 亏损均值 22%），而趋势占比排名第一的标的实为净亏。两项同时满足才可晋级 | `60` |
 | `AUTO_TRADE_AUTO_PRIMARY_SWITCH_MIN_CLOSED_TRADES` | reach-rate 生效所需的最少已平仓影子交易数，避免单笔幸运读成 100% | `5` |
 | `AUTO_TRADE_LIVE_REGIME_GATE_ENABLED` | live 开仓前要求当前主标的最新 Strategy v2 shadow 门禁通过；减仓不受影响 | `false` |

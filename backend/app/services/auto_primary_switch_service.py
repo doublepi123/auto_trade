@@ -82,6 +82,9 @@ class AutoPrimarySwitchService:
             range_suitable_pct=(
                 settings.auto_primary_switch_candidate_trend_pct
             ),
+            reach_lookback_days=(
+                settings.auto_primary_switch_reach_lookback_days
+            ),
         )
         by_symbol = {row.symbol: row for row in rows}
 

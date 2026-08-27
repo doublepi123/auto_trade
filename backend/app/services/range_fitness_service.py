@@ -68,6 +68,7 @@ class RangeFitnessService:
         min_samples: int = 60,
         trend_unsuitable_pct: float = 60.0,
         range_suitable_pct: float = 30.0,
+        reach_lookback_days: int | None = None,
         now: datetime | None = None,
     ) -> list[RangeFitnessRow]:
         if lookback_days <= 0:
@@ -78,8 +79,17 @@ class RangeFitnessService:
             raise ValueError(
                 "require 0 <= range_suitable_pct <= trend_unsuitable_pct <= 100"
             )
+        if reach_lookback_days is not None and reach_lookback_days <= 0:
+            raise ValueError("reach_lookback_days must be positive")
 
-        cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=lookback_days)
+        anchor = now or datetime.now(timezone.utc)
+        cutoff = anchor - timedelta(days=lookback_days)
+        # Closed trades accumulate an order of magnitude slower than bars, so
+        # reach evidence gets its own (never shorter) window. Defaults to the
+        # bar window when unset, keeping existing callers unchanged.
+        reach_cutoff = anchor - timedelta(
+            days=max(lookback_days, reach_lookback_days or lookback_days)
+        )
         rows = self._db.execute(
             select(
                 StrategyV2ShadowDecision.symbol,
@@ -92,7 +102,7 @@ class RangeFitnessService:
         ).all()
 
         primary = self._primary_symbol()
-        reach = self._reach_rates(cutoff)
+        reach = self._reach_rates(reach_cutoff)
         stats: dict[str, dict[str, float]] = {}
         latest_close: dict[str, tuple[datetime, float]] = {}
         for symbol, gate_passed, reasons_json, adx_5m, bar_at, close_price in rows:

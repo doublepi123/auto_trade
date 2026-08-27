@@ -250,6 +250,7 @@ def get_range_fitness(
     min_samples: int = Query(default=60, ge=1, le=100000),
     trend_unsuitable_pct: float = Query(default=60.0, ge=0, le=100),
     range_suitable_pct: float = Query(default=30.0, ge=0, le=100),
+    reach_lookback_days: int = Query(default=30, ge=1, le=90),
     db: Session = Depends(get_db),
 ) -> RangeFitnessResponse:
     """Report whether each shadow-observed symbol still behaves range-like.
@@ -263,6 +264,7 @@ def get_range_fitness(
             min_samples=min_samples,
             trend_unsuitable_pct=trend_unsuitable_pct,
             range_suitable_pct=range_suitable_pct,
+            reach_lookback_days=reach_lookback_days,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -272,6 +274,7 @@ def get_range_fitness(
         min_samples=min_samples,
         trend_unsuitable_pct=trend_unsuitable_pct,
         range_suitable_pct=range_suitable_pct,
+        reach_lookback_days=max(lookback_days, reach_lookback_days),
         items=[RangeFitnessItem(**asdict(row)) for row in rows],
     )
 
