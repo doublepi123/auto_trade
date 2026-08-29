@@ -39,6 +39,20 @@ def _classify_value(value: Any) -> tuple[str, float | None]:
     return "NON_NUMERIC", None
 
 
+def _json_safe(value: Any) -> Any:
+    """Drop values JSON cannot represent, keeping the classification intact.
+
+    A stored metric may hold ``inf``/``nan``: ``json.dumps`` writes them and
+    ``json.loads`` reads them back, but the response encoder runs with
+    ``allow_nan=False`` and raises, turning the whole comparison into a 500.
+    The classification already reports these as NON_NUMERIC, so the raw echo
+    carries no information worth crashing for.
+    """
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    return value
+
+
 class BacktestRunService:
     def __init__(self, db: Session) -> None:
         self._db = db
@@ -254,7 +268,7 @@ class BacktestRunService:
                     {
                         "run_id": rid,
                         "classification": run_cls,
-                        "raw_value": run_raw,
+                        "raw_value": _json_safe(run_raw),
                         "delta": delta,
                     }
                 )
@@ -262,7 +276,7 @@ class BacktestRunService:
             rows.append(
                 {
                     "metric": name,
-                    "baseline_value": baseline_raw,
+                    "baseline_value": _json_safe(baseline_raw),
                     "baseline_classification": baseline_cls,
                     "runs": run_entries,
                 }
