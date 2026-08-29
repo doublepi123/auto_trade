@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import FrozenInstanceError
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -486,5 +487,28 @@ def test_fees_use_commission_field_not_fee() -> None:
 
 
 def test_round_trip_and_open_lot_are_frozen() -> None:
-    assert RoundTrip.__dataclass_params__.frozen is True
-    assert OpenLot.__dataclass_params__.frozen is True
+    trip = RoundTrip(
+        symbol="AAPL.US",
+        entry_at=_T0,
+        exit_at=_T0,
+        entry_price=Decimal("10"),
+        exit_price=Decimal("11"),
+        quantity=1,
+        gross_pnl=Decimal("1"),
+        fees=Decimal("0"),
+        net_pnl=Decimal("1"),
+        entry_notional=Decimal("10"),
+        net_return_pct=10.0,
+    )
+    lot = OpenLot(
+        symbol="AAPL.US",
+        entry_at=_T0,
+        entry_price=Decimal("10"),
+        quantity=1,
+        remaining_fees=Decimal("0"),
+    )
+
+    with pytest.raises(FrozenInstanceError):
+        setattr(trip, "quantity", 2)
+    with pytest.raises(FrozenInstanceError):
+        setattr(lot, "quantity", 2)

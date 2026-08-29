@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from app.api.backtest import _metrics_to_schema, _params_to_engine
 from app.core.backtest import BacktestBar, BacktestEngine, BacktestEngineParams, parse_backtest_csv
 from app.main import app
-from app.schemas import BacktestParams
+from app.schemas import BacktestMetrics, BacktestParams
 
 client = TestClient(app)
 
@@ -1860,33 +1860,48 @@ class TestGrossVersusNetColumns:
             bar(5, 150, 210, 140, 205),
         ]
 
-    def _run(self, **overrides: float):
+    def _run(
+        self, *, fee_rate: float = 0.0, slippage_pct: float = 0.0
+    ) -> BacktestMetrics:
         params = BacktestEngineParams(
-            buy_low=100, sell_high=200, quantity=2, **overrides
+            buy_low=100,
+            sell_high=200,
+            quantity=2,
+            fee_rate=fee_rate,
+            slippage_pct=slippage_pct,
         )
         result = BacktestEngine(params).run(self._bars(), include_fee_sensitivity=False)
         return _metrics_to_schema(result.metrics)
+
+    def _gross_pnl(self, metrics: BacktestMetrics) -> float:
+        """The mapper always populates gross; only legacy saved rows are None."""
+        assert metrics.gross_pnl is not None
+        return metrics.gross_pnl
+
+    def _gross_return_pct(self, metrics: BacktestMetrics) -> float:
+        assert metrics.gross_return_pct is not None
+        return metrics.gross_return_pct
 
     def test_gross_exceeds_net_by_exactly_the_fees(self) -> None:
         m = self._run(fee_rate=0.01)
 
         assert m.fees_paid > 0
-        assert m.gross_pnl == pytest.approx(m.total_pnl + m.fees_paid)
-        assert m.gross_pnl > m.total_pnl
+        assert self._gross_pnl(m) == pytest.approx(m.total_pnl + m.fees_paid)
+        assert self._gross_pnl(m) > m.total_pnl
 
     def test_columns_coincide_when_there_are_no_fees(self) -> None:
         m = self._run(fee_rate=0.0)
 
         assert m.fees_paid == 0
-        assert m.gross_pnl == pytest.approx(m.total_pnl)
+        assert self._gross_pnl(m) == pytest.approx(m.total_pnl)
 
     def test_gross_return_pct_is_gross_pnl_over_initial_cash(self) -> None:
         m = self._run(fee_rate=0.01)
 
-        assert m.gross_return_pct == pytest.approx(
-            m.gross_pnl / m.initial_cash * 100
+        assert self._gross_return_pct(m) == pytest.approx(
+            self._gross_pnl(m) / m.initial_cash * 100
         )
-        assert m.gross_return_pct > m.total_return_pct
+        assert self._gross_return_pct(m) > m.total_return_pct
 
     def test_slippage_is_deducted_from_both_columns(self) -> None:
         """The gap between the columns is fee drag alone.
@@ -1899,12 +1914,12 @@ class TestGrossVersusNetColumns:
         clean = self._run(fee_rate=0.0, slippage_pct=0.0)
         slipped = self._run(fee_rate=0.0, slippage_pct=0.5)
 
-        assert slipped.gross_pnl < clean.gross_pnl
-        assert slipped.gross_pnl == pytest.approx(slipped.total_pnl)
+        assert self._gross_pnl(slipped) < self._gross_pnl(clean)
+        assert self._gross_pnl(slipped) == pytest.approx(slipped.total_pnl)
 
     def test_fee_only_strategy_shows_positive_gross_and_negative_net(self) -> None:
         """The exact trap the columns exist to expose."""
         m = self._run(fee_rate=1.5)
 
-        assert m.gross_pnl > 0
+        assert self._gross_pnl(m) > 0
         assert m.total_pnl < 0
