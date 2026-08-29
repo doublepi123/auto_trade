@@ -612,7 +612,15 @@ class TestTradeEventSync:
         assert runner.risk.check().approved is False
         _clean()
 
-    def test_sync_today_orders_applies_discovered_fill_to_tracked_entry(self) -> None:
+    def test_sync_today_orders_never_books_unattributable_fill(self) -> None:
+        """A broker fill with no local submission must not touch the cost basis.
+
+        Only a TrackedEntry is seeded: no OrderRecord, no ORDER_SUBMITTED
+        event. The system cannot attribute this fill, latches
+        ORDER_RECONCILIATION_UNCERTAIN for exactly that reason, and must leave
+        tracked_entries for a human. Booking it would also add on top of an
+        existing long position, which P0 forbids outright.
+        """
         _clean()
         created_at = datetime(2026, 6, 5, 13, 30, tzinfo=timezone.utc)
 
@@ -653,11 +661,14 @@ class TestTradeEventSync:
 
         with SessionLocal() as db:
             row = db.query(TrackedEntry).filter(TrackedEntry.symbol == "NVDA.US").one()
-            assert row.quantity == 1231.0
-            assert row.cost == pytest.approx(261912.84)
+            assert row.quantity == 1150.0
+            assert row.cost == pytest.approx(245053.5)
         snapshot = runner._trade_svc.snapshot_tracked_entries()
-        assert snapshot["NVDA.US"][0] == Decimal("1231.0")
-        assert snapshot["NVDA.US"][1] == Decimal("261912.84")
+        assert snapshot["NVDA.US"][0] == Decimal("1150.0")
+        assert snapshot["NVDA.US"][1] == Decimal("245053.5")
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason is not None
+        assert runner.risk.pause_reason.startswith("ORDER_RECONCILIATION_UNCERTAIN")
 
     def test_sync_today_orders_does_not_double_book_pending_fill(self) -> None:
         _clean()
