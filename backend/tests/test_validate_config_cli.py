@@ -329,11 +329,23 @@ class TestValidateSettings:
         assert any(i.code == "EMPTY_API_KEY_DEV_TEST" and i.severity == "WARNING" for i in report.issues)
 
     def test_full_buying_power_is_warning(self, monkeypatch, tmp_path) -> None:
+        # Settings clamps full_buying_power_usage_enabled to False (P0), so the
+        # env var alone can no longer reach the validator. Patch the attribute
+        # to exercise the warning branch, matching the P0 violation tests above.
+        monkeypatch.chdir(tmp_path)
+        s = Settings()
+        with mock.patch.object(s, "full_buying_power_usage_enabled", True):
+            report = validate_settings(s)
+        assert any(i.code == "FULL_BUYING_POWER_ENABLED" and i.severity == "WARNING" for i in report.issues)
+
+    def test_full_buying_power_env_override_is_clamped(self, monkeypatch, tmp_path) -> None:
+        """The env opt-in is ignored, so the validator must stay silent."""
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("AUTO_TRADE_FULL_BUYING_POWER_USAGE_ENABLED", "true")
         s = Settings()
+        assert s.full_buying_power_usage_enabled is False
         report = validate_settings(s)
-        assert any(i.code == "FULL_BUYING_POWER_ENABLED" and i.severity == "WARNING" for i in report.issues)
+        assert not any(i.code == "FULL_BUYING_POWER_ENABLED" for i in report.issues)
 
     def test_unsafe_override_short_entries_warning(self, monkeypatch, tmp_path) -> None:
         monkeypatch.chdir(tmp_path)
@@ -423,13 +435,19 @@ class TestRunValidation:
         assert report.has_errors
 
     def test_warning_only_config_exit_zero(self, monkeypatch, tmp_path) -> None:
+        # dev with an empty API key is warning-only on its own; the full
+        # buying-power env var is clamped away and contributes nothing.
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv("AUTO_TRADE_FULL_BUYING_POWER_USAGE_ENABLED", "true")
+        monkeypatch.setenv("AUTO_TRADE_ENV", "dev")
+        monkeypatch.setenv("AUTO_TRADE_API_KEY", "")
         from app.cli.validate_config import run_validation
 
         report, exit_code = run_validation()
         assert exit_code == 0
-        assert report.has_warnings
+        assert any(
+            i.code == "EMPTY_API_KEY_DEV_TEST" and i.severity == "WARNING"
+            for i in report.issues
+        )
         assert not report.has_errors
 
 
