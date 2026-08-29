@@ -492,8 +492,8 @@ auto_trade/
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/api/backtest/run` | 运行回测；body：`csv_text` 或 `price_points[]` + `params` |
-| `POST` | `/api/backtest/sweep` | 参数扫描：`base` + `grid`（`buy_low`/`sell_high`/`min_profit_amount`/...，复用实验网格 `value`/`values`/`range`）+ `sort_by` + `max_combinations`（默认 2000、上限 10000）→ 排名表 + 热力图；422 表示网格超限 / 参数非法 |
+| `POST` | `/api/backtest/run` | 运行回测；body：`csv_text` 或 `price_points[]` + `params`。指标含**成本双列**：`total_pnl` / `total_return_pct` 为扣费后净额（判断一律看这两列），`gross_pnl` / `gross_return_pct` 为扣费前同口径值。并排给出是因为「毛利丰厚但净额为负」与「信号本身就错」需要不同的处置，单看净额无法区分。注意 `gross − net` 只是**费用**拖累：滑点已计入成交价，两列都已扣除。历史保存的回测行没有 gross 列时返回 `null`（未记录，不等于零） |
+| `POST` | `/api/backtest/sweep` | 参数扫描：`base` + `grid`（`buy_low`/`sell_high`/`min_profit_amount`/...，复用实验网格 `value`/`values`/`range`）+ `sort_by` + `max_combinations`（默认 2000、上限 10000）→ 排名表 + 热力图 + `multiple_testing` 多重检验校正；422 表示网格超限 / 参数非法。**`multiple_testing` 必读**：扫描报告的是 N 次试验里的最大 Sharpe，而 N 次纯噪声抽样的最大值本身就为正且随 N 增大——直接把冠军的原始 Sharpe 当成绩效，是把「搜索」误读成「本事」。该字段用 deflated Sharpe（Bailey & López de Prado 2014）以同样试验次数下的零 edge 期望最大值重新校准，并给出 `distinguishable_from_luck`。同一份数据、同一个冠军，网格加密后可以从「可区别于运气」翻转为「不可区别」；`psr` 不含试验次数，故不能单独作为判据。CSCV/PBO 需要按 IS/OOS 分块的逐组合收益面板，本端点既不保留也不切分，故不在此提供 |
 | `POST` | `/api/backtest/walk-forward` | Walk-Forward 滚动窗口：`base` + 可选 `grid` + `train_size`/`test_size`/`step`/`sort_by` → 逐窗口样本外表现 + 稳定性汇总（均值/中位回报、盈利窗口占比、回报标准差）；空 `grid` = 纯滚动评估当前参数 |
 | `POST` | `/api/backtest/stress` | What-If 压力测试：`base` + `scenarios`/`jitter_pct`/`seed` → 对每根 K 线 OHLC 做确定性随机缩放后重跑 N 次，返回收益分布（基线/中位/P5/P95/最差/最大回撤/盈利场景占比）；422 = 参数非法 |
 | `POST` | `/api/backtest/runs` | 保存一条命名回测快照（`name` + `params` + `metrics`）用于对比 |
@@ -832,6 +832,7 @@ auto_trade/
 | `AUTO_TRADE_AUTO_PRIMARY_SWITCH_REACH_LOOKBACK_DAYS` | reach-rate 证据的**独立回看窗口**（不得短于 `LOOKBACK_DAYS`，短则自动上钳）。已平仓影子交易的累积速度比 bar 慢约两个量级——线上 3 天仅 4 笔、30 天 212 笔——共用一个窗口会导致要么 reach 闸门永远无证据、要么趋势判定被陈旧 bar 钝化 | `30` |
 | `AUTO_TRADE_AUTO_PRIMARY_SWITCH_MIN_REACH_RATE_PCT` | 候选的 **reach-rate** 下限（已平仓影子交易中最大有利波动达到 0.4% 的占比）。趋势占比低只说明不趋势，不代表波动够得着成本；实测 247 笔中 reach-rate 无例外地分离盈亏（盈利均值 85% / 亏损均值 22%），而趋势占比排名第一的标的实为净亏。两项同时满足才可晋级 | `60` |
 | `AUTO_TRADE_AUTO_PRIMARY_SWITCH_MIN_CLOSED_TRADES` | reach-rate 生效所需的最少已平仓影子交易数，避免单笔幸运读成 100% | `5` |
+| `AUTO_TRADE_AUTO_PRIMARY_SWITCH_REQUIRE_SIGNAL_EDGE` | 换标的前要求影子入场信号**已被证明有 edge**（`GET /api/strategy-shadow/signal-edge` 判定为 `PASS`）。趋势占比与 reach-rate 两项证据都取自 Strategy v2 影子；若该信号本身不含方向性信息，这些证据只是在给噪声排名，换标的等于把亏损搬家而非避开。跨全部标的评估——首达检验考察的是**入场规则**，而规则是共享的；单标的样本也远不足以判定（数周仅积累个位数已平仓交易，逐标的判定会永远停在 `INSUFFICIENT_DATA`）。**Fail-closed**：无法评估（如缺影子配置）同样拦截 | `true` |
 | `AUTO_TRADE_LIVE_REGIME_GATE_ENABLED` | live 开仓前要求当前主标的最新 Strategy v2 shadow 门禁通过；减仓不受影响 | `false` |
 | `AUTO_TRADE_LIVE_REGIME_MAX_DATA_AGE_SECONDS` | live regime 证据最大允许延迟（秒） | `600` |
 | `AUTO_TRADE_LIVE_MAX_ENTRIES_PER_SYMBOL_PER_DAY` | 每标的、每交易日最大开仓次数；`0` 关闭此限制 | `1` |

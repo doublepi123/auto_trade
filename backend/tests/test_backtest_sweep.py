@@ -363,3 +363,72 @@ class TestRunEndpointSurfacesRatios:
         metrics = resp.json()["metrics"]
         for field in ("sharpe_ratio", "sortino_ratio", "calmar_ratio", "profit_factor", "profit_loss_ratio"):
             assert field in metrics, f"{field} missing from /run metrics"
+
+
+class TestSweepMultipleTesting:
+    """A sweep reports the best of N trials, so the winner's raw Sharpe is a
+    maximum-order statistic. These cover the correction that says so."""
+
+    def _multiple_testing(self, **overrides: Any) -> dict[str, Any]:
+        resp = client.post("/api/backtest/sweep", json=_sweep_body(**overrides))
+        assert resp.status_code == 200, resp.text
+        return cast(dict[str, Any], resp.json()["multiple_testing"])
+
+    def test_reports_the_trial_count_actually_evaluated(self) -> None:
+        stats = self._multiple_testing()
+        assert stats["n_trials"] == 3
+
+    def test_sample_size_is_one_less_than_the_bar_count(self) -> None:
+        stats = self._multiple_testing()
+        assert stats["sample_size"] == 5
+
+    def test_more_trials_raise_the_bar_the_winner_must_clear(self) -> None:
+        few = self._multiple_testing(
+            grid={"buy_low": {"range": {"start": 100, "end": 110, "step": 5}}}
+        )
+        many = self._multiple_testing(
+            grid={"buy_low": {"range": {"start": 100, "end": 110, "step": 1}}}
+        )
+        assert many["n_trials"] > few["n_trials"]
+        assert (
+            many["expected_max_null_sharpe"] > few["expected_max_null_sharpe"]
+        )
+
+    def test_observed_sharpe_is_the_winning_rows_sharpe(self) -> None:
+        resp = client.post("/api/backtest/sweep", json=_sweep_body())
+        data = resp.json()
+        assert (
+            data["multiple_testing"]["observed_sharpe"]
+            == data["best"]["metrics"]["sharpe_ratio"]
+        )
+
+    def test_same_winner_loses_significance_when_more_were_tried(self) -> None:
+        """The correction's whole purpose, on one fixture.
+
+        Identical data and an identical winning Sharpe: searching a denser grid
+        is the only thing that changes. The wider search raises the bar the
+        winner must clear, and the same result stops being distinguishable from
+        luck. PSR is unmoved because it never sees the trial count -- which is
+        why the verdict requires the deflated Sharpe too.
+        """
+        few = self._multiple_testing(
+            grid={"buy_low": {"range": {"start": 100, "end": 110, "step": 5}}}
+        )
+        many = self._multiple_testing(
+            grid={"buy_low": {"range": {"start": 100, "end": 110, "step": 1}}}
+        )
+
+        assert many["observed_sharpe"] == few["observed_sharpe"]
+        assert many["psr"] == few["psr"]
+        assert few["deflated_sharpe"] > 0 > many["deflated_sharpe"]
+        assert few["distinguishable_from_luck"] is True
+        assert many["distinguishable_from_luck"] is False
+
+    def test_absent_when_no_combination_produces_a_sharpe(self) -> None:
+        # buy_low far below every low -> no trades -> flat equity -> Sharpe None.
+        resp = client.post("/api/backtest/sweep", json=_sweep_body(
+            base={"buy_low": 10, "sell_high": 200, "quantity": 2},
+            grid={"buy_low": {"values": [10, 12]}},
+        ))
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["multiple_testing"] is None

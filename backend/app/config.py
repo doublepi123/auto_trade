@@ -761,6 +761,19 @@ class Settings(BaseSettings):
             "evidence. Matches the repo's existing 5-trade first-pass bar."
         ),
     )
+    auto_primary_switch_require_signal_edge: bool = Field(
+        default=True,
+        validation_alias="AUTO_TRADE_AUTO_PRIMARY_SWITCH_REQUIRE_SIGNAL_EDGE",
+        description=(
+            "Require the shadow entry signal to have provable edge before any "
+            "automatic primary switch. Trend share and reach-rate both come "
+            "from Strategy v2 shadow evidence, so a signal that carries no "
+            "directional information makes that evidence a ranking of noise: "
+            "switching would relocate losses rather than avoid them. Assessed "
+            "across all symbols because first-passage tests the entry rule, "
+            "which is shared; per-symbol samples are far too thin to resolve."
+        ),
+    )
     live_regime_gate_enabled: bool = Field(
         default=False,
         validation_alias="AUTO_TRADE_LIVE_REGIME_GATE_ENABLED",

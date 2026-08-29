@@ -9,12 +9,14 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
 from app.api.auth import require_api_key
 from app.database import get_db
+from app.platform.overfitting import deflated_sharpe_ratio
 from app.core.backtest import (
     BacktestBar,
     BacktestEngine,
     BacktestEngineParams,
     BacktestMetrics as EngineMetrics,
     SweepHeatmap as EngineSweepHeatmap,
+    SweepResult as EngineSweepResult,
     SweepResultRow as EngineSweepRow,
     WalkForwardResult as EngineWalkForwardResult,
     expand_numeric_range,
@@ -36,6 +38,7 @@ from app.schemas import (
     BacktestSweepHeatmap,
     BacktestSweepHeatmapCell,
     BacktestSweepRequest,
+    BacktestSweepMultipleTesting,
     BacktestSweepResult,
     BacktestSweepRow,
     BacktestTradeLog,
@@ -150,6 +153,7 @@ def sweep_backtest_endpoint(payload: BacktestSweepRequest) -> BacktestSweepResul
         evaluated_count=result.evaluated_count,
         skipped_count=result.skipped_count,
         sort_by=result.sort_by,
+        multiple_testing=_sweep_multiple_testing(result, len(bars)),
     )
 
 
@@ -419,12 +423,25 @@ def _params_to_engine(p: BacktestParams) -> BacktestEngineParams:
 def _metrics_to_schema(m: EngineMetrics) -> BacktestMetrics:
     """Map the engine metrics dataclass to the API schema, surfacing the
     risk-adjusted ratios the engine already computes (sharpe/sortino/calmar/
-    profit_factor/profit_loss_ratio)."""
+    profit_factor/profit_loss_ratio) plus the pre-fee counterparts of the net
+    columns.
+
+    Gross is derived here rather than in the engine on purpose: the engine
+    module's source text is hashed into the LLM interval-forward evaluator
+    manifest, so editing it would invalidate the digest that binds already
+    published research artifacts. ``total_pnl`` is net of fees and the engine
+    reports ``fees_paid`` separately, so the sum reconstructs gross exactly.
+    """
+    gross_pnl = m.total_pnl + m.fees_paid
     return BacktestMetrics(
         initial_cash=m.initial_cash,
         final_equity=m.final_equity,
         total_pnl=m.total_pnl,
         total_return_pct=m.total_return_pct,
+        gross_pnl=gross_pnl,
+        gross_return_pct=(
+            gross_pnl / m.initial_cash * 100 if m.initial_cash else 0.0
+        ),
         max_drawdown_pct=m.max_drawdown_pct,
         trade_count=m.trade_count,
         closed_trade_count=m.closed_trade_count,
@@ -455,6 +472,34 @@ def _expand_grid_item(item: StrategyExperimentGridItem) -> list[float]:
     if r is None:
         return []
     return expand_numeric_range(r.start, r.step, r.end)
+
+
+def _sweep_multiple_testing(
+    result: EngineSweepResult, bar_count: int
+) -> BacktestSweepMultipleTesting | None:
+    best = result.best
+    if best is None or best.metrics.sharpe_ratio is None:
+        return None
+    trials = max(int(result.evaluated_count), 1)
+    # The engine appends one equity point per bar, and Sharpe is computed from
+    # the differences between consecutive points.
+    sample_size = max(bar_count - 1, 0)
+    stats = deflated_sharpe_ratio(
+        observed_sharpe=float(best.metrics.sharpe_ratio),
+        n_trials=trials,
+        sample_size=sample_size,
+    )
+    return BacktestSweepMultipleTesting(
+        n_trials=trials,
+        sample_size=sample_size,
+        observed_sharpe=stats["observed_sharpe"],
+        expected_max_null_sharpe=stats["expected_max_null_sharpe"],
+        deflated_sharpe=stats["deflated_sharpe"],
+        psr=stats["psr"],
+        distinguishable_from_luck=(
+            stats["deflated_sharpe"] > 0.0 and stats["psr"] > 0.5
+        ),
+    )
 
 
 def _sweep_row_to_schema(row: EngineSweepRow) -> BacktestSweepRow:

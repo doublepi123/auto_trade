@@ -26,6 +26,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.domain.strategy_v2.signal_edge import VERDICT_PASS
 from app.models import (
     StrategyConfig,
     UniverseSelectionCandidate,
@@ -36,6 +37,7 @@ from app.services.range_fitness_service import (
     RangeFitnessService,
     VERDICT_RANGE_SUITABLE,
 )
+from app.services.signal_edge_service import SignalEdgeService
 
 logger = logging.getLogger("auto_trade.auto_primary_switch")
 
@@ -44,6 +46,7 @@ OUTCOME_NO_PRIMARY = "NO_PRIMARY_CONFIGURED"
 OUTCOME_INCUMBENT_ACCEPTABLE = "INCUMBENT_ACCEPTABLE"
 OUTCOME_INCUMBENT_EVIDENCE_THIN = "INCUMBENT_EVIDENCE_THIN"
 OUTCOME_NO_ELIGIBLE_CANDIDATE = "NO_ELIGIBLE_CANDIDATE"
+OUTCOME_SIGNAL_EDGE_UNPROVEN = "SIGNAL_EDGE_UNPROVEN"
 OUTCOME_SWITCH_BLOCKED = "SWITCH_BLOCKED"
 OUTCOME_SWITCHED = "SWITCHED"
 
@@ -100,6 +103,20 @@ class AutoPrimarySwitchService:
                 OUTCOME_INCUMBENT_ACCEPTABLE,
                 incumbent=incumbent,
                 incumbent_trend_pct=incumbent_row.trend_blocked_pct,
+            )
+
+        # Both promotion criteria above -- trend share and reach-rate -- read
+        # Strategy v2 shadow evidence. A signal with no directional information
+        # makes that evidence a ranking of noise, so switching on it relocates
+        # losses rather than avoiding them. Checked only once a switch is on the
+        # table, keeping the common incumbent-acceptable path free of the query.
+        edge_blocked = self._signal_edge_block_reason()
+        if edge_blocked is not None:
+            return AutoPrimarySwitchResult(
+                OUTCOME_SIGNAL_EDGE_UNPROVEN,
+                incumbent=incumbent,
+                incumbent_trend_pct=incumbent_row.trend_blocked_pct,
+                detail=edge_blocked,
             )
 
         eligible = self._eligible_candidates()
@@ -260,6 +277,33 @@ class AutoPrimarySwitchService:
                     exc_info=True,
                 )
             raise
+
+    def _signal_edge_block_reason(self) -> str | None:
+        """Return why a switch must be blocked, or ``None`` when edge is proven.
+
+        Assessed across all symbols, not just the candidate: first-passage tests
+        whether the entry rule carries directional information, and that rule is
+        shared. Per-symbol samples are also far too thin to resolve -- symbols
+        accumulate single-digit closed trades over the weeks needed to reach the
+        evidence floor, so a per-symbol gate would report INSUFFICIENT_DATA
+        forever and could never be satisfied.
+
+        Fails closed: an unassessable signal is not a proven one, and promoting
+        on absent evidence is exactly what made trend share alone unsafe.
+        """
+        if not settings.auto_primary_switch_require_signal_edge:
+            return None
+        try:
+            verdict, _stop, _target, _symbol = SignalEdgeService(self._db).assess()
+        except ValueError as exc:
+            return f"signal edge not assessable: {exc}"
+        if verdict.verdict == VERDICT_PASS:
+            return None
+        detail = "; ".join(verdict.reasons)
+        return (
+            f"shadow signal edge {verdict.verdict}"
+            + (f": {detail}" if detail else "")
+        )
 
     @staticmethod
     def _reach_rate_ok(row: RangeFitnessRow) -> bool:

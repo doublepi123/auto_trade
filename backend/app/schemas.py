@@ -2877,10 +2877,25 @@ class BacktestEquityPoint(BaseModel):
 
 
 class BacktestMetrics(BaseModel):
+    """Backtest outcome. ``total_pnl`` / ``total_return_pct`` are net of fees
+    and slippage and are the columns to judge by; ``gross_*`` are the same
+    quantities before fees. The pair is reported side by side because a
+    strategy can be comfortably profitable gross and lose money net, and a
+    single net number cannot distinguish "the signal is wrong" from "the signal
+    is right but cannot pay the round trip".
+
+    ``gross_* - total_*`` is the fee drag alone, NOT total cost drag: slippage
+    is applied to the fill price, so it is already deducted from both columns.
+    """
+
     initial_cash: float
     final_equity: float
     total_pnl: float
     total_return_pct: float
+    # None on runs saved before these were recorded: unknown, which is not the
+    # same claim as zero.
+    gross_pnl: Optional[float] = None
+    gross_return_pct: Optional[float] = None
     max_drawdown_pct: float
     trade_count: int
     closed_trade_count: int
@@ -2984,6 +2999,33 @@ class BacktestSweepRow(BaseModel):
     rank: int
 
 
+class BacktestSweepMultipleTesting(BaseModel):
+    """Multiple-testing correction for the top-ranked combination.
+
+    A sweep reports the maximum Sharpe over many trials, and the maximum of N
+    pure-noise draws is positive and grows with N. Reading the winner's raw
+    Sharpe as an achievement therefore mistakes selection for skill. The
+    deflated Sharpe (Bailey & Lopez de Prado 2014) re-centres the observed
+    Sharpe on the expected maximum under a zero-edge null across the same
+    number of trials, so it answers the question a sweep actually raises:
+    is the best combination better than the best combination would look if
+    nothing here worked at all?
+
+    ``probability_of_backtest_overfitting`` is deliberately absent: CSCV needs
+    a per-combination return panel split into in-sample and out-of-sample
+    blocks, which this endpoint neither retains nor splits. It belongs to
+    walk-forward evaluation, where those splits exist.
+    """
+
+    n_trials: int
+    sample_size: int
+    observed_sharpe: float
+    expected_max_null_sharpe: float
+    deflated_sharpe: float
+    psr: float
+    distinguishable_from_luck: bool
+
+
 class BacktestSweepResult(BaseModel):
     rows: list[BacktestSweepRow]
     best: Optional[BacktestSweepRow] = None
@@ -2991,6 +3033,9 @@ class BacktestSweepResult(BaseModel):
     evaluated_count: int
     skipped_count: int
     sort_by: str
+    # None when no combination survived, or when the winner's Sharpe was not
+    # computable (constant equity), leaving nothing to deflate.
+    multiple_testing: Optional[BacktestSweepMultipleTesting] = None
 
 
 class BacktestSweepRequest(BaseModel):

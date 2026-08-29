@@ -18,6 +18,7 @@ from app.config import settings
 from app.models import (
     Base,
     StrategyConfig,
+    StrategyV2ShadowConfig,
     StrategyV2ShadowDecision,
     StrategyV2ShadowTrade,
     UniverseSelectionCandidate,
@@ -30,6 +31,7 @@ from app.services.auto_primary_switch_service import (
     OUTCOME_INCUMBENT_EVIDENCE_THIN,
     OUTCOME_NO_ELIGIBLE_CANDIDATE,
     OUTCOME_NO_PRIMARY,
+    OUTCOME_SIGNAL_EDGE_UNPROVEN,
     OUTCOME_SWITCH_BLOCKED,
     OUTCOME_SWITCHED,
 )
@@ -61,6 +63,7 @@ class _Base:
 
     def setup_method(self) -> None:
         db = Session(bind=self.engine)
+        db.query(StrategyV2ShadowConfig).delete()
         db.query(StrategyV2ShadowDecision).delete()
         db.query(StrategyV2ShadowTrade).delete()
         db.query(UniverseSelectionCandidate).delete()
@@ -172,6 +175,11 @@ def _enable_switch(monkeypatch):
     )
     monkeypatch.setattr(
         settings, "auto_primary_switch_candidate_trend_pct", 30.0, raising=False
+    )
+    # Off by default so each test exercises one gate. TestSignalEdgeGate turns
+    # it back on; without this every fixture would also need edge evidence.
+    monkeypatch.setattr(
+        settings, "auto_primary_switch_require_signal_edge", False, raising=False
     )
     yield
 
@@ -434,3 +442,126 @@ class TestReachRateGate(_Base):
 
         assert result.outcome == OUTCOME_SWITCHED
         assert result.candidate == "TER.US"
+
+
+class TestSignalEdgeGate(_Base):
+    """Trend share and reach-rate both read shadow evidence, so a signal with no
+    provable edge ranks noise. The gate is assessed across all symbols and fails
+    closed."""
+
+    @pytest.fixture(autouse=True)
+    def _require_edge(self, monkeypatch):
+        monkeypatch.setattr(
+            settings, "auto_primary_switch_require_signal_edge", True, raising=False
+        )
+        yield
+
+    def _barriers(self, stop: float = 1.0, target: float = 1.0) -> None:
+        db = self._db()
+        db.add(StrategyV2ShadowConfig(
+            symbol="NVDA.US",
+            enabled=True,
+            stop_loss_pct=stop,
+            profit_target_pct=target,
+        ))
+        db.commit()
+        db.close()
+
+    def _edge_trades(self, *, targets: int, stops: int, days: int) -> None:
+        """Seed resolved trades spread over ``days`` distinct exit dates.
+
+        Returns are signed to match the exit reason so first-passage and the
+        clustered t-test see a coherent sample rather than contradictory ones.
+        """
+        db = self._db()
+        now = datetime.now(timezone.utc)
+        outcomes = (
+            [("PROFIT_TARGET", 1.0)] * targets + [("PRICE_STOP", -0.5)] * stops
+        )
+        for index, (reason, pnl) in enumerate(outcomes):
+            exit_at = now - timedelta(days=index % days, minutes=index)
+            db.add(StrategyV2ShadowTrade(
+                symbol="EDGE.US",
+                config_version="v1",
+                status="CLOSED",
+                entry_at=exit_at - timedelta(minutes=20),
+                exit_at=exit_at,
+                entry_price=100.0,
+                quantity=1.0,
+                net_pnl=pnl,
+                exit_reason=reason,
+                mfe_pct=0.009,
+            ))
+        db.commit()
+        db.close()
+
+    def _switch_scenario(self) -> _Runner:
+        self._primary("NVDA.US")
+        self._evidence("NVDA.US", trend_bars=70, calm_bars=10)
+        self._selection_run(["AAPL.US"])
+        self._evidence("AAPL.US", trend_bars=0, calm_bars=80, close_price=200.0)
+        self._reach("AAPL.US", closed=9, reached=8)
+        return _Runner()
+
+    def test_proven_edge_lets_the_switch_through(self) -> None:
+        runner = self._switch_scenario()
+        self._barriers()
+        self._edge_trades(targets=32, stops=8, days=20)
+
+        result = AutoPrimarySwitchService(self._db()).evaluate(runner)
+
+        assert result.outcome == OUTCOME_SWITCHED
+        assert result.candidate == "AAPL.US"
+
+    def test_signal_without_edge_blocks_the_switch(self) -> None:
+        runner = self._switch_scenario()
+        self._barriers()
+        # Mirrors the live finding: first-passage rate below the random-walk
+        # baseline, so no exit re-parameterisation could rescue the signal.
+        self._edge_trades(targets=12, stops=28, days=20)
+
+        result = AutoPrimarySwitchService(self._db()).evaluate(runner)
+
+        assert result.outcome == OUTCOME_SIGNAL_EDGE_UNPROVEN
+        assert "FAIL" in result.detail
+        assert runner.calls == []
+
+    def test_thin_evidence_blocks_but_reports_it_separately(self) -> None:
+        runner = self._switch_scenario()
+        self._barriers()
+        self._edge_trades(targets=4, stops=1, days=3)
+
+        result = AutoPrimarySwitchService(self._db()).evaluate(runner)
+
+        assert result.outcome == OUTCOME_SIGNAL_EDGE_UNPROVEN
+        assert "INSUFFICIENT_DATA" in result.detail
+        assert runner.calls == []
+
+    def test_unassessable_signal_fails_closed(self) -> None:
+        runner = self._switch_scenario()
+
+        result = AutoPrimarySwitchService(self._db()).evaluate(runner)
+
+        assert result.outcome == OUTCOME_SIGNAL_EDGE_UNPROVEN
+        assert "not assessable" in result.detail
+        assert runner.calls == []
+
+    def test_gate_is_skipped_when_the_requirement_is_off(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            settings, "auto_primary_switch_require_signal_edge", False, raising=False
+        )
+        runner = self._switch_scenario()
+
+        result = AutoPrimarySwitchService(self._db()).evaluate(runner)
+
+        assert result.outcome == OUTCOME_SWITCHED
+
+    def test_acceptable_incumbent_never_pays_for_the_assessment(self) -> None:
+        self._primary("NVDA.US")
+        self._evidence("NVDA.US", trend_bars=10, calm_bars=70)
+        self._selection_run(["AAPL.US"])
+        self._evidence("AAPL.US", trend_bars=0, calm_bars=80)
+
+        result = AutoPrimarySwitchService(self._db()).evaluate(_Runner())
+
+        assert result.outcome == OUTCOME_INCUMBENT_ACCEPTABLE
