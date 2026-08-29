@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-> **Last refreshed:** 2026-07-27 / commit `771916c`. Prefer `README.md` for user-facing product docs and `AGENTS.md` for concise agent conventions. This file is the Claude Code working guide for this repo (overrides unrelated global CLAUDE.md elsewhere).
+> **Last refreshed:** 2026-08-29 / commit `51400c1`. Prefer `README.md` for user-facing product docs and `AGENTS.md` for concise agent conventions. This file is the Claude Code working guide for this repo (overrides unrelated global CLAUDE.md elsewhere).
 
 ## Project overview
 
@@ -22,7 +22,7 @@
 ```
 auto_trade/
 ├── backend/app/
-│   ├── main.py                 # lifespan, crons, 30+ include_router
+│   ├── main.py                 # lifespan, crons, 90+ include_router
 │   ├── config.py               # Settings (AUTO_TRADE_* / LONGPORT_*)
 │   ├── runner.py               # AppRunner (threaded live loop + shadow jobs)
 │   ├── api/                    # routers (strategy, trade, watchlist, universe,

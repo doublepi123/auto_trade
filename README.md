@@ -359,7 +359,7 @@ P0：禁止做空、禁止持仓加仓，LLM/shadow/challenger 不下单且不�
 auto_trade/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py              # FastAPI 入口、lifespan、cron、路由挂载（30+ routers）
+│   │   ├── main.py              # FastAPI 入口、lifespan、cron、路由挂载（90+ routers）
 │   │   ├── config.py            # pydantic-settings（AUTO_TRADE_* / LONGPORT_*）
 │   │   ├── database.py          # SQLAlchemy + 运行时 _ensure_* 列迁移
 │   │   ├── models.py / schemas.py
@@ -380,7 +380,7 @@ auto_trade/
 │   └── Dockerfile
 ├── frontend/
 │   ├── src/
-│   │   ├── router/index.ts      # Hash 路由（13 页 + catch-all）
+│   │   ├── router/index.ts      # Hash 路由（13 个核心页 + ~50 只读分析页 + catch-all）
 │   │   ├── api/                 # 按域 axios 客户端
 │   │   ├── composables/         # 状态与实时连接
 │   │   ├── components/          # 图表与面板组件
@@ -413,6 +413,7 @@ auto_trade/
 | `/#/alerts` | 告警规则 — 条件告警 CRUD 与触发历史 |
 | `/#/notifications` | 通知中心 — 已发送通知日志 |
 | `/#/lab` | 优化工作台 — Prompt/性能、Strategy v2 与开盘动量等影子观测 |
+| 其余 ~50 条 | 单一用途只读分析页（退出效率、edge 质量、回撤持续、regime 敏感性、R 倍数、滚动指标、蒙特卡洛、执行质量 …）。每页渲染一个研究视图，均不改配置、不下单；完整清单以 `frontend/src/router/index.ts` 为准 |
 
 ## API 参考
 
