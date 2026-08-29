@@ -2024,6 +2024,56 @@ class StrategyV2ShadowReplayResponse(BaseModel):
     metrics: StrategyV2ShadowMetrics = Field(default_factory=StrategyV2ShadowMetrics)
 
 
+class SignalEdgeFirstPassage(BaseModel):
+    """Realised target-before-stop rate against a driftless random walk."""
+
+    target_hits: int = Field(ge=0)
+    stop_hits: int = Field(ge=0)
+    resolved: int = Field(ge=0)
+    observed_rate: Optional[float] = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    baseline_rate: float = Field(ge=0, le=1, allow_inf_nan=False)
+    edge_pp: Optional[float] = Field(default=None, allow_inf_nan=False)
+    p_value: Optional[float] = Field(default=None, ge=0, le=1, allow_inf_nan=False)
+    beats_baseline: bool
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class SignalEdgeClustered(BaseModel):
+    """Significance after same-day dependence between trades is removed."""
+
+    observations: int = Field(ge=0)
+    distinct_days: int = Field(ge=0)
+    naive_t: Optional[float] = Field(default=None, allow_inf_nan=False)
+    clustered_t: Optional[float] = Field(default=None, allow_inf_nan=False)
+    naive_mean: Optional[float] = Field(default=None, allow_inf_nan=False)
+    day_mean: Optional[float] = Field(default=None, allow_inf_nan=False)
+    # sqrt(trades/days): how much a per-trade t-statistic overstates significance.
+    inflation_factor: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    significant: bool
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class SignalEdgeResponse(BaseModel):
+    """Read-only evidence that a signal has edge before its exits are tuned.
+
+    Never promotes a symbol, changes the interval, or places an order.
+    """
+
+    generated_at: datetime
+    symbol: Optional[str] = None
+    lookback_days: int = Field(ge=1)
+    stop_pct: float = Field(gt=0, allow_inf_nan=False)
+    target_pct: float = Field(gt=0, allow_inf_nan=False)
+    verdict: Literal["PASS", "FAIL", "INSUFFICIENT_DATA"]
+    reasons: list[str] = Field(default_factory=list)
+    first_passage: SignalEdgeFirstPassage
+    clustered: SignalEdgeClustered
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class StatusResponse(BaseModel):
     engine_state: str
     paused: bool

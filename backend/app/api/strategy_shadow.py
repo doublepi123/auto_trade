@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from dataclasses import asdict
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -12,6 +13,9 @@ from app.core.audit import AuditLogger
 from app.database import get_db
 from app.schemas import (
     LiveExitChallengerReport,
+    SignalEdgeClustered,
+    SignalEdgeFirstPassage,
+    SignalEdgeResponse,
     StrategyV2AdxChallengerRequest,
     StrategyV2AdxChallengerResponse,
     StrategyV2BoundaryNeutralDiagnosticRequest,
@@ -33,6 +37,13 @@ from app.schemas import (
     TrustedFrozenAssessmentReport,
 )
 from app.services.live_exit_challenger_service import LiveExitChallengerService
+from app.domain.strategy_v2.signal_edge import (
+    DEFAULT_ALPHA,
+    DEFAULT_MIN_DISTINCT_DAYS,
+    DEFAULT_MIN_RESOLVED_TRADES,
+    DEFAULT_T_CRITICAL,
+)
+from app.services.signal_edge_service import SignalEdgeService
 from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 from app.services.trusted_frozen_assessment_service import (
     TrustedFrozenAssessmentService,
@@ -369,3 +380,48 @@ def replay_shadow_strategy(
         return StrategyV2ShadowService(db).replay(payload)
     except ValueError as exc:
         raise _bad_request(exc) from exc
+
+
+@router.get("/signal-edge", response_model=SignalEdgeResponse)
+def get_signal_edge(
+    symbol: str | None = Query(default=None, max_length=50),
+    lookback_days: int = Query(default=90, ge=1, le=365),
+    stop_pct: float | None = Query(default=None, gt=0, le=100),
+    target_pct: float | None = Query(default=None, gt=0, le=100),
+    alpha: float = Query(default=DEFAULT_ALPHA, gt=0, lt=1),
+    t_critical: float = Query(default=DEFAULT_T_CRITICAL, gt=0, le=10),
+    min_resolved_trades: int = Query(default=DEFAULT_MIN_RESOLVED_TRADES, ge=1),
+    min_distinct_days: int = Query(default=DEFAULT_MIN_DISTINCT_DAYS, ge=1),
+    db: Session = Depends(get_db),
+) -> SignalEdgeResponse:
+    """Report whether a signal demonstrates edge before its exits are tuned.
+
+    Read-only aggregation over existing Strategy v2 shadow trades: it never
+    promotes a symbol, changes the interval, or places an order.
+    """
+    try:
+        verdict, resolved_stop, resolved_target, resolved_symbol = SignalEdgeService(
+            db
+        ).assess(
+            symbol=symbol,
+            lookback_days=lookback_days,
+            stop_pct=stop_pct,
+            target_pct=target_pct,
+            alpha=alpha,
+            t_critical=t_critical,
+            min_resolved_trades=min_resolved_trades,
+            min_distinct_days=min_distinct_days,
+        )
+    except ValueError as exc:
+        raise _bad_request(exc) from exc
+    return SignalEdgeResponse(
+        generated_at=datetime.now(timezone.utc),
+        symbol=resolved_symbol,
+        lookback_days=lookback_days,
+        stop_pct=resolved_stop,
+        target_pct=resolved_target,
+        verdict=verdict.verdict,
+        reasons=list(verdict.reasons),
+        first_passage=SignalEdgeFirstPassage(**asdict(verdict.first_passage)),
+        clustered=SignalEdgeClustered(**asdict(verdict.clustered)),
+    )

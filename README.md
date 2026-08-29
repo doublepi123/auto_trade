@@ -484,6 +484,7 @@ auto_trade/
 | `GET` | `/api/strategy-shadow/decisions` | 当前配置版本的分页逐 bar 决策；支持 symbol/action/from/to |
 | `GET` | `/api/strategy-shadow/trades` | 当前配置版本的虚拟闭环交易与估算费用 |
 | `POST` | `/api/strategy-shadow/replay` | 对调用方提供的 1 分钟 bars 做确定性零写入回放 |
+| `GET` | `/api/strategy-shadow/signal-edge` | **参数调优前置门**：先证明信号有 edge，再谈调参。两项独立检验——(1) 首达检验：无漂移随机游走下触及 `+target` 早于 `-stop` 的概率为 `stop/(stop+target)`，实测胜率未超过该基准即说明入场不含方向性信息，任何出场参数都救不回来（精确二项 p 值）；(2) 聚类稳健显著性：交易在同一交易日跨相关标的成簇，逐笔 t 值约高估 `sqrt(笔数/天数)` 倍，按日折叠后再检验。证据不足单列为 `INSUFFICIENT_DATA`，与 `FAIL` 区分。只读，不晋级、不改区间、不下单 |
 | `GET` | `/api/universe/promotion-readiness` | 汇总入选标的的前向证据；人工复核必须同时满足影子启用、当前代量化评分新鲜且为 `CANDIDATE`、候选闭合交易达到初审 5 笔/成熟 20 笔、候选净收益为正且优于基线；不会自动晋级或切换实盘 |
 
 ### 回测
