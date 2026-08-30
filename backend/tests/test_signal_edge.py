@@ -171,7 +171,7 @@ class TestSignalEdgeVerdict:
             target_hits=80, stop_hits=40, stop_pct=0.45, target_pct=0.80
         )
         clustered = clustered_t_test(
-            [(date(2026, 8, 1 + i), 1.0 + (i % 3) * 0.05) for i in range(25)]
+            [(date(2026, 8, 1 + i), 1.0 + (i % 3) * 0.05) for i in range(30)]
         )
         return fp, clustered
 
@@ -190,7 +190,8 @@ class TestSignalEdgeVerdict:
         verdict = assess_signal_edge(first_passage=fp, clustered=clustered)
         assert verdict.verdict == VERDICT_INSUFFICIENT_DATA
         assert any("bracket-resolved" in r for r in verdict.reasons)
-        assert any("distinct trading days" in r for r in verdict.reasons)
+        assert any("gross trading days" in r for r in verdict.reasons)
+        assert any("net trading days" in r for r in verdict.reasons)
 
     def test_many_trades_on_few_days_is_still_thin(self) -> None:
         """The day floor is what stops a burst of correlated trades qualifying."""
@@ -202,14 +203,15 @@ class TestSignalEdgeVerdict:
         )
         verdict = assess_signal_edge(first_passage=fp, clustered=clustered)
         assert verdict.verdict == VERDICT_INSUFFICIENT_DATA
-        assert any("distinct trading days" in r for r in verdict.reasons)
+        assert any("gross trading days" in r for r in verdict.reasons)
+        assert any("net trading days" in r for r in verdict.reasons)
 
     def test_failing_first_passage_blocks_the_verdict(self) -> None:
         fp = assess_first_passage(
             target_hits=38, stop_hits=83, stop_pct=0.45, target_pct=0.80
         )
         clustered = clustered_t_test(
-            [(date(2026, 8, 1 + i), 1.0 + (i % 3) * 0.05) for i in range(25)]
+            [(date(2026, 8, 1 + i), 1.0 + (i % 3) * 0.05) for i in range(30)]
         )
         verdict = assess_signal_edge(first_passage=fp, clustered=clustered)
         assert verdict.verdict == VERDICT_FAIL
@@ -220,7 +222,7 @@ class TestSignalEdgeVerdict:
             target_hits=80, stop_hits=40, stop_pct=0.45, target_pct=0.80
         )
         clustered = clustered_t_test(
-            [(date(2026, 8, 1 + i), 1.0 if i % 2 == 0 else -1.0) for i in range(25)]
+            [(date(2026, 8, 1 + i), 1.0 if i % 2 == 0 else -1.0) for i in range(30)]
         )
         verdict = assess_signal_edge(first_passage=fp, clustered=clustered)
         assert verdict.verdict == VERDICT_FAIL

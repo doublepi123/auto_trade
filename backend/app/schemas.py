@@ -2030,6 +2030,11 @@ class SignalEdgeFirstPassage(BaseModel):
     target_hits: int = Field(ge=0)
     stop_hits: int = Field(ge=0)
     resolved: int = Field(ge=0)
+    barrier_mismatch_excluded: int = Field(ge=0)
+    matched_versions: int = Field(ge=0)
+    matched_trades: int = Field(ge=0)
+    provenance_excluded_trades: int = Field(ge=0)
+    missing_pnl_excluded: int = Field(ge=0)
     observed_rate: Optional[float] = Field(default=None, ge=0, le=1, allow_inf_nan=False)
     baseline_rate: float = Field(ge=0, le=1, allow_inf_nan=False)
     edge_pp: Optional[float] = Field(default=None, allow_inf_nan=False)
@@ -2040,7 +2045,7 @@ class SignalEdgeFirstPassage(BaseModel):
 
 
 class SignalEdgeClustered(BaseModel):
-    """Significance after same-day dependence between trades is removed."""
+    """Per-trade mean with a day-clustered robust standard error."""
 
     observations: int = Field(ge=0)
     distinct_days: int = Field(ge=0)
@@ -2048,6 +2053,13 @@ class SignalEdgeClustered(BaseModel):
     clustered_t: Optional[float] = Field(default=None, allow_inf_nan=False)
     naive_mean: Optional[float] = Field(default=None, allow_inf_nan=False)
     day_mean: Optional[float] = Field(default=None, allow_inf_nan=False)
+    clustered_standard_error: Optional[float] = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+    )
+    ci_lower: Optional[float] = Field(default=None, allow_inf_nan=False)
+    ci_upper: Optional[float] = Field(default=None, allow_inf_nan=False)
     # sqrt(trades/days): how much a per-trade t-statistic overstates significance.
     inflation_factor: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     significant: bool
@@ -2066,9 +2078,11 @@ class SignalEdgeResponse(BaseModel):
     lookback_days: int = Field(ge=1)
     stop_pct: float = Field(gt=0, allow_inf_nan=False)
     target_pct: float = Field(gt=0, allow_inf_nan=False)
-    verdict: Literal["PASS", "FAIL", "INSUFFICIENT_DATA"]
+    verdict: Literal["PASS", "FAIL", "FEE_BLOCKED", "INSUFFICIENT_DATA"]
     reasons: list[str] = Field(default_factory=list)
     first_passage: SignalEdgeFirstPassage
+    gross: SignalEdgeClustered
+    net: SignalEdgeClustered
     clustered: SignalEdgeClustered
 
     model_config = ConfigDict(extra="forbid")
@@ -2342,7 +2356,26 @@ class DiagnosticLiveSafety(BaseModel):
     live_max_entries_per_symbol_per_day: int
 
 
+class DecisionFunnelDiagnostics(BaseModel):
+    """Live-path decision-funnel counters for the current exchange-local
+    trading session. Read stages in order; the first zero count indicts the
+    stalling stage (see ``decision_funnel_service`` module docstring)."""
+
+    session_date: str = ""
+    fresh_primary_quote: int = 0
+    evaluations: int = 0
+    threshold_crossings: int = 0
+    skips_by_category: dict[str, int] = Field(default_factory=dict)
+    triggers: int = 0
+    sized_quantity_positive: int = 0
+    submit_attempts: int = 0
+    broker_acks: int = 0
+    persisted: int = 0
+    pre_submit_risk_check_invocations: int = 0
+
+
 class DiagnosticsResponse(BaseModel):
+    risk_boundary_version: str
     runner_running: bool
     thread_alive: bool
     quotes_subscribed: bool
@@ -2351,14 +2384,22 @@ class DiagnosticsResponse(BaseModel):
     pending_order_ids: list[str] = Field(default_factory=list)
     unrepresentable_live_order_issues: list[str] = Field(default_factory=list)
     order_sync_succeeded: bool = False
+    order_reconciliation_state: Literal[
+        "CLEAR",
+        "MANUAL_RECONCILIATION",
+    ] = "CLEAR"
     execution_state: str = "IDLE"
     reduction_reason: str = ""
+    trading_state: str = "ACTIVE"
     dedup_suppressed_total: int
     dedup_window_seconds: float
     live_safety: DiagnosticLiveSafety
     quote_stream: DiagnosticQuoteStream
     risk: DiagnosticRiskState
     symbol_runtimes: list[DiagnosticSymbolRuntime]
+    decision_funnel: DecisionFunnelDiagnostics = Field(
+        default_factory=DecisionFunnelDiagnostics
+    )
 
 
 class OrderResponse(BaseModel):

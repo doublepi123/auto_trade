@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 os.environ["AUTO_TRADE_DATABASE_URL"] = (
     f"sqlite:///{tempfile.gettempdir()}/auto_trade_test_auto_switch_{os.getpid()}.db"
@@ -21,6 +23,7 @@ from app.models import (
     StrategyV2ShadowConfig,
     StrategyV2ShadowDecision,
     StrategyV2ShadowTrade,
+    StrategyV2ShadowVersion,
     UniverseSelectionCandidate,
     UniverseSelectionRun,
 )
@@ -66,6 +69,7 @@ class _Base:
         db.query(StrategyV2ShadowConfig).delete()
         db.query(StrategyV2ShadowDecision).delete()
         db.query(StrategyV2ShadowTrade).delete()
+        db.query(StrategyV2ShadowVersion).delete()
         db.query(UniverseSelectionCandidate).delete()
         db.query(UniverseSelectionRun).delete()
         db.query(StrategyConfig).delete()
@@ -166,7 +170,7 @@ class _Base:
 
 
 @pytest.fixture(autouse=True)
-def _enable_switch(monkeypatch):
+def enable_switch(monkeypatch):
     monkeypatch.setattr(settings, "auto_primary_switch_enabled", True, raising=False)
     monkeypatch.setattr(settings, "auto_primary_switch_lookback_days", 3, raising=False)
     monkeypatch.setattr(settings, "auto_primary_switch_min_samples", 60, raising=False)
@@ -464,10 +468,29 @@ class TestSignalEdgeGate(_Base):
             stop_loss_pct=stop,
             profit_target_pct=target,
         ))
+        db.add(StrategyV2ShadowVersion(
+            symbol="EDGE.US",
+            config_version="v1",
+            config_json=json.dumps(
+                {
+                    "algorithm_version": "strategy-v2-rth-mr-v5-causal-entry",
+                    "stop_loss_pct": stop,
+                    "profit_target_pct": target,
+                }
+            ),
+            activated_at=datetime.now(timezone.utc),
+        ))
         db.commit()
         db.close()
 
-    def _edge_trades(self, *, targets: int, stops: int, days: int) -> None:
+    def _edge_trades(
+        self,
+        *,
+        targets: int,
+        stops: int,
+        days: int,
+        pnl_available: bool = True,
+    ) -> None:
         """Seed resolved trades spread over ``days`` distinct exit dates.
 
         Returns are signed to match the exit reason so first-passage and the
@@ -488,7 +511,8 @@ class TestSignalEdgeGate(_Base):
                 exit_at=exit_at,
                 entry_price=100.0,
                 quantity=1.0,
-                net_pnl=pnl,
+                gross_pnl=pnl if pnl_available else None,
+                net_pnl=pnl if pnl_available else None,
                 exit_reason=reason,
                 mfe_pct=0.009,
             ))
@@ -537,6 +561,113 @@ class TestSignalEdgeGate(_Base):
         assert "INSUFFICIENT_DATA" in result.detail
         assert runner.calls == []
 
+    def test_unresolved_barrier_provenance_requests_operator_warning(self) -> None:
+        # Given: resolved evidence exists but its version has no snapshot.
+        runner = self._switch_scenario()
+        db = self._db()
+        db.add(StrategyV2ShadowConfig(
+            symbol="NVDA.US",
+            enabled=True,
+            stop_loss_pct=1.0,
+            profit_target_pct=1.0,
+        ))
+        db.commit()
+        db.close()
+        self._edge_trades(targets=32, stops=8, days=20)
+
+        # When: the live promotion gate evaluates the unattributable cohort.
+        result = AutoPrimarySwitchService(self._db()).evaluate(runner)
+
+        # Then: it remains fail-closed and asks the cron to warn an operator.
+        assert result.outcome == OUTCOME_SIGNAL_EDGE_UNPROVEN
+        assert result.signal_edge_unassessable is True
+        assert "40" in result.detail
+        assert runner.calls == []
+
+    def test_missing_pnl_cohort_emits_operator_warning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Given: one matching v5 version has 40 trades but no paired PnL.
+        from app import main as main_module
+        from app import runner as runner_module
+        from app.services import auto_primary_switch_service
+        from app.services import durable_job_lease_service
+
+        runner = self._switch_scenario()
+        self._barriers()
+        self._edge_trades(
+            targets=32,
+            stops=8,
+            days=20,
+            pnl_available=False,
+        )
+        result = AutoPrimarySwitchService(self._db()).evaluate(runner)
+
+        # When: the cron receives the real blocked result from that cohort.
+        class FakeSession:
+            def close(self) -> None:
+                return None
+
+        class FakeGuard:
+            def __enter__(self) -> "FakeGuard":
+                return self
+
+            def __exit__(self, *_args: object) -> bool:
+                return False
+
+        class FakeLeaseService:
+            def __init__(self, **_kwargs: object) -> None:
+                return None
+
+            @staticmethod
+            def try_acquire(_lease_key: str) -> object:
+                return object()
+
+            @staticmethod
+            def keepalive(_lease: object, **_kwargs: object) -> FakeGuard:
+                return FakeGuard()
+
+        class FakeSwitchService:
+            def __init__(self, _db: object) -> None:
+                return None
+
+            @staticmethod
+            def evaluate(_runner: object) -> object:
+                return result
+
+        monkeypatch.setattr(main_module.settings, "auto_primary_switch_enabled", True)
+        monkeypatch.setattr(main_module, "SessionLocal", FakeSession)
+        monkeypatch.setattr(runner_module, "get_runner", lambda: object())
+        monkeypatch.setattr(
+            durable_job_lease_service,
+            "DurableJobLeaseService",
+            FakeLeaseService,
+        )
+        monkeypatch.setattr(
+            auto_primary_switch_service,
+            "AutoPrimarySwitchService",
+            FakeSwitchService,
+        )
+        with caplog.at_level(logging.WARNING, logger="auto_trade.main"):
+            assert main_module._auto_primary_switch_tick_sync() is None
+
+        # Then: missing PnL is marked unassessable and warned with full detail.
+        assert result.outcome == OUTCOME_SIGNAL_EDGE_UNPROVEN
+        assert result.signal_edge_unassessable is True
+        assert "missing_pnl_excluded=40" in result.detail
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+        ]
+        assert warnings == [
+            "automatic primary switch signal-edge gate unassessable: "
+            + result.detail
+        ]
+        assert runner.calls == []
+
     def test_unassessable_signal_fails_closed(self) -> None:
         runner = self._switch_scenario()
 
@@ -565,3 +696,84 @@ class TestSignalEdgeGate(_Base):
         result = AutoPrimarySwitchService(self._db()).evaluate(_Runner())
 
         assert result.outcome == OUTCOME_INCUMBENT_ACCEPTABLE
+
+
+def test_auto_primary_switch_tick_warns_when_signal_edge_is_unassessable(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Given: the live gate reports a permanently unattributable evidence cohort.
+    from app import main as main_module
+    from app import runner as runner_module
+    from app.services import auto_primary_switch_service
+    from app.services import durable_job_lease_service
+
+    detail = (
+        "shadow signal edge INSUFFICIENT_DATA: matched_versions=0; "
+        "matched_trades=0; provenance_excluded_trades=248"
+    )
+
+    class FakeSession:
+        def close(self) -> None:
+            return None
+
+    class FakeGuard:
+        def __enter__(self) -> "FakeGuard":
+            return self
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+    class FakeLeaseService:
+        def __init__(self, **_kwargs: object) -> None:
+            return None
+
+        @staticmethod
+        def try_acquire(_lease_key: str) -> object:
+            return object()
+
+        @staticmethod
+        def keepalive(_lease: object, **_kwargs: object) -> FakeGuard:
+            return FakeGuard()
+
+    class FakeSwitchService:
+        def __init__(self, _db: object) -> None:
+            return None
+
+        @staticmethod
+        def evaluate(_runner: object) -> SimpleNamespace:
+            return SimpleNamespace(
+                outcome="SIGNAL_EDGE_UNPROVEN",
+                incumbent="NVDA.US",
+                candidate="",
+                detail=detail,
+                signal_edge_unassessable=True,
+            )
+
+    monkeypatch.setattr(main_module.settings, "auto_primary_switch_enabled", True)
+    monkeypatch.setattr(main_module, "SessionLocal", FakeSession)
+    monkeypatch.setattr(runner_module, "get_runner", lambda: object())
+    monkeypatch.setattr(
+        durable_job_lease_service,
+        "DurableJobLeaseService",
+        FakeLeaseService,
+    )
+    monkeypatch.setattr(
+        auto_primary_switch_service,
+        "AutoPrimarySwitchService",
+        FakeSwitchService,
+    )
+
+    # When: the synchronous cron tick handles that blocked result.
+    with caplog.at_level(logging.WARNING, logger="auto_trade.main"):
+        assert main_module._auto_primary_switch_tick_sync() is None
+
+    # Then: an operator-visible warning carries the complete diagnosis.
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    assert warnings == [
+        "automatic primary switch signal-edge gate unassessable: " + detail
+    ]

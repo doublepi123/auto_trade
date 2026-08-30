@@ -26,7 +26,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.domain.strategy_v2.signal_edge import VERDICT_PASS
+from app.domain.strategy_v2.signal_edge import (
+    DEFAULT_MIN_DISTINCT_DAYS,
+    DEFAULT_MIN_RESOLVED_TRADES,
+    VERDICT_INSUFFICIENT_DATA,
+    VERDICT_PASS,
+)
 from app.models import (
     StrategyConfig,
     UniverseSelectionCandidate,
@@ -59,6 +64,13 @@ class AutoPrimarySwitchResult:
     candidate: str = ""
     candidate_trend_pct: float | None = None
     detail: str = ""
+    signal_edge_unassessable: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _SignalEdgeBlock:
+    detail: str
+    unassessable: bool
 
 
 class AutoPrimarySwitchService:
@@ -116,7 +128,8 @@ class AutoPrimarySwitchService:
                 OUTCOME_SIGNAL_EDGE_UNPROVEN,
                 incumbent=incumbent,
                 incumbent_trend_pct=incumbent_row.trend_blocked_pct,
-                detail=edge_blocked,
+                detail=edge_blocked.detail,
+                signal_edge_unassessable=edge_blocked.unassessable,
             )
 
         eligible = self._eligible_candidates()
@@ -278,7 +291,7 @@ class AutoPrimarySwitchService:
                 )
             raise
 
-    def _signal_edge_block_reason(self) -> str | None:
+    def _signal_edge_block_reason(self) -> _SignalEdgeBlock | None:
         """Return why a switch must be blocked, or ``None`` when edge is proven.
 
         Assessed across all symbols, not just the candidate: first-passage tests
@@ -296,13 +309,34 @@ class AutoPrimarySwitchService:
         try:
             verdict, _stop, _target, _symbol = SignalEdgeService(self._db).assess()
         except ValueError as exc:
-            return f"signal edge not assessable: {exc}"
+            return _SignalEdgeBlock(
+                detail=f"signal edge not assessable: {exc}",
+                unassessable=True,
+            )
         if verdict.verdict == VERDICT_PASS:
             return None
         detail = "; ".join(verdict.reasons)
-        return (
-            f"shadow signal edge {verdict.verdict}"
-            + (f": {detail}" if detail else "")
+        first_passage = verdict.first_passage
+        provenance_unassessable = first_passage.matched_versions == 0 or (
+            first_passage.matched_trades == 0
+            and first_passage.provenance_excluded_trades > 0
+        )
+        pnl_unassessable = (
+            verdict.verdict == VERDICT_INSUFFICIENT_DATA
+            and first_passage.missing_pnl_excluded > 0
+            and (
+                verdict.gross.observations < DEFAULT_MIN_RESOLVED_TRADES
+                or verdict.gross.distinct_days < DEFAULT_MIN_DISTINCT_DAYS
+                or verdict.net.observations < DEFAULT_MIN_RESOLVED_TRADES
+                or verdict.net.distinct_days < DEFAULT_MIN_DISTINCT_DAYS
+            )
+        )
+        return _SignalEdgeBlock(
+            detail=(
+                f"shadow signal edge {verdict.verdict}"
+                + (f": {detail}" if detail else "")
+            ),
+            unassessable=provenance_unassessable or pnl_unassessable,
         )
 
     @staticmethod

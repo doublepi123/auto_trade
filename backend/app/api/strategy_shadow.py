@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any
 
@@ -414,6 +413,8 @@ def get_signal_edge(
         )
     except ValueError as exc:
         raise _bad_request(exc) from exc
+    gross = SignalEdgeClustered.model_validate(verdict.gross, from_attributes=True)
+    net = SignalEdgeClustered.model_validate(verdict.net, from_attributes=True)
     return SignalEdgeResponse(
         generated_at=datetime.now(timezone.utc),
         symbol=resolved_symbol,
@@ -422,6 +423,11 @@ def get_signal_edge(
         target_pct=resolved_target,
         verdict=verdict.verdict,
         reasons=list(verdict.reasons),
-        first_passage=SignalEdgeFirstPassage(**asdict(verdict.first_passage)),
-        clustered=SignalEdgeClustered(**asdict(verdict.clustered)),
+        first_passage=SignalEdgeFirstPassage.model_validate(
+            verdict.first_passage,
+            from_attributes=True,
+        ),
+        gross=gross,
+        net=net,
+        clustered=net,
     )
