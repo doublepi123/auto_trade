@@ -136,9 +136,7 @@ class HardBoundProjectionService:
         return {
             "semantics": PROJECTION_SEMANTICS_LABEL,
             "fields": fields,
-            "fixed_sizing_caps_bypassed_by_full_buying_power": bool(
-                settings.full_buying_power_usage_enabled
-            ),
+            "fixed_sizing_caps_bypassed_by_full_buying_power": False,
         }
 
     @staticmethod

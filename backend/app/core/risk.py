@@ -5,6 +5,7 @@ import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from enum import Enum
 from typing import Callable, Iterator, Optional
 
 
@@ -61,6 +62,40 @@ class DailyLossSnapshot:
 TradeDayProvider = Callable[[], date]
 
 
+class TradingState(str, Enum):
+    """Trading-permission state (nautilus_trader ``TradingState`` pattern).
+
+    Derived by :meth:`RiskController.trading_state` from the controller's
+    existing conditions — never persisted, so it cannot drift from them:
+
+    | condition                                              | state    |
+    |--------------------------------------------------------|----------|
+    | kill switch engaged                                    | HALTED   |
+    | paused (manual, drawdown auto-pause, or a fail-closed  | REDUCING |
+    |   operational latch: ORDER_SUBMISSION_UNCERTAIN: /     |          |
+    |   POSITION_RECONCILIATION_UNCERTAIN: /                 |          |
+    |   ORDER_PERSISTENCE_UNCERTAIN: /                       |          |
+    |   PNL_RECONCILIATION_UNCERTAIN: / …)                   |          |
+    | post-fill entry reconciliation in progress             | REDUCING |
+    | daily-loss, drawdown, or consecutive-loss limit hit    | REDUCING |
+    | otherwise                                              | ACTIVE   |
+
+    Semantics: ``ACTIVE`` permits entries and exits; ``REDUCING`` rejects
+    position-increasing orders but still accepts position-reducing and
+    stop-loss exits (cancellations unaffected); ``HALTED`` rejects every
+    order submission including exits.
+
+    The runner-level ``execution_state`` (``_reduction_intents``) is not
+    visible to ``RiskController``; the diagnostics layer reports REDUCING
+    when the risk state is ACTIVE but an emergency reduction intent is
+    active (see ``AppRunner._trading_state``).
+    """
+
+    ACTIVE = "ACTIVE"
+    REDUCING = "REDUCING"
+    HALTED = "HALTED"
+
+
 class RiskController:
     def __init__(
         self,
@@ -101,6 +136,18 @@ class RiskController:
     def check(self) -> RiskResult:
         result, _ = self.check_with_daily_loss_snapshot()
         return result
+
+    def trading_state(self) -> TradingState:
+        """Derive the current :class:`TradingState` from existing conditions."""
+        with self._lock:
+            self._maybe_rollover_day()
+            if self.kill_switch:
+                return TradingState.HALTED
+            if self.paused or self._entry_reconciliation_count > 0:
+                return TradingState.REDUCING
+            if not self._check_limits().approved:
+                return TradingState.REDUCING
+            return TradingState.ACTIVE
 
     def check_with_daily_loss_snapshot(
         self,

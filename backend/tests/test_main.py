@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 import time
 from collections.abc import Generator
@@ -16,6 +17,7 @@ from app import main as main_module
 from app.core.engine import StrategyParams
 from app.services import durable_job_lease_service
 from app.services import llm_interaction_service
+from app.services import research_artifact_retention_service
 from app.services import risk_history_service
 from app.services import strategy_v2_shadow_service
 from app.services.universe_selection_service import (
@@ -408,6 +410,33 @@ def test_storage_maintenance_uses_one_lease_for_all_writers_and_closes_first(
             _exercise_callbacks("wait-prune", self.kwargs)
             return SimpleNamespace(deleted=1, batches=1)
 
+        def prune_expired_diagnostic_wait_decisions(
+            self, **_kwargs: object
+        ) -> object:
+            _exercise_callbacks("diagnostic-wait-prune", self.kwargs)
+            return SimpleNamespace(deleted=1, batches=1)
+
+    class FakeArtifactRetentionService:
+        def __init__(self, session: object, **kwargs: object) -> None:
+            assert session is db
+            self.kwargs = kwargs
+
+        def prune_expired_quant_v6_publication_payloads(
+            self, **_kwargs: object
+        ) -> object:
+            _exercise_callbacks("quant-v6-prune", self.kwargs)
+            return SimpleNamespace(
+                bindings_deleted=1, artifacts_deleted=1, batches=1
+            )
+
+        def prune_expired_forward_replay_artifacts(
+            self, **_kwargs: object
+        ) -> object:
+            _exercise_callbacks("replay-prune", self.kwargs)
+            return SimpleNamespace(
+                bindings_deleted=1, artifacts_deleted=1, batches=1
+            )
+
     class FakeRiskHistoryService:
         def __init__(self, session: object, **kwargs: object) -> None:
             assert session is db
@@ -444,6 +473,11 @@ def test_storage_maintenance_uses_one_lease_for_all_writers_and_closes_first(
         FakeShadowService,
     )
     monkeypatch.setattr(
+        research_artifact_retention_service,
+        "ResearchArtifactRetentionService",
+        FakeArtifactRetentionService,
+    )
+    monkeypatch.setattr(
         risk_history_service,
         "RiskHistoryService",
         FakeRiskHistoryService,
@@ -464,6 +498,15 @@ def test_storage_maintenance_uses_one_lease_for_all_writers_and_closes_first(
         "lease-checkpoint",
         "lease-fence",
             "wait-prune",
+            "lease-checkpoint",
+            "lease-fence",
+            "diagnostic-wait-prune",
+            "lease-checkpoint",
+            "lease-fence",
+            "quant-v6-prune",
+            "lease-checkpoint",
+            "lease-fence",
+            "replay-prune",
             "lease-checkpoint",
             "lease-fence",
             "snapshot-prune",
@@ -2540,3 +2583,261 @@ async def test_llm_tick_persists_skip_state(monkeypatch: pytest.MonkeyPatch, tmp
         assert skipped.last_skip_reason == "cycle budget exhausted"
     finally:
         db.close()
+
+
+class TestLLMQuantGateLogThrottle:
+    """The 60s LLM cron must not repeat the quant-gate exclusion line every tick.
+
+    Measured on the live container: 664 identical INFO lines in 11 hours
+    (32% of all output). The line is rate-limited to once per window; repeats
+    are folded into the next emission's "suppressed" count, not dropped.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _restore_throttle(self) -> Generator[None, None, None]:
+        original = main_module._llm_quant_gate_log_throttle
+        yield
+        main_module._llm_quant_gate_log_throttle = original
+
+    @staticmethod
+    def _make_excluded_runner() -> MagicMock:
+        runner = MagicMock()
+        runner.engine = SimpleNamespace(last_price=100.0, state=SimpleNamespace(value="flat"))
+        runner.broker = MagicMock()
+        runner.fresh_market_price.return_value = 100.0
+        runner.recent_price_context.return_value = []
+        runner.execute_llm_order_decision.return_value = {"status": "NO_ACTION", "order_id": None}
+        runner._symbol_runtimes = {
+            "MSFT.US": SimpleNamespace(
+                symbol="MSFT.US",
+                market="US",
+                engine=SimpleNamespace(last_price=330.0),
+                recent_quotes=[],
+            ),
+        }
+        return runner
+
+    def _patch_deps(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        runner: MagicMock,
+        quant_rows: list[SimpleNamespace],
+    ) -> None:
+        config = SimpleNamespace(
+            auto_interval_enabled=True,
+            symbol="AAPL.US",
+            market="US",
+            llm_interval_minutes=2,
+            llm_last_analysis_at=None,
+            buy_low=100.0,
+            sell_high=110.0,
+            short_selling=False,
+            min_profit_amount=0.0,
+            trading_session_mode="ANY",
+        )
+
+        class FakeDB:
+            def commit(self) -> None:
+                pass
+
+            def rollback(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        class FakeStrategyService:
+            def __init__(self, db: object) -> None:
+                pass
+
+            def get_config(self) -> SimpleNamespace:
+                return config
+
+        class FakeStateService:
+            def __init__(self, db: object) -> None:
+                pass
+
+            def count_analyses_last_hour(self, now: datetime) -> int:
+                return 0
+
+            def get_state(self, symbol: str, market: str) -> SimpleNamespace:
+                return SimpleNamespace(
+                    symbol=symbol,
+                    market=market,
+                    last_analysis_at=None,
+                    next_analysis_at=None,
+                    last_status="",
+                    last_skip_reason="",
+                )
+
+            def record_skip(
+                self,
+                symbol: str,
+                market: str,
+                reason: str,
+                *,
+                next_analysis_at: datetime | None,
+            ) -> None:
+                return None
+
+            def record_analysis(
+                self,
+                symbol: str,
+                market: str,
+                *,
+                analyzed_at: datetime,
+                next_analysis_at: datetime | None,
+            ) -> None:
+                return None
+
+            def record_failure(
+                self,
+                symbol: str,
+                market: str,
+                reason: str,
+                *,
+                next_analysis_at: datetime | None,
+            ) -> None:
+                return None
+
+        monkeypatch.setattr("app.database.SessionLocal", lambda: FakeDB())
+        monkeypatch.setattr("app.services.strategy_service.StrategyService", FakeStrategyService)
+        monkeypatch.setattr("app.main.LLMSymbolStateService", FakeStateService)
+        monkeypatch.setattr("app.runner.get_runner", lambda: runner)
+        monkeypatch.setattr(
+            "app.services.llm_advisor_service.build_recent_analysis_context", lambda cfg: []
+        )
+        monkeypatch.setattr(main_module, "record_trade_event", lambda *a, **kw: None)
+        monkeypatch.setattr(
+            "app.services.watchlist_quant_service.list_latest_current_quant_scores",
+            lambda db: quant_rows,
+        )
+        monkeypatch.setattr(
+            "app.services.llm_advisor_service.LLMAdvisorService",
+            lambda broker=None: MagicMock(
+                analyze=lambda **kw: {
+                    "success": True,
+                    "suggested_buy_low": 98.0,
+                    "suggested_sell_high": 112.0,
+                    "confidence_score": 0.85,
+                    "order_action": "NONE",
+                    "interaction_id": 42,
+                }
+            ),
+        )
+        monkeypatch.setattr(
+            "app.api.llm_advisor._interval_reference_quantity",
+            lambda *args, **kwargs: 1.0,
+        )
+        monkeypatch.setattr(
+            "app.services.llm_interaction_service.LLMInteractionService",
+            lambda db: MagicMock(update_outcome=lambda *a, **kw: None),
+        )
+
+    def _install_fake_clock_throttle(self, ticks: list[float]) -> None:
+        from app.core.log_throttle import RepeatedLogThrottle
+
+        clock = iter(ticks).__next__
+        main_module._llm_quant_gate_log_throttle = RepeatedLogThrottle(
+            window_seconds=3600.0,
+            clock=clock,
+        )
+
+    @pytest.mark.asyncio
+    async def test_repeats_within_window_emit_once(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        runner = self._make_excluded_runner()
+        now = datetime.now(timezone.utc)
+        quant_rows = [
+            SimpleNamespace(
+                symbol="MSFT.US",
+                recommended_action="AVOID",
+                score=0.1,
+                expires_at=now + timedelta(hours=1),
+            ),
+        ]
+        self._patch_deps(monkeypatch, runner, quant_rows)
+        self._install_fake_clock_throttle([60.0, 120.0, 180.0, 240.0, 300.0])
+
+        with caplog.at_level(logging.INFO, logger="auto_trade.main"):
+            for _ in range(5):
+                await main_module._llm_analysis_tick()
+
+        gate_lines = [
+            r for r in caplog.records if "secondary quant gate excluded" in r.getMessage()
+        ]
+        assert len(gate_lines) == 1
+        assert "excluded 1/1 targets" in gate_lines[0].getMessage()
+
+    @pytest.mark.asyncio
+    async def test_first_emission_after_window_reports_suppressed_count(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        runner = self._make_excluded_runner()
+        now = datetime.now(timezone.utc)
+        quant_rows = [
+            SimpleNamespace(
+                symbol="MSFT.US",
+                recommended_action="AVOID",
+                score=0.1,
+                expires_at=now + timedelta(hours=1),
+            ),
+        ]
+        self._patch_deps(monkeypatch, runner, quant_rows)
+        self._install_fake_clock_throttle(
+            [60.0, 120.0, 180.0, 240.0, 300.0, 60.0 + 3601.0]
+        )
+
+        with caplog.at_level(logging.INFO, logger="auto_trade.main"):
+            for _ in range(6):
+                await main_module._llm_analysis_tick()
+
+        gate_lines = [
+            r for r in caplog.records if "secondary quant gate excluded" in r.getMessage()
+        ]
+        assert len(gate_lines) == 2
+        summary = gate_lines[1].getMessage()
+        assert "suppressed" in summary
+        assert "4" in summary
+
+
+@pytest.mark.asyncio
+async def test_readiness_503_logs_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A degraded readiness verdict must be greppable via WARNING, not silent."""
+    from app import database
+
+    monkeypatch.setattr(
+        database.engine,
+        "connect",
+        lambda: _ReadyConnection(),
+    )
+    monkeypatch.setattr(
+        main_module,
+        "get_runner",
+        lambda: SimpleNamespace(
+            diagnostics=lambda: {
+                "runner_running": True,
+                "quotes_subscribed": True,
+                "order_sync_succeeded": False,
+                "unrepresentable_live_order_issues": [],
+            }
+        ),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="auto_trade.main"):
+        response = await main_module.ready()
+
+    assert isinstance(response, JSONResponse)
+    assert response.status_code == 503
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "readiness" in warnings[0].getMessage().lower()
+    assert "order_sync" in warnings[0].getMessage()

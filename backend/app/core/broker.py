@@ -14,6 +14,16 @@ from typing import TYPE_CHECKING, Any, Callable, cast
 from zoneinfo import ZoneInfo
 
 from app.config import settings
+from app.core.position_probe_diagnostics import (
+    POSITION_PROBE_MESSAGE_LIMIT,
+    POSITION_PROBE_STDERR_LIMIT,
+    PositionProbeConnectionError,
+    PositionProbeDiagnostics,
+    PositionProbeProtocolError,
+    PositionProbeRuntimeError,
+    PositionProbeTimeoutError,
+    redact_probe_text,
+)
 
 if TYPE_CHECKING:
     from app.core.audit import AuditLogger
@@ -448,26 +458,54 @@ def _decode_position_probe_output(
     output: str,
     *,
     returncode: int,
+    stderr: str = "",
+    probe_duration_ms: float = 0.0,
+    retry_count: int = 0,
 ) -> list[Position]:
+    sanitized_stderr = redact_probe_text(
+        str(stderr or ""),
+        limit=POSITION_PROBE_STDERR_LIMIT,
+    )
+
+    def protocol_error(error_type: str = "MalformedPositionProbePayload") -> PositionProbeProtocolError:
+        return PositionProbeProtocolError(
+            PositionProbeDiagnostics(
+                error_type=error_type,
+                sdk_error_category="PROTOCOL",
+                error_message="malformed broker position probe payload",
+                probe_duration_ms=max(0.0, probe_duration_ms),
+                exit_code=returncode,
+                retry_count=retry_count,
+                stderr=sanitized_stderr,
+            )
+        )
+
     if (
         not isinstance(output, str)
         or len(output.encode("utf-8")) > _POSITION_PROBE_MAX_OUTPUT_BYTES
     ):
-        raise RuntimeError("malformed broker position probe payload")
+        raise protocol_error()
     try:
         payload = json.loads(output)
     except (TypeError, ValueError) as exc:
-        raise RuntimeError("malformed broker position probe payload") from exc
+        raise protocol_error(type(exc).__name__) from exc
     if not isinstance(payload, dict):
-        raise RuntimeError("malformed broker position probe payload")
+        raise protocol_error()
 
     status = payload.get("status")
     if status == "error":
+        legacy_keys = {"status", "error_type", "retryable"}
+        diagnostic_keys = legacy_keys | {
+            "sdk_error_code",
+            "sdk_error_category",
+            "error_message",
+        }
         if (
-            set(payload) != {"status", "error_type", "retryable"}
+            frozenset(payload)
+            not in {frozenset(legacy_keys), frozenset(diagnostic_keys)}
             or returncode == 0
         ):
-            raise RuntimeError("malformed broker position probe payload")
+            raise protocol_error()
         error_type = payload.get("error_type")
         retryable = payload.get("retryable")
         if (
@@ -476,24 +514,45 @@ def _decode_position_probe_output(
             or len(error_type) > 80
             or not isinstance(retryable, bool)
         ):
-            raise RuntimeError("malformed broker position probe payload")
-        if retryable:
-            raise ConnectionError(
-                f"isolated broker position snapshot failed ({error_type})"
+            raise protocol_error()
+        sdk_error_code = payload.get("sdk_error_code", "")
+        sdk_error_category = payload.get("sdk_error_category", "")
+        error_message = payload.get("error_message", "")
+        if not all(
+            isinstance(value, str)
+            for value in (
+                sdk_error_code,
+                sdk_error_category,
+                error_message,
             )
-        raise RuntimeError(
-            f"isolated broker position snapshot failed ({error_type})"
+        ):
+            raise protocol_error()
+        diagnostics = PositionProbeDiagnostics(
+            error_type=error_type,
+            sdk_error_code=str(sdk_error_code)[:80],
+            sdk_error_category=str(sdk_error_category)[:80],
+            error_message=redact_probe_text(
+                str(error_message),
+                limit=POSITION_PROBE_MESSAGE_LIMIT,
+            ),
+            probe_duration_ms=max(0.0, probe_duration_ms),
+            exit_code=returncode,
+            retry_count=retry_count,
+            stderr=sanitized_stderr,
         )
+        if retryable:
+            raise PositionProbeConnectionError(diagnostics)
+        raise PositionProbeRuntimeError(diagnostics)
     if (
         status != "ok"
         or returncode != 0
         or set(payload) != {"status", "positions"}
     ):
-        raise RuntimeError("malformed broker position probe payload")
+        raise protocol_error()
 
     raw_positions = payload.get("positions")
     if not isinstance(raw_positions, list):
-        raise RuntimeError("malformed broker position probe payload")
+        raise protocol_error()
     expected_keys = {
         "symbol",
         "side",
@@ -503,21 +562,48 @@ def _decode_position_probe_output(
     }
     for item in raw_positions:
         if not isinstance(item, dict) or set(item) != expected_keys:
-            raise RuntimeError("malformed broker position probe payload")
+            raise protocol_error()
         if not all(
             isinstance(item[key], str)
             for key in ("symbol", "side", "quantity")
         ):
-            raise RuntimeError("malformed broker position probe payload")
+            raise protocol_error()
         if not all(
             item[key] is None or isinstance(item[key], str)
             for key in ("avg_price", "available_quantity")
         ):
-            raise RuntimeError("malformed broker position probe payload")
+            raise protocol_error()
     try:
         return _normalize_position_response(raw_positions)
     except (RuntimeError, ValueError) as exc:
-        raise RuntimeError("malformed broker position probe payload") from exc
+        raise protocol_error(type(exc).__name__) from exc
+
+
+def _position_probe_timeout_error(
+    message: str,
+    *,
+    started_at: float,
+    stderr: str | bytes | None = None,
+) -> PositionProbeTimeoutError:
+    if isinstance(stderr, bytes):
+        stderr_text = stderr.decode("utf-8", errors="replace")
+    else:
+        stderr_text = str(stderr or "")
+    return PositionProbeTimeoutError(
+        PositionProbeDiagnostics(
+            error_type="TimeoutExpired",
+            sdk_error_category="TIMEOUT",
+            error_message=message,
+            probe_duration_ms=max(
+                0.0,
+                (time.monotonic() - started_at) * 1_000,
+            ),
+            stderr=redact_probe_text(
+                stderr_text,
+                limit=POSITION_PROBE_STDERR_LIMIT,
+            ),
+        )
+    )
 
 
 def _iter_order_items(item: Any) -> list[Any]:
@@ -1660,12 +1746,23 @@ class BrokerGateway:
 
     def get_positions(self) -> list[Position]:
         if settings.broker_position_snapshot_isolation_enabled:
-            return self._call_with_retry(
-                self._get_positions_isolated,
-                op="get_positions_isolated",
-                max_retries=settings.broker_retry_max,
-                base_ms=settings.broker_retry_base_ms,
-            )
+            try:
+                return self._call_with_retry(
+                    self._get_positions_isolated,
+                    op="get_positions_isolated",
+                    max_retries=settings.broker_retry_max,
+                    base_ms=settings.broker_retry_base_ms,
+                )
+            except (
+                PositionProbeConnectionError,
+                PositionProbeTimeoutError,
+            ) as exc:
+                raise exc.with_retry_count(settings.broker_retry_max) from None
+            except (
+                PositionProbeProtocolError,
+                PositionProbeRuntimeError,
+            ) as exc:
+                raise exc.with_retry_count(0) from None
         return self._call_with_retry(
             self._get_positions_direct,
             op="get_positions",
@@ -1681,18 +1778,21 @@ class BrokerGateway:
 
     def _get_positions_isolated(self) -> list[Position]:
         timeout_seconds = settings.broker_position_snapshot_timeout_seconds
-        deadline = time.monotonic() + timeout_seconds
+        started_at = time.monotonic()
+        deadline = started_at + timeout_seconds
         if not _POSITION_PROBE_LOCK.acquire(timeout=timeout_seconds):
-            raise TimeoutError(
+            raise _position_probe_timeout_error(
                 "broker position snapshot probe remained busy beyond "
-                f"{timeout_seconds:g}s timeout"
+                f"{timeout_seconds:g}s timeout",
+                started_at=started_at,
             )
         try:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError(
+                raise _position_probe_timeout_error(
                     "broker position snapshot exceeded "
-                    f"{timeout_seconds:g}s timeout"
+                    f"{timeout_seconds:g}s timeout",
+                    started_at=started_at,
                 )
             try:
                 completed = subprocess.run(
@@ -1700,18 +1800,25 @@ class BrokerGateway:
                     check=False,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
                     text=True,
                     timeout=remaining,
                 )
-            except subprocess.TimeoutExpired:
-                raise TimeoutError(
+            except subprocess.TimeoutExpired as exc:
+                raise _position_probe_timeout_error(
                     "broker position snapshot exceeded "
-                    f"{timeout_seconds:g}s timeout"
+                    f"{timeout_seconds:g}s timeout",
+                    started_at=started_at,
+                    stderr=exc.stderr,
                 ) from None
             return _decode_position_probe_output(
                 completed.stdout,
                 returncode=completed.returncode,
+                stderr=completed.stderr or "",
+                probe_duration_ms=max(
+                    0.0,
+                    (time.monotonic() - started_at) * 1_000,
+                ),
             )
         finally:
             _POSITION_PROBE_LOCK.release()

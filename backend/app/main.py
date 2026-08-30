@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 import sys
@@ -122,6 +123,7 @@ from app.api.cron_health import router as cron_health_router
 from app.api.quote_health import router as quote_health_router
 from app.api.durable_job_leases import router as durable_job_leases_router
 from app.config import settings
+from app.core.log_throttle import HealthcheckAccessFilter, RepeatedLogThrottle
 from app.database import init_db
 from app.runner import get_runner
 from app.services.interval_application_service import IntervalApplicationService
@@ -142,6 +144,16 @@ if TYPE_CHECKING:
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("auto_trade.main")
+# Healthcheck probes (/api/ready, /api/live every ~30s) are container noise,
+# not operator signal — measured 32%+ of container log volume.
+logging.getLogger("uvicorn.access").addFilter(HealthcheckAccessFilter())
+# The 60s LLM cron re-emits the same quant-gate exclusion line every tick
+# (664 identical lines / 11h measured); once per hour suffices, with the
+# suppressed repeat count folded into the next emission.
+_LLM_QUANT_GATE_LOG_WINDOW_SECONDS = 3600.0
+_llm_quant_gate_log_throttle = RepeatedLogThrottle(
+    window_seconds=_LLM_QUANT_GATE_LOG_WINDOW_SECONDS,
+)
 _last_llm_trigger_price: float = 0.0
 _last_llm_trigger_price_by_symbol: dict[str, float] = {}
 _llm_last_analysis_at_by_symbol: dict[str, datetime] = {}
@@ -682,11 +694,22 @@ async def _llm_analysis_tick() -> None:
         if quant_skip_changed:
             db.commit()
         if quant_excluded_targets:
-            logger.info(
-                "LLM secondary quant gate excluded %d/%d targets",
-                len(quant_excluded_targets),
-                max(0, len(raw_targets) - 1),
-            )
+            if _llm_quant_gate_log_throttle.should_log("quant_gate"):
+                suppressed = _llm_quant_gate_log_throttle.take_suppressed_count()
+                if suppressed:
+                    logger.info(
+                        "LLM secondary quant gate excluded %d/%d targets "
+                        "(%d suppressed since last summary)",
+                        len(quant_excluded_targets),
+                        max(0, len(raw_targets) - 1),
+                        suppressed,
+                    )
+                else:
+                    logger.info(
+                        "LLM secondary quant gate excluded %d/%d targets",
+                        len(quant_excluded_targets),
+                        max(0, len(raw_targets) - 1),
+                    )
 
         cycle_budget = min(settings.llm_max_symbols_per_cycle, remaining_hour_budget)
         attempted_count = 0
@@ -1049,6 +1072,9 @@ def _llm_storage_maintenance_tick_sync() -> object | None:
     from app.services.durable_job_lease_service import (
         DurableJobLeaseService,
     )
+    from app.services.research_artifact_retention_service import (
+        ResearchArtifactRetentionService,
+    )
     from app.services.risk_history_service import RiskHistoryService
     from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 
@@ -1091,14 +1117,59 @@ def _llm_storage_maintenance_tick_sync() -> object | None:
                 transaction_fence=lease_guard.fence_in_transaction,
                 operation_checkpoint=lease_guard.checkpoint,
             )
-            shadow_pruned = StrategyV2ShadowService(
+            shadow_service = StrategyV2ShadowService(
                 db,
                 transaction_fence=lease_guard.fence_in_transaction,
                 operation_checkpoint=lease_guard.checkpoint,
-            ).prune_expired_wait_decisions(
+            )
+            replay_source_retention_days = (
+                settings.strategy_v2_forward_replay_artifact_retention_days
+                or None
+            )
+            shadow_pruned = shadow_service.prune_expired_wait_decisions(
                 retention_days=settings.strategy_v2_wait_retention_days,
                 batch_size=settings.strategy_v2_wait_maintenance_batch_size,
                 max_batches=8,
+                replay_source_retention_days=replay_source_retention_days,
+            )
+            diagnostic_pruned = (
+                shadow_service.prune_expired_diagnostic_wait_decisions(
+                    retention_days=(
+                        settings.strategy_v2_diagnostic_wait_retention_days
+                    ),
+                    batch_size=(
+                        settings.strategy_v2_diagnostic_wait_maintenance_batch_size
+                    ),
+                    max_batches=8,
+                    replay_source_retention_days=replay_source_retention_days,
+                )
+            )
+            artifact_retention = ResearchArtifactRetentionService(
+                db,
+                transaction_fence=lease_guard.fence_in_transaction,
+                operation_checkpoint=lease_guard.checkpoint,
+            )
+            quant_v6_pruned = (
+                artifact_retention.prune_expired_quant_v6_publication_payloads(
+                    retention_days=(
+                        settings.watchlist_quant_v6_artifact_retention_days
+                    ),
+                    batch_size=(
+                        settings.watchlist_quant_v6_artifact_maintenance_batch_size
+                    ),
+                    max_batches=8,
+                )
+            )
+            replay_pruned = (
+                artifact_retention.prune_expired_forward_replay_artifacts(
+                    retention_days=(
+                        settings.strategy_v2_forward_replay_artifact_retention_days
+                    ),
+                    batch_size=(
+                        settings.strategy_v2_forward_replay_artifact_maintenance_batch_size
+                    ),
+                    max_batches=8,
+                )
             )
             snapshots_pruned = RiskHistoryService(
                 db,
@@ -1128,6 +1199,29 @@ def _llm_storage_maintenance_tick_sync() -> object | None:
                     "deleted=%d batches=%d",
                     shadow_pruned.deleted,
                     shadow_pruned.batches,
+                )
+            if diagnostic_pruned.deleted:
+                logger.info(
+                    "Strategy v2 diagnostic WAIT storage maintenance: "
+                    "deleted=%d batches=%d",
+                    diagnostic_pruned.deleted,
+                    diagnostic_pruned.batches,
+                )
+            if quant_v6_pruned.bindings_deleted or quant_v6_pruned.artifacts_deleted:
+                logger.info(
+                    "quant v6 artifact maintenance: "
+                    "bindings_deleted=%d artifacts_deleted=%d batches=%d",
+                    quant_v6_pruned.bindings_deleted,
+                    quant_v6_pruned.artifacts_deleted,
+                    quant_v6_pruned.batches,
+                )
+            if replay_pruned.bindings_deleted or replay_pruned.artifacts_deleted:
+                logger.info(
+                    "forward replay artifact maintenance: "
+                    "bindings_deleted=%d artifacts_deleted=%d batches=%d",
+                    replay_pruned.bindings_deleted,
+                    replay_pruned.artifacts_deleted,
+                    replay_pruned.batches,
                 )
             if snapshots_pruned.deleted:
                 logger.info(
@@ -1973,6 +2067,11 @@ def _auto_primary_switch_tick_sync() -> object | None:
             result.incumbent,
             result.candidate,
         )
+    elif result.signal_edge_unassessable:
+        logger.warning(
+            "automatic primary switch signal-edge gate unassessable: %s",
+            result.detail,
+        )
     else:
         logger.debug("automatic primary switch outcome: %s", result.outcome)
     return None
@@ -2400,6 +2499,10 @@ async def ready() -> JSONResponse | dict[str, Any]:
 
     if not (db_ok and runner_ok and order_sync_ok):
         ready_status["ready"] = False
+        logger.warning(
+            "readiness probe failing: checks=%s",
+            json.dumps(ready_status["checks"], default=str),
+        )
         return JSONResponse(status_code=503, content=ready_status)
     return ready_status
 

@@ -215,16 +215,14 @@ class TestHardBoundProjections:
             200.0, settings.hard_max_risk_per_trade
         )
 
-    def test_full_buying_power_bypass_flag(self) -> None:
+    def test_fixed_sizing_caps_are_never_reported_as_bypassed(self) -> None:
         db = database.SessionLocal()
         try:
             _make_config(db)
             result = HardBoundProjectionService(db).build()
         finally:
             db.close()
-        assert result["fixed_sizing_caps_bypassed_by_full_buying_power"] == bool(
-            settings.full_buying_power_usage_enabled
-        )
+        assert result["fixed_sizing_caps_bypassed_by_full_buying_power"] is False
 
     def test_no_config_row(self) -> None:
         """When no StrategyConfig exists, configured_present is False."""

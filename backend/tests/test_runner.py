@@ -25,7 +25,12 @@ from app.runner import (
     get_runner,
 )
 from app.services import trade_execution_service as trade_execution_service_module
-from app.services.trade_execution_service import EntryPolicyCheckResult, OrderStatus
+from app.services.trade_execution_service import (
+    BrokerSubmissionUncertainError,
+    EntryPolicyCheckResult,
+    FinalOrderQuoteCheckResult,
+    OrderStatus,
+)
 
 
 database.init_db()
@@ -68,7 +73,13 @@ class TestAppRunner:
         runner._trade_svc._update_order_status = lambda *args, **kwargs: None
         runner._trade_svc._record_risk_event = lambda reason: None
         runner._trade_svc._record_order_skipped = lambda *args: None
-        runner._trade_svc._final_order_quote_check = lambda *_args: None
+        runner._trade_svc._final_order_quote_check = (
+            lambda _broker, _symbol, _action, price: FinalOrderQuoteCheckResult(
+                executable_price=price,
+                bid=price,
+                ask=price,
+            )
+        )
         runner._llm_order_execution_enabled = True
         if not callable(getattr(runner.broker, "get_positions", None)):
             setattr(runner.broker, "get_positions", lambda: [])
@@ -899,6 +910,35 @@ class TestAppRunner:
         )
         assert runner.risk.pause_auto_resumable is False
         assert runner.diagnostics()["order_sync_succeeded"] is False
+
+    def test_diagnostics_reports_derived_trading_state(self) -> None:
+        # Given
+        runner = AppRunner()
+        runner.risk.disable_kill_switch()
+        runner.risk.resume()
+
+        # When / Then: healthy runner is ACTIVE
+        assert runner.diagnostics()["trading_state"] == "ACTIVE"
+
+        # When: kill switch trips
+        runner.risk.enable_kill_switch("test halt")
+
+        # Then
+        assert runner.diagnostics()["trading_state"] == "HALTED"
+
+        # When: kill switch cleared and an emergency reduction is active
+        runner.risk.disable_kill_switch()
+        runner._reduction_intents[runner.engine.params.symbol] = _ReductionIntent(
+            action="SELL",
+            cause="test",
+            reason="test reduction",
+            trigger_price=100.0,
+            started_at=datetime.now(timezone.utc),
+        )
+
+        # Then
+        assert runner.diagnostics()["execution_state"] == "REDUCING"
+        assert runner.diagnostics()["trading_state"] == "REDUCING"
 
     def test_failed_protective_exit_reverification_revokes_prior_permission(
         self,
@@ -4383,7 +4423,7 @@ class TestAppRunner:
         assert live_safety["stop_loss_pct"] == runner_module.settings.hard_stop_loss_pct
         assert live_safety["full_buying_power_usage_enabled"] is False
 
-    def test_full_buying_power_mode_is_visible_and_disables_entry_limit_breaches(
+    def test_full_buying_power_flag_is_visible_but_does_not_disable_breaches(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -4417,8 +4457,12 @@ class TestAppRunner:
             diagnostics["live_safety"]["full_buying_power_usage_enabled"]
             is True
         )
-        assert diagnostics["live_safety"]["buying_power_usage_pct"] == 100.0
-        assert diagnostics["symbol_runtimes"][0]["position_limit_breaches"] == []
+        assert diagnostics["live_safety"]["buying_power_usage_pct"] == 35.0
+        assert diagnostics["symbol_runtimes"][0]["position_limit_breaches"] == [
+            "MAX_POSITION_QUANTITY",
+            "MAX_POSITION_NOTIONAL",
+            "MAX_RISK_PER_TRADE",
+        ]
 
     @pytest.mark.parametrize("full_buying_power_usage", [False, True])
     def test_execution_ledger_distinguishes_sizing_caps_from_stop_loss(
@@ -4444,10 +4488,7 @@ class TestAppRunner:
         snapshot = json.loads(cast(str, context["config_snapshot"]))
 
         assert snapshot["strategy_source"] == "INTERVAL"
-        assert (
-            snapshot["hard_limits"]["sizing_caps_enforced_for_entry"]
-            is not full_buying_power_usage
-        )
+        assert snapshot["hard_limits"]["sizing_caps_enforced_for_entry"] is True
         assert (
             snapshot["hard_limits"]["stop_loss_required_for_entry"]
             is True
@@ -4472,9 +4513,7 @@ class TestAppRunner:
                 runner_module.settings.min_entry_reward_risk_ratio
             ),
         }
-        assert snapshot["buying_power_usage_mode"] == (
-            "FULL_BUYING_POWER" if full_buying_power_usage else "GUARDED"
-        )
+        assert snapshot["buying_power_usage_mode"] == "GUARDED"
 
     def test_execute_llm_order_decision_submits_buy_now(self) -> None:
         class Broker:
@@ -4828,6 +4867,116 @@ class TestAppRunner:
         })
         assert result["executed"] is True
         assert runner._last_llm_action_at[("NVDA.US", "BUY")] == 100.0
+
+    def test_llm_pre_submit_estimate_failure_does_not_latch_uncertainty(
+        self,
+    ) -> None:
+        # Given
+        class Broker:
+            def __init__(self) -> None:
+                self.submit_entered = False
+
+            def get_quotes(self, symbols: list[str]) -> list[Quote]:
+                return [
+                    Quote(symbol, 222.0, 221.9, 222.1, _fresh_timestamp())
+                    for symbol in symbols
+                ]
+
+            def get_positions(self) -> list[Position]:
+                return []
+
+            def estimate_margin_max_quantity(self, *_args: object) -> Decimal:
+                raise RuntimeError("margin estimate unavailable")
+
+            def submit_limit_order(
+                self,
+                symbol: str,
+                side: str,
+                quantity: Decimal,
+                price: Decimal,
+            ) -> OrderResult:
+                self.submit_entered = True
+                return OrderResult("must-not-submit", symbol, side, quantity, price, "SUBMITTED")
+
+        runner = AppRunner()
+        broker = Broker()
+        runner._running = True
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=218,
+            sell_high=225,
+        )
+        runner.broker = broker
+        runner.notifier = _NoopNotifier()
+        self._stub_trade_callbacks(runner)
+
+        # When
+        result = runner.execute_llm_order_decision({
+            "order_action": "BUY_NOW",
+            "order_price": 221.75,
+            "confidence_score": 0.9,
+        })
+
+        # Then
+        assert result["status"] == "SKIPPED"
+        assert broker.submit_entered is False
+        assert runner.risk.paused is False
+        assert runner.risk.pause_auto_resumable is False
+
+    def test_llm_broker_submit_failure_still_latches_uncertainty(self) -> None:
+        # Given
+        class Broker:
+            def __init__(self) -> None:
+                self.submit_entered = False
+
+            def get_quotes(self, symbols: list[str]) -> list[Quote]:
+                return [
+                    Quote(symbol, 222.0, 221.9, 222.1, _fresh_timestamp())
+                    for symbol in symbols
+                ]
+
+            def get_positions(self) -> list[Position]:
+                return []
+
+            def estimate_margin_max_quantity(self, *_args: object) -> Decimal:
+                return Decimal("10")
+
+            def submit_limit_order(
+                self,
+                _symbol: str,
+                _side: str,
+                _quantity: Decimal,
+                _price: Decimal,
+            ) -> OrderResult:
+                self.submit_entered = True
+                raise RuntimeError("broker acknowledgement missing")
+
+        runner = AppRunner()
+        broker = Broker()
+        runner._running = True
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=218,
+            sell_high=225,
+        )
+        runner.broker = broker
+        runner.notifier = _NoopNotifier()
+        self._stub_trade_callbacks(runner)
+
+        # When
+        result = runner.execute_llm_order_decision({
+            "order_action": "BUY_NOW",
+            "order_price": 221.75,
+            "confidence_score": 0.9,
+        })
+
+        # Then
+        assert result["status"] == "ORDER_SUBMISSION_UNCERTAIN"
+        assert broker.submit_entered is True
+        assert runner.risk.paused is True
+        assert runner.risk.pause_auto_resumable is False
 
     def test_llm_order_decision_targets_secondary_symbol_runtime(self, monkeypatch) -> None:
         class Broker:
@@ -6079,6 +6228,61 @@ class TestAppRunner:
         assert runner.risk.pause_auto_resumable is False
         assert runner.risk.pause_reason.startswith("ORDER_SUBMISSION_UNCERTAIN:")
         assert "429" in runner.risk.pause_reason
+
+    def test_pre_submit_quote_timeout_skips_without_uncertain_pause(self) -> None:
+        # Given
+        class Broker:
+            def __init__(self) -> None:
+                self.submissions = 0
+
+            def get_positions(self) -> list[Position]:
+                return []
+
+            def estimate_margin_max_quantity(
+                self,
+                _symbol: str,
+                _side: str,
+                _price: Decimal,
+                _currency: str | None = None,
+            ) -> Decimal:
+                return Decimal("10")
+
+            def get_quotes(self, _symbols: list[str]) -> list[Quote]:
+                raise TimeoutError("fresh quote timed out")
+
+            def submit_limit_order(
+                self,
+                symbol: str,
+                side: str,
+                quantity: Decimal,
+                price: Decimal,
+            ) -> OrderResult:
+                self.submissions += 1
+                return OrderResult("must-not-submit", symbol, side, quantity, price, "SUBMITTED")
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = broker
+        runner._running = True
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US",
+            buy_low=100.0,
+            sell_high=200.0,
+        )
+        runner.notifier = _NoopNotifier()
+        self._stub_trade_callbacks(runner)
+        runner._trade_svc._final_order_quote_check = runner._validate_final_order_quote
+
+        # When
+        runner._on_quote(
+            Quote("AAPL.US", 99.0, 98.5, 99.5, _fresh_timestamp())
+        )
+
+        # Then
+        assert broker.submissions == 0
+        assert runner.risk.paused is False
+        assert runner.last_action_message.startswith("BUY skipped:")
+        assert "ORDER_SUBMISSION_UNCERTAIN" not in runner.last_action_message
 
     def test_auto_resume_transient_pause_after_configured_delay(self) -> None:
         runner = AppRunner()
@@ -8925,7 +9129,7 @@ class TestRecentQuotesDequeBound:
         runner._trade_svc._track_pending_order(
             "SELL",
             OrderResult(
-                "async-protective-exit",
+                f"async-protective-exit-{initial_status.lower()}",
                 "NVDA.US",
                 "SELL",
                 Decimal("5"),
@@ -9072,12 +9276,17 @@ class TestOpeningMomentumExecution:
         runner._trade_svc.full_buying_power_usage_enabled = True
         runner._running = True
 
-    def test_entry_uses_bbo_full_funds_and_durable_provenance(
+    def test_entry_uses_bbo_guarded_mode_and_durable_provenance(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         runner = TestAppRunner._runner_with_primary_quote_runtime()
         self._enable(runner, monkeypatch)
+        monkeypatch.setattr(
+            trade_execution_service_module,
+            "is_trading_hours",
+            lambda _market: True,
+        )
         runner._opening_execution_policies = {
             "NVDA.US": self._policy()
         }
@@ -9139,9 +9348,7 @@ class TestOpeningMomentumExecution:
         snapshot = json.loads(
             captured["execution_context"]["config_snapshot"]
         )
-        assert snapshot["buying_power_usage_mode"] == (
-            "FULL_BUYING_POWER"
-        )
+        assert snapshot["buying_power_usage_mode"] == "GUARDED"
         assert snapshot["strategy_source"] == "OPENING_MOMENTUM"
         assert snapshot["execution_signal"] == {
             "strategy_source": "OPENING_MOMENTUM",
@@ -9154,6 +9361,157 @@ class TestOpeningMomentumExecution:
         }
         assert runner.engine.state == EngineState.LONG
         assert runner._trigger_in_flight is False
+
+    def test_opening_pre_submit_estimate_failure_does_not_latch_uncertainty(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Given
+        runner = TestAppRunner._runner_with_primary_quote_runtime()
+        self._enable(runner, monkeypatch)
+        monkeypatch.setattr(
+            trade_execution_service_module,
+            "is_trading_hours",
+            lambda _market: True,
+        )
+        runner._opening_execution_policies = {
+            "NVDA.US": self._policy()
+        }
+        monkeypatch.setattr(
+            runner.broker,
+            "get_quotes",
+            lambda _symbols: [
+                Quote(
+                    "NVDA.US",
+                    100.0,
+                    99.99,
+                    100.01,
+                    _fresh_timestamp(),
+                )
+            ],
+        )
+        monkeypatch.setattr(runner.broker, "get_positions", lambda: [])
+        monkeypatch.setattr(
+            runner.broker,
+            "estimate_margin_max_quantity",
+            lambda *_args: (_ for _ in ()).throw(
+                RuntimeError("margin estimate unavailable")
+            ),
+        )
+        submit_entered = False
+
+        def submit_limit_order(*_args: object) -> OrderResult:
+            nonlocal submit_entered
+            submit_entered = True
+            raise AssertionError("pre-submit failure reached broker mutation")
+
+        monkeypatch.setattr(
+            runner.broker,
+            "submit_limit_order",
+            submit_limit_order,
+        )
+        monkeypatch.setattr(
+            runner,
+            "_validate_opening_momentum_entry_policy",
+            lambda *_args, **_kwargs: None,
+        )
+        observed_failure: RuntimeError | None = None
+        result: dict[str, object] | None = None
+
+        # When
+        try:
+            result = runner.execute_opening_momentum_entry(
+                execution_id=17,
+                symbol="NVDA.US",
+                reference_entry_price=100.0,
+                entry_deadline_at=(
+                    datetime.now(timezone.utc) + timedelta(minutes=1)
+                ),
+                max_price_deviation_bps=200.0,
+                stop_loss_pct=1.0,
+                max_holding_minutes=60,
+                signal_context={},
+            )
+        except RuntimeError as exc:
+            observed_failure = exc
+
+        # Then
+        assert observed_failure is None
+        assert result is not None
+        assert result["status"] == "SKIPPED"
+        assert submit_entered is False
+        assert runner.risk.paused is False
+        assert runner.risk.pause_auto_resumable is False
+
+    def test_opening_broker_submit_failure_still_latches_uncertainty(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Given
+        runner = TestAppRunner._runner_with_primary_quote_runtime()
+        self._enable(runner, monkeypatch)
+        monkeypatch.setattr(
+            trade_execution_service_module,
+            "is_trading_hours",
+            lambda _market: True,
+        )
+        runner._opening_execution_policies = {
+            "NVDA.US": self._policy()
+        }
+        monkeypatch.setattr(
+            runner.broker,
+            "get_quotes",
+            lambda _symbols: [
+                Quote(
+                    "NVDA.US",
+                    100.0,
+                    99.99,
+                    100.01,
+                    _fresh_timestamp(),
+                )
+            ],
+        )
+        monkeypatch.setattr(runner.broker, "get_positions", lambda: [])
+        monkeypatch.setattr(
+            runner.broker,
+            "estimate_margin_max_quantity",
+            lambda *_args: Decimal("10"),
+        )
+        submit_entered = False
+
+        def submit_limit_order(*_args: object) -> OrderResult:
+            nonlocal submit_entered
+            submit_entered = True
+            raise RuntimeError("broker acknowledgement missing")
+
+        monkeypatch.setattr(
+            runner.broker,
+            "submit_limit_order",
+            submit_limit_order,
+        )
+        monkeypatch.setattr(
+            runner,
+            "_validate_opening_momentum_entry_policy",
+            lambda *_args, **_kwargs: None,
+        )
+
+        # When / Then
+        with pytest.raises(BrokerSubmissionUncertainError):
+            runner.execute_opening_momentum_entry(
+                execution_id=17,
+                symbol="NVDA.US",
+                reference_entry_price=100.0,
+                entry_deadline_at=(
+                    datetime.now(timezone.utc) + timedelta(minutes=1)
+                ),
+                max_price_deviation_bps=200.0,
+                stop_loss_pct=1.0,
+                max_holding_minutes=60,
+                signal_context={},
+            )
+        assert submit_entered is True
+        assert runner.risk.paused is True
+        assert runner.risk.pause_auto_resumable is False
 
     def test_entry_rejects_catastrophic_price_deviation_without_transition(
         self,

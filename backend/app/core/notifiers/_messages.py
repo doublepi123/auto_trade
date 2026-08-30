@@ -31,6 +31,8 @@ def severity_for_risk_event(event_type: str) -> str:
     return {
         "KILL_SWITCH": "CRITICAL",
         "ORDER_PERSISTENCE_FAILED": "CRITICAL",
+        "POSITION_RECONCILIATION_FAILED": "CRITICAL",
+        "POSITION_RECONCILIATION_RECOVERED": "INFO",
         "ORDER_FAILED": "WARNING",
         "ORDER_TIMEOUT": "WARNING",
         "REJECTED": "WARNING",

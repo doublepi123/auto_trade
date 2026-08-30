@@ -2122,7 +2122,7 @@ class TestBrokerGateway:
         assert calls[0][0] == broker_module._POSITION_PROBE_COMMAND
         assert "must-not-enter-command" not in " ".join(calls[0][0])
         assert "env" not in calls[0][1]
-        assert calls[0][1]["stderr"] is subprocess.DEVNULL
+        assert calls[0][1]["stderr"] is subprocess.PIPE
 
     def test_get_positions_isolated_timeout_retries_and_releases_probe_lock(
         self,

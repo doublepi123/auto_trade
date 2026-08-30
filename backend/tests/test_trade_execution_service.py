@@ -68,6 +68,10 @@ class TestTradeExecutionServiceBasics:
             record_order=lambda *args: None,
             update_order_status=lambda *args: None,
             record_risk_event=lambda *args: None,
+            max_position_quantity=1_000_000,
+            max_position_notional=1_000_000_000.0,
+            max_risk_per_trade=10_000_000.0,
+            stop_loss_pct=1.0,
             final_order_quote_check=lambda _broker, _symbol, _action, price: (
                 FinalOrderQuoteCheckResult(executable_price=price)
             ),
@@ -168,6 +172,13 @@ class TestTradeExecutionServiceBasics:
             update_order_status=lambda *args: None,
             record_risk_event=lambda *args: None,
             entry_policy_check=entry_policy_check,
+            max_position_quantity=100,
+            max_position_notional=5000,
+            max_risk_per_trade=250,
+            stop_loss_pct=1.0,
+            final_order_quote_check=lambda _broker, _symbol, _action, price: (
+                FinalOrderQuoteCheckResult(executable_price=price)
+            ),
         )
 
         status = svc.execute(
@@ -209,6 +220,13 @@ class TestTradeExecutionServiceBasics:
             record_risk_event=lambda *args: None,
             record_order_skipped=lambda symbol, action, reason, payload: skipped.append(
                 (symbol, action, reason, payload)
+            ),
+            max_position_quantity=100,
+            max_position_notional=5000,
+            max_risk_per_trade=250,
+            stop_loss_pct=1.0,
+            final_order_quote_check=lambda _broker, _symbol, _action, price: (
+                FinalOrderQuoteCheckResult(executable_price=price)
             ),
         )
 
@@ -820,7 +838,7 @@ class TestTradeExecutionServiceBasics:
 
         assert qty == 23
 
-    def test_full_buying_power_uses_broker_max_and_bypasses_entry_caps(
+    def test_full_buying_power_flag_is_noop_for_entry_caps(
         self,
         svc: TradeExecutionService,
     ) -> None:
@@ -842,9 +860,9 @@ class TestTradeExecutionServiceBasics:
             "USD",
         )
 
-        assert qty == 1237
+        assert qty == 23
 
-    def test_full_buying_power_execute_submits_broker_max_quantity(
+    def test_full_buying_power_flag_executes_with_capped_quantity(
         self,
         svc: TradeExecutionService,
     ) -> None:
@@ -855,7 +873,7 @@ class TestTradeExecutionServiceBasics:
             "full-power-order",
             "NVDA.US",
             "BUY",
-            Decimal("1237"),
+            Decimal("23"),
             Decimal("209.62"),
             "SUBMITTED",
         )
@@ -888,7 +906,7 @@ class TestTradeExecutionServiceBasics:
         broker.submit_limit_order.assert_called_once_with(
             "NVDA.US",
             "BUY",
-            Decimal("1237"),
+            Decimal("23"),
             Decimal("209.62"),
         )
 
@@ -974,6 +992,9 @@ class TestTradeExecutionServiceBasics:
             record_order=lambda *args: recorded.append(args),
             update_order_status=lambda *args: None,
             record_risk_event=lambda *args: None,
+            max_position_quantity=100,
+            max_position_notional=5000,
+            max_risk_per_trade=250,
             stop_loss_pct=1.0,
             final_order_quote_check=lambda _broker, _symbol, _action, price: (
                 FinalOrderQuoteCheckResult(executable_price=price)
@@ -1041,6 +1062,9 @@ class TestTradeExecutionServiceBasics:
             record_order_skipped=lambda _symbol, _action, _reason, payload: (
                 skipped.append(payload)
             ),
+            max_position_quantity=100,
+            max_position_notional=5000,
+            max_risk_per_trade=250,
             stop_loss_pct=1.0,
         )
 
@@ -1099,6 +1123,10 @@ class TestTradeExecutionServiceBasics:
             record_order=lambda *args: None,
             update_order_status=lambda *args: None,
             record_risk_event=lambda *args: None,
+            max_position_quantity=10_000,
+            max_position_notional=1_000_000_000,
+            max_risk_per_trade=10_000_000,
+            stop_loss_pct=0.01,
             final_order_quote_check=final_quote_check,
         )
 
@@ -2020,9 +2048,8 @@ class TestTradeExecutionServiceBasics:
         broker = Broker()
         risk = RiskController()
         status = svc._submit_limit_order(
-            "SELL_SHORT",
+            "BUY",
             "AAPL.US",
-            "SELL",
             Decimal("5"),
             Decimal("100"),
             broker,
@@ -2040,7 +2067,7 @@ class TestTradeExecutionServiceBasics:
         assert broker.cancel_calls == 0
         pending = svc.pending_order_by_broker_id("sync-submit-race")
         assert pending is not None
-        assert pending.action == "SELL_SHORT"
+        assert pending.action == "BUY"
         assert pending.engine_snapshot == snapshot
         assert pending.avg_price == Decimal("99")
         assert pending.restore_engine_snapshot_fn is restore_snapshot
@@ -2719,7 +2746,11 @@ class TestTradeExecutionServiceBasics:
         assert svc.has_pending_order is True
         broker.get_order_status.assert_not_called()
 
-    def test_execute_sell_short_uses_margin_max_quantity(self, svc: TradeExecutionService, monkeypatch) -> None:
+    def test_execute_sell_short_sizes_but_boundary_rejects_short_entry(
+        self,
+        svc: TradeExecutionService,
+        monkeypatch,
+    ) -> None:
         from app.core.broker import OrderResult, Quote
         from app.core.risk import RiskController
         from app.core.notify import ServerChanNotifier
@@ -2740,9 +2771,10 @@ class TestTradeExecutionServiceBasics:
         )
 
         assert status is not None
+        assert status.status == "SKIPPED"
         broker.estimate_margin_max_quantity.assert_called_once_with("NVDA.US", "SELL", Decimal("225"), "USD")
         broker.get_cash.assert_not_called()
-        broker.submit_limit_order.assert_called_once_with("NVDA.US", "SELL", Decimal("45"), Decimal("225"))
+        broker.submit_limit_order.assert_not_called()
 
     def test_execute_buy_skips_zero_margin_quantity(self, svc: TradeExecutionService) -> None:
         from app.core.broker import Quote
@@ -4633,6 +4665,10 @@ class TestTradeExecutionServiceBasics:
             record_risk_event=lambda *args: None,
             record_order_skipped=lambda symbol, action, reason, payload: skipped.append((symbol, action, reason, payload)),
             allow_position_addons=True,
+            max_position_quantity=100,
+            max_position_notional=5000,
+            max_risk_per_trade=250,
+            stop_loss_pct=1.0,
         )
         svc.load_tracked_entries({"NVDA.US": (Decimal("100"), Decimal("20000"))})
 

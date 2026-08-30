@@ -1207,6 +1207,66 @@ class OrderRecord(Base):
     mae_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 
+class OrderTerminalCallback(Base):
+    __tablename__ = "order_terminal_callbacks"
+
+    broker_order_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    terminal_status: Mapped[str] = mapped_column(String(30), primary_key=True)
+    state: Mapped[str] = mapped_column(
+        String(20),
+        default="PROCESSING",
+        nullable=False,
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+    completed_at: Mapped[datetime | None] = mapped_column(
+        _TZDateTime,
+        nullable=True,
+    )
+
+
+class ReconciliationIncident(Base):
+    __tablename__ = "reconciliation_incidents"
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "failure_category",
+            "symbols_json",
+            name="ux_reconciliation_incident_key",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(80), nullable=False)
+    failure_category: Mapped[str] = mapped_column(String(80), nullable=False)
+    symbols_json: Mapped[str] = mapped_column(Text, nullable=False)
+    occurrence_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    alert_count: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+    last_alerted_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+    next_alert_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+    recovered_at: Mapped[datetime | None] = mapped_column(_TZDateTime, nullable=True)
+    message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    error_type: Mapped[str] = mapped_column(String(100), default="", nullable=False)
+    sdk_error_code: Mapped[str] = mapped_column(
+        String(100),
+        default="",
+        nullable=False,
+    )
+    sdk_error_category: Mapped[str] = mapped_column(
+        String(100),
+        default="",
+        nullable=False,
+    )
+    error_message: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    probe_duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    stderr: Mapped[str] = mapped_column(Text, default="", nullable=False)
+
+
 class TradeEvent(Base):
     __tablename__ = "trade_events"
     __table_args__ = (
@@ -2598,3 +2658,43 @@ class FactorICSeries(Base):
     ic_ir: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     num_symbols: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+
+
+class DecisionFunnelSessionSummary(Base):
+    """Durable per-session decision-funnel summary (one row per exchange-local
+    trading day per primary symbol).
+
+    Written once when the live-path ``DecisionFunnelTracker`` rolls over to a
+    new session, so a multi-session zero-order diagnosis keeps durable
+    evidence of exactly which funnel stage stalled each day. Upserted by
+    (session_date, symbol): a process restart re-persisting the same session
+    updates the row in place instead of duplicating it.
+    """
+
+    __tablename__ = "decision_funnel_session_summaries"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_date",
+            "symbol",
+            name="uq_decision_funnel_session_summaries_session_symbol",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_date: Mapped[date] = mapped_column(Date, nullable=False)
+    symbol: Mapped[str] = mapped_column(String(50), default="", nullable=False)
+    market: Mapped[str] = mapped_column(String(10), default="", nullable=False)
+    fresh_primary_quote: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    evaluations: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    threshold_crossings: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    triggers: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    sized_quantity_positive: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    submit_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    broker_acks: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    persisted: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    pre_submit_risk_check_invocations: Mapped[int] = mapped_column(
+        Integer, default=0, nullable=False
+    )
+    skips_json: Mapped[str] = mapped_column(Text, default="{}", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)

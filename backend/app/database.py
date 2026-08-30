@@ -240,6 +240,8 @@ def init_db() -> None:
     _ensure_runtime_state_symbol_uniqueness(engine)
     _ensure_runtime_state_entry_rearm_column(engine)
     _ensure_order_broker_id_uniqueness(engine)
+    _ensure_order_terminal_callbacks_table(engine)
+    _ensure_reconciliation_incidents_table(engine)
     _ensure_trade_event_source_event_key(engine)
     _ensure_tracked_entries_table(engine)
     _ensure_tracked_entry_metadata_columns(engine)
@@ -279,6 +281,7 @@ def init_db() -> None:
     _ensure_transactions_table(engine)
     _ensure_platform_backtest_runs_table(engine)
     _ensure_factor_snapshots_table(engine)
+    _ensure_decision_funnel_session_summaries_table(engine)
     db = SessionLocal()
     try:
         _bootstrap_credentials(db, CredentialConfig, StrategyConfig)
@@ -921,6 +924,82 @@ def _ensure_trade_event_source_event_key(db_engine: Engine) -> None:
         )
 
 
+def _ensure_order_terminal_callbacks_table(db_engine: Engine) -> None:
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS order_terminal_callbacks (
+                broker_order_id VARCHAR(100) NOT NULL,
+                terminal_status VARCHAR(30) NOT NULL,
+                state VARCHAR(20) NOT NULL DEFAULT 'PROCESSING',
+                attempt_count INTEGER NOT NULL DEFAULT 1,
+                first_seen_at DATETIME NOT NULL,
+                last_seen_at DATETIME NOT NULL,
+                completed_at DATETIME,
+                PRIMARY KEY (broker_order_id, terminal_status)
+            )
+            """
+        )
+
+
+def _ensure_reconciliation_incidents_table(db_engine: Engine) -> None:
+    inspector = inspect(db_engine)
+    table_exists = "reconciliation_incidents" in inspector.get_table_names()
+    columns = (
+        {
+            column["name"]
+            for column in inspector.get_columns("reconciliation_incidents")
+        }
+        if table_exists
+        else set()
+    )
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS reconciliation_incidents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source VARCHAR(80) NOT NULL,
+                failure_category VARCHAR(80) NOT NULL,
+                symbols_json TEXT NOT NULL,
+                occurrence_count INTEGER NOT NULL DEFAULT 1,
+                alert_count INTEGER NOT NULL DEFAULT 1,
+                first_seen_at DATETIME NOT NULL,
+                last_seen_at DATETIME NOT NULL,
+                last_alerted_at DATETIME NOT NULL,
+                next_alert_at DATETIME NOT NULL,
+                recovered_at DATETIME,
+                message TEXT NOT NULL DEFAULT '',
+                error_type VARCHAR(100) NOT NULL DEFAULT '',
+                sdk_error_code VARCHAR(100) NOT NULL DEFAULT '',
+                sdk_error_category VARCHAR(100) NOT NULL DEFAULT '',
+                error_message TEXT NOT NULL DEFAULT '',
+                probe_duration_ms FLOAT,
+                exit_code INTEGER,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                stderr TEXT NOT NULL DEFAULT '',
+                CONSTRAINT ux_reconciliation_incident_key
+                    UNIQUE (source, failure_category, symbols_json)
+            )
+            """
+        )
+        if table_exists:
+            missing_columns = {
+                "sdk_error_code": "VARCHAR(100) NOT NULL DEFAULT ''",
+                "sdk_error_category": "VARCHAR(100) NOT NULL DEFAULT ''",
+                "error_message": "TEXT NOT NULL DEFAULT ''",
+                "probe_duration_ms": "FLOAT",
+                "exit_code": "INTEGER",
+                "retry_count": "INTEGER NOT NULL DEFAULT 0",
+                "stderr": "TEXT NOT NULL DEFAULT ''",
+            }
+            for name, column_type in missing_columns.items():
+                if name not in columns:
+                    connection.exec_driver_sql(
+                        "ALTER TABLE reconciliation_incidents ADD COLUMN "
+                        f"{name} {column_type}"
+                    )
+
+
 def _ensure_audit_log_table(db_engine: Engine) -> None:
     from app.models import Base
 
@@ -1288,6 +1367,47 @@ def _ensure_transactions_table(db_engine: Engine) -> None:
         )
         connection.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_transactions_timestamp ON transactions (timestamp)"
+        )
+
+
+def _ensure_decision_funnel_session_summaries_table(db_engine: Engine) -> None:
+    """Defensive explicit create for decision_funnel_session_summaries.
+
+    One row per exchange-local trading day per primary symbol with the
+    live-path decision-funnel counters; the durable evidence for the
+    multi-session zero-order diagnosis. Idempotent via IF NOT EXISTS so an
+    existing deployment database gains the table without manual migration.
+    """
+    inspector = inspect(db_engine)
+    if "decision_funnel_session_summaries" in inspector.get_table_names():
+        return
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS decision_funnel_session_summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_date DATE NOT NULL,
+                symbol VARCHAR(50) NOT NULL DEFAULT '',
+                market VARCHAR(10) NOT NULL DEFAULT '',
+                fresh_primary_quote INTEGER NOT NULL DEFAULT 0,
+                evaluations INTEGER NOT NULL DEFAULT 0,
+                threshold_crossings INTEGER NOT NULL DEFAULT 0,
+                triggers INTEGER NOT NULL DEFAULT 0,
+                sized_quantity_positive INTEGER NOT NULL DEFAULT 0,
+                submit_attempts INTEGER NOT NULL DEFAULT 0,
+                broker_acks INTEGER NOT NULL DEFAULT 0,
+                persisted INTEGER NOT NULL DEFAULT 0,
+                pre_submit_risk_check_invocations INTEGER NOT NULL DEFAULT 0,
+                skips_json TEXT NOT NULL DEFAULT '{}',
+                created_at DATETIME,
+                updated_at DATETIME
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE UNIQUE INDEX IF NOT EXISTS "
+            "uq_decision_funnel_session_summaries_session_symbol "
+            "ON decision_funnel_session_summaries (session_date, symbol)"
         )
 
 

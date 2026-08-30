@@ -29,7 +29,8 @@ from app.core.fees import one_side_fee_rate
 from app.core.market_calendar import is_closing_window, is_opening_warmup, is_trading_hours, trade_day_for
 from app.core.notifiers.multi_channel import MultiChannelNotifier
 from app.core.notifiers.serverchan import ServerChanNotifier
-from app.core.risk import DailyLossSnapshot, RiskConfig, RiskController
+from app.core.position_probe_diagnostics import PositionProbeDiagnostics
+from app.core.risk import DailyLossSnapshot, RiskConfig, RiskController, TradingState
 from app.database import SessionLocal
 from app.models import OrderRecord, ReconciliationEvidence, TrackedEntry, TradeEvent
 from app.services.daily_pnl_service import DailyPnlService
@@ -37,6 +38,14 @@ from app.services.notification_log_service import get_notification_sink
 from app.services.opening_momentum_execution_service import (
     opening_execution_reservation_window,
 )
+from app.services.order_terminal_callback_service import (
+    OrderTerminalCallbackService,
+)
+from app.services.reconciliation_incident_service import (
+    ReconciliationFailure,
+    ReconciliationIncidentService,
+)
+from app.services.reconciliation_backoff import ReconciliationBackoff
 from app.core.credential_crypto import CredentialIntegrityError
 from app.services.credentials_service import CredentialsService, PlainCredentials
 from app.services.runtime_state_service import (
@@ -49,17 +58,23 @@ from app.services.llm_order_policy import evaluate_llm_order_policy
 from app.services.strategy_service import StrategyService
 from app.services.trade_event_service import record_trade_event
 from app.services.trade_execution_service import (
+    BrokerSubmissionUncertainError,
     EntryPolicyCheckResult,
     FinalOrderQuoteCheckResult,
     ORDER_EXECUTION_BLOCKED_PREFIX,
     ORDER_PERSISTENCE_UNCERTAIN_PREFIX,
     ORDER_STATUS_PERSISTENCE_UNCERTAIN_PREFIX,
+    RISK_BOUNDARY_VERSION,
     OrderPersistenceError,
     TradeExecutionService,
     _PendingOrder,
 )
 from app.services.watchlist_service import WatchlistService
 from app.services.quote_stream_health_service import QuoteStreamHealthTracker
+from app.services.decision_funnel_service import (
+    DecisionFunnelTracker,
+    persist_session_summary,
+)
 
 logger = logging.getLogger("auto_trade.runner")
 
@@ -119,6 +134,10 @@ _ORDER_PROVENANCE_TIME_TOLERANCE_SECONDS = 600.0
 _POSITION_DRIFT_PCT_TOLERANCE = Decimal("0.05")  # 5% position drift tolerance
 _POSITION_DRIFT_SHARE_TOLERANCE = Decimal("1")  # 1 share absolute drift tolerance
 _POSITION_DRIFT_SIGNATURE_QUANTUM = Decimal("0.000001")
+
+# Decision funnel: one INFO summary line at most once per hour (emitted from
+# the run loop's housekeeping, never from the quote hot path).
+_DECISION_FUNNEL_SUMMARY_LOG_INTERVAL_SECONDS = 3600.0
 
 _OPERATIONAL_PAUSE_PREFIXES = (
     _ORDER_SUBMISSION_UNCERTAIN_PREFIX,
@@ -227,6 +246,12 @@ class AppRunner:
         self.engine = StrategyEngine()
         self._symbol_runtimes: dict[str, SymbolRuntime] = {}
         self.risk = RiskController(trade_day_provider=self._market_trade_day)
+        # Observer-only decision-funnel stage counters (see
+        # DecisionFunnelTracker docstring for the interpretation contract).
+        self.decision_funnel: DecisionFunnelTracker = DecisionFunnelTracker(
+            trade_day_provider=self._market_trade_day,
+        )
+        self._decision_funnel_last_summary_log_at = 0.0
         self.notifier = MultiChannelNotifier(
             [(ServerChanNotifier(""), "INFO")],
             sink=get_notification_sink().record,
@@ -241,6 +266,7 @@ class AppRunner:
             on_fill=self._mark_fill_processed,
             on_reduction_fill=self._on_reduction_fill,
             audit=self._audit,
+            decision_funnel=self.decision_funnel,
             margin_safety_factor=None,
             allow_position_addons=False,
             short_entries_enabled=settings.allow_short_entries,
@@ -260,8 +286,15 @@ class AppRunner:
             final_protective_exit_commit_check=(
                 self._validate_protective_exit_commit
             ),
+            terminal_callback_store=OrderTerminalCallbackService(),
         )
         self._state_svc = RuntimeStateService()
+        self._reconciliation_incident_svc = ReconciliationIncidentService(
+            settings.notify_dedup_window_seconds
+        )
+        self._reconciliation_fallback_alert_keys: set[
+            tuple[str, str, tuple[str, ...]]
+        ] = set()
         self._running = False
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -286,6 +319,10 @@ class AppRunner:
         self._position_sync_interval_seconds = 15.0
         self._last_tracked_reconcile_at = 0.0
         self._tracked_reconcile_interval_seconds = 15.0
+        self._reconciliation_backoff = ReconciliationBackoff(
+            self._tracked_reconcile_interval_seconds,
+            300.0,
+        )
         self._last_order_sync_at = 0.0
         self._order_sync_interval_seconds = 15.0
         self._last_order_sync_succeeded = False
@@ -2038,13 +2075,12 @@ class AppRunner:
             notional = quantity_value * reference_price
             risk_at_stop = float(cost) * stop_loss_pct / 100 if cost > 0 else 0.0
             breaches: list[str] = []
-            if not self._trade_svc.full_buying_power_usage_enabled:
-                if max_quantity > 0 and quantity_value > max_quantity:
-                    breaches.append("MAX_POSITION_QUANTITY")
-                if max_notional > 0 and notional > max_notional:
-                    breaches.append("MAX_POSITION_NOTIONAL")
-                if max_risk > 0 and risk_at_stop > max_risk:
-                    breaches.append("MAX_RISK_PER_TRADE")
+            if max_quantity > 0 and quantity_value > max_quantity:
+                breaches.append("MAX_POSITION_QUANTITY")
+            if max_notional > 0 and notional > max_notional:
+                breaches.append("MAX_POSITION_NOTIONAL")
+            if max_risk > 0 and risk_at_stop > max_risk:
+                breaches.append("MAX_RISK_PER_TRADE")
             return {
                 "position_quantity": quantity_value,
                 "position_avg_price": avg_price,
@@ -2056,12 +2092,26 @@ class AppRunner:
         with self._state_lock:
             thread_alive = self._thread is not None and self._thread.is_alive()
             pending_order_symbols = sorted(getattr(self._trade_svc, "_pending_orders", {}).keys())
+            unresolved_live_order_ids = list(self._unresolved_live_order_ids)
             pending_order_ids = sorted(
                 set(self._trade_svc.pending_order_ids())
-                | set(self._unresolved_live_order_ids)
+                | set(unresolved_live_order_ids)
             )
             unrepresentable_live_order_issues = list(
                 self._unrepresentable_live_order_issues
+            )
+            order_reconciliation_state = (
+                "MANUAL_RECONCILIATION"
+                if unresolved_live_order_ids
+                or unrepresentable_live_order_issues
+                or self.risk.pause_reason.startswith(
+                    (
+                        _ORDER_RECONCILIATION_UNCERTAIN_PREFIX,
+                        ORDER_PERSISTENCE_UNCERTAIN_PREFIX,
+                        ORDER_STATUS_PERSISTENCE_UNCERTAIN_PREFIX,
+                    )
+                )
+                else "CLEAR"
             )
             primary_symbol = self.engine.params.symbol
             symbol_runtimes = []
@@ -2099,6 +2149,7 @@ class AppRunner:
                     },
                 )
             return {
+                "risk_boundary_version": RISK_BOUNDARY_VERSION,
                 "runner_running": self._running and thread_alive,
                 "thread_alive": thread_alive,
                 "quotes_subscribed": self._quotes_subscribed,
@@ -2107,19 +2158,17 @@ class AppRunner:
                 "pending_order_ids": pending_order_ids,
                 "unrepresentable_live_order_issues": unrepresentable_live_order_issues,
                 "order_sync_succeeded": self._last_order_sync_succeeded,
+                "order_reconciliation_state": order_reconciliation_state,
                 "execution_state": self.execution_state()[0],
                 "reduction_reason": self.execution_state()[1],
+                "trading_state": self._trading_state(),
                 "dedup_suppressed_total": self.notifier.dedup_suppressed_total,
                 "dedup_window_seconds": self.notifier.dedup_window_seconds,
                 "live_safety": {
                     "full_buying_power_usage_enabled": bool(
                         self._trade_svc.full_buying_power_usage_enabled
                     ),
-                    "buying_power_usage_pct": (
-                        100.0
-                        if self._trade_svc.full_buying_power_usage_enabled
-                        else guarded_buying_power_usage_pct
-                    ),
+                    "buying_power_usage_pct": guarded_buying_power_usage_pct,
                     "short_entries_enabled": bool(
                         self._trade_svc.short_entries_enabled and self.engine.params.short_selling
                     ),
@@ -2164,6 +2213,7 @@ class AppRunner:
                     "last_quote_age_seconds": age_since(self._last_quote_at),
                     "recent_quote_count": len(self._recent_quotes),
                 },
+                "decision_funnel": self.decision_funnel.snapshot().to_dict(),
                 "risk": {
                     "paused": self.risk.paused,
                     "kill_switch": self.risk.kill_switch,
@@ -2588,6 +2638,8 @@ class AppRunner:
                     and push_quality["source_timestamp_fresh"]
                 ):
                     self.quote_stream_health.record_quote(quote.timestamp)
+                    # Funnel stage 1: a usable, fresh quote for the primary.
+                    self.decision_funnel.record_fresh_primary_quote()
             opening_policy = self._opening_execution_policies.get(quote.symbol)
             if runtime is None and not is_primary_symbol:
                 decision.early_return = True
@@ -2627,10 +2679,17 @@ class AppRunner:
                 )
                 decision.early_return = True
                 return decision
+            if is_primary_symbol:
+                # Funnel stage 2: the runner evaluated a quote against the
+                # engine thresholds (loop running, quality gate passed).
+                self.decision_funnel.record_evaluation()
             risk_result, daily_loss_snapshot = (
                 self.risk.check_with_daily_loss_snapshot()
             )
             if self._trade_svc.pending_order_for(quote.symbol) is not None:
+                if is_primary_symbol:
+                    # Funnel stage 4: a pending order suppresses evaluation.
+                    self.decision_funnel.record_skip("PENDING")
                 self._trigger_in_flight = True
                 decision.processing_started = True
             else:
@@ -2649,6 +2708,10 @@ class AppRunner:
                     if self._get_trading_session_mode() == "RTH_ONLY" and not is_trading_hours(
                         active_market
                     ):
+                        if is_primary_symbol:
+                            # Funnel stage 4: protective exit suppressed by
+                            # the session guard.
+                            self.decision_funnel.record_skip("SESSION")
                         active_engine.record_price(quote.last_price)
                         return decision
                     decision.engine_snapshot = active_engine.snapshot()
@@ -2691,6 +2754,16 @@ class AppRunner:
                     float(quote.last_price),
                 ):
                     if (
+                        is_primary_symbol
+                        and active_engine.state == EngineState.FLAT
+                        and not active_engine.long_entry_rearm_required
+                        and float(quote.last_price) <= active_engine.params.buy_low
+                    ):
+                        # Funnel stages 3+4: price did cross the entry
+                        # threshold; the risk gate suppressed the evaluation.
+                        self.decision_funnel.record_threshold_crossing()
+                        self.decision_funnel.record_skip("RISK")
+                    if (
                         active_engine.state == EngineState.FLAT
                         and active_engine.long_entry_rearm_required
                     ):
@@ -2713,6 +2786,10 @@ class AppRunner:
                             and current_price >= active_engine.params.sell_high
                         ):
                             prospective_entry_action = "SELL_SHORT"
+                    if is_primary_symbol and prospective_entry_action:
+                        # Funnel stage 3: price actually crossed an entry
+                        # threshold (whether or not a trigger follows).
+                        self.decision_funnel.record_threshold_crossing()
                     crossing_block = (
                         self._validate_live_entry_crossing(
                             active_engine.params.symbol or quote.symbol,
@@ -2735,11 +2812,19 @@ class AppRunner:
                         not risk_result.approved
                         and not self._risk_rejection_allows_action(decision.result.action)
                     ):
+                        if is_primary_symbol:
+                            # Funnel stage 4: the risk veto killed the
+                            # trigger before it counted.
+                            self.decision_funnel.record_skip("RISK")
                         if decision.engine_snapshot is not None:
                             active_engine.restore(decision.engine_snapshot)
                         active_engine.record_price(quote.last_price)
                         decision.result = None
                         return decision
+                    if is_primary_symbol:
+                        # Funnel stage 5: an entry/exit trigger fired and
+                        # survived the pre-trigger risk veto.
+                        self.decision_funnel.record_trigger()
                     decision.trigger_symbol = active_engine.params.symbol or quote.symbol
                     decision.trigger_engine = active_engine
                     decision.trigger_params = dataclass_replace(
@@ -2789,6 +2874,9 @@ class AppRunner:
         engine_snapshot = decision.engine_snapshot
         risk_result = self.risk.check()
         if not risk_result.approved and not self._risk_rejection_allows_action(result.action):
+            if self._is_primary_symbol(decision.trigger_symbol or quote.symbol):
+                # Funnel stage 4: trigger fired but risk rejected at execution.
+                self.decision_funnel.record_skip("RISK")
             logger.warning("risk rejected: %s", risk_result.reason)
             self._set_last_action_message(f"{result.action} rejected by risk: {risk_result.reason}")
             self._record_risk_event(risk_result.reason)
@@ -2863,6 +2951,9 @@ class AppRunner:
                 reduce_only=decision.reduce_only,
                 execution_context=ledger_context,
             )
+            is_funnel_primary = self._is_primary_symbol(
+                decision.trigger_symbol or quote.symbol
+            )
             if order_status is None:
                 self._set_last_action_message(f"{result.action} skipped: no order submitted")
                 if engine_snapshot is not None:
@@ -2873,10 +2964,20 @@ class AppRunner:
                 if engine_snapshot is not None:
                     restore_engine_state_preserve_trigger(engine_snapshot)
             elif order_status.status in {"REJECTED", "CANCELLED"}:
+                if is_funnel_primary:
+                    # Funnel stages 6+7: sizing provably passed and the order
+                    # reached the broker, which rejected it (no ack).
+                    self.decision_funnel.record_sized_quantity_positive()
+                    self.decision_funnel.record_submit_attempt()
                 self._set_last_action_message(f"{result.action} ended with status {order_status.status}")
                 if engine_snapshot is not None:
                     restore_engine_snapshot(engine_snapshot)
             else:
+                if is_funnel_primary:
+                    # Funnel stages 6+7+8: sized, submitted, broker acked.
+                    self.decision_funnel.record_sized_quantity_positive()
+                    self.decision_funnel.record_submit_attempt()
+                    self.decision_funnel.record_broker_ack()
                 order_id = order_status.broker_order_id or "-"
                 self._set_last_action_message(f"{result.action} {order_status.status}: {order_id}")
                 if decision.reduce_only and order_status.status == "FILLED":
@@ -2894,7 +2995,11 @@ class AppRunner:
                             f"{result.action} FILLED but broker position remains; reduction stays active"
                         )
             self._broadcast_status()
-        except Exception as exc:
+        except BrokerSubmissionUncertainError as exc:
+            if self._is_primary_symbol(decision.trigger_symbol or quote.symbol):
+                # Funnel stage 7: the broker mutation was entered but no
+                # acknowledgement proved its outcome.
+                self.decision_funnel.record_submit_attempt()
             if engine_snapshot is not None:
                 restore_engine_snapshot(engine_snapshot)
             uncertain_symbol = decision.trigger_symbol or quote.symbol
@@ -2919,6 +3024,23 @@ class AppRunner:
                 logger.exception("failed to send order execution exception notification")
             self._broadcast_status()
             logger.exception("order execution failed; trading paused")
+        except Exception as exc:
+            if engine_snapshot is not None:
+                restore_engine_state_preserve_trigger(engine_snapshot)
+            failed_symbol = decision.trigger_symbol or quote.symbol
+            reason = (
+                f"PRE_SUBMIT_EXECUTION_FAILED: symbol={failed_symbol} "
+                f"action={result.action} check failed: {exc}"
+            )
+            self._set_last_action_message(f"{result.action} skipped: {reason}")
+            try:
+                self._record_risk_event(reason)
+            except Exception:
+                logger.exception(
+                    "failed to record pre-submit execution failure risk event"
+                )
+            self._broadcast_status()
+            logger.exception("pre-submit execution failed closed")
 
     def _execution_ledger_context(
         self,
@@ -2954,9 +3076,7 @@ class AppRunner:
                 "max_position_notional": settings.hard_max_position_notional,
                 "max_risk_per_trade": settings.hard_max_risk_per_trade,
                 "stop_loss_pct": settings.hard_stop_loss_pct,
-                "sizing_caps_enforced_for_entry": not (
-                    self._trade_svc.full_buying_power_usage_enabled
-                ),
+                "sizing_caps_enforced_for_entry": True,
                 "stop_loss_required_for_entry": True,
             },
             "entry_policy": {
@@ -2979,11 +3099,7 @@ class AppRunner:
                     settings.min_entry_reward_risk_ratio
                 ),
             },
-            "buying_power_usage_mode": (
-                "FULL_BUYING_POWER"
-                if self._trade_svc.full_buying_power_usage_enabled
-                else "GUARDED"
-            ),
+            "buying_power_usage_mode": "GUARDED",
         }
         snapshot_json = json.dumps(
             snapshot,
@@ -3424,7 +3540,7 @@ class AppRunner:
                 order_id=order_id,
                 reason=reason,
             )
-        except Exception:
+        except BrokerSubmissionUncertainError:
             if engine_snapshot is not None:
                 target_engine.restore(engine_snapshot)
             reason = (
@@ -3436,6 +3552,22 @@ class AppRunner:
             self._persist_risk_pause_best_effort()
             logger.exception(reason)
             raise
+        except Exception as exc:
+            if engine_snapshot is not None:
+                target_engine.restore(engine_snapshot)
+            reason = (
+                f"PRE_SUBMIT_EXECUTION_FAILED: opening momentum entry check "
+                f"failed for {target_symbol}: {exc}"
+            )
+            self._set_last_action_message(f"{action} skipped: {reason}")
+            try:
+                self._record_risk_event(reason)
+            except Exception:
+                logger.exception(
+                    "failed to record rejected opening pre-submit check"
+                )
+            logger.exception("opening momentum pre-submit check failed closed")
+            return result("SKIPPED", reason=reason)
         finally:
             with self._state_lock:
                 self._trigger_in_flight = False
@@ -3759,7 +3891,7 @@ class AppRunner:
                     "LLM trade action",
                 ),
             )
-        except Exception:
+        except BrokerSubmissionUncertainError:
             target_engine.restore(engine_snapshot)
             reason = (
                 f"{_ORDER_SUBMISSION_UNCERTAIN_PREFIX} LLM order submission "
@@ -3776,6 +3908,24 @@ class AppRunner:
             return {
                 "executed": False,
                 "status": "ORDER_SUBMISSION_UNCERTAIN",
+                "order_id": None,
+                "action": action,
+            }
+        except Exception as exc:
+            target_engine.restore(engine_snapshot)
+            reason = (
+                f"PRE_SUBMIT_EXECUTION_FAILED: LLM order check failed for "
+                f"symbol={target_symbol} action={action}: {exc}"
+            )
+            self._set_last_action_message(f"{action} skipped: {reason}")
+            try:
+                self._record_risk_event(reason)
+            except Exception:
+                logger.exception("failed to record rejected LLM pre-submit check")
+            logger.exception("LLM pre-submit check failed closed")
+            return {
+                "executed": False,
+                "status": "SKIPPED",
                 "order_id": None,
                 "action": action,
             }
@@ -5604,8 +5754,9 @@ class AppRunner:
         if value is None:
             return 0.0
         try:
-            return float(value)  # pyright: ignore[reportArgumentType]
-        except Exception:
+            text_value: str = str(value)
+            return float(text_value)
+        except (TypeError, ValueError, OverflowError):
             return 0.0
 
     @staticmethod
@@ -5613,8 +5764,9 @@ class AppRunner:
         if value is None:
             return None
         try:
-            return float(value)  # pyright: ignore[reportArgumentType]
-        except (TypeError, ValueError):
+            text_value: str = str(value)
+            return float(text_value)
+        except (TypeError, ValueError, OverflowError):
             logger.debug("_coerce_optional_float failed for value %r", value)
             return None
 
@@ -5703,7 +5855,63 @@ class AppRunner:
                     db.commit()
             except Exception:
                 logger.exception("error persisting state")
+            try:
+                self._decision_funnel_housekeeping()
+            except Exception:
+                logger.exception("error in decision funnel housekeeping")
             time.sleep(5)
+
+    def _decision_funnel_housekeeping(self) -> None:
+        """Run-loop maintenance for the decision funnel (every ~5s).
+
+        Persists any closed session's summary row (durable evidence for the
+        multi-session diagnosis) and emits the hourly INFO summary line. All
+        I/O lives here, off the quote hot path.
+        """
+        closed = self.decision_funnel.drain_closed_sessions()
+        if closed:
+            with self._state_lock:
+                symbol = self.engine.params.symbol
+                market = self.engine.params.market
+            for snapshot in closed:
+                try:
+                    with self._db_session() as db:
+                        persist_session_summary(
+                            db,
+                            snapshot,
+                            symbol=symbol,
+                            market=market,
+                        )
+                        db.commit()
+                except Exception:
+                    logger.exception(
+                        "failed to persist decision funnel session summary"
+                    )
+                    self.decision_funnel.requeue_closed_sessions([snapshot])
+        now = time.monotonic()
+        if (
+            now - self._decision_funnel_last_summary_log_at
+            >= _DECISION_FUNNEL_SUMMARY_LOG_INTERVAL_SECONDS
+        ):
+            self._decision_funnel_last_summary_log_at = now
+            snapshot = self.decision_funnel.snapshot()
+            logger.info(
+                "decision funnel session=%s fresh_primary_quote=%d evaluations=%d "
+                "threshold_crossings=%d skips=%s triggers=%d "
+                "sized_quantity_positive=%d submit_attempts=%d broker_acks=%d "
+                "persisted=%d pre_submit_risk_check_invocations=%d",
+                snapshot.session_date,
+                snapshot.fresh_primary_quote,
+                snapshot.evaluations,
+                snapshot.threshold_crossings,
+                json.dumps(snapshot.skips_by_category, sort_keys=True),
+                snapshot.triggers,
+                snapshot.sized_quantity_positive,
+                snapshot.submit_attempts,
+                snapshot.broker_acks,
+                snapshot.persisted,
+                snapshot.pre_submit_risk_check_invocations,
+            )
 
     @staticmethod
     def _is_auto_resumable_pause_reason(reason: str) -> bool:
@@ -5929,11 +6137,7 @@ class AppRunner:
             ):
                 return False
             now = time.monotonic()
-            if (
-                self._last_tracked_reconcile_at > 0
-                and now - self._last_tracked_reconcile_at
-                < self._tracked_reconcile_interval_seconds
-            ):
+            if not self._reconciliation_backoff.allows_attempt(now):
                 return False
             self._last_tracked_reconcile_at = now
 
@@ -5946,6 +6150,8 @@ class AppRunner:
                 ):
                     return False
             before = self._trade_svc.snapshot_tracked_entries()
+            pause_reason_before = self.risk.pause_reason
+            _, pause_generation_before = self.risk.pause_verification_snapshot()
             position_snapshot: list[Position] | None = None
             position_snapshot_error: Exception | None = None
             position_snapshot_at = time.monotonic()
@@ -5960,19 +6166,60 @@ class AppRunner:
                     position_snapshot=position_snapshot,
                     position_snapshot_error=position_snapshot_error,
                 )
-                if self.risk.paused:
+                if position_snapshot is None:
+                    self._reconciliation_backoff.record_failure(
+                        now,
+                        type(position_snapshot_error).__name__
+                        if position_snapshot_error is not None
+                        else "UNKNOWN",
+                    )
                     self._state_svc.persist(db, self.engine, self.risk)
                     self._apply_reconciliation_outcome(
                         db,
                         failed=True,
                         source="runtime_position_reconcile",
                     )
-                elif self._reconciliation_gate != "passed":
+                else:
+                    if (
+                        _is_recoverable_position_snapshot_pause(
+                            pause_reason_before
+                        )
+                        and self.risk.pause_reason == pause_reason_before
+                    ):
+                        self.risk.resume_if_pause_reason(
+                            pause_reason_before,
+                            expected_generation=pause_generation_before,
+                            on_resumed=lambda: self._state_svc.persist(
+                                db,
+                                self.engine,
+                                self.risk,
+                            ),
+                        )
                     self._apply_reconciliation_outcome(
                         db,
                         failed=False,
                         source="runtime_position_reconcile",
                     )
+                    recoveries = self._reconciliation_incident_svc.record_recovery(
+                        db,
+                        source="runtime_position_reconcile",
+                        category="BROKER_POSITION_SNAPSHOT_FAILED",
+                    )
+                    db.commit()
+                    with self._state_lock:
+                        self._reconciliation_fallback_alert_keys.clear()
+                    self._reconciliation_backoff.record_success(now)
+                    for recovery in recoveries:
+                        try:
+                            self.notifier.notify_risk_event(
+                                "POSITION_RECONCILIATION_RECOVERED",
+                                recovery.message,
+                                severity="INFO",
+                            )
+                        except Exception:
+                            logger.exception(
+                                "failed to notify position reconciliation recovery"
+                            )
             state_changed = False
             if position_snapshot is not None:
                 state_changed = (
@@ -6513,6 +6760,12 @@ class AppRunner:
                 return "IDLE", "", None
             return "REDUCING", intent.reason, intent.started_at
 
+    def _trading_state(self) -> str:
+        state = self.risk.trading_state()
+        if state is TradingState.ACTIVE and self.execution_state()[0] == "REDUCING":
+            return TradingState.REDUCING.value
+        return state.value
+
     def _pause_orphan_tracked_position_if_daily_loss_reached(
         self,
         quote: Quote,
@@ -6765,6 +7018,10 @@ class AppRunner:
         else:
             os.environ.pop(name, None)
 
+    def _is_primary_symbol(self, symbol: str) -> bool:
+        with self._state_lock:
+            return bool(symbol) and symbol == self.engine.params.symbol
+
     def _record_order(
         self,
         order_id: str,
@@ -6895,6 +7152,9 @@ class AppRunner:
                         payload={"quantity": qty, "price": price, "source": "runner_submit_result"},
                     )
                 db.commit()
+                if self._is_primary_symbol(symbol):
+                    # Funnel stage 9: a new order row was committed locally.
+                    self.decision_funnel.record_persisted()
 
     @staticmethod
     def _order_status_rank(status: str) -> int:
@@ -7368,7 +7628,9 @@ class AppRunner:
                 else self.broker.get_positions()
             )
         except Exception as exc:
-            logger.warning("tracked entry reconciliation skipped: %s", exc)
+            probe_diagnostics = getattr(exc, "diagnostics", None)
+            if not isinstance(probe_diagnostics, PositionProbeDiagnostics):
+                probe_diagnostics = None
             unsafe_symbols: list[str] = []
             for symbol in snapshot:
                 tracked = self._trade_svc.tracked_position(symbol)
@@ -7396,18 +7658,78 @@ class AppRunner:
                     and self.risk.pause_reason.startswith(_OPERATIONAL_PAUSE_PREFIXES)
                 ):
                     self.risk.pause(reason, auto_resumable=False)
-                record_trade_event(
-                    db,
-                    event_type="TRACKED_ENTRY_RECOVERY_FAILED",
-                    status="ERROR",
-                    message=reason,
-                    payload={
-                        "source": source,
-                        "symbols": sorted(set(unsafe_symbols)),
-                        "position_snapshot_error_type": type(exc).__name__,
-                    },
-                )
-                db.commit()
+                incident_symbols = tuple(sorted(set(unsafe_symbols)))
+                incident_category = "BROKER_POSITION_SNAPSHOT_FAILED"
+                fallback_key = (source, incident_category, incident_symbols)
+                should_notify = False
+                occurrence_count = 1
+                try:
+                    incident_result = self._reconciliation_incident_svc.record_failure(
+                        db,
+                        ReconciliationFailure(
+                            source=source,
+                            category=incident_category,
+                            symbols=incident_symbols,
+                            message=reason,
+                            error_type=(
+                                probe_diagnostics.error_type
+                                if probe_diagnostics is not None
+                                else type(exc).__name__
+                            ),
+                            diagnostics=probe_diagnostics,
+                        ),
+                    )
+                    db.commit()
+                    occurrence_count = incident_result.occurrence_count
+                    with self._state_lock:
+                        fallback_already_alerted = (
+                            fallback_key
+                            in self._reconciliation_fallback_alert_keys
+                        )
+                    should_notify = (
+                        incident_result.should_notify
+                        and not fallback_already_alerted
+                    )
+                except Exception:
+                    rollback = getattr(db, "rollback", None)
+                    if callable(rollback):
+                        rollback()
+                    logger.exception(
+                        "failed to persist position reconciliation incident"
+                    )
+                    with self._state_lock:
+                        should_notify = (
+                            fallback_key
+                            not in self._reconciliation_fallback_alert_keys
+                        )
+                        self._reconciliation_fallback_alert_keys.add(fallback_key)
+                if should_notify:
+                    logger.error(
+                        "broker position reconciliation incident: source=%s symbols=%s error_type=%s occurrences=%d",
+                        source,
+                        incident_symbols,
+                        (
+                            probe_diagnostics.error_type
+                            if probe_diagnostics is not None
+                            else type(exc).__name__
+                        ),
+                        occurrence_count,
+                    )
+                    try:
+                        self.notifier.notify_risk_event(
+                            "POSITION_RECONCILIATION_FAILED",
+                            reason,
+                            severity="CRITICAL",
+                        )
+                    except Exception:
+                        logger.exception(
+                            "failed to notify position reconciliation incident"
+                        )
+                else:
+                    logger.debug(
+                        "broker position reconciliation incident repeated",
+                        exc_info=True,
+                    )
             return []
 
         broker_positions: dict[str, list[tuple[str, Decimal, Decimal]]] = {}
@@ -8182,6 +8504,11 @@ class AppRunner:
         reason: str,
         payload: dict[str, object],
     ) -> None:
+        # Funnel stage 4: the execution service suppressed the order; the
+        # skip category rides in the payload it already sends. Unknown or
+        # empty categories are ignored by the tracker, never invented.
+        if self._is_primary_symbol(symbol):
+            self.decision_funnel.record_skip(str(payload.get("skip_category") or ""))
         with self._db_session() as db:
             record_trade_event(
                 db,

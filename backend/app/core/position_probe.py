@@ -3,10 +3,11 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Mapping
 from typing import Any
 
 
-def _write_protocol_payload(fd: int, payload: dict[str, Any]) -> None:
+def _write_protocol_payload(fd: int, payload: Mapping[str, Any]) -> None:
     encoded = json.dumps(
         payload,
         ensure_ascii=True,
@@ -32,21 +33,21 @@ def main() -> int:
                 _fetch_position_snapshot_payload_from_env,
                 _is_retryable_exception,
             )
+            from app.core.position_probe_diagnostics import (
+                build_position_probe_error_payload,
+            )
 
             classify_retryable = _is_retryable_exception
             positions = _fetch_position_snapshot_payload_from_env()
         except Exception as exc:
+            retryable = bool(
+                classify_retryable(exc)
+                if classify_retryable is not None
+                else False
+            )
             _write_protocol_payload(
                 protocol_fd,
-                {
-                    "status": "error",
-                    "error_type": type(exc).__name__,
-                    "retryable": bool(
-                        classify_retryable(exc)
-                        if classify_retryable is not None
-                        else False
-                    ),
-                },
+                build_position_probe_error_payload(exc, retryable=retryable),
             )
             return 1
         _write_protocol_payload(

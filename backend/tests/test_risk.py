@@ -659,3 +659,124 @@ class TestRiskController:
             expected_generation=generation,
         ) is False
         assert ctrl.paused is True
+
+
+class TestTradingState:
+    def test_enum_has_exactly_three_members(self) -> None:
+        # Given / When: the TradingState enum exported by the risk module
+        from app.core.risk import TradingState
+
+        # Then
+        assert {member.value for member in TradingState} == {
+            "ACTIVE",
+            "REDUCING",
+            "HALTED",
+        }
+
+    def test_healthy_controller_derives_active(self) -> None:
+        # Given
+        ctrl = RiskController()
+
+        # When / Then
+        assert ctrl.trading_state().value == "ACTIVE"
+
+    def test_kill_switch_trip_derives_halted(self) -> None:
+        # Given
+        ctrl = RiskController()
+
+        # When
+        ctrl.enable_kill_switch("trip test")
+
+        # Then
+        assert ctrl.trading_state().value == "HALTED"
+
+    def test_kill_switch_dominates_pause(self) -> None:
+        # Given
+        ctrl = RiskController()
+        ctrl.pause("manual")
+
+        # When
+        ctrl.enable_kill_switch("trip test")
+
+        # Then
+        assert ctrl.trading_state().value == "HALTED"
+
+    def test_manual_pause_derives_reducing(self) -> None:
+        # Given
+        ctrl = RiskController()
+
+        # When
+        ctrl.pause("manual")
+
+        # Then
+        assert ctrl.trading_state().value == "REDUCING"
+
+    def test_operational_pause_latch_derives_reducing(self) -> None:
+        # Given
+        ctrl = RiskController()
+
+        # When
+        ctrl.pause("ORDER_SUBMISSION_UNCERTAIN: broker ack lost")
+
+        # Then
+        assert ctrl.trading_state().value == "REDUCING"
+
+    def test_daily_loss_limit_derives_reducing(self) -> None:
+        # Given
+        ctrl = RiskController(RiskConfig(max_daily_loss=100.0))
+
+        # When
+        ctrl.record_trade(-100.0)
+
+        # Then
+        assert ctrl.check().approved is False
+        assert ctrl.trading_state().value == "REDUCING"
+
+    def test_consecutive_losses_derive_reducing(self) -> None:
+        # Given
+        ctrl = RiskController(RiskConfig(max_consecutive_losses=2))
+
+        # When
+        ctrl.record_trade(-1.0)
+        ctrl.record_trade(-1.0)
+
+        # Then
+        assert ctrl.trading_state().value == "REDUCING"
+
+    def test_drawdown_pause_derives_reducing(self) -> None:
+        # Given
+        ctrl = RiskController(RiskConfig(max_drawdown_amount=50.0))
+        ctrl.restore_drawdown_state(
+            cumulative_realized_pnl=100.0,
+            peak_realized_pnl=100.0,
+        )
+
+        # When
+        ctrl.record_trade(-50.0)
+
+        # Then
+        assert ctrl.paused is True
+        assert ctrl.trading_state().value == "REDUCING"
+
+    def test_entry_reconciliation_derives_reducing_until_finished(self) -> None:
+        # Given
+        ctrl = RiskController()
+        ctrl.begin_entry_reconciliation("test")
+
+        # When / Then: the reconciliation-owned pause outlives the counter
+        assert ctrl.trading_state().value == "REDUCING"
+        ctrl.finish_entry_reconciliation()
+        assert ctrl.trading_state().value == "REDUCING"
+        ctrl.resume()
+        assert ctrl.trading_state().value == "ACTIVE"
+
+    def test_resume_restores_active(self) -> None:
+        # Given
+        ctrl = RiskController()
+        ctrl.pause("manual")
+
+        # When
+        ctrl.resume()
+
+        # Then
+        assert ctrl.trading_state().value == "ACTIVE"

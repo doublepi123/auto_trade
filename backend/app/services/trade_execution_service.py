@@ -7,9 +7,9 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace as dataclass_replace
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
+from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from threading import RLock
-from typing import TYPE_CHECKING, Callable, Optional, cast
+from typing import TYPE_CHECKING, Callable, Final, Optional, Protocol, assert_never, cast
 
 from app.config import settings
 from app.core.fees import (
@@ -18,6 +18,7 @@ from app.core.fees import (
     evaluate_long_round_trip_reward_risk,
 )
 from app.core.market_calendar import is_closing_window, is_opening_warmup, is_trading_hours
+from app.core.risk import TradingState
 
 if TYPE_CHECKING:
     from app.core.audit import AuditLogger
@@ -31,6 +32,16 @@ logger = logging.getLogger("auto_trade.services.trade_execution_service")
 
 class OrderPersistenceError(RuntimeError):
     """Raised when a broker order was submitted but could not be persisted locally."""
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerSubmissionUncertainError(RuntimeError):
+    action: str
+    symbol: str
+    cause: str
+
+    def __str__(self) -> str:
+        return f"{self.action} {self.symbol} broker submission failed: {self.cause}"
 
 
 _LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
@@ -52,8 +63,15 @@ _OPERATIONAL_PAUSE_PREFIXES = (
 _SKIPPED_ORDER_STATUS = "SKIPPED"
 _ENTRY_ACTIONS = {"BUY", "SELL_SHORT"}
 _POSITION_REDUCING_ACTIONS = {"SELL", "BUY_TO_COVER"}
+_ACTION_TO_SIDE: Final[dict[str, str]] = {
+    "BUY": "BUY",
+    "SELL": "SELL",
+    "SELL_SHORT": "SELL",
+    "BUY_TO_COVER": "BUY",
+}
 ENTRY_BUYING_POWER_USAGE = Decimal("0.9")
 US_PRICE_TICK = Decimal("0.01")
+RISK_BOUNDARY_VERSION: Final[str] = "pre-submit-risk-v1"
 
 # HKEX stepped tick table (https://www.hkex.com.hk/Services/Trading/Securities/Overview/Trading-Mechanism)
 # Phase 2 tick sizes (effective 2019-07); the 20–100 band merged to 0.050.
@@ -179,11 +197,31 @@ class _EntryPositionCheck:
     conflicting_symbol: str = ""
 
 
-@dataclass(frozen=True)
-class _FinalSubmissionApproval:
-    """Carry the exact precheck result into the broker commit boundary."""
+@dataclass(frozen=True, slots=True)
+class _EntryRiskLimits:
+    max_quantity: Decimal
+    max_notional: Decimal
+    max_risk: Decimal
+    stop_loss_pct: Decimal
 
-    submission_price: Decimal | None
+
+@dataclass(frozen=True, slots=True)
+class _PreSubmitRiskRequest:
+    action: str
+    symbol: str
+    quantity: Decimal
+    price: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedOrder:
+    action: str
+    symbol: str
+    side: str
+    quantity: Decimal
+    price: Decimal
+    bid: Decimal | None = None
+    ask: Decimal | None = None
     protective_commit_required: bool = False
 
 
@@ -205,6 +243,18 @@ _FinalProtectiveExitCheck = Callable[
 _FinalProtectiveExitCommitCheck = _FinalProtectiveExitCheck
 
 
+class _PreSubmitRiskCheckRecorder(Protocol):
+    def record_pre_submit_risk_check(self) -> None: ...
+
+
+class _TerminalCallbackStore(Protocol):
+    def claim(self, broker_order_id: str, terminal_status: str) -> bool: ...
+
+    def complete(self, broker_order_id: str, terminal_status: str) -> None: ...
+
+    def release(self, broker_order_id: str, terminal_status: str) -> None: ...
+
+
 class TradeExecutionService:
     def __init__(
         self,
@@ -216,6 +266,7 @@ class TradeExecutionService:
         on_fill: _FillCallback | None = None,
         on_reduction_fill: _ReductionFillCallback | None = None,
         audit: AuditLogger | None = None,
+        decision_funnel: _PreSubmitRiskCheckRecorder | None = None,
         margin_safety_factor: float | None = None,
         allow_position_addons: bool = False,
         short_entries_enabled: bool = False,
@@ -231,6 +282,7 @@ class TradeExecutionService:
         final_protective_exit_commit_check: (
             _FinalProtectiveExitCommitCheck | None
         ) = None,
+        terminal_callback_store: _TerminalCallbackStore | None = None,
     ) -> None:
         self._record_order = record_order
         self._update_order_status = update_order_status
@@ -246,6 +298,7 @@ class TradeExecutionService:
         self._on_fill = on_fill
         self._on_reduction_fill = on_reduction_fill
         self._audit = audit
+        self.decision_funnel = decision_funnel
         self.margin_safety_factor = margin_safety_factor
         self.allow_position_addons = allow_position_addons
         self.short_entries_enabled = short_entries_enabled
@@ -261,6 +314,7 @@ class TradeExecutionService:
         self._final_protective_exit_commit_check = (
             final_protective_exit_commit_check
         )
+        self._terminal_callback_store = terminal_callback_store
         self._state_lock = RLock()
         self._submission_lock = RLock()
         self._pending_orders: dict[str, _PendingOrder] = {}
@@ -1051,41 +1105,245 @@ class TradeExecutionService:
             avg_price = entry.avg_price
         return avg_price > 0 and price < avg_price
 
-    def _entry_safety_configuration_error(self) -> str | None:
+    @staticmethod
+    def _positive_finite_limit(
+        value: Decimal | float | int | None,
+    ) -> Decimal | None:
+        if value is None:
+            return None
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        if not parsed.is_finite() or parsed <= 0:
+            return None
+        return parsed
+
+    def _entry_risk_limits(self) -> _EntryRiskLimits | str:
         with self._state_lock:
-            full_buying_power_usage = self.full_buying_power_usage_enabled
-            max_risk_per_trade = self.max_risk_per_trade
-            stop_loss_pct = self.stop_loss_pct
-            if full_buying_power_usage:
-                limits = (("stop_loss_pct", stop_loss_pct),)
-            else:
-                limits = (
-                    ("max_position_quantity", self.max_position_quantity),
-                    ("max_position_notional", self.max_position_notional),
-                    ("max_risk_per_trade", max_risk_per_trade),
-                    ("stop_loss_pct", stop_loss_pct),
-                )
-        if full_buying_power_usage and stop_loss_pct is None:
+            raw_max_quantity = self.max_position_quantity
+            raw_max_notional = self.max_position_notional
+            raw_max_risk = self.max_risk_per_trade
+            raw_stop_loss_pct = self.stop_loss_pct
+
+        max_quantity = self._positive_finite_limit(raw_max_quantity)
+        if max_quantity is None:
             return (
-                "invalid live safety limit: stop_loss_pct is required in "
-                "full buying-power mode"
+                "invalid live safety limit: max_position_quantity must be "
+                "configured, finite, and greater than zero"
             )
-        for name, raw_value in limits:
-            if raw_value is None:
-                continue
-            try:
-                value = Decimal(str(raw_value))
-            except Exception:
-                return f"invalid live safety limit: {name} must be finite and greater than zero"
-            if not value.is_finite() or value <= 0:
-                return f"invalid live safety limit: {name} must be finite and greater than zero"
-        if (
-            not full_buying_power_usage
-            and max_risk_per_trade is not None
-            and stop_loss_pct is None
-        ):
-            return "invalid live safety limit: stop_loss_pct is required when max_risk_per_trade is set"
-        return None
+        max_notional = self._positive_finite_limit(raw_max_notional)
+        if max_notional is None:
+            return (
+                "invalid live safety limit: max_position_notional must be "
+                "configured, finite, and greater than zero"
+            )
+        max_risk = self._positive_finite_limit(raw_max_risk)
+        if max_risk is None:
+            return (
+                "invalid live safety limit: max_risk_per_trade must be "
+                "configured, finite, and greater than zero"
+            )
+        stop_loss_pct = self._positive_finite_limit(raw_stop_loss_pct)
+        if stop_loss_pct is None:
+            return (
+                "invalid live safety limit: stop_loss_pct must be configured, "
+                "finite, and greater than zero"
+            )
+        return _EntryRiskLimits(
+            max_quantity=max_quantity,
+            max_notional=max_notional,
+            max_risk=max_risk,
+            stop_loss_pct=stop_loss_pct,
+        )
+
+    def _entry_safety_configuration_error(self) -> str | None:
+        match self._entry_risk_limits():
+            case str() as issue:
+                return issue
+            case _EntryRiskLimits():
+                return None
+            case unreachable:
+                assert_never(unreachable)
+
+    def _pre_submit_risk_rejection(
+        self,
+        request: _PreSubmitRiskRequest,
+        reason: str,
+    ) -> OrderStatus:
+        message = (
+            "PRE_SUBMIT_RISK_CHECK_REJECTED: "
+            f"{request.action} {request.symbol}: {reason}"
+        )
+        try:
+            self._record_risk_event(message)
+        except Exception as exc:
+            logger.error(
+                "pre-submit risk-event persistence failed for %s %s: %s",
+                request.action,
+                request.symbol,
+                exc,
+            )
+            message = (
+                f"{message}; risk-event persistence unavailable: "
+                f"{type(exc).__name__}"
+            )
+        return self._skip_order(
+            request.symbol,
+            request.action,
+            message,
+            skip_category="RISK",
+        )
+
+    def pre_submit_risk_check(
+        self,
+        request: _PreSubmitRiskRequest,
+        broker: BrokerGateway,
+    ) -> OrderStatus | ApprovedOrder:
+        if self.decision_funnel is not None:
+            self.decision_funnel.record_pre_submit_risk_check()
+
+        if request.action in _POSITION_REDUCING_ACTIONS:
+            return ApprovedOrder(
+                action=request.action,
+                symbol=request.symbol,
+                side=_ACTION_TO_SIDE[request.action],
+                quantity=request.quantity,
+                price=request.price,
+            )
+        if request.action not in _ENTRY_ACTIONS:
+            return self._pre_submit_risk_rejection(
+                request,
+                "unknown position-increasing action",
+            )
+        if request.action == "SELL_SHORT":
+            return self._pre_submit_risk_rejection(
+                request,
+                "short entries are disabled by the mandatory risk boundary",
+            )
+
+        limits_result = self._entry_risk_limits()
+        match limits_result:
+            case str() as issue:
+                return self._pre_submit_risk_rejection(request, issue)
+            case _EntryRiskLimits() as limits:
+                pass
+            case unreachable:
+                assert_never(unreachable)
+
+        if not request.quantity.is_finite() or request.quantity <= 0:
+            return self._pre_submit_risk_rejection(
+                request,
+                "entry quantity must be finite and greater than zero",
+            )
+        if not request.price.is_finite() or request.price <= 0:
+            return self._pre_submit_risk_rejection(
+                request,
+                "entry price must be fresh, finite, and greater than zero",
+            )
+
+        position_check = self._entry_position_check(
+            broker,
+            request.symbol,
+            request.action,
+        )
+        if position_check is None:
+            return self._pre_submit_risk_rejection(
+                request,
+                "broker position state is unavailable or uncertain",
+            )
+        if position_check.conflicting_symbol:
+            return self._pre_submit_risk_rejection(
+                request,
+                f"cross-symbol position {position_check.conflicting_symbol} is open",
+            )
+        if position_check.current_quantity > 0:
+            return self._pre_submit_risk_rejection(
+                request,
+                "existing position blocks entry at the mandatory risk boundary",
+            )
+
+        quote_check = self._final_order_quote_check
+        if quote_check is None:
+            return self._pre_submit_risk_rejection(
+                request,
+                "fresh executable quote validation is unavailable",
+            )
+        try:
+            quote_result = quote_check(
+                broker,
+                request.symbol,
+                request.action,
+                request.price,
+            )
+        except Exception as exc:
+            return self._pre_submit_risk_rejection(
+                request,
+                "fresh executable quote validation failed: "
+                f"{type(exc).__name__}",
+            )
+        match quote_result:
+            case FinalOrderQuoteCheckResult(
+                executable_price=fresh_price,
+                issue=quote_issue,
+                bid=bid,
+                ask=ask,
+            ):
+                if quote_issue:
+                    return self._pre_submit_risk_rejection(request, quote_issue)
+            case str() as quote_issue:
+                return self._pre_submit_risk_rejection(
+                    request,
+                    quote_issue or "fresh executable quote is unavailable",
+                )
+            case None:
+                return self._pre_submit_risk_rejection(
+                    request,
+                    "fresh executable quote is unavailable",
+                )
+            case unreachable:
+                assert_never(unreachable)
+
+        if fresh_price is None or not fresh_price.is_finite() or fresh_price <= 0:
+            return self._pre_submit_risk_rejection(
+                request,
+                "fresh executable price must be finite and greater than zero",
+            )
+
+        approved_price = max(request.price, fresh_price)
+        projected_quantity = position_check.current_quantity + request.quantity
+        if projected_quantity > limits.max_quantity:
+            return self._pre_submit_risk_rejection(
+                request,
+                f"projected quantity {projected_quantity} exceeds cap {limits.max_quantity}",
+            )
+        projected_notional = projected_quantity * approved_price
+        if projected_notional > limits.max_notional:
+            return self._pre_submit_risk_rejection(
+                request,
+                f"projected notional {projected_notional} exceeds cap {limits.max_notional}",
+            )
+        stop_distance = approved_price * limits.stop_loss_pct / Decimal("100")
+        if not stop_distance.is_finite() or stop_distance <= 0:
+            return self._pre_submit_risk_rejection(
+                request,
+                "stop distance is unavailable",
+            )
+        projected_risk = projected_quantity * stop_distance
+        if projected_risk > limits.max_risk:
+            return self._pre_submit_risk_rejection(
+                request,
+                f"projected stop risk {projected_risk} exceeds cap {limits.max_risk}",
+            )
+        return ApprovedOrder(
+            action=request.action,
+            symbol=request.symbol,
+            side=_ACTION_TO_SIDE[request.action],
+            quantity=request.quantity,
+            price=approved_price,
+            bid=bid,
+            ask=ask,
+        )
 
     def _entry_position_check(
         self,
@@ -1140,9 +1398,17 @@ class TradeExecutionService:
         *,
         safety_factor: float | None = None,
     ) -> int:
-        safety_error = self._entry_safety_configuration_error()
-        if safety_error is not None:
-            logger.error("%s: %s", side, safety_error)
+        limits_result = self._entry_risk_limits()
+        match limits_result:
+            case str() as issue:
+                logger.error("%s: %s", side, issue)
+                return 0
+            case _EntryRiskLimits() as limits:
+                pass
+            case unreachable:
+                assert_never(unreachable)
+        if not price.is_finite() or price <= 0:
+            logger.error("%s: entry price must be finite and greater than zero", side)
             return 0
 
         position_check = self._entry_position_check(
@@ -1167,61 +1433,44 @@ class TradeExecutionService:
             )
             return 0
 
-        max_qty = broker.estimate_margin_max_quantity(symbol, side, price, cash_currency)
-        full_buying_power_usage = self.full_buying_power_usage_enabled
-        if full_buying_power_usage:
-            factor = Decimal("1")
-        elif safety_factor is not None:
-            factor = Decimal(str(safety_factor))
-        elif self.margin_safety_factor is not None:
-            factor = Decimal(str(self.margin_safety_factor))
-        else:
-            factor = ENTRY_BUYING_POWER_USAGE
+        broker_max_quantity = broker.estimate_margin_max_quantity(
+            symbol,
+            side,
+            price,
+            cash_currency,
+        )
+        max_qty = self._positive_finite_limit(broker_max_quantity)
+        if max_qty is None:
+            logger.error("%s: broker margin quantity is unavailable", side)
+            return 0
+        raw_factor = (
+            safety_factor
+            if safety_factor is not None
+            else self.margin_safety_factor
+        )
+        factor = self._positive_finite_limit(
+            ENTRY_BUYING_POWER_USAGE if raw_factor is None else raw_factor
+        )
+        if factor is None:
+            logger.error("%s: buying-power safety factor is invalid", side)
+            return 0
+
         candidate = max_qty * factor
-        if full_buying_power_usage:
-            logger.warning(
-                "%s: full buying-power sizing enabled for %s; "
-                "broker_max_quantity=%s price=%s",
-                side,
-                symbol,
-                max_qty,
-                price,
-            )
-        if (
-            not full_buying_power_usage
-            and self.max_position_quantity is not None
-            and self.max_position_quantity > 0
-        ):
-            remaining_qty = Decimal(self.max_position_quantity) - current_qty
-            candidate = min(candidate, max(Decimal("0"), remaining_qty))
+        remaining_qty = limits.max_quantity - current_qty
+        candidate = min(candidate, max(Decimal("0"), remaining_qty))
 
-        if (
-            not full_buying_power_usage
-            and self.max_position_notional is not None
-            and self.max_position_notional > 0
-            and price > 0
-        ):
-            current_notional = current_qty * price
-            remaining_notional = Decimal(str(self.max_position_notional)) - current_notional
-            notional_qty = max(Decimal("0"), remaining_notional) / price
-            candidate = min(candidate, notional_qty)
+        current_notional = current_qty * price
+        remaining_notional = limits.max_notional - current_notional
+        notional_qty = max(Decimal("0"), remaining_notional) / price
+        candidate = min(candidate, notional_qty)
 
-        if (
-            not full_buying_power_usage
-            and self.max_risk_per_trade is not None
-            and self.max_risk_per_trade > 0
-            and self.stop_loss_pct is not None
-            and self.stop_loss_pct > 0
-            and price > 0
-        ):
-            stop_distance = price * Decimal(str(self.stop_loss_pct)) / Decimal("100")
-            if stop_distance > 0:
-                remaining_risk = max(
-                    Decimal("0"),
-                    Decimal(str(self.max_risk_per_trade)) - current_qty * stop_distance,
-                )
-                risk_qty = remaining_risk / stop_distance
-                candidate = min(candidate, risk_qty)
+        stop_distance = price * limits.stop_loss_pct / Decimal("100")
+        remaining_risk = max(
+            Decimal("0"),
+            limits.max_risk - current_qty * stop_distance,
+        )
+        risk_qty = remaining_risk / stop_distance
+        candidate = min(candidate, risk_qty)
 
         qty = int(candidate)
         if qty <= 0:
@@ -1615,7 +1864,6 @@ class TradeExecutionService:
         order_status = self._submit_limit_order(
             "BUY",
             symbol,
-            "BUY",
             Decimal(qty),
             price,
             broker,
@@ -1719,7 +1967,6 @@ class TradeExecutionService:
         order_status = self._submit_limit_order(
             "SELL",
             symbol,
-            "SELL",
             qty,
             price,
             broker,
@@ -1835,7 +2082,6 @@ class TradeExecutionService:
         order_status = self._submit_limit_order(
             "SELL_SHORT",
             symbol,
-            "SELL",
             Decimal(qty),
             price,
             broker,
@@ -1934,7 +2180,6 @@ class TradeExecutionService:
         order_status = self._submit_limit_order(
             "BUY_TO_COVER",
             symbol,
-            "BUY",
             qty,
             price,
             broker,
@@ -2022,7 +2267,6 @@ class TradeExecutionService:
         self,
         action: str,
         symbol: str,
-        side: str,
         qty: Decimal,
         price: Decimal,
         broker: BrokerGateway,
@@ -2078,27 +2322,88 @@ class TradeExecutionService:
             )
             if isinstance(precheck_result, OrderStatus):
                 return precheck_result
-            submission_price = (
-                precheck_result.submission_price
-                if precheck_result.submission_price is not None
-                else price
-            )
-            return self._submit_limit_order_after_precheck(
-                action,
-                symbol,
-                side,
-                qty,
-                submission_price,
+
+            approved_order = precheck_result
+            submit_started_at = datetime.now(timezone.utc)
+            submit_started_monotonic = time.perf_counter()
+
+            def submit_approved_order() -> OrderResult:
+                try:
+                    return broker.submit_limit_order(
+                        approved_order.symbol,
+                        approved_order.side,
+                        approved_order.quantity,
+                        approved_order.price,
+                    )
+                except Exception as exc:
+                    raise BrokerSubmissionUncertainError(
+                        action=approved_order.action,
+                        symbol=approved_order.symbol,
+                        cause=str(exc),
+                    ) from exc
+
+            if approved_order.protective_commit_required:
+                with risk.protective_submission_guard():
+                    commit_check = self._final_protective_exit_commit_check
+                    if commit_check is None:
+                        risk.revoke_protective_exits()
+                        return self._skip_order(
+                            approved_order.symbol,
+                            approved_order.action,
+                            "protective exit commit verification is unavailable",
+                            skip_category="RISK",
+                        )
+                    try:
+                        protective_issue = commit_check(
+                            broker,
+                            approved_order.symbol,
+                            approved_order.action,
+                            approved_order.quantity,
+                            dict(self._active_execution_context),
+                        )
+                    except Exception:
+                        logger.exception(
+                            "protective exit commit verification failed for %s %s",
+                            approved_order.action,
+                            approved_order.symbol,
+                        )
+                        protective_issue = (
+                            "protective exit commit verification raised an exception"
+                        )
+                    if protective_issue is not None:
+                        risk.revoke_protective_exits()
+                        return self._skip_order(
+                            approved_order.symbol,
+                            approved_order.action,
+                            str(protective_issue),
+                            skip_category="RISK",
+                        )
+                    with risk.protective_permission_guard() as permitted:
+                        if permitted:
+                            broker_result = submit_approved_order()
+                    if not permitted:
+                        risk.revoke_protective_exits()
+                        return self._skip_order(
+                            approved_order.symbol,
+                            approved_order.action,
+                            "protective exit permission changed at broker commit",
+                            skip_category="RISK",
+                        )
+            else:
+                broker_result = submit_approved_order()
+
+            return self._process_submitted_order(
+                precheck_result,
+                broker_result,
                 broker,
                 risk,
                 notifier,
+                submit_started_at=submit_started_at,
+                submit_started_monotonic=submit_started_monotonic,
                 engine_snapshot=engine_snapshot,
                 restore_engine_snapshot=restore_engine_snapshot,
                 notify_risk_event=notify_risk_event,
                 avg_price=avg_price,
-                protective_commit_required=(
-                    precheck_result.protective_commit_required
-                ),
             )
 
     def _final_submission_precheck(
@@ -2124,34 +2429,30 @@ class TradeExecutionService:
         final_entry_policy_check: EntryPolicyCheck | None = None,
         market: str = "US",
         reduce_only: bool = False,
-    ) -> OrderStatus | _FinalSubmissionApproval:
+    ) -> OrderStatus | ApprovedOrder:
         protective_commit_required = False
-        if action in _ENTRY_ACTIONS:
-            position_check = self._entry_position_check(broker, symbol, action)
-            if position_check is None:
-                return self._skip_order(
-                    symbol,
-                    action,
-                    "broker position lookup unavailable immediately before submission",
-                    skip_category="RISK",
+        boundary_result = self.pre_submit_risk_check(
+            _PreSubmitRiskRequest(
+                action=action,
+                symbol=symbol,
+                quantity=qty,
+                price=price,
+            ),
+            broker,
+        )
+        match boundary_result:
+            case OrderStatus() as rejection:
+                return rejection
+            case ApprovedOrder() as boundary_approval:
+                final_executable_price = (
+                    boundary_approval.price
+                    if boundary_approval.action in _ENTRY_ACTIONS
+                    else None
                 )
-            if position_check.conflicting_symbol:
-                return self._skip_order(
-                    symbol,
-                    action,
-                    (
-                        f"cross-symbol broker position {position_check.conflicting_symbol} "
-                        "blocks submission"
-                    ),
-                    skip_category="POSITION",
-                )
-            if not self.allow_position_addons and position_check.current_quantity > 0:
-                return self._skip_order(
-                    symbol,
-                    action,
-                    "position appeared immediately before submission while add-ons are disabled",
-                    skip_category="POSITION",
-                )
+                final_bid = boundary_approval.bid
+                final_ask = boundary_approval.ask
+            case unreachable:
+                assert_never(unreachable)
 
         with self._state_lock:
             unresolved_order_ids = (
@@ -2245,7 +2546,7 @@ class TradeExecutionService:
                 broker,
                 symbol,
                 action,
-                qty,
+                boundary_approval.quantity,
             )
             if position_issue is not None:
                 return self._pause_for_final_position_uncertainty(
@@ -2254,10 +2555,10 @@ class TradeExecutionService:
                     position_issue,
                     risk,
                 )
-        final_executable_price: Decimal | None = None
-        final_bid: Decimal | None = None
-        final_ask: Decimal | None = None
-        if self._final_order_quote_check is not None:
+        if (
+            action in _POSITION_REDUCING_ACTIONS
+            and self._final_order_quote_check is not None
+        ):
             try:
                 quote_check_result = self._final_order_quote_check(
                     broker,
@@ -2298,9 +2599,9 @@ class TradeExecutionService:
         if action == "BUY" and entry_expected_exit_price is not None:
             entry_guard = self._profit_guard_for_entry(
                 symbol=symbol,
-                entry_price=price,
+                entry_price=boundary_approval.price,
                 expected_exit_price=entry_expected_exit_price,
-                quantity=qty,
+                quantity=boundary_approval.quantity,
                 bid=final_bid if final_bid is not None else entry_bid,
                 ask=final_ask if final_ask is not None else entry_ask,
                 min_profit_amount=entry_min_profit_amount,
@@ -2338,7 +2639,7 @@ class TradeExecutionService:
                     symbol=symbol,
                     avg_price=exit_avg_price,
                     exit_price=marketable_price,
-                    quantity=qty,
+                    quantity=boundary_approval.quantity,
                     min_profit_amount=exit_min_profit_amount,
                     allow_loss_exit=False,
                     fee_rate=exit_fee_rate,
@@ -2348,7 +2649,36 @@ class TradeExecutionService:
                     return final_profit_guard
         else:
             marketable_price = None
+        trading_state = risk.trading_state()
         risk_result = risk.check()
+        if trading_state is TradingState.HALTED:
+            reason = risk_result.reason or "trading state is HALTED"
+            logger.warning(
+                "submission rejected: trading state HALTED for %s %s: %s",
+                action,
+                symbol,
+                reason,
+            )
+            return self._skip_order(
+                symbol,
+                action,
+                reason,
+                skip_category="RISK",
+            )
+        if trading_state is TradingState.REDUCING and action in _ENTRY_ACTIONS:
+            reason = risk_result.reason or "trading state is REDUCING"
+            logger.warning(
+                "submission rejected: trading state REDUCING blocks entry %s %s: %s",
+                action,
+                symbol,
+                reason,
+            )
+            return self._skip_order(
+                symbol,
+                action,
+                reason,
+                skip_category="RISK",
+            )
         if not risk_result.approved and not self._risk_rejection_allows_action(
             action,
             risk,
@@ -2372,8 +2702,13 @@ class TradeExecutionService:
                 action,
                 risk_result.reason,
             )
-        return _FinalSubmissionApproval(
-            submission_price=marketable_price,
+        return dataclass_replace(
+            boundary_approval,
+            price=(
+                marketable_price
+                if marketable_price is not None
+                else boundary_approval.price
+            ),
             protective_commit_required=protective_commit_required,
         )
 
@@ -2475,83 +2810,25 @@ class TradeExecutionService:
             skip_category="RISK",
         )
 
-    def _submit_limit_order_after_precheck(
+    def _process_submitted_order(
         self,
-        action: str,
-        symbol: str,
-        side: str,
-        qty: Decimal,
-        price: Decimal,
+        approved_order: ApprovedOrder,
+        result: OrderResult,
         broker: BrokerGateway,
         risk: RiskController,
         notifier: "NotifierInterface",
         *,
+        submit_started_at: datetime,
+        submit_started_monotonic: float,
         engine_snapshot: EngineSnapshot | None = None,
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
         avg_price: Decimal | None = None,
-        protective_commit_required: bool = False,
     ) -> OrderStatus | None:
-        submit_started_at = datetime.now(timezone.utc)
-        submit_started_monotonic = time.perf_counter()
-        if protective_commit_required:
-            # Runtime invalidation and this commit proof use the same outer
-            # guard.  The inner risk lock then covers the final permission
-            # decision and the only broker mutation, eliminating the physical
-            # post-check/pre-submit window.
-            with risk.protective_submission_guard():
-                commit_check = self._final_protective_exit_commit_check
-                if commit_check is None:
-                    risk.revoke_protective_exits()
-                    return self._skip_order(
-                        symbol,
-                        action,
-                        "protective exit commit verification is unavailable",
-                        skip_category="RISK",
-                    )
-                try:
-                    protective_issue = commit_check(
-                        broker,
-                        symbol,
-                        action,
-                        qty,
-                        dict(self._active_execution_context),
-                    )
-                except Exception:
-                    logger.exception(
-                        "protective exit commit verification failed for %s %s",
-                        action,
-                        symbol,
-                    )
-                    protective_issue = (
-                        "protective exit commit verification raised an exception"
-                    )
-                if protective_issue is not None:
-                    risk.revoke_protective_exits()
-                    return self._skip_order(
-                        symbol,
-                        action,
-                        str(protective_issue),
-                        skip_category="RISK",
-                    )
-                with risk.protective_permission_guard() as permitted:
-                    if permitted:
-                        result = broker.submit_limit_order(
-                            symbol,
-                            side,
-                            qty,
-                            price,
-                        )
-                if not permitted:
-                    risk.revoke_protective_exits()
-                    return self._skip_order(
-                        symbol,
-                        action,
-                        "protective exit permission changed at broker commit",
-                        skip_category="RISK",
-                    )
-        else:
-            result = broker.submit_limit_order(symbol, side, qty, price)
+        action = approved_order.action
+        symbol = approved_order.symbol
+        qty = approved_order.quantity
+        price = approved_order.price
         acknowledged_at = datetime.now(timezone.utc)
         ack_latency_ms = (time.perf_counter() - submit_started_monotonic) * 1000
         ledger_metadata = dict(self._active_execution_context)
@@ -3183,7 +3460,23 @@ class TradeExecutionService:
                 return
             self._fill_finalization_in_flight.add(order_id)
 
+        terminal_status = str(
+            getattr(order_status, "status", "FILLED") or "FILLED"
+        ).upper()
+        callback_claimed = False
         try:
+            if self._terminal_callback_store is not None:
+                callback_claimed = self._terminal_callback_store.claim(
+                    order_id,
+                    terminal_status,
+                )
+                if not callback_claimed:
+                    logger.debug(
+                        "terminal callback already applied for order %s status %s",
+                        order_id,
+                        terminal_status,
+                    )
+                    return
             self._finalize_pending_fill_once(
                 pending,
                 order_status,
@@ -3192,7 +3485,18 @@ class TradeExecutionService:
                 fill_qty=fill_qty,
                 notify_risk_event=notify_risk_event,
             )
+            if self._terminal_callback_store is not None:
+                self._terminal_callback_store.complete(order_id, terminal_status)
         except BaseException:
+            if callback_claimed and self._terminal_callback_store is not None:
+                try:
+                    self._terminal_callback_store.release(order_id, terminal_status)
+                except Exception:
+                    logger.exception(
+                        "failed to release terminal callback claim for order %s status %s",
+                        order_id,
+                        terminal_status,
+                    )
             with self._state_lock:
                 self._fill_finalization_in_flight.discard(order_id)
             raise

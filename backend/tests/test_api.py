@@ -1654,6 +1654,7 @@ class TestAPI:
         class DiagnosticsRunner:
             def diagnostics(self):
                 return {
+                    "risk_boundary_version": "pre-submit-risk-v1",
                     "runner_running": True,
                     "thread_alive": True,
                     "quotes_subscribed": True,
@@ -1722,6 +1723,7 @@ class TestAPI:
 
         assert resp.status_code == 200
         data = resp.json()
+        assert data["risk_boundary_version"] == "pre-submit-risk-v1"
         assert data["runner_running"] is True
         assert data["pending_order_symbols"] == ["AAPL.US"]
         assert data["quote_stream"]["recent_quote_count"] == 4
@@ -1739,6 +1741,57 @@ class TestAPI:
         assert data["dedup_window_seconds"] == 45.0
         assert data["symbol_runtimes"][1]["symbol"] == "AAPL.US"
         assert data["symbol_runtimes"][1]["has_pending_order"] is True
+
+    def test_diagnostics_returns_trading_state(self, monkeypatch) -> None:
+        class DiagnosticsRunner:
+            def diagnostics(self):
+                return {
+                    "risk_boundary_version": "pre-submit-risk-v1",
+                    "runner_running": True,
+                    "thread_alive": True,
+                    "quotes_subscribed": True,
+                    "trigger_in_flight": False,
+                    "pending_order_symbols": [],
+                    "trading_state": "REDUCING",
+                    "dedup_suppressed_total": 0,
+                    "dedup_window_seconds": 45.0,
+                    "live_safety": {
+                        "short_entries_enabled": False,
+                        "allow_position_addons": False,
+                        "max_position_quantity": 100,
+                        "max_position_notional": 5000.0,
+                        "max_risk_per_trade": 250.0,
+                        "stop_loss_pct": 1.0,
+                        "max_holding_minutes": 60,
+                        "entry_cutoff_minutes_before_close": 45,
+                        "flatten_minutes_before_close": 15,
+                        "llm_shadow_mode": True,
+                        "llm_order_execution_enabled": False,
+                        "live_regime_gate_enabled": False,
+                        "live_regime_max_data_age_seconds": 600,
+                        "live_max_entries_per_symbol_per_day": 1,
+                    },
+                    "quote_stream": {
+                        "last_push_age_seconds": None,
+                        "last_quote_age_seconds": None,
+                        "recent_quote_count": 0,
+                    },
+                    "risk": {
+                        "paused": True,
+                        "kill_switch": False,
+                        "pause_reason": "manual stand-down",
+                        "daily_pnl": 0.0,
+                        "consecutive_losses": 0,
+                    },
+                    "symbol_runtimes": [],
+                }
+
+        monkeypatch.setattr(strategy_api, "get_runner", lambda: DiagnosticsRunner())
+
+        resp = client.get("/api/diagnostics")
+
+        assert resp.status_code == 200
+        assert resp.json()["trading_state"] == "REDUCING"
 
     def test_llm_account_context_uses_pending_order_for_requested_symbol(self, monkeypatch) -> None:
         class Broker:
@@ -1804,7 +1857,7 @@ class TestAPI:
             trade_service=trade_service,
         ) == 7.0
 
-    def test_interval_reference_quantity_uses_full_broker_buying_power(
+    def test_interval_reference_quantity_ignores_deprecated_full_power_flag(
         self,
     ) -> None:
         trade_service = SimpleNamespace(
@@ -1823,7 +1876,7 @@ class TestAPI:
             trade_service=trade_service,
         )
 
-        assert quantity == 1237.0
+        assert quantity == 23.0
 
     def test_llm_interval_status_includes_budget_and_symbol_statuses(self, monkeypatch) -> None:
         _clean_strategy()

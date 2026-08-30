@@ -178,6 +178,20 @@ export interface DiagnosticLiveSafety {
   live_max_entries_per_symbol_per_day: number
 }
 
+export interface DecisionFunnelDiagnostics {
+  session_date: string
+  fresh_primary_quote: number
+  evaluations: number
+  threshold_crossings: number
+  skips_by_category: Record<string, number>
+  triggers: number
+  sized_quantity_positive: number
+  submit_attempts: number
+  broker_acks: number
+  persisted: number
+  pre_submit_risk_check_invocations: number
+}
+
 export interface DiagnosticsResponse {
   runner_running: boolean
   thread_alive: boolean
@@ -189,10 +203,12 @@ export interface DiagnosticsResponse {
   order_sync_succeeded: boolean
   execution_state: 'IDLE' | 'REDUCING'
   reduction_reason: string
+  trading_state: 'ACTIVE' | 'REDUCING' | 'HALTED'
   live_safety: DiagnosticLiveSafety
   quote_stream: DiagnosticQuoteStream
   risk: DiagnosticRiskState
   symbol_runtimes: DiagnosticSymbolRuntime[]
+  decision_funnel: DecisionFunnelDiagnostics
 }
 
 export interface OrderRecord {
