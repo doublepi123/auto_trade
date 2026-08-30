@@ -271,6 +271,20 @@ class StrategyV2ShadowService:
         self._transaction_fence(self.db)
         return True
 
+    @staticmethod
+    def _replay_source_not_before(
+        *,
+        now: datetime | None,
+        replay_source_retention_days: int | None,
+    ) -> datetime | None:
+        if (
+            replay_source_retention_days is None
+            or replay_source_retention_days <= 0
+        ):
+            return None
+        reference = now or datetime.now(timezone.utc)
+        return reference - timedelta(days=replay_source_retention_days)
+
     def prune_expired_wait_decisions(
         self,
         *,
@@ -278,6 +292,7 @@ class StrategyV2ShadowService:
         batch_size: int,
         max_batches: int | None = 8,
         now: datetime | None = None,
+        replay_source_retention_days: int | None = None,
     ) -> StrategyV2WaitPruneResult:
         """Bound routine per-minute WAIT evidence without deleting actions.
 
@@ -298,6 +313,10 @@ class StrategyV2ShadowService:
 
         cutoff = (now or datetime.now(timezone.utc)) - timedelta(
             days=retention_days
+        )
+        replay_source_not_before = self._replay_source_not_before(
+            now=now,
+            replay_source_retention_days=replay_source_retention_days,
         )
         expired = (
             StrategyV2ShadowDecision.action == StrategyV2Action.WAIT.value,
@@ -352,6 +371,7 @@ class StrategyV2ShadowService:
                 protected_sessions = (
                     self._forward_sessions_requiring_replay_source(
                         candidate_sessions=candidate_sessions,
+                        not_before=replay_source_not_before,
                     )
                 )
                 for row in rows:
@@ -405,6 +425,7 @@ class StrategyV2ShadowService:
                     protected_sessions = (
                         self._forward_sessions_requiring_replay_source(
                             candidate_sessions=candidate_sessions,
+                            not_before=replay_source_not_before,
                         )
                     )
                     ids = [
@@ -438,6 +459,162 @@ class StrategyV2ShadowService:
                 raise
             batches += 1
             if exhausted:
+                break
+        self._checkpoint_operation()
+        return StrategyV2WaitPruneResult(deleted=deleted, batches=batches)
+
+    def prune_expired_diagnostic_wait_decisions(
+        self,
+        *,
+        retention_days: int,
+        batch_size: int,
+        max_batches: int | None = 8,
+        now: datetime | None = None,
+        replay_source_retention_days: int | None = None,
+    ) -> StrategyV2WaitPruneResult:
+        """Bound the WAIT classes the routine prune retains forever.
+
+        ``prune_expired_wait_decisions`` keeps gate-passed, breach-armed,
+        state-transition and incomplete-session WAIT rows for long-horizon
+        diagnostics; this prune expires those classes past a longer window so
+        the table stays bounded. Action rows are never eligible: shadow
+        trades reference entry/exit decision ids, and actions are the frozen
+        negative-control evidence base. Forward sessions that still require
+        their decisions as replay source remain protected.
+        """
+        self._checkpoint_operation()
+        if retention_days < 0:
+            raise ValueError("retention_days must be non-negative")
+        if batch_size <= 0:
+            raise ValueError("batch_size must be positive")
+        if retention_days == 0 or (max_batches is not None and max_batches <= 0):
+            self._checkpoint_operation()
+            return StrategyV2WaitPruneResult()
+
+        reference = now or datetime.now(timezone.utc)
+        cutoff = reference - timedelta(days=retention_days)
+        replay_source_not_before = self._replay_source_not_before(
+            now=now,
+            replay_source_retention_days=replay_source_retention_days,
+        )
+        expired = (
+            StrategyV2ShadowDecision.action == StrategyV2Action.WAIT.value,
+            StrategyV2ShadowDecision.bar_at < cutoff,
+        )
+        deleted = 0
+        batches = 0
+        cursor_bar_at: datetime | None = None
+        cursor_id = 0
+        while max_batches is None or batches < max_batches:
+            self._checkpoint_operation()
+            query = self.db.query(
+                StrategyV2ShadowDecision.id,
+                StrategyV2ShadowDecision.symbol,
+                StrategyV2ShadowDecision.config_version,
+                StrategyV2ShadowDecision.session_date,
+                StrategyV2ShadowDecision.bar_at,
+            ).filter(*expired)
+            if cursor_bar_at is not None:
+                query = query.filter(or_(
+                    StrategyV2ShadowDecision.bar_at > cursor_bar_at,
+                    and_(
+                        StrategyV2ShadowDecision.bar_at == cursor_bar_at,
+                        StrategyV2ShadowDecision.id > cursor_id,
+                    ),
+                ))
+            rows = query.order_by(
+                StrategyV2ShadowDecision.bar_at.asc(),
+                StrategyV2ShadowDecision.id.asc(),
+            ).limit(batch_size).all()
+            if not rows:
+                break
+            cursor_id = int(rows[-1].id)
+            cursor_bar_at = _as_utc(rows[-1].bar_at)
+            protected_sessions = self._forward_sessions_requiring_replay_source(
+                candidate_sessions={
+                    (
+                        str(row.symbol),
+                        str(row.config_version),
+                        row.session_date,
+                    )
+                    for row in rows
+                },
+                not_before=replay_source_not_before,
+            )
+            ids = [
+                int(row.id)
+                for row in rows
+                if (
+                    str(row.symbol),
+                    str(row.config_version),
+                    row.session_date,
+                )
+                not in protected_sessions
+            ]
+            if not ids:
+                if len(rows) < batch_size:
+                    break
+                continue
+            try:
+                fenced = self._start_fenced_transaction()
+                if fenced:
+                    candidates = (
+                        self.db.query(
+                            StrategyV2ShadowDecision.id,
+                            StrategyV2ShadowDecision.symbol,
+                            StrategyV2ShadowDecision.config_version,
+                            StrategyV2ShadowDecision.session_date,
+                        )
+                        .filter(
+                            StrategyV2ShadowDecision.id.in_(ids),
+                            *expired,
+                        )
+                        .all()
+                    )
+                    protected_sessions = (
+                        self._forward_sessions_requiring_replay_source(
+                            candidate_sessions={
+                                (
+                                    str(row.symbol),
+                                    str(row.config_version),
+                                    row.session_date,
+                                )
+                                for row in candidates
+                            },
+                            not_before=replay_source_not_before,
+                        )
+                    )
+                    ids = [
+                        int(row.id)
+                        for row in candidates
+                        if (
+                            str(row.symbol),
+                            str(row.config_version),
+                            row.session_date,
+                        )
+                        not in protected_sessions
+                    ]
+                if not ids:
+                    if fenced:
+                        self.db.commit()
+                    if len(rows) < batch_size:
+                        break
+                    continue
+                deleted += int(
+                    self.db.query(StrategyV2ShadowDecision)
+                    .filter(
+                        StrategyV2ShadowDecision.id.in_(ids),
+                        *expired,
+                    )
+                    .delete(synchronize_session=False)
+                )
+                self.db.commit()
+                self._checkpoint_operation()
+            except Exception:
+                self.db.rollback()
+                raise
+            batches += 1
+            if len(rows) < batch_size:
                 break
         self._checkpoint_operation()
         return StrategyV2WaitPruneResult(deleted=deleted, batches=batches)
@@ -3285,6 +3462,7 @@ class StrategyV2ShadowService:
         self,
         *,
         candidate_sessions: set[tuple[str, str, date]] | None = None,
+        not_before: datetime | None = None,
     ) -> set[tuple[str, str, date]]:
         if candidate_sessions is not None and not candidate_sessions:
             return set()
@@ -3300,6 +3478,13 @@ class StrategyV2ShadowService:
         ).filter(
             StrategyV2ForwardEvidence.disposition == "INCLUDED",
         )
+        if not_before is not None:
+            # Evidence older than the replay-artifact retention window no
+            # longer needs raw decision rows as a replay source: the policy
+            # has already archived or deliberately expired its replay bytes.
+            query = query.filter(
+                StrategyV2ForwardEvidence.evaluated_at >= not_before
+            )
         if candidate_sessions is not None:
             symbols = sorted({item[0] for item in candidate_sessions})
             config_versions = sorted({item[1] for item in candidate_sessions})

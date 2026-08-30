@@ -235,7 +235,7 @@ class Settings(BaseSettings):
         validation_alias="AUTO_TRADE_RUNTIME_STATE_SNAPSHOT_MAINTENANCE_BATCH_SIZE",
     )
     strategy_v2_wait_retention_days: int = Field(
-        default=45,
+        default=14,
         ge=0,
         le=3650,
         validation_alias="AUTO_TRADE_STRATEGY_V2_WAIT_RETENTION_DAYS",
@@ -245,6 +245,50 @@ class Settings(BaseSettings):
         ge=10,
         le=10000,
         validation_alias="AUTO_TRADE_STRATEGY_V2_WAIT_MAINTENANCE_BATCH_SIZE",
+    )
+    strategy_v2_diagnostic_wait_retention_days: int = Field(
+        default=90,
+        ge=0,
+        le=3650,
+        validation_alias="AUTO_TRADE_STRATEGY_V2_DIAGNOSTIC_WAIT_RETENTION_DAYS",
+    )
+    strategy_v2_diagnostic_wait_maintenance_batch_size: int = Field(
+        default=2500,
+        ge=10,
+        le=10000,
+        validation_alias=(
+            "AUTO_TRADE_STRATEGY_V2_DIAGNOSTIC_WAIT_MAINTENANCE_BATCH_SIZE"
+        ),
+    )
+    strategy_v2_forward_replay_artifact_retention_days: int = Field(
+        default=30,
+        ge=0,
+        le=3650,
+        validation_alias=(
+            "AUTO_TRADE_STRATEGY_V2_FORWARD_REPLAY_ARTIFACT_RETENTION_DAYS"
+        ),
+    )
+    strategy_v2_forward_replay_artifact_maintenance_batch_size: int = Field(
+        default=250,
+        ge=10,
+        le=5000,
+        validation_alias=(
+            "AUTO_TRADE_STRATEGY_V2_FORWARD_REPLAY_ARTIFACT_MAINTENANCE_BATCH_SIZE"
+        ),
+    )
+    watchlist_quant_v6_artifact_retention_days: int = Field(
+        default=30,
+        ge=0,
+        le=3650,
+        validation_alias="AUTO_TRADE_WATCHLIST_QUANT_V6_ARTIFACT_RETENTION_DAYS",
+    )
+    watchlist_quant_v6_artifact_maintenance_batch_size: int = Field(
+        default=250,
+        ge=10,
+        le=5000,
+        validation_alias=(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_ARTIFACT_MAINTENANCE_BATCH_SIZE"
+        ),
     )
     llm_interval_volatility_threshold_pct: float = Field(
         default=1.0,

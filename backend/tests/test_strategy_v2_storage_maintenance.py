@@ -186,8 +186,10 @@ def test_wait_prune_scopes_replay_checks_to_each_candidate_batch(
     def _scoped_replay_check(
         *,
         candidate_sessions: set[tuple[str, str, date]],
+        not_before: datetime | None = None,
     ) -> set[tuple[str, str, date]]:
         assert candidate_sessions
+        assert not_before is None
         assert len(candidate_sessions) <= 2
         replay_check_calls.append(set(candidate_sessions))
         return set()
@@ -310,3 +312,220 @@ def test_prune_expired_wait_decisions_validates_limits() -> None:
             retention_days=45,
             batch_size=0,
         )
+
+
+def _forward_registration(db: Session) -> StrategyV2ForwardRegistration:
+    registered_at = datetime(2026, 5, 1, tzinfo=timezone.utc)
+    registration = StrategyV2ForwardRegistration(
+        symbol="NVDA.US",
+        market="US",
+        candidate_algorithm_version="strategy-v2-causal-trend-prewarm-v1",
+        source_config_version="version-a",
+        evaluator_digest="evaluator-a",
+        candidate_spec_json="{}",
+        registered_at=registered_at,
+        eligible_after=registered_at,
+    )
+    db.add(registration)
+    db.flush()
+    return registration
+
+
+def _included_evidence(
+    db: Session,
+    registration_id: int,
+    *,
+    session_day: date,
+    evaluated_at: datetime,
+) -> StrategyV2ForwardEvidence:
+    evidence = StrategyV2ForwardEvidence(
+        registration_id=registration_id,
+        target_session_date=session_day,
+        seed_session_date=session_day,
+        target_open_at=datetime.combine(
+            session_day,
+            datetime.min.time(),
+            tzinfo=timezone.utc,
+        ),
+        evaluated_at=evaluated_at,
+        disposition="INCLUDED",
+    )
+    db.add(evidence)
+    db.flush()
+    return evidence
+
+
+def test_prune_expired_diagnostic_wait_decisions_deletes_old_wait_keeps_actions() -> None:
+    db = _session()
+    now = datetime(2026, 8, 30, tzinfo=timezone.utc)
+    old = now - timedelta(days=120)
+    rows = {
+        "gate_old": _decision(
+            bar_at=old, suffix="gate-old", gate_passed=True, reason="NO_BREACH"
+        ),
+        "armed_old": _decision(
+            bar_at=old,
+            suffix="armed-old",
+            breach_armed=True,
+            reason="WAITING_FOR_RECLAIM",
+            state_before="ARMED_LONG",
+            state_after="ARMED_LONG",
+        ),
+        "transition_old": _decision(
+            bar_at=old, suffix="transition-old", state_after="COLD"
+        ),
+        "incomplete_old": _decision(
+            bar_at=old,
+            suffix="incomplete-old",
+            reason="SESSION_DATA_INCOMPLETE",
+        ),
+        "routine_old": _decision(bar_at=old, suffix="routine-old"),
+        "gate_recent": _decision(
+            bar_at=now - timedelta(days=5),
+            suffix="gate-recent",
+            gate_passed=True,
+            reason="NO_BREACH",
+        ),
+        "action_arm": _decision(
+            bar_at=old, suffix="action-arm", action="ARM_LONG"
+        ),
+        "action_fill": _decision(
+            bar_at=old, suffix="action-fill", action="FILL_ENTRY"
+        ),
+    }
+    db.add_all(rows.values())
+    db.commit()
+    ids = {name: row.id for name, row in rows.items()}
+
+    result = StrategyV2ShadowService(db).prune_expired_diagnostic_wait_decisions(
+        retention_days=90,
+        batch_size=10,
+        now=now,
+    )
+
+    # Then: every old WAIT class (gate/armed/transition/incomplete/routine)
+    # is deleted by the diagnostic window...
+    assert result.deleted == 5
+    for name in (
+        "gate_old",
+        "armed_old",
+        "transition_old",
+        "incomplete_old",
+        "routine_old",
+    ):
+        assert db.get(StrategyV2ShadowDecision, ids[name]) is None
+    # ...and recent WAIT rows plus all action rows survive.
+    assert db.get(StrategyV2ShadowDecision, ids["gate_recent"]) is not None
+    assert db.get(StrategyV2ShadowDecision, ids["action_arm"]) is not None
+    assert db.get(StrategyV2ShadowDecision, ids["action_fill"]) is not None
+
+
+def test_prune_expired_diagnostic_wait_decisions_zero_disables() -> None:
+    db = _session()
+    now = datetime(2026, 8, 30, tzinfo=timezone.utc)
+    db.add(_decision(bar_at=now - timedelta(days=120), suffix="old"))
+    db.commit()
+
+    result = StrategyV2ShadowService(db).prune_expired_diagnostic_wait_decisions(
+        retention_days=0,
+        batch_size=10,
+        now=now,
+    )
+
+    assert result.deleted == 0
+    assert db.query(StrategyV2ShadowDecision).count() == 1
+
+
+def test_prune_expired_diagnostic_wait_decisions_validates_limits() -> None:
+    service = StrategyV2ShadowService(_session())
+
+    with pytest.raises(ValueError, match="non-negative"):
+        service.prune_expired_diagnostic_wait_decisions(
+            retention_days=-1,
+            batch_size=10,
+        )
+    with pytest.raises(ValueError, match="positive"):
+        service.prune_expired_diagnostic_wait_decisions(
+            retention_days=90,
+            batch_size=0,
+        )
+
+
+def test_diagnostic_prune_respects_and_lifts_forward_replay_protection() -> None:
+    db = _session()
+    now = datetime(2026, 8, 30, tzinfo=timezone.utc)
+    old = now - timedelta(days=120)
+    session_day = old.date()
+    registration = _forward_registration(db)
+    _included_evidence(
+        db,
+        registration.id,
+        session_day=session_day,
+        evaluated_at=now - timedelta(days=10),
+    )
+    db.add(
+        _decision(
+            bar_at=old,
+            suffix="protected",
+            gate_passed=True,
+            reason="NO_BREACH",
+        )
+    )
+    db.commit()
+
+    service = StrategyV2ShadowService(db)
+    protected = service.prune_expired_diagnostic_wait_decisions(
+        retention_days=90,
+        batch_size=10,
+        now=now,
+    )
+
+    # Then: an unarchived INCLUDED session still protects its decision rows.
+    assert protected.deleted == 0
+    assert db.query(StrategyV2ShadowDecision).count() == 1
+
+    lifted = service.prune_expired_diagnostic_wait_decisions(
+        retention_days=90,
+        batch_size=10,
+        now=now,
+        replay_source_retention_days=5,
+    )
+
+    # Then: evidence older than the replay-source window no longer protects.
+    assert lifted.deleted == 1
+    assert db.query(StrategyV2ShadowDecision).count() == 0
+
+
+def test_routine_wait_prune_honors_replay_source_retention_window() -> None:
+    db = _session()
+    now = datetime(2026, 8, 30, tzinfo=timezone.utc)
+    old = now - timedelta(days=120)
+    session_day = old.date()
+    registration = _forward_registration(db)
+    _included_evidence(
+        db,
+        registration.id,
+        session_day=session_day,
+        evaluated_at=now - timedelta(days=60),
+    )
+    db.add(_decision(bar_at=old, suffix="routine"))
+    db.commit()
+
+    service = StrategyV2ShadowService(db)
+    protected = service.prune_expired_wait_decisions(
+        retention_days=14,
+        batch_size=10,
+        now=now,
+    )
+    lifted = service.prune_expired_wait_decisions(
+        retention_days=14,
+        batch_size=10,
+        now=now,
+        replay_source_retention_days=30,
+    )
+
+    # Then: the replay-source window lifts protection for old evidence only
+    # when explicitly configured; the default behavior is unchanged.
+    assert protected.deleted == 0
+    assert lifted.deleted == 1
+    assert db.query(StrategyV2ShadowDecision).count() == 0
