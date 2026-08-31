@@ -93,6 +93,17 @@ class TestIsTradingHours:
         # 2026-05-22 04:30 UTC = 12:30 HKT (lunch break)
         assert not is_trading_hours("HK", datetime(2026, 5, 22, 4, 30, tzinfo=timezone.utc))
 
+    def test_out_of_coverage_2030_weekday_is_still_rth(self) -> None:
+        # WHY fail-open: 2030-01-02 is outside the static holiday table.
+        # is_market_closed must stay "known full-day closure" only. Marking
+        # unknown dates closed would make is_rth() return False
+        # (market_calendar.py:51-52), disabling EOD flatten (runner.py:6576)
+        # and RTH_ONLY stop-loss exits (trade_execution_service.py:866-874).
+        instant = datetime(2030, 1, 2, 10, 30, tzinfo=ZoneInfo("America/New_York")).astimezone(
+            timezone.utc
+        )
+        assert is_trading_hours("US", instant) is True
+
 
 class TestNextSessionOpen:
     def test_next_open_skips_weekend(self) -> None:
@@ -171,6 +182,17 @@ class TestClosingWindow:
             15,
             datetime(2026, 5, 22, 4, 0, tzinfo=timezone.utc),
         )
+
+    def test_out_of_coverage_2030_weekday_still_fires_eod_flatten_window(self) -> None:
+        # WHY fail-open: live flatten is runner.py:6576
+        # in_flatten_window=is_closing_window(...). If unknown dates were
+        # "closed", is_closing_window would return False
+        # (market_calendar.py:133-134) and EOD flatten would not fire.
+        # RTH_ONLY exits would also stop (trade_execution_service.py:866-874).
+        instant = datetime(2030, 1, 2, 15, 50, tzinfo=ZoneInfo("America/New_York")).astimezone(
+            timezone.utc
+        )
+        assert is_closing_window("US", 15, instant) is True
 
 
 def test_session_metadata() -> None:

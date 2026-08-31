@@ -1438,15 +1438,15 @@ class TestSemanticAndSafetyGoldens:
         )
 
         assert evaluator_digest_sha256() == (
-            "09917a773dd10f0409ab00cc68f21285e2df4cbfb6d249fb712af07ad6356566"
+            "ea401f3eb6c1909063e793e9b46335536877882212611538f5bf8f05a40d5cd2"
         )
         assert proposal.registration_digest_sha256 == (
-            "dfdc4569e3d1abca86502aaf259e2ad5f2454a780c3e366efcef189913c581fe"
+            "0f396e85f154931127c971d69b7c67864565647d960d307e09f7030e4a66e114"
         )
         assert leaf.leaf_digest_sha256 == (
-            "a4bc00de5caa8bc41dcbcd6eaef00b067f383420f6562ea9f94b9d18e559f838"
+            "4fbd196903d8fffa8d211408842c3c26030715de370bc16e2e3df2f1cbc45a65"
         )
         assert assessment.report_digest_sha256 == (
-            "a2c7f7d07ae59ef8facb806d687f23c128188073d7975c3dae1d8d902c6edee6"
+            "87207fbd6eed3d14282ec010ff158342bb42ca3078394f835537993c6bb1089e"
         )
         assert canonical_sha256(assessment.to_payload()) != assessment.report_digest_sha256

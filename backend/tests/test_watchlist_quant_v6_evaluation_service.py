@@ -208,7 +208,7 @@ def test_historical_evaluator_manifest_has_exact_source_closure() -> None:
 
 def test_historical_evaluator_manifest_golden_digest() -> None:
     assert quant_v6_historical_evaluator_digest_sha256() == (
-        "e9670068afed9354dd0a965759827d583734995516e043fe5a335fcee439040d"
+        "31fd7466dd5db58a493c1506d663c5c220d4d0aeb3ec48897966da28257de619"
     )
 
 

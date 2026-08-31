@@ -19,10 +19,10 @@ from app.services.strategy_v2_shadow_service import StrategyV2ShadowService
 
 
 _APPROVED_SEMANTIC_DIGEST = (
-    "79a4ec7474dab811b4cadaec97bb41889fc595fa2617f17b44237be62a35f3eb"
+    "6de0f98a63f89940b5416617dc13bff36dd9cf934de8f51328be2c9bc95d411a"
 )
 _APPROVED_NEUTRAL_EVALUATOR_DIGEST = (
-    "b636c708537c56e30041ac101c1f631cb58affadadbdd2a660873b34d8ad9a3f"
+    "92252846850e9a83b9e8265213c204917ba787cdad769b36ccd3f38752bb769f"
 )
 _LEGACY_EVALUATOR_DIGEST = (
     "e5ae9ea3e68dcc47d5131c21d8ba223824aecabf59da1f4b592df72cb9aa0294"

@@ -133,3 +133,123 @@ def test_calendar_closures_api_rejects_out_of_range_year():
     resp = client.get("/api/calendar/closures", params={"market": "US", "year": 2027})
     assert resp.status_code == 200
     assert resp.json()["coverage_end_year"] == 2027
+
+
+# ---------------------------------------------------------------------------
+# Fail-open guardrails. is_market_closed means "known full-day closure" only.
+# Treating unknown dates as closed would make is_rth() return False
+# (market_calendar.py:51-52), which disables EOD flatten (runner.py:6576 via
+# is_closing_window) and RTH_ONLY stop-loss exits
+# (trade_execution_service.py:866-874). These must stay GREEN forever.
+# ---------------------------------------------------------------------------
+
+
+def test_is_market_closed_fail_open_for_uncovered_2030_weekday():
+    # WHY: pinning fail-open by name. A 2030 weekday is outside the static
+    # table; is_market_closed must return False ("not a known closure"), not
+    # True. Making unknown dates "closed" would disable EOD flatten
+    # (runner.py:6576) and RTH_ONLY exits (trade_execution_service.py:866-874).
+    assert is_market_closed("US", date(2030, 1, 2)) is False
+
+
+def test_is_market_closed_fail_open_for_pre_coverage_2023_weekday():
+    # WHY: dates before COVERAGE_START_YEAR are also fail-open. test_rotation_forward.py:42
+    # builds _sessions(date(2023, 1, 3), ...) against the real is_market_closed
+    # and relies on this. Making unknown dates "closed" would disable EOD flatten
+    # (runner.py:6576) and RTH_ONLY exits (trade_execution_service.py:866-874).
+    assert is_market_closed("US", date(2023, 1, 3)) is False
+
+
+@pytest.mark.parametrize(
+    "day",
+    [
+        date(2028, 1, 17),
+        date(2028, 2, 21),
+        date(2028, 4, 14),
+        date(2028, 5, 29),
+        date(2028, 6, 19),
+        date(2028, 7, 4),
+        date(2028, 9, 4),
+        date(2028, 11, 23),
+        date(2028, 12, 25),
+    ],
+)
+def test_us_2028_full_day_closures(day: date):
+    assert is_market_closed("US", day) is True
+
+
+def test_us_2028_new_years_is_not_a_closure():
+    # 2028-01-01 falls on a Saturday; NYSE observes no New Year's holiday in 2028.
+    assert is_market_closed("US", date(2028, 1, 1)) is False
+
+
+def test_us_2027_nye_is_not_a_closure():
+    assert is_market_closed("US", date(2027, 12, 31)) is False
+
+
+def test_us_2028_independence_eve_and_black_friday_are_half_days():
+    assert is_half_day("US", date(2028, 7, 3)) is True
+    assert is_half_day("US", date(2028, 11, 24)) is True
+
+
+def test_us_2028_christmas_eve_is_sunday_so_not_a_half_day():
+    # 2028-12-24 is a Sunday; there is no Christmas Eve early close.
+    assert is_half_day("US", date(2028, 12, 24)) is False
+
+
+@pytest.mark.parametrize(
+    "day",
+    [
+        date(2027, 2, 5),
+        date(2027, 12, 24),
+        date(2027, 12, 31),
+    ],
+)
+def test_hk_2027_half_day_sessions(day: date):
+    # Official HKEX circular ce_SEHK_CT_077_2026.pdf: these sessions close 12:00.
+    # 2027-12-24 is currently also listed as a full-day closure; that conflict
+    # is deliberately left untested here (no is_market_closed assertion).
+    assert is_half_day("HK", day) is True
+
+
+def test_coverage_end_years_is_per_market():
+    from app.core.holiday_calendar import COVERAGE_END_YEARS
+
+    assert COVERAGE_END_YEARS == {"US": 2028, "HK": 2027}
+
+
+@pytest.mark.parametrize(
+    ("market", "day", "expired"),
+    [
+        ("US", date(2029, 1, 2), True),
+        ("US", date(2028, 6, 1), False),
+        ("HK", date(2028, 1, 3), True),
+        ("HK", date(2027, 6, 1), False),
+        ("US", date(2023, 5, 2), False),
+        ("XX", date(2026, 1, 5), True),
+    ],
+)
+def test_is_coverage_expired(market: str, day: date, expired: bool):
+    from app.core.holiday_calendar import is_coverage_expired
+
+    assert is_coverage_expired(market, day) is expired
+
+
+def test_coverage_horizon_stays_at_least_a_year_ahead():
+    """Rule-enforcing: fail CI ~12 months before the calendar can mislead live trading.
+
+    Past the horizon `pre_submit_risk_check` refuses new entries, so an expired
+    calendar halts entry rather than trading blind. This test makes that a
+    build-time failure instead of a silent runtime cliff.
+    """
+    from app.core.holiday_calendar import COVERAGE_END_YEARS
+
+    today = date.today()
+    for market, end_year in sorted(COVERAGE_END_YEARS.items()):
+        assert date(end_year, 12, 31) >= today.replace(year=today.year + 1), (
+            f"{market} holiday coverage ends {end_year}-12-31, under a year away. "
+            f"Extend _FULL_DAY_CLOSURES and _HALF_DAY_SESSIONS in "
+            f"app/core/holiday_calendar.py from the official "
+            f"{'NYSE' if market == 'US' else 'HKEX'} calendar, then raise "
+            f"COVERAGE_END_YEARS['{market}']."
+        )

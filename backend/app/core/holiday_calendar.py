@@ -30,7 +30,9 @@ check ``closure_label(...)`` which returns ``None`` for out-of-range days.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from datetime import date, datetime
+from types import MappingProxyType
 
 logger = logging.getLogger("auto_trade.holiday_calendar")
 
@@ -69,6 +71,18 @@ _FULL_DAY_CLOSURES: tuple[tuple[date, str, str], ...] = (
     (date(2026, 9, 7), "US", "Labor Day"),
     (date(2026, 11, 26), "US", "Thanksgiving Day"),
     (date(2026, 12, 25), "US", "Christmas Day"),
+    # ---- NYSE 2028 ----
+    # 2028-01-01 falls on a Saturday and NYSE observes no New Year's holiday
+    # that year, so there is deliberately no 2028-01-01 / 2027-12-31 US row.
+    (date(2028, 1, 17), "US", "Martin Luther King Jr. Day"),
+    (date(2028, 2, 21), "US", "Presidents' Day"),
+    (date(2028, 4, 14), "US", "Good Friday"),
+    (date(2028, 5, 29), "US", "Memorial Day"),
+    (date(2028, 6, 19), "US", "Juneteenth"),
+    (date(2028, 7, 4), "US", "Independence Day"),
+    (date(2028, 9, 4), "US", "Labor Day"),
+    (date(2028, 11, 23), "US", "Thanksgiving Day"),
+    (date(2028, 12, 25), "US", "Christmas Day"),
     # ---- HKEX 2024 ----
     (date(2024, 1, 1), "HK", "New Year's Day"),
     (date(2024, 2, 9), "HK", "Lunar New Year"),
@@ -154,9 +168,14 @@ _FULL_DAY_CLOSURES: tuple[tuple[date, str, str], ...] = (
 #: Earliest year covered by the static closure data above. The API and
 #: ``is_market_closed`` return safe fallbacks for dates outside this range.
 COVERAGE_START_YEAR: int = 2024
-#: Latest year covered by the static closure data above. The API and
-#: ``is_market_closed`` return safe fallbacks for dates outside this range.
-COVERAGE_END_YEAR: int = 2027
+#: Latest year covered by the static closure data above, per market. Closure
+#: data is published on different horizons: NYSE announces three years ahead,
+#: HKEX gazettes roughly one year ahead, so a single horizon would overstate
+#: one of them.
+COVERAGE_END_YEARS: Mapping[str, int] = MappingProxyType({"US": 2028, "HK": 2027})
+#: Conservative cross-market horizon. Consumers that already fail closed on it
+#: keep their existing (stricter) behaviour.
+COVERAGE_END_YEAR: int = min(COVERAGE_END_YEARS.values())
 
 # Half-day sessions: market closes at lunch on these days. The trading
 # calendar uses this set to shorten RTH and closing windows.
@@ -167,6 +186,9 @@ _HALF_DAY_SESSIONS: tuple[tuple[date, str, str], ...] = (
     (date(2025, 12, 31), "HK", "New Year's Eve"),
     (date(2026, 12, 24), "HK", "Christmas Eve"),
     (date(2026, 12, 31), "HK", "New Year's Eve"),
+    (date(2027, 2, 5), "HK", "Lunar New Year's Eve"),
+    (date(2027, 12, 24), "HK", "Christmas Eve"),
+    (date(2027, 12, 31), "HK", "New Year's Eve"),
     # NYSE: day before Independence Day, Thanksgiving, Christmas (varies)
     (date(2024, 7, 3), "US", "Day before Independence Day"),
     (date(2024, 11, 29), "US", "Black Friday (early close 13:00)"),
@@ -177,6 +199,8 @@ _HALF_DAY_SESSIONS: tuple[tuple[date, str, str], ...] = (
     (date(2026, 11, 27), "US", "Black Friday (early close 13:00)"),
     (date(2026, 12, 24), "US", "Christmas Eve (early close 13:00)"),
     (date(2027, 11, 26), "US", "Black Friday (early close 13:00)"),
+    (date(2028, 7, 3), "US", "Day before Independence Day"),
+    (date(2028, 11, 24), "US", "Black Friday (early close 13:00)"),
 )
 
 
@@ -194,10 +218,30 @@ def _build_indices() -> None:
 
 
 def is_market_closed(market: str, day: date) -> bool:
-    """True if the given exchange is fully closed on ``day`` (full-day closure)."""
+    """True if the given exchange is fully closed on ``day`` (full-day closure).
+
+    Deliberately fail-open: an unknown day is reported *open*. Reporting it
+    closed would make ``is_rth`` false all day, which in turn makes
+    ``is_closing_window`` false — silently disabling the end-of-day forced
+    flatten and, under ``RTH_ONLY``, every exit including stop-losses. Use
+    :func:`is_coverage_expired` to gate new entries instead.
+    """
     _build_indices()
     assert _CLOSURE_INDEX is not None
     return (day, (market or "US").upper()) in _CLOSURE_INDEX
+
+
+def is_coverage_expired(market: str, day: date) -> bool:
+    """True if ``day`` is past the market's published closure horizon.
+
+    Only forward dates expire: earlier days are covered by the exchange's
+    published history even when they predate this table. Unknown markets are
+    treated as expired so a typo cannot silently authorise trading.
+    """
+    end_year = COVERAGE_END_YEARS.get((market or "").upper())
+    if end_year is None:
+        return True
+    return day.year > end_year
 
 
 # Emit a one-shot warning at import time when the static calendar is past
@@ -205,13 +249,14 @@ def is_market_closed(market: str, day: date) -> bool:
 # out-of-range dates, so without this warning operators would not notice
 # the gap until the first missed closure.
 _current_year = datetime.now().year
-if _current_year >= COVERAGE_END_YEAR:
-    logger.warning(
-        "holiday_calendar coverage ends in %d (current year=%d). "
-        "Days in %d+ will be treated as open unless the calendar is updated. "
-        "See COVERAGE_END_YEAR in app/core/holiday_calendar.py.",
-        COVERAGE_END_YEAR, _current_year, COVERAGE_END_YEAR,
-    )
+for _market, _end_year in sorted(COVERAGE_END_YEARS.items()):
+    if _current_year >= _end_year:
+        logger.warning(
+            "holiday_calendar %s coverage ends in %d (current year=%d). "
+            "Days in %d+ are treated as open and new entries are refused. "
+            "See COVERAGE_END_YEARS in app/core/holiday_calendar.py.",
+            _market, _end_year, _current_year, _end_year,
+        )
 
 
 def is_half_day(market: str, day: date) -> bool:
