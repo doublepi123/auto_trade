@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-from app.core.broker import OrderResult, Quote
+from app.core.broker import OrderResult, Position, Quote
 from app.core.notify import ServerChanNotifier
 from app.core.risk import RiskConfig, RiskController
 from app.services import trade_execution_service as trade_svc_module
@@ -4833,3 +4833,99 @@ class TestOrderStatusNoneSafety:
         # Old form would raise TypeError; new form must not.
         if OrderStatus._positive(s.executed_quantity) > 0:
             pass
+
+
+class _FakeReductionBroker:
+    def __init__(self, positions: list[Position]) -> None:
+        self._positions = positions
+
+    def get_positions(self) -> list[Position]:
+        return self._positions
+
+
+class TestFinalReductionPositionIssue:
+    """Direct coverage of the reduce-only final position gate.
+
+    Over-availability (T+ unlock / cancelled reservation) is harmless on an
+    exit and must not be treated as uncertainty. Tested at the staticmethod
+    itself: a None return is the only signal that prevents
+    ``_pause_for_final_position_uncertainty``.
+    """
+
+    def test_returns_none_when_broker_available_quantity_exceeds_requested(
+        self,
+    ) -> None:
+        requested = Decimal("8")
+        broker = _FakeReductionBroker(
+            [
+                Position(
+                    "NVDA.US",
+                    "LONG",
+                    Decimal("10"),
+                    Decimal("220"),
+                    available_quantity=Decimal("10"),
+                )
+            ]
+        )
+
+        issue = TradeExecutionService._final_reduction_position_issue(
+            broker,
+            "NVDA.US",
+            "SELL",
+            requested,
+        )
+
+        assert issue is None
+
+    def test_returns_none_when_broker_available_quantity_equals_requested(
+        self,
+    ) -> None:
+        requested = Decimal("10")
+        broker = _FakeReductionBroker(
+            [
+                Position(
+                    "NVDA.US",
+                    "LONG",
+                    Decimal("10"),
+                    Decimal("220"),
+                    available_quantity=Decimal("10"),
+                )
+            ]
+        )
+
+        issue = TradeExecutionService._final_reduction_position_issue(
+            broker,
+            "NVDA.US",
+            "SELL",
+            requested,
+        )
+
+        assert issue is None
+
+    def test_returns_issue_when_broker_available_quantity_is_below_requested(
+        self,
+    ) -> None:
+        requested = Decimal("10")
+        available = Decimal("8")
+        broker = _FakeReductionBroker(
+            [
+                Position(
+                    "NVDA.US",
+                    "LONG",
+                    Decimal("10"),
+                    Decimal("220"),
+                    available_quantity=available,
+                )
+            ]
+        )
+
+        issue = TradeExecutionService._final_reduction_position_issue(
+            broker,
+            "NVDA.US",
+            "SELL",
+            requested,
+        )
+
+        assert issue is not None
+        assert str(requested) in issue
+        assert str(available) in issue

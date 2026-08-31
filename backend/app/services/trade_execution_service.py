@@ -17,7 +17,15 @@ from app.core.fees import (
     evaluate_long_round_trip_edge,
     evaluate_long_round_trip_reward_risk,
 )
-from app.core.market_calendar import is_closing_window, is_opening_warmup, is_trading_hours
+from app.core.holiday_calendar import is_coverage_expired
+from app.core.log_throttle import RepeatedLogThrottle
+from app.core.market_calendar import (
+    is_closing_window,
+    is_opening_warmup,
+    is_trading_hours,
+    market_for_symbol,
+    trade_day_for,
+)
 from app.core.risk import TradingState
 
 if TYPE_CHECKING:
@@ -28,6 +36,11 @@ if TYPE_CHECKING:
     from app.core.risk import RiskController
 
 logger = logging.getLogger("auto_trade.services.trade_execution_service")
+
+_REDUCTION_AVAILABILITY_LOG_WINDOW_SECONDS = 3600.0
+_REDUCTION_AVAILABILITY_LOG_THROTTLE = RepeatedLogThrottle(
+    window_seconds=_REDUCTION_AVAILABILITY_LOG_WINDOW_SECONDS,
+)
 
 
 class OrderPersistenceError(RuntimeError):
@@ -50,6 +63,7 @@ ORDER_EXECUTION_BLOCKED_PREFIX = "ORDER_EXECUTION_BLOCKED:"
 ORDER_PERSISTENCE_UNCERTAIN_PREFIX = "ORDER_PERSISTENCE_UNCERTAIN:"
 ORDER_STATUS_PERSISTENCE_UNCERTAIN_PREFIX = "ORDER_STATUS_PERSISTENCE_UNCERTAIN:"
 PNL_RECONCILIATION_UNCERTAIN_PREFIX = "PNL_RECONCILIATION_UNCERTAIN:"
+CALENDAR_COVERAGE_EXPIRED_REASON = "CALENDAR_COVERAGE_EXPIRED"
 _OPERATIONAL_PAUSE_PREFIXES = (
     "ORDER_SUBMISSION_UNCERTAIN:",
     "POSITION_RECONCILIATION_UNCERTAIN:",
@@ -1220,6 +1234,16 @@ class TradeExecutionService:
             return self._pre_submit_risk_rejection(
                 request,
                 "short entries are disabled by the mandatory risk boundary",
+            )
+        # Past the published closure horizon the calendar cannot tell a holiday
+        # from a trading day, so an entry here would be placed blind. Reductions
+        # already returned above, keeping exits, stops and the end-of-day
+        # flatten alive while new risk is refused.
+        entry_market = market_for_symbol(request.symbol)
+        if is_coverage_expired(entry_market, trade_day_for(entry_market)):
+            return self._pre_submit_risk_rejection(
+                request,
+                f"{CALENDAR_COVERAGE_EXPIRED_REASON} for {entry_market}",
             )
 
         limits_result = self._entry_risk_limits()
@@ -2776,11 +2800,30 @@ class TradeExecutionService:
                 f"broker position quantity {total_quantity} is below requested "
                 f"reduce-only quantity {requested_quantity}"
             )
-        if total_available != requested_quantity:
+        if total_available < requested_quantity:
             return (
-                f"broker available quantity changed from requested "
-                f"{requested_quantity} to {total_available}"
+                f"broker available quantity {total_available} is below requested "
+                f"reduce-only quantity {requested_quantity}"
             )
+        if total_available > requested_quantity:
+            # Availability grows benignly (T+ settlement, or our own cancelled
+            # order releasing its reservation). Over-availability cannot cause an
+            # over-sell -- the submitted quantity stays bounded by the checks
+            # above -- so it must never block a firing stop. Logged, not written:
+            # this runs under the submission guard on the exit hot path.
+            if _REDUCTION_AVAILABILITY_LOG_THROTTLE.should_log(symbol.upper()):
+                suppressed = (
+                    _REDUCTION_AVAILABILITY_LOG_THROTTLE.take_suppressed_count()
+                )
+                logger.warning(
+                    "%s: broker available quantity %s exceeds requested reduce-only "
+                    "quantity %s for %s; proceeding (suppressed=%d)",
+                    action,
+                    total_available,
+                    requested_quantity,
+                    symbol,
+                    suppressed,
+                )
         return None
 
     def _pause_for_final_position_uncertainty(
