@@ -11,7 +11,9 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
-os.environ["AUTO_TRADE_DATABASE_URL"] = f"sqlite:///{tempfile.gettempdir()}/test_watchlist_score.db"
+os.environ["AUTO_TRADE_DATABASE_URL"] = (
+    f"sqlite:///{tempfile.gettempdir()}/test_watchlist_score_{os.getpid()}.db"
+)
 os.environ["DEEPSEEK_API_KEY"] = ""
 
 from app.main import app  # noqa: E402
