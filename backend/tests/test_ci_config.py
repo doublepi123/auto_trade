@@ -112,8 +112,31 @@ class TestCoverageIsGatedOnTheCombinedTotal:
     def test_coverage_job_enforces_the_original_threshold(self) -> None:
         assert "--fail-under=80" in _run_commands("backend-coverage")
 
-    def test_coverage_job_waits_for_every_shard(self) -> None:
-        assert _jobs()["backend-coverage"]["needs"] == ["backend-test"]
+
+class TestWallClockTestsGetTheirOwnSerialJob:
+    """Deadline assertions need the runner, not a quarter of it."""
+
+    def test_realtime_job_exists(self) -> None:
+        assert "backend-realtime" in _jobs()
+
+    def test_realtime_job_selects_only_the_wall_clock_modules(self) -> None:
+        env = _step_env("backend-realtime", "Run pytest")
+        assert env["AUTO_TRADE_TEST_REALTIME_ONLY"] == "1"
+
+    def test_realtime_job_runs_without_parallel_workers(self) -> None:
+        assert "-p no:xdist" in _run_commands("backend-realtime")
+
+    def test_realtime_job_still_measures_coverage(self) -> None:
+        assert "--cov=app" in _run_commands("backend-realtime")
+
+    def test_realtime_job_does_not_gate_on_its_own_slice(self) -> None:
+        assert "--cov-fail-under" not in _run_commands("backend-realtime")
+
+    def test_coverage_gate_waits_for_the_realtime_job_too(self) -> None:
+        assert _jobs()["backend-coverage"]["needs"] == [
+            "backend-test",
+            "backend-realtime",
+        ]
 
 
 class TestReleaseGateCoversEveryCheck:
@@ -123,6 +146,7 @@ class TestReleaseGateCoversEveryCheck:
         needs = set(cast("list[str]", _jobs()["dockerhub"]["needs"]))
         assert needs == {
             "backend-test",
+            "backend-realtime",
             "backend-coverage",
             "backend-typecheck",
             "frontend-check",
@@ -133,6 +157,7 @@ class TestReleaseGateCoversEveryCheck:
         "job",
         [
             "backend-test",
+            "backend-realtime",
             "backend-coverage",
             "backend-typecheck",
             "frontend-check",

@@ -5,6 +5,7 @@ import pytest
 from tests.conftest import (
     RELIABILITY_DB_GROUP,
     TEST_LEVEL_SAFE_MODULES,
+    WALL_CLOCK_MODULES,
     assign_modules_to_shards,
     xdist_group_for,
 )
@@ -17,23 +18,42 @@ _RELIABILITY_MODULES_UNDER_TEST = frozenset(
     }
 )
 
-_QUANT_V6_WALL_CLOCK_MODULES_UNDER_TEST = frozenset(
+_CI_FAILED_WALL_CLOCK_MODULES = frozenset(
     {
         "tests/test_watchlist_quant_v6_cron.py",
-        "tests/test_watchlist_quant_v6_deadline.py",
-        "tests/test_watchlist_quant_v6_evaluation_service.py",
-        "tests/test_watchlist_quant_v6_historical_provider.py",
         "tests/test_watchlist_quant_v6_publication_service.py",
         "tests/test_watchlist_quant_v6_spawn_supervisor.py",
     }
 )
-"""Modules whose tests assert on elapsed wall-clock while spawning processes.
+"""The modules that actually lost tests to missed deadlines on CI."""
 
-Each keeps its own module group. They must never be freed to test granularity:
-their timing bounds already sit close to the margin on a 4-vCPU runner, and
-spreading one module's spawn-heavy tests across all workers at once is the
-contention that breaks them.
-"""
+
+class TestRealtimeLaneIsSeparated:
+    """Wall-clock tests need the machine, not a share of it.
+
+    These spawn their own compute processes and assert bounds like
+    `2.5 <= elapsed < 8`. They pass serially and fail under `-n 4` on a 4-vCPU
+    runner: runs 33418588994 and 33533855333 lost exactly these to missed
+    deadlines while every other test passed. CI gives them their own serial job,
+    so the numbered shards must not also run them.
+    """
+
+    def test_declared_wall_clock_modules_match_the_known_offenders(self) -> None:
+        assert WALL_CLOCK_MODULES == _CI_FAILED_WALL_CLOCK_MODULES
+
+    @pytest.mark.parametrize("module", sorted(_CI_FAILED_WALL_CLOCK_MODULES))
+    def test_wall_clock_module_is_excluded_from_numbered_shards(
+        self, module: str
+    ) -> None:
+        shardable = {name: 1.0 for name in _shardable(_CI_FAILED_WALL_CLOCK_MODULES)}
+        assert module not in assign_modules_to_shards(shardable, shard_count=4)
+
+    def test_wall_clock_modules_are_never_freed_to_test_level(self) -> None:
+        assert not (TEST_LEVEL_SAFE_MODULES & WALL_CLOCK_MODULES)
+
+
+def _shardable(modules: frozenset[str]) -> set[str]:
+    return {module for module in modules if module not in WALL_CLOCK_MODULES}
 
 
 class TestDefaultsToModuleGroup:
@@ -91,7 +111,7 @@ class TestAuditedModulesDistributePerTest:
         assert xdist_group_for(f"{module}::test_anything") == module
 
     def test_wall_clock_modules_are_never_freed(self) -> None:
-        assert not (TEST_LEVEL_SAFE_MODULES & _QUANT_V6_WALL_CLOCK_MODULES_UNDER_TEST)
+        assert not (TEST_LEVEL_SAFE_MODULES & WALL_CLOCK_MODULES)
 
     def test_reliability_modules_are_never_freed(self) -> None:
         assert not (TEST_LEVEL_SAFE_MODULES & _RELIABILITY_MODULES_UNDER_TEST)

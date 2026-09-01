@@ -76,6 +76,27 @@ _RELIABILITY_DB_MODULES = frozenset(
     }
 )
 
+WALL_CLOCK_MODULES = frozenset(
+    {
+        "tests/test_watchlist_quant_v6_cron.py",
+        "tests/test_watchlist_quant_v6_publication_service.py",
+        "tests/test_watchlist_quant_v6_spawn_supervisor.py",
+    }
+)
+"""Modules that spawn compute processes and assert on elapsed wall-clock.
+
+Bounds like `2.5 <= elapsed < 8` hold serially and miss under `-n 4` on a
+4-vCPU runner, where four xdist workers plus each test's own spawned workers
+oversubscribe the CPU. CI runs these in one serial job so they get the machine;
+the numbered shards skip them.
+
+Only the three modules that have actually failed that way are listed: run
+33418588994 lost cron, publication_service and spawn_supervisor, and run
+33533855333 lost cron and spawn_supervisor again. deadline, evaluation_service
+and historical_provider assert on elapsed time too but have never missed, and
+serialising them as well would cost more than it buys.
+"""
+
 _DURATIONS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".test_durations")
 
 TEST_LEVEL_SAFE_MODULES: frozenset[str] = frozenset(
@@ -174,6 +195,24 @@ def _shard_selection() -> tuple[int, int] | None:
     return index - 1, count
 
 
+def _realtime_only() -> bool:
+    return os.environ.get("AUTO_TRADE_TEST_REALTIME_ONLY", "").strip() == "1"
+
+
+def _selected_modules(modules: set[str]) -> set[str] | None:
+    if _realtime_only():
+        return modules & WALL_CLOCK_MODULES
+    selection = _shard_selection()
+    if selection is None:
+        return None
+    shard_index, shard_count = selection
+    shardable = modules - WALL_CLOCK_MODULES
+    assignment = assign_modules_to_shards(_module_weights(shardable), shard_count)
+    return {
+        module for module, shard in assignment.items() if shard == shard_index
+    }
+
+
 # tryfirst: xdist's worker-side hook appends the group name to each nodeid, and
 # it only sees markers already attached when it runs.
 @pytest.hookimpl(tryfirst=True)
@@ -181,19 +220,12 @@ def pytest_collection_modifyitems(
     config: pytest.Config,
     items: list[pytest.Item],
 ) -> None:
-    selection = _shard_selection()
-    if selection is not None:
-        shard_index, shard_count = selection
-        assignment = assign_modules_to_shards(
-            _module_weights({item.nodeid.split("::", 1)[0] for item in items}),
-            shard_count,
-        )
-        keep = [
-            item
-            for item in items
-            if assignment[item.nodeid.split("::", 1)[0]] == shard_index
-        ]
-        dropped = [item for item in items if item not in set(keep)]
+    selected = _selected_modules({item.nodeid.split("::", 1)[0] for item in items})
+    if selected is not None:
+        keep, dropped = [], []
+        for item in items:
+            target = keep if item.nodeid.split("::", 1)[0] in selected else dropped
+            target.append(item)
         if dropped:
             config.hook.pytest_deselected(items=dropped)
         items[:] = keep
