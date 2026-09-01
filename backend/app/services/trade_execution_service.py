@@ -63,6 +63,13 @@ ORDER_EXECUTION_BLOCKED_PREFIX = "ORDER_EXECUTION_BLOCKED:"
 ORDER_PERSISTENCE_UNCERTAIN_PREFIX = "ORDER_PERSISTENCE_UNCERTAIN:"
 ORDER_STATUS_PERSISTENCE_UNCERTAIN_PREFIX = "ORDER_STATUS_PERSISTENCE_UNCERTAIN:"
 PNL_RECONCILIATION_UNCERTAIN_PREFIX = "PNL_RECONCILIATION_UNCERTAIN:"
+_TERMINAL_STATUS_PERSIST_BACKOFF_SECONDS = (0.02, 0.05, 0.1)
+_TRANSIENT_WRITE_CONFLICT_MARKERS = ("database is locked", "database table is locked")
+
+
+def _is_transient_write_conflict(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _TRANSIENT_WRITE_CONFLICT_MARKERS)
 CALENDAR_COVERAGE_EXPIRED_REASON = "CALENDAR_COVERAGE_EXPIRED"
 _OPERATIONAL_PAUSE_PREFIXES = (
     "ORDER_SUBMISSION_UNCERTAIN:",
@@ -174,6 +181,7 @@ class _PendingOrder:
     submitted_at: float = 0.0
     restore_engine_snapshot_fn: Callable[[EngineSnapshot], None] | None = None
     timeout_recovery_attempted: bool = False
+    known_terminal_status: str = ""
 
 
 @dataclass
@@ -500,6 +508,19 @@ class TradeExecutionService:
     def pending_order_ids(self) -> list[str]:
         with self._state_lock:
             return sorted(self._pending_orders_by_id)
+
+    def broker_uncertain_order_ids(self) -> list[str]:
+        """Return pending orders whose broker state is genuinely unknown.
+
+        Excludes orders the broker already reported terminal, which stay
+        queued only to retry the local write.
+        """
+        with self._state_lock:
+            return sorted(
+                order_id
+                for order_id, pending in self._pending_orders_by_id.items()
+                if not pending.known_terminal_status
+            )
 
     def pending_order_inventory(self) -> dict[str, list[str]]:
         with self._state_lock:
@@ -3134,20 +3155,9 @@ class TradeExecutionService:
                 self._pending_status_query_warned_ids.discard(order_id)
 
     def _defer_pending_status_retry(self, pending: _PendingOrder, now: float) -> None:
-        updated_pending = _PendingOrder(
-            broker=pending.broker,
-            broker_order_id=pending.broker_order_id,
-            symbol=pending.symbol,
-            action=pending.action,
-            quantity=pending.quantity,
-            price=pending.price,
-            engine_snapshot=pending.engine_snapshot,
-            avg_price=pending.avg_price,
-            pnl_fee_rate=pending.pnl_fee_rate,
+        updated_pending = dataclass_replace(
+            pending,
             next_status_check_at=now + self._order_status_poll_interval_seconds,
-            submitted_at=pending.submitted_at,
-            restore_engine_snapshot_fn=pending.restore_engine_snapshot_fn,
-            timeout_recovery_attempted=pending.timeout_recovery_attempted,
         )
         with self._state_lock:
             if updated_pending.broker_order_id in self._pending_orders_by_id:
@@ -4196,16 +4206,32 @@ class TradeExecutionService:
         executed_price: float | None = None,
         ledger_metadata: Mapping[str, object] | None = None,
     ) -> bool:
-        try:
-            args = (order_id, status, filled_at, executed_quantity, executed_price)
-            if self._accepts_positional_args(self._update_order_status, 6):
-                self._update_order_status(*args, dict(ledger_metadata or {}))
-            else:
-                self._update_order_status(*args)
-        except Exception:
-            logger.exception("failed to update order %s to status %s", order_id, status)
-            return False
-        return True
+        args = (order_id, status, filled_at, executed_quantity, executed_price)
+        last_attempt = _TERMINAL_STATUS_PERSIST_BACKOFF_SECONDS[-1]
+        for delay in _TERMINAL_STATUS_PERSIST_BACKOFF_SECONDS:
+            try:
+                if self._accepts_positional_args(self._update_order_status, 6):
+                    self._update_order_status(*args, dict(ledger_metadata or {}))
+                else:
+                    self._update_order_status(*args)
+            except Exception as exc:
+                # SQLite serialises writers, so a concurrent commit fails this
+                # write immediately rather than waiting out `busy_timeout`.
+                # Such collisions clear in milliseconds; pausing on the first
+                # one blocks protective exits, so retry those specifically.
+                # Any other failure is deterministic and retrying only delays
+                # the fail-closed pause.
+                if delay is last_attempt or not _is_transient_write_conflict(exc):
+                    logger.exception(
+                        "failed to update order %s to status %s",
+                        order_id,
+                        status,
+                    )
+                    return False
+                time.sleep(delay)
+                continue
+            return True
+        return False
 
     def _safe_update_order_status_from_result(self, result: object) -> bool:
         status = getattr(result, "status", "SUBMITTED")
@@ -4257,14 +4283,12 @@ class TradeExecutionService:
             f"{ORDER_STATUS_PERSISTENCE_UNCERTAIN_PREFIX} cannot persist terminal "
             f"status {status} for order {pending.broker_order_id}"
         )
-        if pending.broker_order_id:
+        settled = dataclass_replace(pending, known_terminal_status=status)
+        if settled.broker_order_id:
             with self._state_lock:
-                self._pending_orders_by_id.setdefault(
-                    pending.broker_order_id,
-                    pending,
-                )
+                self._pending_orders_by_id[settled.broker_order_id] = settled
                 self._rebuild_pending_orders_by_symbol_locked()
-        self._defer_pending_status_retry(pending, time.monotonic())
+        self._defer_pending_status_retry(settled, time.monotonic())
         if risk is not None:
             risk.pause(reason, auto_resumable=False)
         try:

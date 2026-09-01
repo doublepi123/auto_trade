@@ -4294,6 +4294,109 @@ class TestTradeExecutionServiceBasics:
         assert risk.protective_exit_permitted is False
         assert broker.submitted is False
 
+    def test_terminal_status_persistence_retries_transient_database_lock(
+        self,
+    ) -> None:
+        """A momentary SQLite writer collision must not pause live trading.
+
+        On 2026-08-03 a FILLED status hit `database is locked`, the single
+        attempt gave up, and the resulting pause blocked the 60-minute time
+        stop from exiting -- the position ran 30 hours. Write-upgrade
+        conflicts clear in milliseconds, so a bounded retry resolves them
+        while a genuinely unwritable database still fails closed.
+        """
+        attempts: list[str] = []
+
+        def update_order_status(*args: object) -> None:
+            attempts.append(str(args[1]))
+            if len(attempts) < 3:
+                raise RuntimeError("(sqlite3.OperationalError) database is locked")
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=update_order_status,
+            record_risk_event=lambda *args: None,
+        )
+
+        assert svc._safe_update_order_status("order-lock", "FILLED") is True
+        assert len(attempts) == 3
+
+    def test_terminal_status_persistence_gives_up_after_bounded_retries(
+        self,
+    ) -> None:
+        """A permanently unwritable database must still fail closed."""
+        attempts: list[str] = []
+
+        def update_order_status(*args: object) -> None:
+            attempts.append(str(args[1]))
+            raise RuntimeError("(sqlite3.OperationalError) database is locked")
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=update_order_status,
+            record_risk_event=lambda *args: None,
+        )
+
+        assert svc._safe_update_order_status("order-lock", "FILLED") is False
+        assert len(attempts) > 1
+
+    def test_orders_awaiting_persistence_retry_are_not_broker_uncertain(
+        self,
+    ) -> None:
+        """Separate "broker state unknown" from "our own write failed".
+
+        A terminal status the broker already reported is re-queued only so the
+        local row can be rewritten. Counting it as an in-flight order deadlocks
+        the protective-exit proof: the pause keeps the order pending, and the
+        pending order keeps the exit from being armed.
+        """
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+        )
+        pending = trade_svc_module._PendingOrder(
+            broker=object(),
+            broker_order_id="order-terminal",
+            symbol="NVDA.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("220"),
+            engine_snapshot=None,
+        )
+        svc._pause_for_order_status_persistence_failure(
+            pending,
+            "FILLED",
+            risk=None,
+            notify_risk_event=None,
+        )
+
+        assert svc.pending_order_ids() == ["order-terminal"]
+        assert svc.broker_uncertain_order_ids() == []
+
+    def test_orders_without_known_terminal_status_stay_broker_uncertain(
+        self,
+    ) -> None:
+        """An order whose broker state is genuinely unknown still blocks."""
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+        )
+        pending = trade_svc_module._PendingOrder(
+            broker=object(),
+            broker_order_id="order-inflight",
+            symbol="NVDA.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("220"),
+            engine_snapshot=None,
+        )
+        with svc._state_lock:
+            svc._pending_orders_by_id[pending.broker_order_id] = pending
+
+        assert svc.broker_uncertain_order_ids() == ["order-inflight"]
+
     @pytest.mark.parametrize("mode", ["missing", "failure", "exception"])
     def test_paused_reduce_only_commit_proof_fails_closed_and_revokes(
         self,

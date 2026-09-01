@@ -466,6 +466,109 @@ class TestAppRunner:
         assert runner.risk.protective_exit_permitted is True
         assert runner.risk.check().approved is False
 
+    def test_persistence_uncertain_pause_still_arms_the_time_stop_exit(
+        self,
+    ) -> None:
+        """Reproduces the 2026-08-03 ISRG.US incident.
+
+        A FILLED status could not be written locally, the pause that followed
+        kept the order queued for a retry, and the queued order in turn blocked
+        the protective-exit proof. The 60-minute time stop fired on schedule
+        but could never submit, so the position ran 30 hours for a $3,797 loss.
+        A broker-confirmed fill is not broker-state uncertainty.
+        """
+        runner = AppRunner()
+        pending = trade_execution_service_module._PendingOrder(
+            broker=object(),
+            broker_order_id="order-isrg",
+            symbol="ISRG.US",
+            action="BUY",
+            quantity=Decimal("704"),
+            price=Decimal("371.49"),
+            engine_snapshot=None,
+        )
+        runner._trade_svc._pause_for_order_status_persistence_failure(
+            pending,
+            "FILLED",
+            risk=runner.risk,
+            notify_risk_event=None,
+        )
+        with runner._state_lock:
+            runner._reduction_intents["ISRG.US"] = runner_module._ReductionIntent(
+                action="SELL",
+                cause="TIME_STOP",
+                reason="maximum holding time reached: 60 minutes",
+                trigger_price=366.465,
+                started_at=datetime.now(timezone.utc),
+            )
+
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason.startswith(
+            trade_execution_service_module.ORDER_STATUS_PERSISTENCE_UNCERTAIN_PREFIX
+        )
+        assert runner._protective_reduction_local_proof_key() is not None
+
+    def test_genuinely_unknown_broker_order_still_blocks_the_exit_proof(
+        self,
+    ) -> None:
+        """An order the broker never confirmed must keep failing closed."""
+        runner = AppRunner()
+        pending = trade_execution_service_module._PendingOrder(
+            broker=object(),
+            broker_order_id="order-inflight",
+            symbol="ISRG.US",
+            action="BUY",
+            quantity=Decimal("704"),
+            price=Decimal("371.49"),
+            engine_snapshot=None,
+        )
+        runner.risk.pause(
+            f"{trade_execution_service_module.ORDER_STATUS_PERSISTENCE_UNCERTAIN_PREFIX} unknown",
+            auto_resumable=False,
+        )
+        with runner._trade_svc._state_lock:
+            runner._trade_svc._pending_orders_by_id["order-inflight"] = pending
+        with runner._state_lock:
+            runner._reduction_intents["ISRG.US"] = runner_module._ReductionIntent(
+                action="SELL",
+                cause="TIME_STOP",
+                reason="maximum holding time reached: 60 minutes",
+                trigger_price=366.465,
+                started_at=datetime.now(timezone.utc),
+            )
+
+        assert runner._protective_reduction_local_proof_key() is None
+
+    def test_kill_switch_still_blocks_the_exit_proof(self) -> None:
+        """Kill switch outranks every protective-exit allowance."""
+        runner = AppRunner()
+        pending = trade_execution_service_module._PendingOrder(
+            broker=object(),
+            broker_order_id="order-isrg",
+            symbol="ISRG.US",
+            action="BUY",
+            quantity=Decimal("704"),
+            price=Decimal("371.49"),
+            engine_snapshot=None,
+        )
+        runner._trade_svc._pause_for_order_status_persistence_failure(
+            pending,
+            "FILLED",
+            risk=runner.risk,
+            notify_risk_event=None,
+        )
+        with runner._state_lock:
+            runner._reduction_intents["ISRG.US"] = runner_module._ReductionIntent(
+                action="SELL",
+                cause="TIME_STOP",
+                reason="maximum holding time reached: 60 minutes",
+                trigger_price=366.465,
+                started_at=datetime.now(timezone.utc),
+            )
+        runner.risk.enable_kill_switch()
+
+        assert runner._protective_reduction_local_proof_key() is None
+
     def test_post_fill_incomplete_ledger_latches_pnl_pause(
         self,
         monkeypatch,

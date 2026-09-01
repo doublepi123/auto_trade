@@ -1510,7 +1510,7 @@ class AppRunner:
             or trigger_in_flight
             or unresolved_order_ids
             or representation_issues
-            or self._trade_svc.pending_order_ids()
+            or self._trade_svc.broker_uncertain_order_ids()
         ):
             return None
         return self._protective_exit_scope_snapshot()
