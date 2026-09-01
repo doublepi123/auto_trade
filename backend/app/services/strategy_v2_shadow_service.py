@@ -1278,14 +1278,32 @@ class StrategyV2ShadowService:
         """
         state_id = int(state.id)
         self.db.commit()
+        self._write_poll_state(state_id, current, "")
+        state.last_polled_at = current
+        state.last_poll_error = ""
+
+    def _persist_poll_error(
+        self,
+        symbol: str,
+        current: datetime,
+        message: str,
+    ) -> None:
+        state_id = int(self._get_or_create_state(symbol).id)
+        self.db.commit()
+        self._write_poll_state(state_id, current, message)
+
+    def _write_poll_state(
+        self,
+        state_id: int,
+        current: datetime,
+        message: str,
+    ) -> None:
         self.db.execute(
             update(StrategyV2ShadowState)
             .where(StrategyV2ShadowState.id == state_id)
-            .values(last_polled_at=current, last_poll_error="")
+            .values(last_polled_at=current, last_poll_error=message)
         )
         self.db.commit()
-        state.last_polled_at = current
-        state.last_poll_error = ""
 
     def tick(
         self,
@@ -1413,11 +1431,7 @@ class StrategyV2ShadowService:
                 self.db.commit()
         except Exception as exc:
             self.db.rollback()
-            state = self._get_or_create_state(normalized)
-            state.last_polled_at = current
-            state.last_poll_error = str(exc)[:1000]
-            self.db.add(state)
-            self.db.commit()
+            self._persist_poll_error(normalized, current, str(exc)[:1000])
             raise
         return self.get_status(normalized)
 

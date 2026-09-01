@@ -5102,6 +5102,66 @@ class TestStrategyV2ShadowService:
             assert "SELECT" not in statements[:update_at]
             assert "COMMIT" in statements[:update_at]
 
+    def test_poll_error_write_opens_its_own_transaction(self) -> None:
+        """The failure path must not upgrade a read either.
+
+        After a broker error the service re-reads state to record the message,
+        which put the write back behind a fresh read snapshot -- the same
+        upgrade the success path had to stop doing.
+        """
+        statements: list[str] = []
+
+        def _record_dml(
+            _conn,
+            _cursor,
+            statement: str,
+            _parameters,
+            _context,
+            _executemany,
+        ) -> None:
+            normalized = " ".join(statement.upper().split())
+            if "STRATEGY_V2_SHADOW_STATE" in normalized:
+                statements.append(normalized.split()[0])
+
+        def _record_commit(_conn) -> None:
+            statements.append("COMMIT")
+
+        with self._db() as db:
+            state = StrategyV2ShadowState(symbol="AAPL.US")
+            db.add(state)
+            db.commit()
+            svc = StrategyV2ShadowService(db)
+
+            event.listen(self.engine, "before_cursor_execute", _record_dml)
+            event.listen(self.engine, "commit", _record_commit)
+            try:
+                svc._persist_poll_error(
+                    "AAPL.US",
+                    datetime.now(timezone.utc),
+                    "broker unavailable",
+                )
+            finally:
+                event.remove(self.engine, "before_cursor_execute", _record_dml)
+                event.remove(self.engine, "commit", _record_commit)
+
+            assert "UPDATE" in statements
+            update_at = statements.index("UPDATE")
+            assert "COMMIT" in statements[:update_at]
+            reads = [i for i, s in enumerate(statements[:update_at]) if s == "SELECT"]
+            last_commit = max(
+                i for i, s in enumerate(statements[:update_at]) if s == "COMMIT"
+            )
+            assert all(i < last_commit for i in reads)
+
+            db.expire_all()
+            refreshed = (
+                db.query(StrategyV2ShadowState)
+                .filter(StrategyV2ShadowState.symbol == "AAPL.US")
+                .first()
+            )
+            assert refreshed is not None
+            assert refreshed.last_poll_error == "broker unavailable"
+
     def test_version_snapshot_fence_runs_before_snapshot_insert(self) -> None:
         with self._db() as db:
             config = StrategyV2ShadowConfig(symbol="AAPL.US")
