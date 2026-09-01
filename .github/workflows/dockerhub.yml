@@ -26,7 +26,54 @@ env:
 
 jobs:
   backend-test:
-    name: Backend Tests and Type Check
+    name: Backend Tests (shard ${{ matrix.group }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [1, 2, 3, 4]
+    defaults:
+      run:
+        working-directory: ./backend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements*.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      # Refresh .test_durations when shards drift apart, from backend/:
+      #   pytest tests/ -o addopts= -q --no-cov --store-durations
+      - name: Run pytest
+        env:
+          COVERAGE_FILE: .coverage.shard-${{ matrix.group }}
+          AUTO_TRADE_TEST_SHARD: ${{ matrix.group }}
+          AUTO_TRADE_TEST_SHARD_COUNT: 4
+        run: >-
+          pytest tests/
+          -o addopts=
+          -p no:cacheprovider
+          -n 4 --dist loadgroup
+          --cov=app --cov-config=.coveragerc --cov-report=
+
+      - name: Upload shard coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-shard-${{ matrix.group }}
+          path: backend/.coverage.shard-${{ matrix.group }}
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  backend-realtime:
+    name: Backend Wall-Clock Tests
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -45,8 +92,82 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt -r requirements-dev.txt
 
+      # These spawn their own compute processes and assert elapsed bounds, so
+      # they need the whole runner rather than one of four xdist workers.
       - name: Run pytest
-        run: pytest tests/ -v
+        env:
+          COVERAGE_FILE: .coverage.shard-realtime
+          AUTO_TRADE_TEST_REALTIME_ONLY: '1'
+        run: >-
+          pytest tests/
+          -o addopts=
+          -p no:cacheprovider
+          -p no:xdist
+          --cov=app --cov-config=.coveragerc --cov-report=
+
+      - name: Upload realtime coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-shard-realtime
+          path: backend/.coverage.shard-realtime
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  backend-coverage:
+    name: Backend Coverage Gate
+    needs: [backend-test, backend-realtime]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements*.txt
+
+      - name: Install coverage
+        run: pip install coverage
+
+      - name: Download shard coverage
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-shard-*
+          merge-multiple: true
+          path: backend
+
+      # Each shard runs part of the suite, so only the combined data can be
+      # measured against the threshold the whole suite used to meet.
+      - name: Combine and enforce threshold
+        run: |
+          coverage combine .coverage.shard-*
+          coverage report --rcfile=.coveragerc --show-missing --fail-under=80
+
+  backend-typecheck:
+    name: Backend Type Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: backend/requirements*.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-dev.txt
 
       - name: Run basedpyright
         run: basedpyright
@@ -109,7 +230,7 @@ jobs:
 
   dockerhub:
     name: Build and push Docker images
-    needs: [backend-test, frontend-check, frontend-e2e]
+    needs: [backend-test, backend-realtime, backend-coverage, backend-typecheck, frontend-check, frontend-e2e]
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request'
 
