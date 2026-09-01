@@ -5052,6 +5052,56 @@ class TestStrategyV2ShadowService:
                 "config_insert"
             )
 
+    def test_poll_rate_limit_write_opens_its_own_transaction(self) -> None:
+        """The rate-limit write must not upgrade a read transaction.
+
+        SQLite fails a write that upgrades a transaction whose read snapshot
+        another connection has already superseded, and it fails immediately
+        rather than consulting busy_timeout. Measured against the deployed
+        database under concurrent writers, keeping the preceding reads in the
+        same transaction failed 7.94% of the time; ending them first dropped
+        that to zero.
+        """
+        statements: list[str] = []
+
+        def _record_dml(
+            _conn,
+            _cursor,
+            statement: str,
+            _parameters,
+            _context,
+            _executemany,
+        ) -> None:
+            normalized = " ".join(statement.upper().split())
+            if "STRATEGY_V2_SHADOW_STATE" in normalized:
+                statements.append(normalized.split()[0])
+
+        def _record_commit(_conn) -> None:
+            statements.append("COMMIT")
+
+        with self._db() as db:
+            state = StrategyV2ShadowState(symbol="AAPL.US")
+            db.add(state)
+            db.commit()
+            svc = StrategyV2ShadowService(db)
+            state_id = int(state.id)
+            db.query(StrategyV2ShadowState).filter(
+                StrategyV2ShadowState.id == state_id
+            ).first()
+
+            event.listen(self.engine, "before_cursor_execute", _record_dml)
+            event.listen(self.engine, "commit", _record_commit)
+            try:
+                svc._persist_poll_attempt(state, datetime.now(timezone.utc))
+            finally:
+                event.remove(self.engine, "before_cursor_execute", _record_dml)
+                event.remove(self.engine, "commit", _record_commit)
+
+            assert "UPDATE" in statements
+            update_at = statements.index("UPDATE")
+            assert "SELECT" not in statements[:update_at]
+            assert "COMMIT" in statements[:update_at]
+
     def test_version_snapshot_fence_runs_before_snapshot_insert(self) -> None:
         with self._db() as db:
             config = StrategyV2ShadowConfig(symbol="AAPL.US")

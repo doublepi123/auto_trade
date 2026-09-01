@@ -12,7 +12,7 @@ from decimal import Decimal
 from functools import cache
 from typing import Any, Literal, Mapping, Protocol, Sequence
 
-from sqlalchemy import and_, func, or_
+from sqlalchemy import and_, func, or_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -1264,6 +1264,29 @@ class StrategyV2ShadowService:
         )
         return [StrategyV2ShadowTradeResponse.model_validate(row) for row in rows]
 
+    def _persist_poll_attempt(
+        self,
+        state: StrategyV2ShadowState,
+        current: datetime,
+    ) -> None:
+        """Record the poll attempt as the first statement of a new transaction.
+
+        SQLite rejects a write that upgrades a transaction whose read snapshot
+        another connection has already superseded, and it returns immediately
+        instead of honouring busy_timeout. Ending the preceding reads first
+        makes this an ordinary write-lock acquisition that does wait.
+        """
+        state_id = int(state.id)
+        self.db.commit()
+        self.db.execute(
+            update(StrategyV2ShadowState)
+            .where(StrategyV2ShadowState.id == state_id)
+            .values(last_polled_at=current, last_poll_error="")
+        )
+        self.db.commit()
+        state.last_polled_at = current
+        state.last_poll_error = ""
+
     def tick(
         self,
         symbol: str,
@@ -1351,10 +1374,7 @@ class StrategyV2ShadowService:
 
         # Persist the attempt before broker I/O. Concurrent or failing cron
         # calls therefore remain rate-limited instead of hammering the API.
-        state.last_polled_at = current
-        state.last_poll_error = ""
-        self.db.add(state)
-        self.db.commit()
+        self._persist_poll_attempt(state, current)
         try:
             one_minute = self.candle_provider.get_candlesticks(
                 normalized, "MIN_1", _ONE_MINUTE_CANDLE_COUNT
