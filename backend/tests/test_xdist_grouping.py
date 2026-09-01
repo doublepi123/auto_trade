@@ -5,9 +5,9 @@ import pytest
 from tests.conftest import (
     RELIABILITY_DB_GROUP,
     TEST_LEVEL_SAFE_MODULES,
+    assign_modules_to_shards,
     xdist_group_for,
 )
-
 
 _RELIABILITY_MODULES_UNDER_TEST = frozenset(
     {
@@ -56,33 +56,14 @@ class TestDefaultsToModuleGroup:
 class TestReliabilityTrioSharesOneGroup:
     """The three modules deliberately share one pid-scoped SQLite file.
 
-    tests/test_order_lifecycle_reliability.py:10-19 and its two siblings set the
-    identical `AUTO_TRADE_DATABASE_URL` at import time, deleting the db/-wal/-shm
-    files on first import. Interleaving them across workers corrupts fixture
-    state, so they must land on a single worker.
+    Each sets the identical `AUTO_TRADE_DATABASE_URL` at import time, deleting
+    the db/-wal/-shm files on first import. Interleaving them across workers
+    corrupts fixture state, so they must land on a single worker.
     """
 
-    @pytest.mark.parametrize(
-        "module",
-        [
-            "tests/test_order_lifecycle_reliability.py",
-            "tests/test_position_probe_reliability.py",
-            "tests/test_reconciliation_reliability.py",
-        ],
-    )
+    @pytest.mark.parametrize("module", sorted(_RELIABILITY_MODULES_UNDER_TEST))
     def test_module_maps_to_the_shared_reliability_group(self, module: str) -> None:
         assert xdist_group_for(f"{module}::test_anything") == RELIABILITY_DB_GROUP
-
-    def test_all_three_resolve_to_exactly_one_group(self) -> None:
-        groups = {
-            xdist_group_for(f"{module}::test_anything")
-            for module in (
-                "tests/test_order_lifecycle_reliability.py",
-                "tests/test_position_probe_reliability.py",
-                "tests/test_reconciliation_reliability.py",
-            )
-        }
-        assert groups == {RELIABILITY_DB_GROUP}
 
 
 class TestAuditedModulesDistributePerTest:
@@ -92,20 +73,7 @@ class TestAuditedModulesDistributePerTest:
     cannot finish before the single slowest file does.
     """
 
-    @pytest.mark.parametrize(
-        "module",
-        [
-            "tests/test_strategy_v2_shadow_service.py",
-            "tests/test_opening_momentum_shadow_service.py",
-            "tests/test_trade_execution_service.py",
-            "tests/test_universe_selection_service.py",
-            "tests/test_research_observation_health_service.py",
-            "tests/test_broker.py",
-            "tests/test_strategy_v2_portfolio_service.py",
-            "tests/test_e2e_restart.py",
-            "tests/platform/test_api_risk_portfolio.py",
-        ],
-    )
+    @pytest.mark.parametrize("module", sorted(TEST_LEVEL_SAFE_MODULES))
     def test_audited_module_carries_no_group(self, module: str) -> None:
         assert xdist_group_for(f"{module}::test_anything") is None
 
@@ -129,6 +97,48 @@ class TestAuditedModulesDistributePerTest:
         assert not (TEST_LEVEL_SAFE_MODULES & _RELIABILITY_MODULES_UNDER_TEST)
 
 
-class TestNodeidsWithoutASeparator:
-    def test_bare_module_nodeid_is_its_own_group(self) -> None:
-        assert xdist_group_for("tests/test_fees.py") == "tests/test_fees.py"
+class TestShardingKeepsModulesWhole:
+    """CI splits the suite over runners, and a module must not be split with it.
+
+    Several modules only pass in file order: test_api.py reuses one TestClient
+    without resetting tables between tests, and some modules set process-wide
+    env a later test in the same file depends on. Splitting a module across
+    runners breaks both, so shards are assigned whole modules.
+    """
+
+    def test_every_module_lands_on_exactly_one_shard(self) -> None:
+        weights = {f"m{index}.py": float(index) for index in range(50)}
+        assignment = assign_modules_to_shards(weights, shard_count=4)
+        assert set(assignment) == set(weights)
+        assert all(0 <= shard < 4 for shard in assignment.values())
+
+    def test_assignment_does_not_depend_on_input_order(self) -> None:
+        weights = {f"m{index}.py": float(index % 7) for index in range(40)}
+        reversed_weights = dict(reversed(list(weights.items())))
+        assert assign_modules_to_shards(weights, 4) == assign_modules_to_shards(
+            reversed_weights, 4
+        )
+
+    def test_equally_heavy_modules_are_spread_across_shards(self) -> None:
+        weights = {f"heavy{index}.py": 100.0 for index in range(4)}
+        assignment = assign_modules_to_shards(weights, shard_count=4)
+        assert sorted(assignment.values()) == [0, 1, 2, 3]
+
+    def test_shard_loads_stay_within_one_module_of_each_other(self) -> None:
+        weights = {f"m{index}.py": float(index) for index in range(1, 101)}
+        assignment = assign_modules_to_shards(weights, shard_count=4)
+        totals = [0.0] * 4
+        for module, shard in assignment.items():
+            totals[shard] += weights[module]
+        assert max(totals) - min(totals) < max(weights.values())
+
+    def test_single_shard_keeps_everything(self) -> None:
+        weights = {"a.py": 1.0, "b.py": 2.0}
+        assert set(assign_modules_to_shards(weights, shard_count=1).values()) == {0}
+
+    def test_no_modules_yields_no_assignment(self) -> None:
+        assert assign_modules_to_shards({}, shard_count=4) == {}
+
+    def test_modules_missing_a_weight_are_still_assigned(self) -> None:
+        assignment = assign_modules_to_shards({"a.py": 0.0, "b.py": 0.0}, 2)
+        assert sorted(assignment.values()) == [0, 1]

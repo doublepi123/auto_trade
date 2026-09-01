@@ -30,6 +30,13 @@ def _run_commands(job: str) -> str:
     )
 
 
+def _step_env(job: str, step_name: str) -> dict[str, Any]:
+    for step in _steps(job):
+        if step.get("name") == step_name:
+            return cast(dict[str, Any], step.get("env", {}))
+    raise AssertionError(f"{job} has no step named {step_name!r}")
+
+
 class TestTypecheckRunsAsItsOwnJob:
     """basedpyright must not queue behind the test suite.
 
@@ -74,18 +81,15 @@ class TestSuiteIsShardedAcrossRunners:
     def test_shards_keep_running_when_one_fails(self) -> None:
         assert _jobs()["backend-test"]["strategy"]["fail-fast"] is False
 
-    def test_test_job_splits_by_the_matrix_group(self) -> None:
-        commands = _run_commands("backend-test")
-        assert "--splits 4" in commands
-        assert "--group ${{ matrix.group }}" in commands
+    def test_each_shard_is_told_which_slice_to_run(self) -> None:
+        env = _step_env("backend-test", "Run pytest")
+        assert env["AUTO_TRADE_TEST_SHARD"] == "${{ matrix.group }}"
+        assert str(env["AUTO_TRADE_TEST_SHARD_COUNT"]) == "4"
 
-    def test_test_job_reads_the_committed_durations(self) -> None:
-        assert "--durations-path" in _run_commands("backend-test")
-
-    def test_shards_are_balanced_by_measured_duration(self) -> None:
-        assert "--splitting-algorithm least_duration" in _run_commands(
-            "backend-test"
-        )
+    def test_sharding_is_not_delegated_to_a_test_level_splitter(self) -> None:
+        # Splitting per test tears order-dependent modules apart across
+        # runners; conftest assigns whole modules instead.
+        assert "--splits" not in _run_commands("backend-test")
 
     def test_durations_file_is_committed(self) -> None:
         assert (Path(__file__).resolve().parents[1] / ".test_durations").is_file()

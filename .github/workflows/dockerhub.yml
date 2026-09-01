@@ -54,14 +54,13 @@ jobs:
       - name: Run pytest
         env:
           COVERAGE_FILE: .coverage.shard-${{ matrix.group }}
+          AUTO_TRADE_TEST_SHARD: ${{ matrix.group }}
+          AUTO_TRADE_TEST_SHARD_COUNT: 4
         run: >-
           pytest tests/
           -o addopts=
           -p no:cacheprovider
           -n 4 --dist loadgroup
-          --splits 4 --group ${{ matrix.group }}
-          --splitting-algorithm least_duration
-          --durations-path .test_durations
           --cov=app --cov-config=.coveragerc --cov-report=
 
       - name: Upload shard coverage

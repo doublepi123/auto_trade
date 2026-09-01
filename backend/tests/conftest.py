@@ -1,15 +1,12 @@
 from __future__ import annotations
 
 import importlib.abc
+import json
 import os
 import sys
 import tempfile
-from typing import TYPE_CHECKING
 
 import pytest
-
-if TYPE_CHECKING:
-    from collections.abc import Iterable
 
 
 class _BlockBrokerSdkFinder(importlib.abc.MetaPathFinder):
@@ -79,6 +76,8 @@ _RELIABILITY_DB_MODULES = frozenset(
     }
 )
 
+_DURATIONS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".test_durations")
+
 TEST_LEVEL_SAFE_MODULES: frozenset[str] = frozenset(
     {
         "tests/test_strategy_v2_shadow_service.py",
@@ -121,10 +120,83 @@ def xdist_group_for(nodeid: str) -> str | None:
     return module
 
 
+def assign_modules_to_shards(
+    module_weights: dict[str, float],
+    shard_count: int,
+) -> dict[str, int]:
+    """Pack whole modules into shards, heaviest first onto the lightest shard.
+
+    Modules are the unit because several only pass in file order, so a module
+    split across runners fails. Sorting by weight then path keeps every runner's
+    answer identical without them communicating.
+    """
+    if shard_count < 1:
+        raise ValueError("shard_count must be at least 1")
+    loads = [0.0] * shard_count
+    counts = [0] * shard_count
+    assignment: dict[str, int] = {}
+    ordered = sorted(module_weights.items(), key=lambda item: (-item[1], item[0]))
+    for module, weight in ordered:
+        target = min(
+            range(shard_count),
+            key=lambda index: (loads[index], counts[index], index),
+        )
+        assignment[module] = target
+        loads[target] += weight
+        counts[target] += 1
+    return assignment
+
+
+def _module_weights(modules: set[str]) -> dict[str, float]:
+    weights = {module: 0.0 for module in modules}
+    try:
+        with open(_DURATIONS_PATH, encoding="utf-8") as handle:
+            recorded = json.load(handle)
+    except (OSError, ValueError):
+        return weights
+    for nodeid, seconds in recorded.items():
+        module = nodeid.split("::", 1)[0]
+        if module in weights:
+            weights[module] += float(seconds)
+    return weights
+
+
+def _shard_selection() -> tuple[int, int] | None:
+    raw_index = os.environ.get("AUTO_TRADE_TEST_SHARD", "").strip()
+    raw_count = os.environ.get("AUTO_TRADE_TEST_SHARD_COUNT", "").strip()
+    if not raw_index or not raw_count:
+        return None
+    index, count = int(raw_index), int(raw_count)
+    if count < 1 or not 1 <= index <= count:
+        raise ValueError(
+            f"AUTO_TRADE_TEST_SHARD={index} is outside 1..{count}"
+        )
+    return index - 1, count
+
+
 # tryfirst: xdist's worker-side hook appends the group name to each nodeid, and
 # it only sees markers already attached when it runs.
 @pytest.hookimpl(tryfirst=True)
-def pytest_collection_modifyitems(items: Iterable[pytest.Item]) -> None:
+def pytest_collection_modifyitems(
+    config: pytest.Config,
+    items: list[pytest.Item],
+) -> None:
+    selection = _shard_selection()
+    if selection is not None:
+        shard_index, shard_count = selection
+        assignment = assign_modules_to_shards(
+            _module_weights({item.nodeid.split("::", 1)[0] for item in items}),
+            shard_count,
+        )
+        keep = [
+            item
+            for item in items
+            if assignment[item.nodeid.split("::", 1)[0]] == shard_index
+        ]
+        dropped = [item for item in items if item not in set(keep)]
+        if dropped:
+            config.hook.pytest_deselected(items=dropped)
+        items[:] = keep
     for item in items:
         group = xdist_group_for(item.nodeid)
         if group is not None:
