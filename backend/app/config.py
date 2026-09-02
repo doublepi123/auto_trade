@@ -823,6 +823,24 @@ class Settings(BaseSettings):
             "which is shared; per-symbol samples are far too thin to resolve."
         ),
     )
+    auto_primary_switch_max_price_age_seconds: int = Field(
+        default=1800,
+        ge=60,
+        le=86400,
+        validation_alias=(
+            "AUTO_TRADE_AUTO_PRIMARY_SWITCH_MAX_PRICE_AGE_SECONDS"
+        ),
+        description=(
+            "Maximum age of the candidate close that centres the new live "
+            "interval. The band is built around that close, so a close from an "
+            "earlier session centres it where the market no longer trades and "
+            "price can never reach the bounds: a cross-day reference once put "
+            "buy_low 1.5% below the market and took zero fills for 28 days. "
+            "The default admits normal intraday evaluation while rejecting any "
+            "cross-day reference. Fails closed -- a close whose age cannot be "
+            "measured counts as stale."
+        ),
+    )
     live_regime_gate_enabled: bool = Field(
         default=False,
         validation_alias="AUTO_TRADE_LIVE_REGIME_GATE_ENABLED",

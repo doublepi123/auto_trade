@@ -121,6 +121,12 @@ export function tradeEventTypeLabel(eventType?: string | null): string {
       return '风控暂停'
     case 'RISK_AUTO_RESUMED':
       return '自动恢复'
+    case 'PRIMARY_SWITCHED':
+      return '主标的切换'
+    case 'PRIMARY_SWITCH_ROLLED_BACK':
+      return '主标的切换回滚'
+    case 'PRIMARY_SWITCH_BLOCKED':
+      return '主标的切换拦截'
     default:
       return eventType || '事件'
   }

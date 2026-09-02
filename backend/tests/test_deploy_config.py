@@ -293,6 +293,7 @@ def test_docker_compose_passes_auto_primary_switch_settings() -> None:
         "AUTO_TRADE_AUTO_PRIMARY_SWITCH_REACH_LOOKBACK_DAYS=",
         "AUTO_TRADE_AUTO_PRIMARY_SWITCH_MIN_REACH_RATE_PCT=",
         "AUTO_TRADE_AUTO_PRIMARY_SWITCH_MIN_CLOSED_TRADES=",
+        "AUTO_TRADE_AUTO_PRIMARY_SWITCH_MAX_PRICE_AGE_SECONDS=",
     )
     for key in keys:
         assert key in compose, key

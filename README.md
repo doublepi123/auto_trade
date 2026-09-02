@@ -833,6 +833,7 @@ auto_trade/
 | `AUTO_TRADE_AUTO_PRIMARY_SWITCH_MIN_REACH_RATE_PCT` | 候选的 **reach-rate** 下限（已平仓影子交易中最大有利波动达到 0.4% 的占比）。趋势占比低只说明不趋势，不代表波动够得着成本；实测 247 笔中 reach-rate 无例外地分离盈亏（盈利均值 85% / 亏损均值 22%），而趋势占比排名第一的标的实为净亏。两项同时满足才可晋级 | `60` |
 | `AUTO_TRADE_AUTO_PRIMARY_SWITCH_MIN_CLOSED_TRADES` | reach-rate 生效所需的最少已平仓影子交易数，避免单笔幸运读成 100% | `5` |
 | `AUTO_TRADE_AUTO_PRIMARY_SWITCH_REQUIRE_SIGNAL_EDGE` | 换标的前要求影子入场信号**已被证明有 edge**（`GET /api/strategy-shadow/signal-edge` 判定为 `PASS`）。趋势占比与 reach-rate 两项证据都取自 Strategy v2 影子；若该信号本身不含方向性信息，这些证据只是在给噪声排名，换标的等于把亏损搬家而非避开。跨全部标的评估——首达检验考察的是**入场规则**，而规则是共享的；单标的样本也远不足以判定（数周仅积累个位数已平仓交易，逐标的判定会永远停在 `INSUFFICIENT_DATA`）。**Fail-closed**：无法评估（如缺影子配置）同样拦截 | `true` |
+| `AUTO_TRADE_AUTO_PRIMARY_SWITCH_MAX_PRICE_AGE_SECONDS` | 候选**参考收盘价**的最大允许延迟（秒）。新区间围绕该收盘价构建，因此跨日的旧收盘价会把区间中心放在市场已不再成交的位置，价格永远够不到边界：线上曾用 5 天前的收盘价把 `buy_low` 定在现价下方约 1.5%，28 天零成交。适配度证据窗口按天计，窗口内任何一根 bar 都能提供收盘价，故需要独立的时效上限。默认 30 分钟：允许正常盘中评估，严格拒绝任何跨日参考。**Fail-closed**：收盘价缺时间戳、无法测龄时同样按过期拦截 | `1800` |
 | `AUTO_TRADE_LIVE_REGIME_GATE_ENABLED` | live 开仓前要求当前主标的最新 Strategy v2 shadow 门禁通过；减仓不受影响 | `false` |
 | `AUTO_TRADE_LIVE_REGIME_MAX_DATA_AGE_SECONDS` | live regime 证据最大允许延迟（秒） | `600` |
 | `AUTO_TRADE_LIVE_MAX_ENTRIES_PER_SYMBOL_PER_DAY` | 每标的、每交易日最大开仓次数；`0` 关闭此限制 | `1` |

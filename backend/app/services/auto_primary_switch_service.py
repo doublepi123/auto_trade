@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any
+from datetime import datetime, timezone
+from typing import Any, Callable
 
-from sqlalchemy import select
+from sqlalchemy import event as sa_event, select
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -43,6 +44,10 @@ from app.services.range_fitness_service import (
     VERDICT_RANGE_SUITABLE,
 )
 from app.services.signal_edge_service import SignalEdgeService
+from app.services.trade_event_service import (
+    encode_event_payload,
+    record_trade_event,
+)
 
 logger = logging.getLogger("auto_trade.auto_primary_switch")
 
@@ -54,6 +59,12 @@ OUTCOME_NO_ELIGIBLE_CANDIDATE = "NO_ELIGIBLE_CANDIDATE"
 OUTCOME_SIGNAL_EDGE_UNPROVEN = "SIGNAL_EDGE_UNPROVEN"
 OUTCOME_SWITCH_BLOCKED = "SWITCH_BLOCKED"
 OUTCOME_SWITCHED = "SWITCHED"
+
+# Durable provenance vocabulary. Operators grep these, so they must stay stable.
+EVENT_PRIMARY_SWITCHED = "PRIMARY_SWITCHED"
+EVENT_PRIMARY_SWITCH_ROLLED_BACK = "PRIMARY_SWITCH_ROLLED_BACK"
+EVENT_PRIMARY_SWITCH_BLOCKED = "PRIMARY_SWITCH_BLOCKED"
+AUDIT_PRIMARY_SWITCH = "AUTO_PRIMARY_SWITCH"
 
 
 @dataclass(frozen=True)
@@ -73,13 +84,65 @@ class _SignalEdgeBlock:
     unassessable: bool
 
 
-class AutoPrimarySwitchService:
-    def __init__(self, db: Session) -> None:
-        self._db = db
+@dataclass(frozen=True, slots=True)
+class _SwitchPlan:
+    """The change a switch applies, plus the evidence that earned it."""
 
-    def evaluate(self, runner: Any) -> AutoPrimarySwitchResult:
+    symbol: str
+    market: str
+    buy_low: float
+    sell_high: float
+    reference_price: float
+    reference_bar_at: datetime | None
+    incumbent_trend_pct: float
+    candidate_trend_pct: float
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Read a naive datetime as the UTC instant it was written as.
+
+    SQLite drops the offset on ``DateTime(timezone=True)`` columns, so a stored
+    UTC timestamp comes back naive and comparing it to an aware anchor raises.
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+
+
+def _reference_age_seconds(bar_at: datetime | None, at: datetime) -> float | None:
+    return None if bar_at is None else (at - _as_utc(bar_at)).total_seconds()
+
+
+def _reference_is_fresh(age_seconds: float | None) -> bool:
+    """Fresh means measurable and inside the bound on BOTH sides.
+
+    A future-dated bar yields a negative age that satisfies any upper bound,
+    yet a close the market has not printed yet is clock-skewed or corrupt, not
+    fresh. Unmeasurable and future-dated ages both fail closed.
+    """
+    if age_seconds is None:
+        return False
+    return 0 <= age_seconds <= settings.auto_primary_switch_max_price_age_seconds
+
+
+class AutoPrimarySwitchService:
+    def __init__(
+        self,
+        db: Session,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._db = db
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def evaluate(
+        self,
+        runner: Any,
+        *,
+        now: datetime | None = None,
+    ) -> AutoPrimarySwitchResult:
         if not settings.auto_primary_switch_enabled:
             return AutoPrimarySwitchResult(OUTCOME_DISABLED)
+
+        anchor = _as_utc(now or self._clock())
 
         config = self._db.scalar(
             select(StrategyConfig).order_by(StrategyConfig.id.desc())
@@ -100,6 +163,7 @@ class AutoPrimarySwitchService:
             reach_lookback_days=(
                 settings.auto_primary_switch_reach_lookback_days
             ),
+            now=anchor,
         )
         by_symbol = {row.symbol: row for row in rows}
 
@@ -146,6 +210,26 @@ class AutoPrimarySwitchService:
             # never trigger — a switch into an immediately dead interval.
             if row.last_close_price is None or row.last_close_price <= 0:
                 continue
+            # A close from an earlier session prices a band the live market can
+            # no longer reach. Any bar inside the multi-day fitness window used
+            # to qualify, so a stale close once centred a live band 1.5% below
+            # the market and took zero fills for 28 days. Fails closed: a close
+            # whose age cannot be measured is not a proven-fresh one.
+            reference_age = _reference_age_seconds(row.last_bar_at, anchor)
+            if not _reference_is_fresh(reference_age):
+                logger.warning(
+                    "automatic primary switch rejected %s: reference close at "
+                    "%s is %s, outside the 0-%ss freshness window",
+                    row.symbol,
+                    row.last_bar_at,
+                    (
+                        "unknown age"
+                        if reference_age is None
+                        else f"{reference_age:.0f}s old"
+                    ),
+                    settings.auto_primary_switch_max_price_age_seconds,
+                )
+                continue
             # Reach-rate gate. A low ADX trend share only says price is not
             # trending; it does not say the swings are big enough to clear the
             # round-trip cost. Measured over 247 closed shadow trades, reach-rate
@@ -172,7 +256,7 @@ class AutoPrimarySwitchService:
         try:
             runner.assert_primary_switch_safe(best.symbol, market)
         except Exception as exc:
-            return AutoPrimarySwitchResult(
+            blocked = AutoPrimarySwitchResult(
                 OUTCOME_SWITCH_BLOCKED,
                 incumbent=incumbent,
                 incumbent_trend_pct=incumbent_row.trend_blocked_pct,
@@ -180,6 +264,8 @@ class AutoPrimarySwitchService:
                 candidate_trend_pct=best.trend_blocked_pct,
                 detail=str(exc),
             )
+            self._record_block(blocked)
+            return blocked
 
         reference_price = float(best.last_close_price or 0)
         half_width = reference_price * (
@@ -197,14 +283,40 @@ class AutoPrimarySwitchService:
                 detail="cannot derive a valid interval for the candidate",
             )
 
+        # Re-measured against a fresh clock reading. assert_primary_switch_safe
+        # performs a blocking broker position probe, so the reference can age
+        # past the bound between the early gate and this write; the early gate
+        # is only a cheap rejection ahead of that probe, and this is the
+        # authoritative one. The band must be built from a reference that is
+        # still fresh at the instant it becomes durable.
+        if not _reference_is_fresh(
+            _reference_age_seconds(best.last_bar_at, _as_utc(self._clock()))
+        ):
+            blocked = AutoPrimarySwitchResult(
+                OUTCOME_SWITCH_BLOCKED,
+                incumbent=incumbent,
+                incumbent_trend_pct=incumbent_row.trend_blocked_pct,
+                candidate=best.symbol,
+                candidate_trend_pct=best.trend_blocked_pct,
+                detail="reference price went stale before the switch was written",
+            )
+            self._record_block(blocked)
+            return blocked
+
         try:
             self._commit_switch(
                 runner,
                 config,
-                best.symbol,
-                market,
-                buy_low,
-                sell_high,
+                _SwitchPlan(
+                    symbol=best.symbol,
+                    market=market,
+                    buy_low=buy_low,
+                    sell_high=sell_high,
+                    reference_price=reference_price,
+                    reference_bar_at=best.last_bar_at,
+                    incumbent_trend_pct=incumbent_row.trend_blocked_pct,
+                    candidate_trend_pct=best.trend_blocked_pct,
+                ),
             )
         except Exception as exc:
             logger.exception("automatic primary switch failed to persist")
@@ -237,12 +349,9 @@ class AutoPrimarySwitchService:
         self,
         runner: Any,
         config: Any,
-        symbol: str,
-        market: str,
-        buy_low: float,
-        sell_high: float,
+        plan: _SwitchPlan,
     ) -> None:
-        """Persist the new primary symbol and reload the live runner.
+        """Persist the new primary symbol, its provenance, and reload the runner.
 
         The safety gate is already proven by the caller's
         ``assert_primary_switch_safe`` call, so this deliberately does not go
@@ -260,22 +369,87 @@ class AutoPrimarySwitchService:
         previous_market = (config.market or "US").strip().upper()
         previous_buy_low = float(config.buy_low or 0)
         previous_sell_high = float(config.sell_high or 0)
+        payload: dict[str, Any] = {
+            "previous_symbol": previous_symbol,
+            "new_symbol": plan.symbol,
+            "previous_market": previous_market,
+            "new_market": plan.market,
+            "previous_buy_low": previous_buy_low,
+            "previous_sell_high": previous_sell_high,
+            "new_buy_low": plan.buy_low,
+            "new_sell_high": plan.sell_high,
+            "reference_price": plan.reference_price,
+            "reference_bar_at": (
+                None
+                if plan.reference_bar_at is None
+                else _as_utc(plan.reference_bar_at).isoformat()
+            ),
+            "incumbent_trend_pct": plan.incumbent_trend_pct,
+            "candidate_trend_pct": plan.candidate_trend_pct,
+        }
         reload_strategy = getattr(runner, "reload_strategy", None)
-        svc.update_config({
-            "symbol": symbol,
-            "market": market,
-            "buy_low": buy_low,
-            "sell_high": sell_high,
+        # Staged BEFORE update_config, which commits the session itself. Staging
+        # afterwards would leave a crash window in which the live symbol has
+        # changed with no record of why — the original defect, merely narrowed.
+        event = record_trade_event(
+            self._db,
+            event_type=EVENT_PRIMARY_SWITCHED,
+            symbol=plan.symbol,
+            status=OUTCOME_SWITCHED,
+            message=(
+                f"automatic primary switch {previous_symbol} -> {plan.symbol}"
+            ),
+            payload=payload,
+        )
+        self._apply_config(svc, {
+            "symbol": plan.symbol,
+            "market": plan.market,
+            "buy_low": plan.buy_low,
+            "sell_high": plan.sell_high,
         })
         try:
+            # Age re-read AFTER the commit returned, not before it. update_config
+            # takes the SQLite writer lock before committing and that wait is
+            # unbounded, so no earlier reading can bound the age at commit time.
+            # Age only grows, so commit_age <= this reading: inside the bound
+            # here proves the commit was inside it, and outside proves nothing.
+            # An unproven band is undone through the rollback path below rather
+            # than left in effect, and the reload never sees it.
+            committed_age = _reference_age_seconds(
+                plan.reference_bar_at, _as_utc(self._clock())
+            )
+            if not _reference_is_fresh(committed_age):
+                raise RuntimeError(
+                    "reference price was stale when the switch committed (age "
+                    + (
+                        "unknown"
+                        if committed_age is None
+                        else f"{committed_age:.0f}s"
+                    )
+                    + f", bound {settings.auto_primary_switch_max_price_age_seconds}s)"
+                )
             if callable(reload_strategy):
                 reload_strategy()
-        except Exception:
+        except Exception as exc:
             logger.exception(
-                "automatic primary switch reload failed; rolling back to %s",
+                "automatic primary switch could not be completed; "
+                "rolling back to %s",
                 previous_symbol,
             )
-            svc.update_config({
+            # The switch is being undone, so the committed row must stop
+            # claiming it stands. Restated rather than deleted, and made durable
+            # by the restoring update_config below.
+            event.event_type = EVENT_PRIMARY_SWITCH_ROLLED_BACK
+            event.status = "ROLLED_BACK"
+            event.message = (
+                f"automatic primary switch to {plan.symbol} rolled back to "
+                f"{previous_symbol}: {exc}"
+            )
+            event.payload_json = encode_event_payload(
+                {**payload, "rollback_reason": str(exc)}
+            )
+            self._db.add(event)
+            self._apply_config(svc, {
                 "symbol": previous_symbol,
                 "market": previous_market,
                 "buy_low": previous_buy_low,
@@ -290,6 +464,90 @@ class AutoPrimarySwitchService:
                     exc_info=True,
                 )
             raise
+        self._record_switch_audit(payload)
+
+    def _apply_config(self, svc: Any, values: dict[str, Any]) -> None:
+        """Apply a config change, tolerating a failure that happened AFTER commit.
+
+        ``StrategyService.update_config`` commits and only then refreshes, so a
+        raise from it does not mean the write was rejected. Whether the commit
+        landed is read from an ``after_commit`` hook rather than a verification
+        query: a query is itself fallible, and one that raised here would
+        propagate before either reload or rollback ran, stranding the exact
+        state this path exists to prevent. When the change did land the caller
+        must continue into its reload/rollback handling, or the live engine is
+        left on the old symbol while the database claims the new one.
+
+        The session is always left with no open transaction. A commit's
+        post-steps, or a failure among them, otherwise leave a read snapshot
+        open that the restore would upgrade into a write -- the SQLite
+        ``BUSY_SNAPSHOT`` failure mode.
+        """
+        committed: list[bool] = []
+
+        def _mark_committed(_session: Session) -> None:
+            committed.append(True)
+
+        sa_event.listen(self._db, "after_commit", _mark_committed)
+        try:
+            svc.update_config(values)
+        except Exception:
+            if not committed:
+                raise
+            logger.exception(
+                "automatic primary switch config write raised after it "
+                "committed; continuing so the reload path still runs",
+            )
+        finally:
+            sa_event.remove(self._db, "after_commit", _mark_committed)
+            self._db.rollback()
+
+    def _record_block(self, blocked: AutoPrimarySwitchResult) -> None:
+        """Persist a refused switch so an operator sees the system tried.
+
+        Best-effort: the veto is already decided, and a write that loses the
+        SQLite writer lock to the live trading loop must not turn a clean
+        refusal into a crash.
+        """
+        try:
+            record_trade_event(
+                self._db,
+                event_type=EVENT_PRIMARY_SWITCH_BLOCKED,
+                symbol=blocked.candidate,
+                status=OUTCOME_SWITCH_BLOCKED,
+                message=(
+                    f"automatic primary switch {blocked.incumbent} -> "
+                    f"{blocked.candidate} refused: {blocked.detail}"
+                ),
+                payload={
+                    "previous_symbol": blocked.incumbent,
+                    "candidate_symbol": blocked.candidate,
+                    "incumbent_trend_pct": blocked.incumbent_trend_pct,
+                    "candidate_trend_pct": blocked.candidate_trend_pct,
+                    "reason": blocked.detail,
+                },
+            )
+            self._db.commit()
+        except Exception:
+            self._db.rollback()
+            logger.warning(
+                "failed to record blocked automatic primary switch",
+                exc_info=True,
+            )
+
+    def _record_switch_audit(self, payload: dict[str, Any]) -> None:
+        """Mirror the switch into the audit log, following the swallow-and-warn
+        convention: provenance must never veto the operation it records."""
+        from app.api.deps import init_audit_logger
+
+        try:
+            init_audit_logger().record(
+                AUDIT_PRIMARY_SWITCH,
+                severity="WARNING",
+                request_summary=payload,
+            )
+        except Exception as exc:
+            logger.warning("audit_record_failed: %s", exc)
 
     def _signal_edge_block_reason(self) -> _SignalEdgeBlock | None:
         """Return why a switch must be blocked, or ``None`` when edge is proven.
