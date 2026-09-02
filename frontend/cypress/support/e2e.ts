@@ -1094,7 +1094,14 @@ Cypress.Commands.add('stubApi', () => {
   }).as('getNotificationStats')
 
   cy.intercept('GET', '/api/account', {
-    body: { total_assets: 0, cash_balances: [], positions: [], available: true, error: null },
+    body: {
+      total_assets: 0,
+      cash_balances: [],
+      positions: [],
+      margin_infos: [],
+      available: true,
+      error: null,
+    },
   }).as('getAccount')
 
   cy.intercept('GET', '/api/database-health', (req) => {
@@ -2089,6 +2096,23 @@ Cypress.Commands.add('stubApi', () => {
       quotes_subscribed: true,
       trigger_in_flight: false,
       pending_order_symbols: ['AAPL.US'],
+      decision_funnel: {
+        session_date: '2026-01-02',
+        primary_quotes_seen: 120,
+        quality_rejections: 0,
+        quality_rejections_by_reason: {},
+        fresh_primary_quote: 120,
+        evaluations: 120,
+        threshold_crossings: 2,
+        entry_crossing_blocks: 0,
+        skips_by_category: {},
+        triggers: 1,
+        sized_quantity_positive: 1,
+        submit_attempts: 1,
+        broker_acks: 1,
+        persisted: 1,
+        pre_submit_risk_check_invocations: 1,
+      },
       live_safety: {
         full_buying_power_usage_enabled: false,
         buying_power_usage_pct: 90,

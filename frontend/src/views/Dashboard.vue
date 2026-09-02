@@ -477,26 +477,26 @@
         </div>
 
         <div class="live-safety" data-testid="dashboard-decision-funnel">
-          <h5>决策漏斗（{{ diagnostics.decision_funnel.session_date || '本交易日' }}）</h5>
+          <h5>决策漏斗（{{ decisionFunnel.session_date || '本交易日' }}）</h5>
           <el-descriptions :column="isMobile ? 1 : 4" border size="small">
-            <el-descriptions-item label="主标的报价">{{ diagnostics.decision_funnel.primary_quotes_seen }}</el-descriptions-item>
+            <el-descriptions-item label="主标的报价">{{ decisionFunnel.primary_quotes_seen }}</el-descriptions-item>
             <el-descriptions-item label="质量门拒绝">
-              <span :class="diagnostics.decision_funnel.quality_rejections > 0 ? 'metric-negative' : ''">
-                {{ diagnostics.decision_funnel.quality_rejections }}
+              <span :class="decisionFunnel.quality_rejections > 0 ? 'metric-negative' : ''">
+                {{ decisionFunnel.quality_rejections }}
               </span>
             </el-descriptions-item>
-            <el-descriptions-item label="已评估">{{ diagnostics.decision_funnel.evaluations }}</el-descriptions-item>
-            <el-descriptions-item label="触及阈值">{{ diagnostics.decision_funnel.threshold_crossings }}</el-descriptions-item>
+            <el-descriptions-item label="已评估">{{ decisionFunnel.evaluations }}</el-descriptions-item>
+            <el-descriptions-item label="触及阈值">{{ decisionFunnel.threshold_crossings }}</el-descriptions-item>
             <el-descriptions-item label="等待新鲜触线">
-              <span :class="diagnostics.decision_funnel.entry_crossing_blocks > 0 ? 'metric-negative' : ''">
-                {{ diagnostics.decision_funnel.entry_crossing_blocks }}
+              <span :class="decisionFunnel.entry_crossing_blocks > 0 ? 'metric-negative' : ''">
+                {{ decisionFunnel.entry_crossing_blocks }}
               </span>
             </el-descriptions-item>
-            <el-descriptions-item label="触发">{{ diagnostics.decision_funnel.triggers }}</el-descriptions-item>
+            <el-descriptions-item label="触发">{{ decisionFunnel.triggers }}</el-descriptions-item>
             <el-descriptions-item label="提交 / 回执">
-              {{ diagnostics.decision_funnel.submit_attempts }} / {{ diagnostics.decision_funnel.broker_acks }}
+              {{ decisionFunnel.submit_attempts }} / {{ decisionFunnel.broker_acks }}
             </el-descriptions-item>
-            <el-descriptions-item label="已入库">{{ diagnostics.decision_funnel.persisted }}</el-descriptions-item>
+            <el-descriptions-item label="已入库">{{ decisionFunnel.persisted }}</el-descriptions-item>
           </el-descriptions>
           <div v-if="qualityRejectionReasons.length > 0" class="field-hint" data-testid="funnel-quality-reasons">
             质量门拒绝原因：{{ qualityRejectionReasons.map(([k, v]) => `${qualityPredicateLabel(k)} ${v}`).join(' · ') }}
@@ -802,9 +802,9 @@
         <p v-else-if="!account.available" class="empty-note">数据不可用</p>
         <p v-else class="empty-note">暂无数据</p>
 
-        <template v-if="account.margin_infos.length > 0">
+        <template v-if="(account.margin_infos ?? []).length > 0">
           <h4 class="subsection-title">融资与保证金</h4>
-          <el-table :data="account.margin_infos" size="small" class="responsive-table" data-testid="margin-info-table">
+          <el-table :data="account.margin_infos ?? []" size="small" class="responsive-table" data-testid="margin-info-table">
             <el-table-column prop="currency" label="币种" min-width="70" />
             <el-table-column prop="risk_level" label="风控等级" min-width="100">
               <template #default="{ row }">
@@ -922,7 +922,7 @@ import ReconciliationStatus from '../components/ReconciliationStatus.vue'
 import { useReconciliationStatus } from '../composables/useReconciliationStatus'
 import { useDiagnosticsSnapshot } from '../composables/useDiagnosticsSnapshot'
 import { startTrading, stopTrading, pauseTrading, resumeTrading, enableProtectiveExits, disableProtectiveExits, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getNotifications, getOrders, getTradeEvents, getMetricsSummary, getDatabaseHealth, getCronHealth, getQuoteStreamHealth, type QuoteStreamHealthResult } from '../api'
-import type { CronHealthSnapshot, DatabaseHealthSnapshot, LLMIntervalStatus, NotificationLogOut, OrderRecord, Position, StatisticsQuality, StatusHistoryPoint, TradeEventRecord } from '../types'
+import type { CronHealthSnapshot, DatabaseHealthSnapshot, DecisionFunnelDiagnostics, LLMIntervalStatus, NotificationLogOut, OrderRecord, Position, StatisticsQuality, StatusHistoryPoint, TradeEventRecord } from '../types'
 import { engineStateLabel, auditActionLabel, marginRiskLevelLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 import { EVENT_TYPE } from '../utils/constants'
 import { downloadCsv } from '../utils/csv'
@@ -953,6 +953,28 @@ function qualityPredicateLabel(key: string): string {
       return key
   }
 }
+
+const emptyDecisionFunnel: DecisionFunnelDiagnostics = {
+  session_date: '',
+  primary_quotes_seen: 0,
+  quality_rejections: 0,
+  quality_rejections_by_reason: {},
+  fresh_primary_quote: 0,
+  evaluations: 0,
+  threshold_crossings: 0,
+  entry_crossing_blocks: 0,
+  skips_by_category: {},
+  triggers: 0,
+  sized_quantity_positive: 0,
+  submit_attempts: 0,
+  broker_acks: 0,
+  persisted: 0,
+  pre_submit_risk_check_invocations: 0,
+}
+
+const decisionFunnel = computed<DecisionFunnelDiagnostics>(
+  () => diagnostics.value?.decision_funnel ?? emptyDecisionFunnel,
+)
 
 const qualityRejectionReasons = computed<[string, number][]>(() => {
   const byReason = diagnostics.value?.decision_funnel?.quality_rejections_by_reason
