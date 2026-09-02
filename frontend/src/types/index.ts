@@ -374,10 +374,22 @@ export interface Position {
   market_value: number
 }
 
+export interface MarginInfo {
+  currency: string
+  risk_level: number
+  margin_call: number
+  init_margin: number
+  maintenance_margin: number
+  max_finance_amount: number
+  remaining_finance_amount: number
+  buy_power: number
+}
+
 export interface AccountInfo {
   total_assets: number
   cash_balances: CashBalance[]
   positions: Position[]
+  margin_infos: MarginInfo[]
   available: boolean
   error?: string | null
 }
@@ -976,6 +988,9 @@ export type AlertRuleType =
   | 'daily_loss'
   | 'consecutive_losses'
   | 'kill_switch_engaged'
+  | 'interval_stale'
+  | 'margin_risk_level'
+  | 'margin_call'
 export type AlertSeverity = 'INFO' | 'WARNING' | 'CRITICAL'
 
 export interface AlertRule {

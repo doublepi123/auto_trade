@@ -171,6 +171,9 @@
             <el-option label="日内亏损 ≤" value="daily_loss" />
             <el-option label="连续亏损 ≥（账户级）" value="consecutive_losses" data-testid="alert-type-consecutive-losses" />
             <el-option label="熔断开关触发（账户级）" value="kill_switch_engaged" data-testid="alert-type-kill-switch" />
+            <el-option label="区间失效 ≥" value="interval_stale" data-testid="alert-type-interval-stale" />
+            <el-option label="保证金风控等级 ≥（账户级）" value="margin_risk_level" data-testid="alert-type-margin-risk-level" />
+            <el-option label="追缴保证金 ≥（账户级）" value="margin_call" data-testid="alert-type-margin-call" />
           </el-select>
         </el-form-item>
         <el-form-item label="标的">
@@ -192,6 +195,14 @@
           <template v-else-if="dialog.rule_type === 'consecutive_losses'">
             <el-input-number v-model="dialog.threshold" :precision="0" :step="1" data-testid="alert-threshold" />
             <div class="field-hint">连续亏损笔数达到阈值时触发，须为 ≥ 1 的整数。</div>
+          </template>
+          <template v-else-if="dialog.rule_type === 'margin_risk_level'">
+            <el-input-number v-model="dialog.threshold" :precision="0" :step="1" :min="1" :max="3" data-testid="alert-threshold" />
+            <div class="field-hint">长桥风控等级：1 中风险 / 2 预警 / 3 危险，达到阈值即触发。</div>
+          </template>
+          <template v-else-if="dialog.rule_type === 'margin_call'">
+            <el-input-number v-model="dialog.threshold" :precision="2" :step="100" data-testid="alert-threshold" />
+            <div class="field-hint">券商追缴保证金金额达到阈值时触发，须为正数。</div>
           </template>
           <template v-else>
             <el-input-number v-model="dialog.threshold" :precision="2" :step="1" data-testid="alert-threshold" />
@@ -299,7 +310,7 @@ import type { AlertRule, AlertRuleCreate, AlertEvaluateResult, AlertRuleEffectiv
 import { alertRuleTypeLabel } from '../utils/labels'
 import { resolveErrorMessage } from '../utils/error'
 
-const ACCOUNT_WIDE_RULE_TYPES: ReadonlySet<AlertRuleType> = new Set(['consecutive_losses', 'kill_switch_engaged'])
+const ACCOUNT_WIDE_RULE_TYPES: ReadonlySet<AlertRuleType> = new Set(['consecutive_losses', 'kill_switch_engaged', 'margin_risk_level', 'margin_call'])
 
 const rules = ref<AlertRule[]>([])
 const loading = ref(false)
@@ -435,6 +446,12 @@ function handleRuleTypeChange(next: AlertRuleType) {
     dialog.threshold = 1
   } else if (next === 'consecutive_losses') {
     dialog.threshold = 3
+  } else if (next === 'margin_risk_level') {
+    dialog.threshold = 2
+  } else if (next === 'margin_call') {
+    dialog.threshold = 1
+  } else if (next === 'interval_stale') {
+    dialog.threshold = 5
   } else if (next === 'daily_loss') {
     dialog.threshold = -500
   } else {

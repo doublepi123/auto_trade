@@ -138,7 +138,28 @@ export function alertRuleTypeLabel(ruleType?: string | null): string {
       return '连续亏损 ≥'
     case 'kill_switch_engaged':
       return '熔断开关触发'
+    case 'interval_stale':
+      return '区间失效 ≥'
+    case 'margin_risk_level':
+      return '保证金风控等级 ≥'
+    case 'margin_call':
+      return '追缴保证金 ≥'
     default:
       return ruleType || '未知类型'
+  }
+}
+
+export function marginRiskLevelLabel(level?: number | null): string {
+  switch (level) {
+    case 0:
+      return '安全'
+    case 1:
+      return '中风险'
+    case 2:
+      return '预警'
+    case 3:
+      return '危险'
+    default:
+      return '未知'
   }
 }

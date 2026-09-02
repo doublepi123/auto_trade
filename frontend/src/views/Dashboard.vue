@@ -773,6 +773,34 @@
         </el-table>
         <p v-else-if="!account.available" class="empty-note">数据不可用</p>
         <p v-else class="empty-note">暂无数据</p>
+
+        <template v-if="account.margin_infos.length > 0">
+          <h4 class="subsection-title">融资与保证金</h4>
+          <el-table :data="account.margin_infos" size="small" class="responsive-table" data-testid="margin-info-table">
+            <el-table-column prop="currency" label="币种" min-width="70" />
+            <el-table-column prop="risk_level" label="风控等级" min-width="100">
+              <template #default="{ row }">
+                <el-tag :type="marginRiskTagType(row.risk_level)" size="small">
+                  {{ row.risk_level }} · {{ marginRiskLevelLabel(row.risk_level) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="margin_call" label="追缴保证金" min-width="120">
+              <template #default="{ row }">
+                <span :class="row.margin_call > 0 ? 'metric-negative' : ''">${{ formatNumber(row.margin_call) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="maintenance_margin" label="维持保证金" min-width="120">
+              <template #default="{ row }">${{ formatNumber(row.maintenance_margin) }}</template>
+            </el-table-column>
+            <el-table-column prop="remaining_finance_amount" label="剩余融资额度" min-width="130">
+              <template #default="{ row }">${{ formatNumber(row.remaining_finance_amount) }}</template>
+            </el-table-column>
+            <el-table-column prop="buy_power" label="购买力" min-width="120">
+              <template #default="{ row }">${{ formatNumber(row.buy_power) }}</template>
+            </el-table-column>
+          </el-table>
+        </template>
       </div>
 
       <div class="detail-panel" v-loading="strategyLoading || statusLoading">
@@ -867,7 +895,7 @@ import { useReconciliationStatus } from '../composables/useReconciliationStatus'
 import { useDiagnosticsSnapshot } from '../composables/useDiagnosticsSnapshot'
 import { startTrading, stopTrading, pauseTrading, resumeTrading, enableProtectiveExits, disableProtectiveExits, activateKillSwitch, disableKillSwitch, getLLMIntervalStatus, getNotifications, getOrders, getTradeEvents, getMetricsSummary, getDatabaseHealth, getCronHealth, getQuoteStreamHealth, type QuoteStreamHealthResult } from '../api'
 import type { CronHealthSnapshot, DatabaseHealthSnapshot, LLMIntervalStatus, NotificationLogOut, OrderRecord, Position, StatisticsQuality, StatusHistoryPoint, TradeEventRecord } from '../types'
-import { engineStateLabel, auditActionLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
+import { engineStateLabel, auditActionLabel, marginRiskLevelLabel, marketLabel, positionSideLabel, skipCategoryLabel, tradeEventTypeLabel } from '../utils/labels'
 import { EVENT_TYPE } from '../utils/constants'
 import { downloadCsv } from '../utils/csv'
 import { relativeAgeLabel } from '../utils/time'
@@ -875,6 +903,14 @@ import { formatBytes, formatCurrency, formatNumber, signedCurrency, signedPercen
 import { resolveErrorMessage } from '../utils/error'
 
 type CypressWindow = Window & { Cypress?: unknown }
+
+function marginRiskTagType(level: number): 'success' | 'warning' | 'danger' | 'info' {
+  if (level >= 3) return 'danger'
+  if (level === 2) return 'warning'
+  if (level === 1) return 'info'
+  return 'success'
+}
+
 const multiSymbols = useMultiSymbolSnapshots()
 const {
   snapshots: multiSymbolSnapshots,

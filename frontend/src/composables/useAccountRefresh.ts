@@ -6,6 +6,7 @@ const defaultAccount: AccountInfo = {
   total_assets: 0,
   cash_balances: [],
   positions: [],
+  margin_infos: [],
   available: true,
   error: null,
 }
