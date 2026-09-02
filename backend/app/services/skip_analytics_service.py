@@ -1,6 +1,6 @@
 """Skip reason analytics service.
 
-Aggregates ORDER_SKIPPED trade events by skip_category (FEE / RISK /
+Aggregates ORDER_SKIPPED trade events by skip_category (FEE / REGIME / RISK /
 PENDING / POSITION / SESSION / COOLDOWN / REPRICING) to show why the
 engine refrained from trading, per symbol and over time.  Read-only.
 
@@ -27,6 +27,7 @@ _SKIP_CATEGORIES = frozenset({
     "FEE",
     "REPRICING",
     "COOLDOWN",
+    "REGIME",
     "RISK",
     "PENDING",
     "POSITION",

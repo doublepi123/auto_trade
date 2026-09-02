@@ -67,6 +67,7 @@ SKIP_CATEGORIES: tuple[str, ...] = (
     "FEE",
     "REPRICING",
     "COOLDOWN",
+    "REGIME",
     "RISK",
     "PENDING",
     "POSITION",

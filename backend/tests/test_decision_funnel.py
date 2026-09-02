@@ -8,6 +8,7 @@ assert each stage increments exactly as the interpretation contract on
 """
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from datetime import date, datetime, timezone
@@ -47,10 +48,10 @@ class _NoopNotifier:
     dedup_suppressed_total = 0
     dedup_window_seconds = 0.0
 
-    def notify_order(self, *args: object) -> bool:
+    def notify_order(self, *_args: object) -> bool:
         return True
 
-    def notify_risk_event(self, *args: object) -> bool:
+    def notify_risk_event(self, *_args: object) -> bool:
         return True
 
 
@@ -128,11 +129,24 @@ class TestDecisionFunnelPipeline:
             "FEE": 0,
             "REPRICING": 0,
             "COOLDOWN": 0,
+            "REGIME": 0,
             "RISK": 0,
             "PENDING": 0,
             "POSITION": 0,
             "SESSION": 0,
         }
+
+    def test_record_skip_regime_is_counted(self) -> None:
+        # Given: a tracker observing one exchange-local trading day.
+        tracker = DecisionFunnelTracker(
+            trade_day_provider=lambda: date(2026, 8, 28)
+        )
+
+        # When: the live entry-policy regime gate blocks an entry.
+        tracker.record_skip("REGIME")
+
+        # Then: diagnostics retain the regime-blocked decision.
+        assert tracker.snapshot().skips_by_category["REGIME"] == 1
 
     def test_risk_skip_increments_risk_category_but_not_triggers(self) -> None:
         # Given: a paused risk controller, so the entry is suppressed before
@@ -214,6 +228,26 @@ class TestDecisionFunnelSessionPersistence:
             assert rows[0].threshold_crossings == 1
             assert rows[0].pre_submit_risk_check_invocations == 0
             assert db.query(DecisionFunnelSessionSummary).count() == 1
+        finally:
+            db.close()
+
+    def test_regime_skip_round_trips_through_session_summary(self) -> None:
+        # Given: a tracker whose completed session has a regime-blocked entry.
+        current_day = [date(2026, 8, 28)]
+        tracker = DecisionFunnelTracker(trade_day_provider=lambda: current_day[0])
+        tracker.record_skip("REGIME")
+        current_day[0] = date(2026, 8, 29)
+
+        # When: the completed session is persisted.
+        closed = tracker.drain_closed_sessions()
+        db = database.SessionLocal()
+        try:
+            persist_session_summary(db, closed[0], symbol="TSLA.US", market="US")
+            db.commit()
+            row = db.query(DecisionFunnelSessionSummary).one()
+
+            # Then: the serialized durable summary retains the regime count.
+            assert json.loads(row.skips_json)["REGIME"] == 1
         finally:
             db.close()
 
