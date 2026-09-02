@@ -13,6 +13,7 @@ from typing import Any, Callable, cast
 from unittest.mock import patch
 
 import pytest
+from sqlalchemy import event
 
 from app import database
 from app import runner as runner_module
@@ -10147,3 +10148,465 @@ def test_force_resume_writes_reconciliation_evidence() -> None:
         assert row.operator == "admin"
         assert row.passed is True
         assert row.drift_summary == "operator verified positions"
+
+
+class TestRuntimeStatePersistence:
+    """The live loop's runtime-state write must open its own transaction.
+
+    SQLite refuses a write that upgrades a read transaction whose snapshot
+    another connection has already superseded, and it fails immediately
+    instead of honouring busy_timeout. The deployed backend logged three
+    ``database is locked`` failures at this exact commit in eight minutes of
+    uptime, each one dropping the live engine + risk safety state.
+    """
+
+    _PRIMARY = "TXNPRIMARY.US"
+    _SECONDARIES = ("TXNSECA.US", "TXNSECB.US")
+    _STALL_EVENT = "RUNTIME_STATE_PERSISTENCE_STALLED"
+    _SUSTAINED_STALL_PASSES = 6
+
+    @pytest.fixture(autouse=True)
+    def _isolate_runtime_rows(self):
+        self._delete_rows()
+        yield
+        self._delete_rows()
+
+    @classmethod
+    def _delete_rows(cls) -> None:
+        from app.models import RuntimeState, RuntimeStateSnapshot, TradeEvent
+
+        symbols = (cls._PRIMARY, *cls._SECONDARIES)
+        with database.SessionLocal() as db:
+            db.query(TradeEvent).filter(
+                TradeEvent.event_type == cls._STALL_EVENT
+            ).delete(synchronize_session=False)
+            db.query(RuntimeStateSnapshot).filter(
+                RuntimeStateSnapshot.symbol.in_(symbols)
+            ).delete(synchronize_session=False)
+            db.query(RuntimeState).filter(
+                RuntimeState.symbol.in_(symbols)
+            ).delete(synchronize_session=False)
+            db.commit()
+
+    @classmethod
+    def _stall_event_count(cls) -> int:
+        from app.models import TradeEvent
+
+        with database.SessionLocal() as db:
+            return (
+                db.query(TradeEvent)
+                .filter(TradeEvent.event_type == cls._STALL_EVENT)
+                .count()
+            )
+
+    def _runner(self) -> AppRunner:
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(
+            symbol=self._PRIMARY,
+            market="US",
+            buy_low=100.0,
+            sell_high=110.0,
+        )
+        runner.engine.last_price = 105.0
+        runtimes = {
+            self._PRIMARY: runner._build_symbol_runtime(
+                self._PRIMARY,
+                "US",
+                primary=True,
+            )
+        }
+        for offset, symbol in enumerate(self._SECONDARIES):
+            runtime = runner._build_symbol_runtime(symbol, "US")
+            runtime.engine.last_price = 50.0 + offset
+            runtimes[symbol] = runtime
+        runner._symbol_runtimes = runtimes
+        return runner
+
+    @staticmethod
+    @contextmanager
+    def _record_runtime_state_sql():
+        """Record every runtime_state statement plus transaction boundaries."""
+        recorded: list[tuple[str, str]] = []
+
+        def _before_cursor_execute(
+            _conn,
+            _cursor,
+            statement: str,
+            parameters,
+            _context,
+            _executemany,
+        ) -> None:
+            normalized = " ".join(statement.upper().split())
+            if "RUNTIME_STATE" not in normalized:
+                return
+            recorded.append((normalized, str(parameters)))
+
+        def _on_commit(_conn) -> None:
+            recorded.append(("COMMIT", ""))
+
+        event.listen(
+            database.engine,
+            "before_cursor_execute",
+            _before_cursor_execute,
+        )
+        event.listen(database.engine, "commit", _on_commit)
+        try:
+            yield recorded
+        finally:
+            event.remove(
+                database.engine,
+                "before_cursor_execute",
+                _before_cursor_execute,
+            )
+            event.remove(database.engine, "commit", _on_commit)
+
+    @staticmethod
+    def _wrote(recorded: list[tuple[str, str]], symbol: str) -> bool:
+        return any(
+            statement.split()[0] in ("UPDATE", "INSERT") and symbol in params
+            for statement, params in recorded
+        )
+
+    def test_runtime_state_write_opens_its_own_transaction(self) -> None:
+        runner = self._runner()
+
+        with self._record_runtime_state_sql() as recorded:
+            runner._persist_runtime_state()
+
+        kinds = [statement.split()[0] for statement, _ in recorded]
+        dml_positions = [
+            index
+            for index, kind in enumerate(kinds)
+            if kind in ("UPDATE", "INSERT")
+        ]
+        assert dml_positions, f"no runtime_state DML was issued: {kinds}"
+        first_dml = dml_positions[0]
+        commits_before = [
+            index
+            for index, kind in enumerate(kinds[:first_dml])
+            if kind == "COMMIT"
+        ]
+        assert commits_before, f"read phase was never committed: {kinds}"
+        assert "SELECT" not in kinds[commits_before[-1] + 1 : first_dml], (
+            f"a read preceded the first write in its transaction: {kinds}"
+        )
+
+    def test_clean_secondary_runtime_rows_are_not_rewritten(self) -> None:
+        runner = self._runner()
+        runner._persist_runtime_state()
+
+        with self._record_runtime_state_sql() as recorded:
+            runner._persist_runtime_state()
+
+        rewritten = [
+            symbol
+            for symbol in self._SECONDARIES
+            if self._wrote(recorded, symbol)
+        ]
+        assert rewritten == []
+
+    def test_primary_runtime_state_persists_every_loop(self) -> None:
+        runner = self._runner()
+        runner._persist_runtime_state()
+
+        with self._record_runtime_state_sql() as recorded:
+            runner._persist_runtime_state()
+
+        assert self._wrote(recorded, self._PRIMARY)
+
+    def test_promoted_primary_is_not_skipped_by_dirty_filter(self) -> None:
+        runner = self._runner()
+        runner._persist_runtime_state()
+        promoted = self._SECONDARIES[0]
+        promoted_engine = runner._symbol_runtimes[promoted].engine
+
+        runner.engine.params = StrategyParams(
+            symbol=promoted,
+            market="US",
+            buy_low=100.0,
+            sell_high=110.0,
+        )
+        runner.engine.state = promoted_engine.state
+        runner.engine.last_price = promoted_engine.last_price
+        runner.engine.last_trigger_price = promoted_engine.last_trigger_price
+        demoted = runner._build_symbol_runtime(self._PRIMARY, "US")
+        demoted.engine.last_price = 105.0
+        runner._symbol_runtimes[self._PRIMARY] = demoted
+        runner._symbol_runtimes[promoted] = runner._build_symbol_runtime(
+            promoted,
+            "US",
+            primary=True,
+        )
+
+        with self._record_runtime_state_sql() as recorded:
+            runner._persist_runtime_state()
+
+        assert self._wrote(recorded, promoted)
+
+    def _arm_promotion(self, runner, monkeypatch, promoted: str):
+        """Return a callable that performs a real primary promotion once."""
+        from app.services.strategy_service import StrategyService
+
+        watchlist_symbols = (self._PRIMARY, *self._SECONDARIES)
+        runner._running = True
+        config = SimpleNamespace(
+            symbol=promoted,
+            market="US",
+            buy_low=40.0,
+            sell_high=60.0,
+            short_selling=False,
+            min_profit_amount=0.0,
+            auto_resume_minutes=3,
+            max_daily_loss=5000.0,
+            max_consecutive_losses=3,
+            fee_rate_us=0.0005,
+            fee_rate_hk=0.003,
+            min_repricing_pct=0.003,
+            llm_action_cooldown_seconds=60,
+            trading_session_mode="RTH_ONLY",
+            margin_safety_factor=0.35,
+        )
+
+        class FakeWatchlistService:
+            def __init__(self, _db) -> None:
+                pass
+
+            def list_items(self):
+                return [
+                    SimpleNamespace(symbol=symbol, market="US")
+                    for symbol in watchlist_symbols
+                ]
+
+        monkeypatch.setattr(StrategyService, "__init__", lambda self, db: None)
+        monkeypatch.setattr(StrategyService, "get_config", lambda _self: config)
+        monkeypatch.setattr(
+            runner_module,
+            "WatchlistService",
+            FakeWatchlistService,
+        )
+        monkeypatch.setattr(
+            runner._state_svc,
+            "load_symbol_runtime",
+            lambda *args: None,
+        )
+        monkeypatch.setattr(runner.broker, "get_positions", lambda: [])
+
+        promotions: list[str] = []
+
+        def promote_once() -> None:
+            if promotions:
+                return
+            promotions.append(promoted)
+            runner.reload_strategy()
+
+        return promotions, promote_once
+
+    def _load_risk_state(self, promoted: str) -> dict[str, tuple]:
+        from app.models import RuntimeState
+
+        with database.SessionLocal() as db:
+            return {
+                row.symbol: (
+                    row.daily_pnl,
+                    row.consecutive_losses,
+                    row.kill_switch,
+                    row.paused,
+                )
+                for row in db.query(RuntimeState)
+                .filter(RuntimeState.symbol.in_((self._PRIMARY, promoted)))
+                .all()
+            }
+
+    @staticmethod
+    def _arm_losing_risk_state(runner) -> None:
+        runner.risk.daily_pnl = -321.0
+        runner.risk.consecutive_losses = 2
+        runner.risk.kill_switch = True
+        runner.risk.pause("operator halted trading")
+
+    def test_primary_promoted_mid_pass_persists_risk_state_on_new_primary(
+        self,
+        monkeypatch,
+    ) -> None:
+        """A promotion landing mid-pass must not strand the risk state.
+
+        Risk is global but stored on the primary's row. If a pass plans the
+        risk fields under the outgoing primary and then writes the incoming
+        one through the risk-less secondary path, a restart reads a clean
+        row for the live symbol and silently drops a real daily loss,
+        consecutive-loss count and kill switch.
+        """
+        promoted = self._SECONDARIES[0]
+        runner = self._runner()
+        self._arm_losing_risk_state(runner)
+        promotions, promote_once = self._arm_promotion(
+            runner,
+            monkeypatch,
+            promoted,
+        )
+
+        plan_symbol = runner._state_svc.plan_symbol
+
+        def promote_during_planning(db, engine, symbol=None, risk=None):
+            promote_once()
+            return plan_symbol(db, engine, symbol, risk)
+
+        monkeypatch.setattr(
+            runner._state_svc,
+            "plan_symbol",
+            promote_during_planning,
+        )
+
+        runner._persist_runtime_state()
+
+        assert promotions == [promoted]
+        assert runner.engine.params.symbol == promoted
+        assert self._load_risk_state(promoted) == {
+            promoted: (-321.0, 2, True, True),
+            self._PRIMARY: (0.0, 0, False, False),
+        }
+
+    def test_primary_promoted_after_revalidation_lands_risk_on_new_primary(
+        self,
+        monkeypatch,
+    ) -> None:
+        """The generation check must also cover the write itself.
+
+        Revalidating and then releasing the lock leaves the whole write
+        window unguarded: a promotion landing there is never detected, the
+        pass reports success so no retry fires, and the risk state stays on
+        the demoted row while the live primary reads zero.
+        """
+        promoted = self._SECONDARIES[0]
+        runner = self._runner()
+        self._arm_losing_risk_state(runner)
+        promotions, promote_once = self._arm_promotion(
+            runner,
+            monkeypatch,
+            promoted,
+        )
+
+        apply_writes = runner._state_svc.apply_writes
+
+        def promote_during_write(db, writes):
+            promote_once()
+            return apply_writes(db, writes)
+
+        monkeypatch.setattr(
+            runner._state_svc,
+            "apply_writes",
+            promote_during_write,
+        )
+
+        runner._persist_runtime_state()
+
+        assert promotions == [promoted]
+        assert runner.engine.params.symbol == promoted
+        assert self._load_risk_state(promoted) == {
+            promoted: (-321.0, 2, True, True),
+            self._PRIMARY: (-321.0, 2, True, True),
+        }
+
+    def test_repeated_persist_stalls_escalate_beyond_a_log_warning(
+        self,
+        monkeypatch,
+    ) -> None:
+        """Persisting nothing while still trading must not stay a log line.
+
+        One stalled pass is an ordinary promotion race that the next pass
+        resolves. Sustained stalls mean the live risk state is no longer
+        reaching the row a restart reads, so they must surface as durable
+        evidence and a dispatched risk event -- once per episode, so a real
+        stall is visible without a notification every five seconds.
+        """
+        runner = self._runner()
+        risk_events: list[str] = []
+        monkeypatch.setattr(
+            runner.notifier,
+            "notify_risk_event",
+            lambda event_type, reason, **_kwargs: risk_events.append(event_type)
+            or True,
+        )
+
+        def stall_passes(count: int) -> None:
+            monkeypatch.setattr(
+                runner,
+                "_persist_runtime_state_attempt",
+                lambda: False,
+            )
+            for _ in range(count):
+                runner._persist_runtime_state()
+
+        stall_passes(1)
+
+        assert risk_events == []
+        assert self._stall_event_count() == 0
+
+        stall_passes(self._SUSTAINED_STALL_PASSES)
+
+        assert risk_events == [self._STALL_EVENT]
+        assert self._stall_event_count() == 1
+
+        monkeypatch.setattr(
+            runner,
+            "_persist_runtime_state_attempt",
+            lambda: True,
+        )
+        runner._persist_runtime_state()
+        stall_passes(self._SUSTAINED_STALL_PASSES)
+
+        assert risk_events == [self._STALL_EVENT, self._STALL_EVENT]
+        assert self._stall_event_count() == 2
+
+    def test_failed_escalation_delivery_is_retried_on_a_later_stall(
+        self,
+        monkeypatch,
+    ) -> None:
+        """A failed delivery must not count as an escalation.
+
+        Latching before the durable record commits lets a single failed
+        write silence every later escalation, leaving a sustained
+        persistence failure quieter than the plain warning it replaced.
+        """
+        runner = self._runner()
+        risk_events: list[str] = []
+        monkeypatch.setattr(
+            runner.notifier,
+            "notify_risk_event",
+            lambda event_type, reason, **_kwargs: risk_events.append(event_type)
+            or True,
+        )
+        monkeypatch.setattr(
+            runner,
+            "_persist_runtime_state_attempt",
+            lambda: False,
+        )
+
+        record_trade_event = runner_module.record_trade_event
+        attempts: list[str] = []
+
+        def failing_first_record(db, **kwargs):
+            attempts.append(kwargs.get("event_type", ""))
+            if len(attempts) == 1:
+                raise RuntimeError("event store unavailable")
+            return record_trade_event(db, **kwargs)
+
+        monkeypatch.setattr(
+            runner_module,
+            "record_trade_event",
+            failing_first_record,
+        )
+
+        raised: list[str] = []
+        for _ in range(self._SUSTAINED_STALL_PASSES):
+            try:
+                runner._persist_runtime_state()
+            except Exception as exc:
+                raised.append(str(exc))
+
+        assert attempts == [self._STALL_EVENT, self._STALL_EVENT]
+        assert risk_events == [self._STALL_EVENT]
+        assert self._stall_event_count() == 1
+        assert raised == []
+
+

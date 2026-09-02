@@ -138,6 +138,9 @@ _POSITION_DRIFT_SIGNATURE_QUANTUM = Decimal("0.000001")
 # Decision funnel: one INFO summary line at most once per hour (emitted from
 # the run loop's housekeeping, never from the quote hot path).
 _DECISION_FUNNEL_SUMMARY_LOG_INTERVAL_SECONDS = 3600.0
+_RUNTIME_STATE_PERSIST_ATTEMPTS = 3
+_RUNTIME_STATE_PERSIST_STALL_ALERT_PASSES = 3
+_RUNTIME_STATE_PERSISTENCE_STALLED_EVENT = "RUNTIME_STATE_PERSISTENCE_STALLED"
 
 _OPERATIONAL_PAUSE_PREFIXES = (
     _ORDER_SUBMISSION_UNCERTAIN_PREFIX,
@@ -289,6 +292,12 @@ class AppRunner:
             terminal_callback_store=OrderTerminalCallbackService(),
         )
         self._state_svc = RuntimeStateService()
+        self._primary_generation = 0
+        self._runtime_state_persist_stalls = 0
+        self._runtime_state_persist_stall_alerted = False
+        self._secondary_state_fingerprints: dict[
+            str, tuple[tuple[str, Any], ...]
+        ] = {}
         self._reconciliation_incident_svc = ReconciliationIncidentService(
             settings.notify_dedup_window_seconds
         )
@@ -2556,6 +2565,7 @@ class AppRunner:
                 previous_quote_symbols = set(self._desired_quote_symbols_locked())
                 if candidate_engine is not None:
                     self.engine = candidate_engine
+                    self._primary_generation += 1
                 else:
                     self.engine.params = new_params
                 self.risk.config = new_risk_config
@@ -5857,21 +5867,7 @@ class AppRunner:
             except Exception:
                 logger.exception("error resubscribing stale quote stream")
             try:
-                with self._db_session() as db:
-                    self._state_svc.stage(db, self.engine, self.risk)
-                    with self._state_lock:
-                        secondary_runtimes = [
-                            runtime
-                            for symbol, runtime in self._symbol_runtimes.items()
-                            if symbol != self.engine.params.symbol
-                        ]
-                    for runtime in secondary_runtimes:
-                        self._state_svc.stage_symbol(
-                            db,
-                            runtime.engine,
-                            runtime.symbol,
-                        )
-                    db.commit()
+                self._persist_runtime_state()
             except Exception:
                 logger.exception("error persisting state")
             try:
@@ -5879,6 +5875,150 @@ class AppRunner:
             except Exception:
                 logger.exception("error in decision funnel housekeeping")
             time.sleep(5)
+
+    def _persist_runtime_state(self) -> None:
+        """Persist runtime state with the write in its own transaction.
+
+        SQLite refuses a write that upgrades a read transaction whose snapshot
+        another connection has already superseded, and it fails immediately
+        instead of honouring busy_timeout. Planning every row first and then
+        committing to end the read phase makes the DML the first statement of
+        a fresh transaction, so it takes the ordinary write lock that waits.
+
+        Risk state is global but lives on the primary symbol's row, so a
+        promotion landing mid-pass would otherwise write it under the outgoing
+        primary and persist the incoming one through the risk-less secondary
+        path. A restart then reads a clean row for the live symbol and drops a
+        real daily loss and kill switch. An attempt that raced a promotion is
+        therefore replanned against the new primary rather than written.
+        """
+        for _ in range(_RUNTIME_STATE_PERSIST_ATTEMPTS):
+            if self._persist_runtime_state_attempt():
+                self._runtime_state_persist_stalls = 0
+                self._runtime_state_persist_stall_alerted = False
+                return
+        self._runtime_state_persist_stalls += 1
+        self._report_runtime_state_persist_stall()
+
+    def _report_runtime_state_persist_stall(self) -> None:
+        """Escalate a persistence stall that outlived an ordinary race.
+
+        One stalled pass is expected around a primary switch: the next pass
+        writes the same state five seconds later. Sustained stalls mean the
+        live risk state -- daily loss, consecutive losses, kill switch -- is
+        no longer reaching the row a restart reads, which is a risk-limit
+        bypass waiting on a crash, so it becomes durable evidence and a
+        dispatched risk event rather than a log line. Trading is deliberately
+        not paused: the in-memory risk controller still enforces every limit
+        and only its durable copy is stale, so pausing on a transient race
+        would be the worse failure. The alert latches on the committed record
+        rather than on the attempt, so a persistent stall does not notify
+        every five seconds while a delivery that fails is retried by the next
+        qualifying stall instead of silencing all of them.
+        """
+        stalls = self._runtime_state_persist_stalls
+        if (
+            stalls < _RUNTIME_STATE_PERSIST_STALL_ALERT_PASSES
+            or self._runtime_state_persist_stall_alerted
+        ):
+            logger.warning(
+                "runtime state not persisted: primary symbol changed on every "
+                "attempt (consecutive passes: %d)",
+                stalls,
+            )
+            return
+        with self._state_lock:
+            symbol = self.engine.params.symbol
+        reason = (
+            f"{_RUNTIME_STATE_PERSISTENCE_STALLED_EVENT}: runtime state has not "
+            f"been persisted for {stalls} consecutive passes; the primary symbol "
+            "changed during every attempt"
+        )
+        logger.error(reason)
+        try:
+            with self._db_session() as db:
+                record_trade_event(
+                    db,
+                    event_type=_RUNTIME_STATE_PERSISTENCE_STALLED_EVENT,
+                    symbol=symbol,
+                    status="ERROR",
+                    message=reason,
+                    payload={"consecutive_passes": stalls},
+                )
+                db.commit()
+        except Exception:
+            logger.exception(
+                "failed to record runtime state persistence stall; the next "
+                "qualifying stall retries the escalation"
+            )
+            return
+        self._runtime_state_persist_stall_alerted = True
+        self.notifier.notify_risk_event(
+            _RUNTIME_STATE_PERSISTENCE_STALLED_EVENT,
+            reason,
+        )
+
+    def _primary_changed_since(self, generation: int) -> bool:
+        with self._state_lock:
+            return self._primary_generation != generation
+
+    def _persist_runtime_state_attempt(self) -> bool:
+        """Plan, then write, one pass; False when a promotion raced the pass.
+
+        The primary symbol, its engine and the secondary ``(symbol, engine)``
+        pairs are captured together under ``_state_lock`` so the risk fields
+        always land on the symbol that was primary for that engine snapshot.
+        The lock is released for the database work: a promotion can only
+        replace ``self.engine`` while holding it, and callers that already
+        hold a write transaction take it too, so keeping it across a commit
+        that waits on the SQLite writer would invert that order.
+
+        The generation is therefore rechecked after the write commits as well
+        as before it. Checking only before leaves the write window itself
+        unguarded, and a promotion landing there would report success -- so no
+        replan would run -- while the risk state sat on the demoted row and
+        the live primary read zero.
+        """
+        with self._db_session() as db:
+            with self._state_lock:
+                generation = self._primary_generation
+                primary_engine = self.engine
+                primary_risk = self.risk
+                primary_symbol = primary_engine.params.symbol
+                secondaries = [
+                    (symbol, runtime.engine)
+                    for symbol, runtime in self._symbol_runtimes.items()
+                    if symbol != primary_symbol
+                ]
+            writes = [self._state_svc.plan(db, primary_engine, primary_risk)]
+            unchanged: dict[str, tuple[tuple[str, Any], ...]] = {}
+            staged: dict[str, tuple[tuple[str, Any], ...]] = {}
+            for symbol, engine in secondaries:
+                write = self._state_svc.plan_symbol(db, engine, symbol)
+                fingerprint = tuple(
+                    (column, value)
+                    for column, value in sorted(write.values.items())
+                    if column != "updated_at"
+                )
+                if (
+                    write.row_exists
+                    and write.snapshot is None
+                    and self._secondary_state_fingerprints.get(symbol)
+                    == fingerprint
+                ):
+                    unchanged[symbol] = fingerprint
+                    continue
+                staged[symbol] = fingerprint
+                writes.append(write)
+            db.commit()
+            if self._primary_changed_since(generation):
+                return False
+            self._state_svc.apply_writes(db, writes)
+            db.commit()
+            if self._primary_changed_since(generation):
+                return False
+            self._secondary_state_fingerprints = unchanged | staged
+            return True
 
     def _decision_funnel_housekeeping(self) -> None:
         """Run-loop maintenance for the decision funnel (every ~5s).

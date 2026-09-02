@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import math
 import time as time_mod
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -15,6 +17,23 @@ logger = logging.getLogger("auto_trade.runtime_state")
 
 _PRICE_SNAPSHOT_INTERVAL = timedelta(minutes=1)
 _SNAPSHOT_FLOAT_TOLERANCE = 1e-9
+
+
+@dataclass(frozen=True)
+class RuntimeStateWrite:
+    """One planned ``runtime_state`` change, ready to issue as pure DML.
+
+    Planning is separated from writing so a caller can end its read phase
+    before the first write statement. Everything the write needs is captured
+    here as plain data, so applying it touches no ORM row that the
+    read-ending commit expired.
+    """
+
+    symbol: str
+    values: dict[str, Any]
+    row_exists: bool
+    snapshot: Any | None
+
 
 
 def hard_ceiling_float(value: object, hard_value: float) -> float:
@@ -143,33 +162,50 @@ class RuntimeStateService:
 
     def stage(self, db: Any, engine: StrategyEngine, risk: RiskController) -> None:
         """Stage runtime state and its history snapshot without committing."""
+        row, write = self._plan_primary(db, engine, risk)
+        self._stage_write(db, row, write)
+
+    def plan(
+        self,
+        db: Any,
+        engine: StrategyEngine,
+        risk: RiskController,
+    ) -> RuntimeStateWrite:
+        """Decide the primary runtime write without staging it."""
+        return self._plan_primary(db, engine, risk)[1]
+
+    def _plan_primary(
+        self,
+        db: Any,
+        engine: StrategyEngine,
+        risk: RiskController,
+    ) -> tuple[Any | None, RuntimeStateWrite]:
         from app.models import RuntimeState, RuntimeStateSnapshot
 
         primary_symbol = (engine.params.symbol or "").strip().upper()
-        runtime_state = db.query(RuntimeState).filter(
+        row = db.query(RuntimeState).filter(
             RuntimeState.symbol == primary_symbol
         ).first()
-        if runtime_state is None:
-            runtime_state = RuntimeState(symbol=primary_symbol)
-        runtime_state.engine_state = engine.state.value
-        runtime_state.last_price = engine.last_price
-        runtime_state.daily_pnl = risk.daily_pnl
-        runtime_state.daily_pnl_date = risk.daily_pnl_date
-        runtime_state.consecutive_losses = risk.consecutive_losses
-        runtime_state.cumulative_realized_pnl = risk.cumulative_realized_pnl
-        runtime_state.peak_realized_pnl = risk.peak_realized_pnl
-        runtime_state.kill_switch = risk.kill_switch
-        runtime_state.paused = risk.paused
-        runtime_state.pause_reason = risk.pause_reason
-        runtime_state.paused_at = risk.paused_at
-        runtime_state.pause_auto_resumable = risk.pause_auto_resumable
-        runtime_state.last_trigger_price = engine.last_trigger_price
-        runtime_state.last_trigger_at = engine.last_trigger_at
-        runtime_state.long_entry_rearm_required = engine.long_entry_rearm_required
         captured_at = datetime.now(timezone.utc)
-        runtime_state.updated_at = captured_at
-        db.add(runtime_state)
-        self._stage_snapshot_if_needed(
+        values: dict[str, Any] = {
+            "engine_state": engine.state.value,
+            "last_price": engine.last_price,
+            "daily_pnl": risk.daily_pnl,
+            "daily_pnl_date": risk.daily_pnl_date,
+            "consecutive_losses": risk.consecutive_losses,
+            "cumulative_realized_pnl": risk.cumulative_realized_pnl,
+            "peak_realized_pnl": risk.peak_realized_pnl,
+            "kill_switch": risk.kill_switch,
+            "paused": risk.paused,
+            "pause_reason": risk.pause_reason,
+            "paused_at": risk.paused_at,
+            "pause_auto_resumable": risk.pause_auto_resumable,
+            "last_trigger_price": engine.last_trigger_price,
+            "last_trigger_at": engine.last_trigger_at,
+            "long_entry_rearm_required": engine.long_entry_rearm_required,
+            "updated_at": captured_at,
+        }
+        snapshot = self._snapshot_if_needed(
             db,
             RuntimeStateSnapshot(
                 symbol=primary_symbol,
@@ -180,10 +216,16 @@ class RuntimeStateService:
                 consecutive_losses=risk.consecutive_losses,
                 last_price=engine.last_price,
                 last_trigger_price=engine.last_trigger_price,
-                execution_state=runtime_state.execution_state or "IDLE",
-                reduction_reason=runtime_state.reduction_reason or "",
+                execution_state=getattr(row, "execution_state", "") or "IDLE",
+                reduction_reason=getattr(row, "reduction_reason", "") or "",
                 created_at=captured_at,
             ),
+        )
+        return row, RuntimeStateWrite(
+            symbol=primary_symbol,
+            values=values,
+            row_exists=row is not None,
+            snapshot=snapshot,
         )
 
     def persist_risk(self, db: Any, risk: RiskController, *, symbol: str = "") -> None:
@@ -235,27 +277,44 @@ class RuntimeStateService:
         risk: RiskController | None = None,
     ) -> None:
         """Stage one secondary runtime for a caller-managed transaction."""
+        row, write = self._plan_symbol(db, engine, symbol, risk)
+        self._stage_write(db, row, write)
+
+    def plan_symbol(
+        self,
+        db: Any,
+        engine: StrategyEngine,
+        symbol: str | None = None,
+        risk: RiskController | None = None,
+    ) -> RuntimeStateWrite:
+        """Decide one secondary runtime's write without staging it."""
+        return self._plan_symbol(db, engine, symbol, risk)[1]
+
+    def _plan_symbol(
+        self,
+        db: Any,
+        engine: StrategyEngine,
+        symbol: str | None,
+        risk: RiskController | None,
+    ) -> tuple[Any | None, RuntimeStateWrite]:
         from app.models import RuntimeState, RuntimeStateSnapshot
 
         runtime_symbol = (symbol if symbol is not None else engine.params.symbol or "").strip().upper()
-        runtime_state = db.query(RuntimeState).filter(
+        row = db.query(RuntimeState).filter(
             RuntimeState.symbol == runtime_symbol
         ).first()
-        if runtime_state is None:
-            runtime_state = RuntimeState(symbol=runtime_symbol)
         captured_at = datetime.now(timezone.utc)
-        runtime_state.engine_state = engine.state.value
-        runtime_state.last_price = engine.last_price
-        runtime_state.last_trigger_price = engine.last_trigger_price
-        runtime_state.last_trigger_at = engine.last_trigger_at
-        runtime_state.long_entry_rearm_required = (
-            engine.long_entry_rearm_required
-        )
-        runtime_state.updated_at = captured_at
-        db.add(runtime_state)
+        values: dict[str, Any] = {
+            "engine_state": engine.state.value,
+            "last_price": engine.last_price,
+            "last_trigger_price": engine.last_trigger_price,
+            "last_trigger_at": engine.last_trigger_at,
+            "long_entry_rearm_required": engine.long_entry_rearm_required,
+            "updated_at": captured_at,
+        }
 
         snapshot_risk = risk or RiskController()
-        self._stage_snapshot_if_needed(
+        snapshot = self._snapshot_if_needed(
             db,
             RuntimeStateSnapshot(
                 symbol=runtime_symbol,
@@ -266,16 +325,64 @@ class RuntimeStateService:
                 consecutive_losses=snapshot_risk.consecutive_losses,
                 last_price=engine.last_price,
                 last_trigger_price=engine.last_trigger_price,
-                execution_state=(
-                    getattr(runtime_state, "execution_state", "IDLE")
-                    or "IDLE"
-                ),
-                reduction_reason=(
-                    getattr(runtime_state, "reduction_reason", "") or ""
-                ),
+                execution_state=getattr(row, "execution_state", "") or "IDLE",
+                reduction_reason=getattr(row, "reduction_reason", "") or "",
                 created_at=captured_at,
             ),
         )
+        return row, RuntimeStateWrite(
+            symbol=runtime_symbol,
+            values=values,
+            row_exists=row is not None,
+            snapshot=snapshot,
+        )
+
+    @staticmethod
+    def _stage_write(
+        db: Any,
+        row: Any | None,
+        write: RuntimeStateWrite,
+    ) -> None:
+        from app.models import RuntimeState
+
+        target = row if row is not None else RuntimeState(symbol=write.symbol)
+        for column, value in write.values.items():
+            setattr(target, column, value)
+        db.add(target)
+        if write.snapshot is not None:
+            db.add(write.snapshot)
+
+    @staticmethod
+    def apply_writes(db: Any, writes: Sequence[RuntimeStateWrite]) -> None:
+        """Issue planned writes as the first statements of a transaction.
+
+        Every statement here is DML. SQLite rejects a write that upgrades a
+        transaction whose read snapshot another connection has already
+        superseded, and it returns immediately instead of honouring
+        busy_timeout; the caller ends its read phase first so this takes an
+        ordinary write lock, which does wait.
+        """
+        from sqlalchemy import insert, update
+
+        from app.models import RuntimeState
+
+        for write in writes:
+            if write.row_exists:
+                db.execute(
+                    update(RuntimeState)
+                    .where(RuntimeState.symbol == write.symbol)
+                    .values(**write.values)
+                    .execution_options(synchronize_session=False)
+                )
+            else:
+                db.execute(
+                    insert(RuntimeState).values(
+                        symbol=write.symbol,
+                        **write.values,
+                    )
+                )
+            if write.snapshot is not None:
+                db.add(write.snapshot)
 
     def record_snapshot(self, db: Any, engine: StrategyEngine, risk: RiskController, *, symbol: str = "") -> None:
         from app.models import RuntimeStateSnapshot
@@ -335,6 +442,18 @@ class RuntimeStateService:
         db: Any,
         candidate: Any,
     ) -> bool:
+        snapshot = cls._snapshot_if_needed(db, candidate)
+        if snapshot is None:
+            return False
+        db.add(snapshot)
+        return True
+
+    @classmethod
+    def _snapshot_if_needed(
+        cls,
+        db: Any,
+        candidate: Any,
+    ) -> Any | None:
         """Keep state transitions immediately and coalesce quote-only churn."""
         from app.models import RuntimeStateSnapshot
 
@@ -345,9 +464,8 @@ class RuntimeStateService:
             .first()
         )
         if not cls._should_record_snapshot(latest, candidate):
-            return False
-        db.add(candidate)
-        return True
+            return None
+        return candidate
 
     @classmethod
     def _should_record_snapshot(
