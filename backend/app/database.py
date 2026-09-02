@@ -1380,6 +1380,7 @@ def _ensure_decision_funnel_session_summaries_table(db_engine: Engine) -> None:
     """
     inspector = inspect(db_engine)
     if "decision_funnel_session_summaries" in inspector.get_table_names():
+        _ensure_decision_funnel_suppression_columns(db_engine)
         return
     with db_engine.begin() as connection:
         connection.exec_driver_sql(
@@ -1389,6 +1390,10 @@ def _ensure_decision_funnel_session_summaries_table(db_engine: Engine) -> None:
                 session_date DATE NOT NULL,
                 symbol VARCHAR(50) NOT NULL DEFAULT '',
                 market VARCHAR(10) NOT NULL DEFAULT '',
+                primary_quotes_seen INTEGER NOT NULL DEFAULT 0,
+                quality_rejections INTEGER NOT NULL DEFAULT 0,
+                quality_rejections_json TEXT NOT NULL DEFAULT '{}',
+                entry_crossing_blocks INTEGER NOT NULL DEFAULT 0,
                 fresh_primary_quote INTEGER NOT NULL DEFAULT 0,
                 evaluations INTEGER NOT NULL DEFAULT 0,
                 threshold_crossings INTEGER NOT NULL DEFAULT 0,
@@ -1409,6 +1414,35 @@ def _ensure_decision_funnel_session_summaries_table(db_engine: Engine) -> None:
             "uq_decision_funnel_session_summaries_session_symbol "
             "ON decision_funnel_session_summaries (session_date, symbol)"
         )
+
+
+def _ensure_decision_funnel_suppression_columns(db_engine: Engine) -> None:
+    """Backfill the suppression counters onto an existing summaries table.
+
+    A deployment created before these counters existed keeps its rows; the new
+    columns default to 0/{} so historical sessions read as "not measured"
+    rather than "measured zero".
+    """
+    inspector = inspect(db_engine)
+    if "decision_funnel_session_summaries" not in inspector.get_table_names():
+        return
+    columns = {
+        column["name"]
+        for column in inspector.get_columns("decision_funnel_session_summaries")
+    }
+    missing = {
+        "primary_quotes_seen": "INTEGER NOT NULL DEFAULT 0",
+        "quality_rejections": "INTEGER NOT NULL DEFAULT 0",
+        "quality_rejections_json": "TEXT NOT NULL DEFAULT '{}'",
+        "entry_crossing_blocks": "INTEGER NOT NULL DEFAULT 0",
+    }
+    with db_engine.begin() as connection:
+        for name, column_type in missing.items():
+            if name not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE decision_funnel_session_summaries "
+                    f"ADD COLUMN {name} {column_type}"
+                )
 
 
 def _ensure_platform_backtest_runs_table(db_engine: Engine) -> None:

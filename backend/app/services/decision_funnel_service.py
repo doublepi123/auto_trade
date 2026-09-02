@@ -24,11 +24,15 @@ to remain 0 until a later task introduces a mandatory pre-submit risk
 boundary and wires this as its live probe.
 
 Interpretation contract (read the counters in order, first zero indicts):
-- ``fresh_primary_quote == 0`` → the quote/watchdog layer is at fault.
-- quotes flow but ``evaluations == 0`` → the loop is not running (stopped,
-  trigger stuck in flight, or the quote quality gate rejects everything).
+- ``primary_quotes_seen == 0`` → no quote reached the primary path at all.
+- quotes arrive but ``evaluations == 0`` and ``quality_rejections == 0`` →
+  the loop is not running (stopped or a trigger stuck in flight).
+- ``quality_rejections`` dominates → the live quality gate is refusing the
+  feed; ``quality_rejections_by_reason`` names the failing predicate.
 - evaluations flow but ``threshold_crossings == 0`` → the configured interval
   is stale or genuinely never touched.
+- crossings occur but ``entry_crossing_blocks`` matches them → entries were
+  withheld for want of fresh crossing evidence, not for want of a signal.
 - crossings occur but skips dominate → the indicted stage is the dominant
   skip category.
 - triggers fire but ``sized_quantity_positive == 0`` → sizing/capital (see
@@ -49,7 +53,7 @@ import json
 import logging
 import threading
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 
@@ -70,14 +74,26 @@ SKIP_CATEGORIES: tuple[str, ...] = (
 )
 
 
+QUALITY_PREDICATES: tuple[str, ...] = (
+    "price_positive",
+    "spread_reasonable",
+    "last_bbo_consistent",
+    "source_timestamp_fresh",
+)
+
+
 @dataclass(frozen=True)
 class DecisionFunnelSnapshot:
     """Immutable projection of one session's funnel counters."""
 
     session_date: str
+    primary_quotes_seen: int = 0
+    quality_rejections: int = 0
+    quality_rejections_by_reason: dict[str, int] = field(default_factory=dict)
     fresh_primary_quote: int = 0
     evaluations: int = 0
     threshold_crossings: int = 0
+    entry_crossing_blocks: int = 0
     skips_by_category: dict[str, int] = field(default_factory=dict)
     triggers: int = 0
     sized_quantity_positive: int = 0
@@ -111,13 +127,19 @@ class DecisionFunnelTracker:
         self._skips_by_category: dict[str, int] = {
             category: 0 for category in SKIP_CATEGORIES
         }
+        self._quality_rejections_by_reason: dict[str, int] = {
+            predicate: 0 for predicate in QUALITY_PREDICATES
+        }
 
     @staticmethod
     def _zero_counts() -> dict[str, int]:
         return {
+            "primary_quotes_seen": 0,
+            "quality_rejections": 0,
             "fresh_primary_quote": 0,
             "evaluations": 0,
             "threshold_crossings": 0,
+            "entry_crossing_blocks": 0,
             "triggers": 0,
             "sized_quantity_positive": 0,
             "submit_attempts": 0,
@@ -138,6 +160,28 @@ class DecisionFunnelTracker:
 
     def record_fresh_primary_quote(self) -> None:
         self._increment("fresh_primary_quote")
+
+    def record_primary_quote_seen(self) -> None:
+        self._increment("primary_quotes_seen")
+
+    def record_entry_crossing_block(self) -> None:
+        self._increment("entry_crossing_blocks")
+
+    def record_quality_rejection(self, failed_predicates: Sequence[str]) -> None:
+        """Count one quote the live quality gate refused, and why.
+
+        A rejected quote never reaches ``evaluations``, so without this the
+        gate is indistinguishable from a stopped loop.
+        """
+        try:
+            with self._lock:
+                self._maybe_rollover_locked()
+                self._counts["quality_rejections"] += 1
+                for predicate in failed_predicates:
+                    if predicate in self._quality_rejections_by_reason:
+                        self._quality_rejections_by_reason[predicate] += 1
+        except Exception:
+            logger.debug("decision-funnel record failed", exc_info=True)
 
     def record_evaluation(self) -> None:
         self._increment("evaluations")
@@ -199,6 +243,9 @@ class DecisionFunnelTracker:
     def _reset_counters_locked(self) -> None:
         self._counts = self._zero_counts()
         self._skips_by_category = {category: 0 for category in SKIP_CATEGORIES}
+        self._quality_rejections_by_reason = {
+            predicate: 0 for predicate in QUALITY_PREDICATES
+        }
 
     def _snapshot_locked(self) -> DecisionFunnelSnapshot:
         return DecisionFunnelSnapshot(
@@ -206,6 +253,7 @@ class DecisionFunnelTracker:
                 self._session_day.isoformat() if self._session_day else ""
             ),
             skips_by_category=dict(self._skips_by_category),
+            quality_rejections_by_reason=dict(self._quality_rejections_by_reason),
             **self._counts,
         )
 
@@ -224,6 +272,9 @@ class DecisionFunnelTracker:
             return DecisionFunnelSnapshot(
                 session_date="",
                 skips_by_category={category: 0 for category in SKIP_CATEGORIES},
+                quality_rejections_by_reason={
+                    predicate: 0 for predicate in QUALITY_PREDICATES
+                },
             )
 
     def drain_closed_sessions(self) -> list[DecisionFunnelSnapshot]:
@@ -275,6 +326,12 @@ def persist_session_summary(
         )
         db.add(row)
     row.market = market
+    row.primary_quotes_seen = snapshot.primary_quotes_seen
+    row.quality_rejections = snapshot.quality_rejections
+    row.quality_rejections_json = json.dumps(
+        snapshot.quality_rejections_by_reason, sort_keys=True
+    )
+    row.entry_crossing_blocks = snapshot.entry_crossing_blocks
     row.fresh_primary_quote = snapshot.fresh_primary_quote
     row.evaluations = snapshot.evaluations
     row.threshold_crossings = snapshot.threshold_crossings

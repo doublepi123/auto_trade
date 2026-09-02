@@ -476,6 +476,34 @@
           </div>
         </div>
 
+        <div class="live-safety" data-testid="dashboard-decision-funnel">
+          <h5>决策漏斗（{{ diagnostics.decision_funnel.session_date || '本交易日' }}）</h5>
+          <el-descriptions :column="isMobile ? 1 : 4" border size="small">
+            <el-descriptions-item label="主标的报价">{{ diagnostics.decision_funnel.primary_quotes_seen }}</el-descriptions-item>
+            <el-descriptions-item label="质量门拒绝">
+              <span :class="diagnostics.decision_funnel.quality_rejections > 0 ? 'metric-negative' : ''">
+                {{ diagnostics.decision_funnel.quality_rejections }}
+              </span>
+            </el-descriptions-item>
+            <el-descriptions-item label="已评估">{{ diagnostics.decision_funnel.evaluations }}</el-descriptions-item>
+            <el-descriptions-item label="触及阈值">{{ diagnostics.decision_funnel.threshold_crossings }}</el-descriptions-item>
+            <el-descriptions-item label="等待新鲜触线">
+              <span :class="diagnostics.decision_funnel.entry_crossing_blocks > 0 ? 'metric-negative' : ''">
+                {{ diagnostics.decision_funnel.entry_crossing_blocks }}
+              </span>
+            </el-descriptions-item>
+            <el-descriptions-item label="触发">{{ diagnostics.decision_funnel.triggers }}</el-descriptions-item>
+            <el-descriptions-item label="提交 / 回执">
+              {{ diagnostics.decision_funnel.submit_attempts }} / {{ diagnostics.decision_funnel.broker_acks }}
+            </el-descriptions-item>
+            <el-descriptions-item label="已入库">{{ diagnostics.decision_funnel.persisted }}</el-descriptions-item>
+          </el-descriptions>
+          <div v-if="qualityRejectionReasons.length > 0" class="field-hint" data-testid="funnel-quality-reasons">
+            质量门拒绝原因：{{ qualityRejectionReasons.map(([k, v]) => `${qualityPredicateLabel(k)} ${v}`).join(' · ') }}
+          </div>
+          <div v-if="funnelVerdict" class="field-hint" data-testid="funnel-verdict">{{ funnelVerdict }}</div>
+        </div>
+
         <div class="live-safety" data-testid="dashboard-live-safety">
           <h5>实时安全参数</h5>
           <el-descriptions :column="isMobile ? 1 : 3" border size="small">
@@ -910,6 +938,39 @@ function marginRiskTagType(level: number): 'success' | 'warning' | 'danger' | 'i
   if (level === 1) return 'info'
   return 'success'
 }
+
+function qualityPredicateLabel(key: string): string {
+  switch (key) {
+    case 'price_positive':
+      return '价格非正'
+    case 'spread_reasonable':
+      return '价差异常'
+    case 'last_bbo_consistent':
+      return '买卖盘不一致'
+    case 'source_timestamp_fresh':
+      return '行情过期'
+    default:
+      return key
+  }
+}
+
+const qualityRejectionReasons = computed<[string, number][]>(() => {
+  const byReason = diagnostics.value?.decision_funnel?.quality_rejections_by_reason
+  if (!byReason) return []
+  return Object.entries(byReason).filter(([, count]) => count > 0)
+})
+
+const funnelVerdict = computed(() => {
+  const f = diagnostics.value?.decision_funnel
+  if (!f) return ''
+  if (f.primary_quotes_seen === 0) return '主标的没有任何报价到达，检查行情订阅。'
+  if (f.evaluations === 0 && f.quality_rejections === 0) return '报价已到达但未进入评估，交易循环可能未运行。'
+  if (f.quality_rejections > 0 && f.evaluations === 0) return '报价全部被质量门拒绝，见下方原因。'
+  if (f.threshold_crossings === 0) return '报价正常评估，但价格从未触及入场阈值。'
+  if (f.entry_crossing_blocks >= f.threshold_crossings) return '价格触及阈值但缺少新鲜触线证据，入场被推迟。'
+  if (f.triggers === 0) return '价格触及阈值但未形成触发，见跳过原因分类。'
+  return ''
+})
 
 const multiSymbols = useMultiSymbolSnapshots()
 const {

@@ -2618,6 +2618,12 @@ class AppRunner:
             self._remember_quote(quote)
             runtime = self._symbol_runtimes.get(quote.symbol)
             is_primary_symbol = quote.symbol == self.engine.params.symbol
+            if is_primary_symbol:
+                # Denominator for every later primary-path counter. Counted
+                # before any gate so "loop not running" (nothing else moves)
+                # stays distinguishable from "quality gate rejects everything"
+                # (quality_rejections moves instead).
+                self.decision_funnel.record_primary_quote_seen()
             # Observer-only: record push-stream quotes only (not active
             # polling refresh) for the primary symbol, so a polling refresh
             # cannot mask a silent push stream. Constant-time, non-blocking,
@@ -2674,6 +2680,17 @@ class AppRunner:
                 or not quote_quality["last_bbo_consistent"]
                 or not quote_quality["source_timestamp_fresh"]
             ):
+                if is_primary_symbol:
+                    self.decision_funnel.record_quality_rejection([
+                        predicate
+                        for predicate in (
+                            "price_positive",
+                            "spread_reasonable",
+                            "last_bbo_consistent",
+                            "source_timestamp_fresh",
+                        )
+                        if not quote_quality[predicate]
+                    ])
                 self._last_action_message = (
                     f"{quote.symbol} quote rejected by live quality gate"
                 )
@@ -2799,6 +2816,8 @@ class AppRunner:
                         else None
                     )
                     if crossing_block is not None:
+                        if is_primary_symbol:
+                            self.decision_funnel.record_entry_crossing_block()
                         active_engine.record_price(quote.last_price)
                         self._last_action_message = (
                             f"{prospective_entry_action} waiting: "

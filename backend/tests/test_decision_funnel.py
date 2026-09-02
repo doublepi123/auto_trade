@@ -216,3 +216,65 @@ class TestDecisionFunnelSessionPersistence:
             assert db.query(DecisionFunnelSessionSummary).count() == 1
         finally:
             db.close()
+
+
+class TestDecisionFunnelSuppressionVisibility:
+    """The funnel must explain a zero-order session, not just report zero.
+
+    Two suppressions were previously invisible: a quote the live quality gate
+    rejects never reaches any counter, and a crossing blocked by the fresh-
+    crossing evidence gate is counted as a crossing and then vanishes. Both
+    render as "crossings 0/N, every skip 0", which is exactly the reading that
+    made a stalled session look like an idle one.
+    """
+
+    def _stale_quote(self, symbol: str, price: float) -> Quote:
+        return Quote(symbol, price, price - 0.01, price + 0.01, "2020-01-01T00:00:00+00:00")
+
+    def test_quality_gate_rejection_is_counted_with_its_reason(self) -> None:
+        runner = _runner()
+        runner._on_quote(self._stale_quote("NVDA.US", 105.0))
+
+        snapshot = runner.decision_funnel.snapshot()
+        assert snapshot.primary_quotes_seen == 1
+        assert snapshot.evaluations == 0
+        assert snapshot.quality_rejections == 1
+        assert snapshot.quality_rejections_by_reason["source_timestamp_fresh"] == 1
+
+    def test_healthy_quote_records_no_rejection(self) -> None:
+        runner = _runner()
+        runner._on_quote(_quote("NVDA.US", 105.0))
+
+        snapshot = runner.decision_funnel.snapshot()
+        assert snapshot.primary_quotes_seen == 1
+        assert snapshot.evaluations == 1
+        assert snapshot.quality_rejections == 0
+        assert all(v == 0 for v in snapshot.quality_rejections_by_reason.values())
+
+    def test_entry_crossing_block_is_counted(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            runner_module.settings, "live_entry_crossing_required", True
+        )
+        runner = _runner()
+        # A first quote already below buy_low gives the crossing gate no
+        # outside-the-zone predecessor, so it withholds the entry.
+        runner._on_quote(_quote("NVDA.US", 99.5))
+
+        snapshot = runner.decision_funnel.snapshot()
+        assert snapshot.threshold_crossings == 1
+        assert snapshot.triggers == 0
+        assert snapshot.entry_crossing_blocks == 1
+
+    def test_diagnostics_exposes_the_new_counters(self) -> None:
+        runner = _runner()
+        runner._on_quote(self._stale_quote("NVDA.US", 105.0))
+
+        payload = runner.diagnostics()
+        funnel = payload["decision_funnel"]
+        assert funnel["primary_quotes_seen"] == 1
+        assert funnel["quality_rejections"] == 1
+        assert funnel["quality_rejections_by_reason"]["source_timestamp_fresh"] == 1
+        parsed = DiagnosticsResponse.model_validate(payload)
+        assert parsed.decision_funnel.quality_rejections == 1

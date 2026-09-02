@@ -180,9 +180,13 @@ export interface DiagnosticLiveSafety {
 
 export interface DecisionFunnelDiagnostics {
   session_date: string
+  primary_quotes_seen: number
+  quality_rejections: number
+  quality_rejections_by_reason: Record<string, number>
   fresh_primary_quote: number
   evaluations: number
   threshold_crossings: number
+  entry_crossing_blocks: number
   skips_by_category: Record<string, number>
   triggers: number
   sized_quantity_positive: number

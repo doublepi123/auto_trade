@@ -2362,9 +2362,13 @@ class DecisionFunnelDiagnostics(BaseModel):
     stalling stage (see ``decision_funnel_service`` module docstring)."""
 
     session_date: str = ""
+    primary_quotes_seen: int = 0
+    quality_rejections: int = 0
+    quality_rejections_by_reason: dict[str, int] = Field(default_factory=dict)
     fresh_primary_quote: int = 0
     evaluations: int = 0
     threshold_crossings: int = 0
+    entry_crossing_blocks: int = 0
     skips_by_category: dict[str, int] = Field(default_factory=dict)
     triggers: int = 0
     sized_quantity_positive: int = 0
