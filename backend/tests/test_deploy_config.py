@@ -306,3 +306,32 @@ def test_auto_primary_switch_defaults_to_disabled_in_compose() -> None:
         "AUTO_TRADE_AUTO_PRIMARY_SWITCH_ENABLED="
         "${AUTO_TRADE_AUTO_PRIMARY_SWITCH_ENABLED:-false}"
     ) in compose
+
+
+def test_compose_defaults_do_not_shadow_quant_v6_retention_kill_switch() -> None:
+    """Compose's ``:-`` fallback overrides the Settings default entirely.
+
+    The quant-v6 window must ship closed because the prune targets append-only
+    bindings; a compose fallback of 30 silently re-arms it in every deployment
+    regardless of what ``config.py`` says.
+    """
+    import re
+
+    from app.config import Settings
+
+    expected = Settings.model_fields[
+        "watchlist_quant_v6_artifact_retention_days"
+    ].default
+    assert expected == 0
+
+    for name in ("docker-compose.yaml", "docker-compose.dockerhub.yaml"):
+        text = (ROOT / name).read_text(encoding="utf-8")
+        match = re.search(
+            r"AUTO_TRADE_WATCHLIST_QUANT_V6_ARTIFACT_RETENTION_DAYS="
+            r"\$\{AUTO_TRADE_WATCHLIST_QUANT_V6_ARTIFACT_RETENTION_DAYS:-(\d+)\}",
+            text,
+        )
+        assert match is not None, f"{name} must forward the retention variable"
+        assert int(match.group(1)) == expected, (
+            f"{name} fallback {match.group(1)} shadows the Settings default {expected}"
+        )
