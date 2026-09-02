@@ -20,7 +20,7 @@ from app.core.audit import AuditLogger
 from app.database import SessionLocal, get_db
 from app.models import AuditLog, OrderRecord, TradeEvent
 from app.runner import DrawdownResetBlockedError, get_runner
-from app.schemas import AccountResponse, CashBalanceSchema, ControlRequest, DrawdownResetRequest, DrawdownResetResponse, ForceResumeRequest, ForceResumeResponse, MessageResponse, OrderCancelAllRequest, OrderCancelAllResponse, OrderCancelFailure, OrderCancelResponse, OrderPageResponse, OrderResponse, PositionSchema, TradeEventPageResponse
+from app.schemas import AccountResponse, CashBalanceSchema, ControlRequest, DrawdownResetRequest, DrawdownResetResponse, ForceResumeRequest, ForceResumeResponse, MarginInfoSchema, MessageResponse, OrderCancelAllRequest, OrderCancelAllResponse, OrderCancelFailure, OrderCancelResponse, OrderPageResponse, OrderResponse, PositionSchema, TradeEventPageResponse
 from app.services.event_list_service import list_timeline_events
 from app.services.strategy_service import StrategyService
 from app.services.trade_event_service import decode_event_payload, record_trade_event
@@ -756,11 +756,25 @@ def _fetch_account_response() -> AccountResponse:
             )
             for cb in account.cash_balances
         ]
+        margin_infos = [
+            MarginInfoSchema(
+                currency=mi.currency,
+                risk_level=int(mi.risk_level),
+                margin_call=float(mi.margin_call),
+                init_margin=float(mi.init_margin),
+                maintenance_margin=float(mi.maintenance_margin),
+                max_finance_amount=float(mi.max_finance_amount),
+                remaining_finance_amount=float(mi.remaining_finance_amount),
+                buy_power=float(mi.buy_power),
+            )
+            for mi in getattr(account, "margin_infos", [])
+        ]
     except Exception:
         logging.getLogger("auto_trade.trade").exception("failed to get account balance")
         available = False
         total_assets = 0.0
         cash_balances = []
+        margin_infos = []
 
     try:
         broker_positions = broker.get_positions()
@@ -796,6 +810,7 @@ def _fetch_account_response() -> AccountResponse:
         total_assets=total_assets,
         cash_balances=cash_balances,
         positions=positions,
+        margin_infos=margin_infos,
         available=available,
         error=None if available else "Account data unavailable",
     )
@@ -803,7 +818,7 @@ def _fetch_account_response() -> AccountResponse:
 
 def _unavailable_account_response() -> AccountResponse:
     return AccountResponse(
-        total_assets=0.0, cash_balances=[], positions=[],
+        total_assets=0.0, cash_balances=[], positions=[], margin_infos=[],
         available=False, error="Account data unavailable",
     )
 

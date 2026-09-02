@@ -10,12 +10,12 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from app.core.broker import AccountInfo, BrokerGateway, CashBalance, NetAsset, Position, Quote
+from app.core.broker import AccountInfo, BrokerGateway, CashBalance, MarginInfo, NetAsset, Position, Quote
 from app.database import engine as db_engine, SessionLocal
 from app.main import app
 from app.models import Base
 from app.runner import AppRunner, get_runner
-from app.schemas import AccountResponse, CashBalanceSchema, PositionSchema
+from app.schemas import AccountResponse, CashBalanceSchema, MarginInfoSchema, PositionSchema
 
 Base.metadata.create_all(bind=db_engine)
 
@@ -93,6 +93,73 @@ class TestAccountResponseSchema:
         assert data["total_assets"] == 50000.0
         assert data["cash_balances"][0]["currency"] == "USD"
         assert data["positions"][0]["market_value"] == 1500.0
+
+
+class TestAccountMarginObservability:
+    def test_account_endpoint_exposes_margin_infos(self):
+        runner = get_runner()
+        mock_broker = MagicMock()
+        mock_broker.get_account.return_value = AccountInfo(
+            total_assets=Decimal("685562.51"),
+            cash_balances=[CashBalance(currency="USD", available_cash=Decimal("-16616.98"), frozen_cash=Decimal("269"))],
+            net_assets=[NetAsset(currency="USD", amount=Decimal("685562.51"))],
+            margin_infos=[MarginInfo(
+                currency="USD",
+                risk_level=2,
+                margin_call=Decimal("5000.50"),
+                init_margin=Decimal("12000"),
+                maintenance_margin=Decimal("8000"),
+                max_finance_amount=Decimal("300000"),
+                remaining_finance_amount=Decimal("283383.02"),
+                buy_power=Decimal("279436.45"),
+            )],
+        )
+        mock_broker.get_positions.return_value = []
+        mock_broker.get_quotes.return_value = []
+        runner.broker = mock_broker
+
+        resp = client.get("/api/account")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["margin_infos"]) == 1
+        margin = data["margin_infos"][0]
+        assert margin["currency"] == "USD"
+        assert margin["risk_level"] == 2
+        assert margin["margin_call"] == 5000.50
+        assert margin["init_margin"] == 12000.0
+        assert margin["maintenance_margin"] == 8000.0
+        assert margin["max_finance_amount"] == 300000.0
+        assert margin["remaining_finance_amount"] == 283383.02
+        assert margin["buy_power"] == 279436.45
+
+    def test_account_endpoint_defaults_margin_infos_for_cash_account(self):
+        runner = get_runner()
+        mock_broker = MagicMock()
+        mock_broker.get_account.return_value = AccountInfo(
+            total_assets=Decimal("50000"),
+            cash_balances=[],
+            net_assets=[],
+        )
+        mock_broker.get_positions.return_value = []
+        mock_broker.get_quotes.return_value = []
+        runner.broker = mock_broker
+
+        resp = client.get("/api/account")
+        assert resp.status_code == 200
+        assert resp.json()["margin_infos"] == []
+
+    def test_unavailable_account_response_includes_margin_infos(self):
+        runner = get_runner()
+        mock_broker = MagicMock()
+        mock_broker.get_account.side_effect = RuntimeError("broker down")
+        mock_broker.get_positions.side_effect = RuntimeError("broker down")
+        runner.broker = mock_broker
+
+        resp = client.get("/api/account")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["available"] is False
+        assert data["margin_infos"] == []
 
 
 class TestGetAccountEndpointSuccess:

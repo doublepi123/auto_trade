@@ -18,6 +18,7 @@ from app.core.broker import (
     BrokerCredentials,
     BrokerGateway,
     CashBalance,
+    MarginInfo,
     NetAsset,
     OrderResult,
     OrderStatusResult,
@@ -2728,6 +2729,103 @@ class TestGetAccount:
         assert result.cash_balances[0].available_cash == Decimal("1000")
         assert result.cash_balances[1].currency == "HKD"
         assert result.cash_balances[1].available_cash == Decimal("5000")
+
+    def test_get_account_parses_margin_fields(self) -> None:
+        """A margin account's risk/financing fields must survive the broker boundary.
+
+        Longbridge reports ``margin_call`` as a deficit AMOUNT (0 = healthy) and
+        ``risk_level`` as an int where higher = riskier (0 safe .. 3 danger).
+        """
+        class CashInfo:
+            def __init__(self, currency, available_cash, frozen_cash):
+                self.currency = currency
+                self.available_cash = available_cash
+                self.frozen_cash = frozen_cash
+
+        class BalanceItem:
+            def __init__(self, currency, net_assets, cash_infos):
+                self.currency = currency
+                self.net_assets = net_assets
+                self.cash_infos = cash_infos
+                self.risk_level = 2
+                self.margin_call = "5000.50"
+                self.init_margin = "12000"
+                self.maintenance_margin = "8000"
+                self.max_finance_amount = "300000"
+                self.remaining_finance_amount = "283383.02"
+                self.buy_power = "279436.45"
+
+        class TradeContext:
+            def __init__(self, config):
+                pass
+
+            def account_balance(self):
+                return [BalanceItem("USD", "685562.51", [CashInfo("USD", "-16616.98", "269")])]
+
+        gw = BrokerGateway()
+        gw._trade_ctx = TradeContext(None)
+        gw._quote_ctx = object()
+        result = gw.get_account()
+
+        assert len(result.margin_infos) == 1
+        margin = result.margin_infos[0]
+        assert margin.currency == "USD"
+        assert margin.risk_level == 2
+        assert margin.margin_call == Decimal("5000.50")
+        assert margin.init_margin == Decimal("12000")
+        assert margin.maintenance_margin == Decimal("8000")
+        assert margin.max_finance_amount == Decimal("300000")
+        assert margin.remaining_finance_amount == Decimal("283383.02")
+        assert margin.buy_power == Decimal("279436.45")
+
+    def test_get_account_coerces_string_and_empty_risk_level(self) -> None:
+        """Raw JSON encodes risk_level as a string; empty means "no data" -> 0."""
+        class BalanceItem:
+            def __init__(self, currency, risk_level):
+                self.currency = currency
+                self.net_assets = "1000"
+                self.cash_infos = []
+                self.risk_level = risk_level
+
+        class TradeContext:
+            def __init__(self, config):
+                pass
+
+            def account_balance(self):
+                return [BalanceItem("USD", "3"), BalanceItem("HKD", "")]
+
+        gw = BrokerGateway()
+        gw._trade_ctx = TradeContext(None)
+        gw._quote_ctx = object()
+        result = gw.get_account()
+
+        assert [m.risk_level for m in result.margin_infos] == [3, 0]
+        assert result.margin_infos[0].margin_call == Decimal("0")
+        assert result.margin_infos[0].maintenance_margin == Decimal("0")
+
+    def test_get_account_without_margin_fields_still_parses(self) -> None:
+        """A cash account whose payload lacks every margin attribute stays valid."""
+        class BalanceItem:
+            currency = "USD"
+            net_assets = "50000"
+            cash_infos = []
+
+        class TradeContext:
+            def __init__(self, config):
+                pass
+
+            def account_balance(self):
+                return [BalanceItem()]
+
+        gw = BrokerGateway()
+        gw._trade_ctx = TradeContext(None)
+        gw._quote_ctx = object()
+        result = gw.get_account()
+
+        assert result.total_assets == Decimal("50000")
+        assert len(result.margin_infos) == 1
+        assert result.margin_infos[0].risk_level == 0
+        assert result.margin_infos[0].margin_call == Decimal("0")
 
     def test_get_cash_prefers_requested_currency(self) -> None:
         class CashInfo:

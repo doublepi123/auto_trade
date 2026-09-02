@@ -2740,10 +2740,22 @@ class PositionSchema(BaseModel):
     market_value: float
 
 
+class MarginInfoSchema(BaseModel):
+    currency: str
+    risk_level: int
+    margin_call: float
+    init_margin: float
+    maintenance_margin: float
+    max_finance_amount: float
+    remaining_finance_amount: float
+    buy_power: float
+
+
 class AccountResponse(BaseModel):
     total_assets: float
     cash_balances: list[CashBalanceSchema]
     positions: list[PositionSchema]
+    margin_infos: list[MarginInfoSchema] = []
     available: bool = True
     error: Optional[str] = None
 

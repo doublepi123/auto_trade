@@ -7,7 +7,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation as _DecimalInvalidOp
 from typing import TYPE_CHECKING, Any, Callable, cast
@@ -216,10 +216,31 @@ class NetAsset:
 
 
 @dataclass
+class MarginInfo:
+    """Per-currency financing state.
+
+    ``risk_level`` is Longbridge's 0-3 control level where HIGHER means MORE
+    risk (0 safe, 1 medium, 2 early warning, 3 danger/forced liquidation), and
+    ``margin_call`` is the deficit AMOUNT to deposit rather than a boolean flag,
+    so zero means healthy.
+    """
+
+    currency: str
+    risk_level: int = 0
+    margin_call: Decimal = Decimal("0")
+    init_margin: Decimal = Decimal("0")
+    maintenance_margin: Decimal = Decimal("0")
+    max_finance_amount: Decimal = Decimal("0")
+    remaining_finance_amount: Decimal = Decimal("0")
+    buy_power: Decimal = Decimal("0")
+
+
+@dataclass
 class AccountInfo:
     total_assets: Decimal
     cash_balances: list[CashBalance]
     net_assets: list[NetAsset]
+    margin_infos: list[MarginInfo] = field(default_factory=list)
 
 
 def _get_value(item: Any, key: str, default: Any = None) -> Any:
@@ -697,6 +718,22 @@ def _decimal_attr(item: Any, *names: str) -> Decimal:
             except (ValueError, TypeError, AttributeError, _DecimalInvalidOp):
                 return Decimal("0")
     return Decimal("0")
+
+
+def _risk_level_attr(item: Any) -> int:
+    """Coerce Longbridge's ``risk_level`` to an int.
+
+    The native binding yields an int, but the raw JSON encodes it as a string
+    (``"2"``) and uses ``""`` to mean "not reported", so both must degrade to a
+    safe 0 instead of raising inside the account snapshot path.
+    """
+    value = _get_value(item, "risk_level", None)
+    if value is None or value == "":
+        return 0
+    try:
+        return int(Decimal(str(value)))
+    except (ValueError, TypeError, AttributeError, _DecimalInvalidOp):
+        return 0
 
 
 def _nonnegative_decimal_attr(item: Any, *names: str) -> Decimal:
@@ -1959,6 +1996,7 @@ class BrokerGateway:
                 response = self._trade_ctx.account_balance()
                 cash_balances: list[CashBalance] = []
                 net_assets: list[NetAsset] = []
+                margin_infos: list[MarginInfo] = []
                 total_assets = Decimal("0")
                 items = response if isinstance(response, list) else [response]
                 primary_currency = ""
@@ -1976,6 +2014,17 @@ class BrokerGateway:
                         primary_currency = currency
                         primary_total = net_amount
                     fallback_total += net_amount
+
+                    margin_infos.append(MarginInfo(
+                        currency=currency,
+                        risk_level=_risk_level_attr(item),
+                        margin_call=_decimal_attr(item, "margin_call"),
+                        init_margin=_decimal_attr(item, "init_margin"),
+                        maintenance_margin=_decimal_attr(item, "maintenance_margin"),
+                        max_finance_amount=_decimal_attr(item, "max_finance_amount"),
+                        remaining_finance_amount=_decimal_attr(item, "remaining_finance_amount"),
+                        buy_power=_decimal_attr(item, "buy_power"),
+                    ))
 
                     cash_infos = getattr(item, "cash_infos", None)
                     if cash_infos:
@@ -2003,6 +2052,7 @@ class BrokerGateway:
                     total_assets=total_assets,
                     cash_balances=cash_balances,
                     net_assets=net_assets,
+                    margin_infos=margin_infos,
                 )
         return self._call_with_retry(
             _fetch,
