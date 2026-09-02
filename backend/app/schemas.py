@@ -3321,6 +3321,8 @@ class AlertRuleCreate(BaseModel):
         "consecutive_losses",
         "kill_switch_engaged",
         "interval_stale",
+        "margin_risk_level",
+        "margin_call",
     ]
     threshold: float = Field(allow_inf_nan=False)
     severity: Literal["INFO", "WARNING", "CRITICAL"] = "WARNING"
@@ -3351,6 +3353,18 @@ class AlertRuleCreate(BaseModel):
                 raise ValueError(
                     "interval_stale threshold must be a positive deviation percentage"
                 )
+        if self.rule_type == "margin_risk_level":
+            if (
+                self.threshold < 1
+                or self.threshold > 3
+                or int(self.threshold) != self.threshold
+            ):
+                raise ValueError(
+                    "margin_risk_level threshold must be an integer between 1 and 3"
+                )
+        if self.rule_type == "margin_call":
+            if self.threshold <= 0:
+                raise ValueError("margin_call threshold must be a positive amount")
         return self
 
     @model_validator(mode="after")
@@ -3361,7 +3375,12 @@ class AlertRuleCreate(BaseModel):
         # persisted rule can never silently bind to an unrelated symbol's
         # RuntimeState. The raw value is checked (not the stripped value) so
         # whitespace-only symbols are also rejected.
-        if self.rule_type in ("consecutive_losses", "kill_switch_engaged"):
+        if self.rule_type in (
+            "consecutive_losses",
+            "kill_switch_engaged",
+            "margin_risk_level",
+            "margin_call",
+        ):
             if self.symbol != "":
                 raise ValueError(
                     f"{self.rule_type} is account-wide-only; symbol must be blank"

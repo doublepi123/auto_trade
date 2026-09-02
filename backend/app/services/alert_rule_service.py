@@ -36,6 +36,10 @@ QUOTED_RULES = PRICE_RULES | INTERVAL_RULES
 # the legacy ``symbol == ""`` row). They never bind to a secondary symbol's
 # row and never trigger a broker quote fetch.
 ACCOUNT_RULES = {"consecutive_losses", "kill_switch_engaged"}
+# Account-wide rules sourced from the BROKER's margin/financing snapshot rather
+# than local RuntimeState. They need one ``get_account()`` call per tick, so the
+# fetch is lazy: it only happens when such a rule is enabled.
+BROKER_ACCOUNT_RULES = {"margin_risk_level", "margin_call"}
 # All rule types that read ``RuntimeState`` instead of live broker quotes.
 STATE_RULES = {"daily_loss"} | ACCOUNT_RULES
 
@@ -108,6 +112,11 @@ class AlertRuleService:
         rules = list(self._db.scalars(select(AlertRule).where(AlertRule.enabled.is_(True))))
         symbols = sorted({r.symbol for r in rules if r.rule_type in QUOTED_RULES and r.symbol})
         quote_map = _fetch_quotes(quote_provider, symbols)
+        margin_infos = (
+            _fetch_margin_infos(quote_provider)
+            if any(r.rule_type in BROKER_ACCOUNT_RULES for r in rules)
+            else None
+        )
 
         fired = 0
         skipped_cooldown = 0
@@ -123,7 +132,7 @@ class AlertRuleService:
                 if not _eligible(rule, now):
                     skipped_cooldown += 1
                     continue
-                value = self._current_value(rule, quote_map)
+                value = self._current_value(rule, quote_map, margin_infos)
                 if value is None:
                     continue  # data unavailable (no quote / no state) — skip silently
                 triggered, message = _check(rule, value)
@@ -279,11 +288,22 @@ class AlertRuleService:
             ))
         return out
 
-    def _current_value(self, rule: AlertRule, quote_map: dict[str, float]) -> float | None:
+    def _current_value(
+        self,
+        rule: AlertRule,
+        quote_map: dict[str, float],
+        margin_infos: list[Any] | None = None,
+    ) -> float | None:
         if rule.rule_type in PRICE_RULES:
             return quote_map.get(rule.symbol)
         if rule.rule_type in INTERVAL_RULES:
             return self._interval_deviation_pct(rule, quote_map)
+        if rule.rule_type in BROKER_ACCOUNT_RULES:
+            if not margin_infos:
+                return None
+            if rule.rule_type == "margin_risk_level":
+                return float(max(_margin_risk_level(mi) for mi in margin_infos))
+            return float(max(_margin_call_amount(mi) for mi in margin_infos))
         if rule.rule_type == "daily_loss":
             # daily_loss keeps its pre-c566e76 contract: read the RuntimeState
             # row matching rule.symbol; a blank symbol with no blank row falls
@@ -447,7 +467,52 @@ def _check(rule: AlertRule, value: float) -> tuple[bool, str]:
             f"{rule.symbol} 现价已偏离活动区间 {value:.2f}% ≥ 阈值 "
             f"{rule.threshold:.2f}%，区间可能已失效需人工复核"
         )
+    if rule.rule_type == "margin_risk_level":
+        triggered = int(value) >= int(rule.threshold)
+        label = _RISK_LEVEL_LABELS.get(int(value), "未知")
+        return triggered, (
+            f"账户保证金风控等级 {int(value)}（{label}） ≥ 阈值 {int(rule.threshold)}，"
+            f"融资账户存在强平风险需人工复核"
+        )
+    if rule.rule_type == "margin_call":
+        triggered = value >= rule.threshold
+        return triggered, (
+            f"账户追缴保证金 {value:.2f} ≥ 阈值 {rule.threshold:.2f}，"
+            f"需尽快补足保证金或减仓"
+        )
     return False, ""
+
+
+def _fetch_margin_infos(account_provider: Any) -> list[Any] | None:
+    if account_provider is None:
+        return None
+    try:
+        account = account_provider.get_account()
+    except Exception:
+        # Same rationale as the quote fetch: a silent broker outage would look
+        # identical to a healthy margin account, which is the exact failure this
+        # alert exists to catch.
+        logger.warning("alert-rule margin snapshot fetch failed", exc_info=True)
+        return None
+    margin_infos = getattr(account, "margin_infos", None)
+    return list(margin_infos) if margin_infos else None
+
+
+def _margin_risk_level(margin_info: Any) -> int:
+    try:
+        return int(getattr(margin_info, "risk_level", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _margin_call_amount(margin_info: Any) -> float:
+    try:
+        return float(getattr(margin_info, "margin_call", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+_RISK_LEVEL_LABELS = {0: "安全", 1: "中风险", 2: "预警", 3: "危险"}
 
 
 def _fetch_quotes(quote_provider: Any, symbols: list[str]) -> dict[str, float]:

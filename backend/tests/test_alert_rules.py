@@ -4,6 +4,8 @@ from __future__ import annotations
 import os
 import tempfile
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from types import SimpleNamespace
 
 os.environ["AUTO_TRADE_DATABASE_URL"] = (
     f"sqlite:///{tempfile.gettempdir()}/auto_trade_test_alert_rules_{os.getpid()}.db"
@@ -1179,3 +1181,155 @@ class TestIntervalStaleRule(_Base):
             except ValueError:
                 pass
 
+
+
+class FakeMarginBroker:
+    def __init__(self, margin_infos: list[object], quotes: dict[str, float] | None = None) -> None:
+        self._margin_infos = margin_infos
+        self._quotes = quotes or {}
+        self.get_account_calls = 0
+
+    def get_quotes(self, symbols: list[str]) -> list[FakeQuote]:
+        return [FakeQuote(s, self._quotes[s]) for s in symbols if s in self._quotes]
+
+    def get_account(self):
+        self.get_account_calls += 1
+        return SimpleNamespace(margin_infos=self._margin_infos)
+
+
+class FailingMarginBroker:
+    def get_quotes(self, symbols: list[str]) -> list[FakeQuote]:
+        return []
+
+    def get_account(self):
+        raise RuntimeError("broker unavailable")
+
+
+def _margin(currency: str, risk_level: int = 0, margin_call: float = 0.0) -> SimpleNamespace:
+    return SimpleNamespace(currency=currency, risk_level=risk_level, margin_call=Decimal(str(margin_call)))
+
+
+class TestMarginRiskLevelRule(_Base):
+    def _make_rule(self, threshold: float = 2, cooldown_seconds: int = 0) -> int:
+        svc = AlertRuleService(self._db())
+        out = svc.create(AlertRuleCreate(
+            name="保证金风控等级",
+            symbol="",
+            rule_type="margin_risk_level",
+            threshold=threshold,
+            severity="CRITICAL",
+            cooldown_seconds=cooldown_seconds,
+        ))
+        return out.id
+
+    def test_fires_when_risk_level_reaches_threshold(self) -> None:
+        rid = self._make_rule(threshold=2)
+        notifier = FakeNotifier()
+        broker = FakeMarginBroker([_margin("USD", risk_level=2)])
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(broker, notifier))
+        assert result.fired == 1
+        assert len(notifier.calls) == 1
+        rows = AlertRuleService(self._db()).history(rid)
+        assert rows[0].trigger_value == 2.0
+        assert "风控等级" in rows[0].message
+        assert "预警" in rows[0].message
+
+    def test_uses_worst_risk_level_across_currencies(self) -> None:
+        rid = self._make_rule(threshold=3)
+        notifier = FakeNotifier()
+        broker = FakeMarginBroker([_margin("HKD", risk_level=0), _margin("USD", risk_level=3)])
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(broker, notifier))
+        assert result.fired == 1
+        rows = AlertRuleService(self._db()).history(rid)
+        assert rows[0].trigger_value == 3.0
+        assert "危险" in rows[0].message
+
+    def test_does_not_fire_below_threshold(self) -> None:
+        self._make_rule(threshold=2)
+        notifier = FakeNotifier()
+        broker = FakeMarginBroker([_margin("USD", risk_level=1)])
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(broker, notifier))
+        assert result.fired == 0
+        assert notifier.calls == []
+
+    def test_skips_silently_when_broker_unavailable(self) -> None:
+        self._make_rule(threshold=2)
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(FailingMarginBroker(), notifier))
+        assert result.fired == 0
+        assert notifier.calls == []
+
+    def test_does_not_call_broker_when_no_margin_rule_enabled(self) -> None:
+        svc = AlertRuleService(self._db())
+        svc.create(AlertRuleCreate(
+            name="price", symbol="AAPL.US", rule_type="price_above", threshold=150.0,
+        ))
+        broker = FakeMarginBroker([_margin("USD", risk_level=3)], quotes={"AAPL.US": 100.0})
+        AlertRuleService(self._db()).evaluate(FakeRunner(broker, FakeNotifier()))
+        assert broker.get_account_calls == 0
+
+    def test_fetches_broker_account_once_per_tick(self) -> None:
+        self._make_rule(threshold=1)
+        svc = AlertRuleService(self._db())
+        svc.create(AlertRuleCreate(
+            name="追缴保证金", symbol="", rule_type="margin_call", threshold=1.0,
+        ))
+        broker = FakeMarginBroker([_margin("USD", risk_level=3, margin_call=9000.0)])
+        AlertRuleService(self._db()).evaluate(FakeRunner(broker, FakeNotifier()))
+        assert broker.get_account_calls == 1
+
+
+class TestMarginCallRule(_Base):
+    def _make_rule(self, threshold: float = 1.0) -> int:
+        svc = AlertRuleService(self._db())
+        out = svc.create(AlertRuleCreate(
+            name="追缴保证金", symbol="", rule_type="margin_call",
+            threshold=threshold, severity="CRITICAL", cooldown_seconds=0,
+        ))
+        return out.id
+
+    def test_fires_when_margin_call_amount_reaches_threshold(self) -> None:
+        rid = self._make_rule(threshold=1.0)
+        notifier = FakeNotifier()
+        broker = FakeMarginBroker([_margin("USD", margin_call=5000.50)])
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(broker, notifier))
+        assert result.fired == 1
+        rows = AlertRuleService(self._db()).history(rid)
+        assert rows[0].trigger_value == 5000.50
+        assert "追缴保证金" in rows[0].message
+
+    def test_healthy_zero_margin_call_does_not_fire(self) -> None:
+        self._make_rule(threshold=1.0)
+        notifier = FakeNotifier()
+        broker = FakeMarginBroker([_margin("USD", margin_call=0.0)])
+        result = AlertRuleService(self._db()).evaluate(FakeRunner(broker, notifier))
+        assert result.fired == 0
+        assert notifier.calls == []
+
+
+class TestMarginRuleValidation:
+    def test_margin_rules_are_account_wide_only(self) -> None:
+        for rule_type in ("margin_risk_level", "margin_call"):
+            try:
+                AlertRuleCreate(name="bad", symbol="AAPL.US", rule_type=rule_type, threshold=2.0)
+                raise AssertionError(f"{rule_type} must reject a symbol")
+            except ValueError:
+                pass
+
+    def test_risk_level_threshold_must_be_integer_1_to_3(self) -> None:
+        for bad in (0.0, 4.0, 2.5, -1.0):
+            try:
+                AlertRuleCreate(name="bad", symbol="", rule_type="margin_risk_level", threshold=bad)
+                raise AssertionError(f"threshold {bad} must be rejected")
+            except ValueError:
+                pass
+        for good in (1.0, 2.0, 3.0):
+            AlertRuleCreate(name="ok", symbol="", rule_type="margin_risk_level", threshold=good)
+
+    def test_margin_call_threshold_must_be_positive(self) -> None:
+        for bad in (0.0, -100.0):
+            try:
+                AlertRuleCreate(name="bad", symbol="", rule_type="margin_call", threshold=bad)
+                raise AssertionError(f"threshold {bad} must be rejected")
+            except ValueError:
+                pass
