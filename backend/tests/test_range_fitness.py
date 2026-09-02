@@ -401,3 +401,56 @@ class TestReachLookbackWindow(_Base):
 
         row = self._row("MU.US", min_samples=60, lookback_days=3)
         assert row.closed_trades == 0
+
+
+class TestReferencePriceFreshness(_Base):
+    """The reported close must carry the timestamp of the bar it came from.
+
+    ``last_close_price`` on its own cannot be aged. A consumer that centres a
+    live band on it has no way to tell this session's close from a multi-day-old
+    one, and a band centred on a stale close sits where the market no longer
+    trades.
+    """
+
+    def _priced_bar(
+        self,
+        symbol: str,
+        *,
+        bar_at: datetime,
+        close_price: float,
+    ) -> None:
+        db = self._db()
+        db.add(StrategyV2ShadowDecision(
+            idempotency_key=f"{symbol}-{bar_at.isoformat()}",
+            symbol=symbol,
+            config_version="v1",
+            session_date=bar_at.date(),
+            bar_at=bar_at,
+            action="WAIT",
+            gate_passed=False,
+            gate_reasons_json=OTHER,
+            close_price=close_price,
+        ))
+        db.commit()
+        db.close()
+
+    def test_row_carries_last_bar_at(self) -> None:
+        # Given: an older and a newer priced bar for the same symbol.
+        newest = (
+            datetime.now(timezone.utc).replace(microsecond=0)
+            - timedelta(minutes=5)
+        )
+        self._priced_bar(
+            "TSLA.US",
+            bar_at=newest - timedelta(days=1),
+            close_price=348.02495,
+        )
+        self._priced_bar("TSLA.US", bar_at=newest, close_price=353.30)
+
+        # When: fitness is assessed over a window covering both bars.
+        row = self._row("TSLA.US", min_samples=1)
+
+        # Then: the row reports the newest close with its own timestamp.
+        assert row.last_close_price == 353.30
+        # SQLite drops the offset on tz-aware columns; the instant is UTC.
+        assert row.last_bar_at == newest.replace(tzinfo=None)

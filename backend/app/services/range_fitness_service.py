@@ -50,6 +50,10 @@ class RangeFitnessRow:
     avg_adx_5m: float | None
     verdict: str
     last_close_price: float | None = None
+    # Timestamp of the bar ``last_close_price`` came from. Without it a consumer
+    # cannot age the price it reports, and a close from an earlier session is
+    # indistinguishable from a live one.
+    last_bar_at: datetime | None = None
     # Closed-trade reach evidence. ``None`` when the symbol has no closed shadow
     # trades in the window: absent evidence, not evidence of a zero reach-rate.
     closed_trades: int = 0
@@ -154,6 +158,9 @@ class RangeFitnessService:
                 ),
                 last_close_price=(
                     latest_close[symbol][1] if symbol in latest_close else None
+                ),
+                last_bar_at=(
+                    latest_close[symbol][0] if symbol in latest_close else None
                 ),
                 closed_trades=reach.get(symbol, (0, 0))[0],
                 reach_count=reach.get(symbol, (0, 0))[1],

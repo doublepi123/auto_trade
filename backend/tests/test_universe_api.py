@@ -541,6 +541,7 @@ def test_range_fitness_endpoint_reports_trend_unsuitable_symbol() -> None:
                 "avg_adx_5m",
                 "verdict",
                 "last_close_price",
+                "last_bar_at",
                 "closed_trades",
                 "reach_count",
                 "reach_rate_pct",

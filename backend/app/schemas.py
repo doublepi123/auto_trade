@@ -4550,6 +4550,9 @@ class RangeFitnessItem(BaseModel):
         gt=0,
         allow_inf_nan=False,
     )
+    # Pairs with last_close_price so a reader can age it: a close from an
+    # earlier session is otherwise indistinguishable from a live one.
+    last_bar_at: Optional[datetime] = None
     closed_trades: int = Field(default=0, ge=0)
     reach_count: int = Field(default=0, ge=0)
     # None means "no closed trades in the window", which is distinct from a
