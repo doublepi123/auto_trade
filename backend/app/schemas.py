@@ -3388,8 +3388,8 @@ class AlertRuleCreate(BaseModel):
         # interval_stale resolves both a live quote and that symbol's
         # StrategyConfig interval. A blank symbol would silently never fire
         # (no quote key, no config row), so require an explicit symbol.
-        if self.rule_type == "interval_stale" and not self.symbol.strip():
-            raise ValueError("interval_stale requires an explicit symbol")
+        if self.rule_type == "interval_stale" and self.symbol.strip() != self.symbol:
+            raise ValueError("interval_stale symbol must not be padded")
         return self
 
 

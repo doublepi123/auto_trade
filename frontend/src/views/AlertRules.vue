@@ -179,12 +179,15 @@
         <el-form-item label="标的">
           <el-input
             v-model="dialog.symbol"
-            :placeholder="isAccountWideType ? '账户级规则，无需标的' : 'AAPL.US'"
+            :placeholder="isAccountWideType ? '账户级规则，无需标的' : (dialog.rule_type === 'interval_stale' ? '留空＝跟随当前主标的' : 'AAPL.US')"
             :disabled="isAccountWideType"
             data-testid="alert-symbol"
           />
           <div v-if="isAccountWideType" class="field-hint" data-testid="alert-account-wide-hint">
             账户级规则读取账户整体风控状态，标的固定留空。
+          </div>
+          <div v-else-if="dialog.rule_type === 'interval_stale'" class="field-hint" data-testid="alert-interval-primary-hint">
+            留空则跟随当前主交易标的；主标的切换后规则自动改盯新标的。
           </div>
         </el-form-item>
         <el-form-item label="阈值">

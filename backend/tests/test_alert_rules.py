@@ -1156,15 +1156,24 @@ class TestIntervalStaleRule(_Base):
         finally:
             db.close()
 
-    def test_rejects_blank_symbol(self) -> None:
+    def test_blank_symbol_is_accepted_and_means_active_primary(self) -> None:
+        rule = AlertRuleCreate(
+            name="primary",
+            symbol="",
+            rule_type="interval_stale",
+            threshold=5.0,
+        )
+        assert rule.symbol == ""
+
+    def test_rejects_whitespace_padded_symbol(self) -> None:
         try:
             AlertRuleCreate(
                 name="bad",
-                symbol="",
+                symbol="  ",
                 rule_type="interval_stale",
                 threshold=5.0,
             )
-            raise AssertionError("blank symbol must be rejected")
+            raise AssertionError("padded symbol must be rejected")
         except ValueError:
             pass
 
@@ -1333,3 +1342,79 @@ class TestMarginRuleValidation:
                 raise AssertionError(f"threshold {bad} must be rejected")
             except ValueError:
                 pass
+
+
+class TestIntervalStaleFollowsPrimary(_Base):
+    def setup_method(self) -> None:
+        super().setup_method()
+        db = self._db()
+        db.query(StrategyConfig).delete()
+        db.commit()
+        db.close()
+
+    def _seed_interval(self, symbol: str, buy_low: float, sell_high: float) -> None:
+        db = self._db()
+        db.add(StrategyConfig(symbol=symbol, market="US", buy_low=buy_low, sell_high=sell_high))
+        db.commit()
+        db.close()
+
+    def _primary_rule(self, threshold: float = 5.0) -> int:
+        out = AlertRuleService(self._db()).create(AlertRuleCreate(
+            name="主标的区间失效",
+            symbol="",
+            rule_type="interval_stale",
+            threshold=threshold,
+            severity="WARNING",
+            enabled=True,
+            cooldown_seconds=0,
+        ))
+        return out.id
+
+    def test_blank_symbol_tracks_the_active_primary(self) -> None:
+        self._seed_interval("TSLA.US", 344.5447, 351.5052)
+        self._primary_rule(threshold=5.0)
+        notifier = FakeNotifier()
+        fired = AlertRuleService(self._db()).evaluate(
+            FakeRunner(FakeBroker({"TSLA.US": 400.0}), notifier)
+        ).fired
+        assert fired == 1
+        assert "TSLA.US" in notifier.calls[0][1]
+
+    def test_same_rule_follows_a_primary_switch(self) -> None:
+        """One rule must survive the switch that silently killed the old one.
+
+        A rule pinned to the previous primary stops resolving a StrategyConfig
+        row once the symbol changes, so it skips instead of firing — the stale
+        interval it exists to report becomes invisible exactly when a fresh
+        symbol needs watching.
+        """
+        self._seed_interval("NVDA.US", 191.0, 196.5)
+        rid = self._primary_rule(threshold=5.0)
+        notifier = FakeNotifier()
+        assert AlertRuleService(self._db()).evaluate(
+            FakeRunner(FakeBroker({"NVDA.US": 210.0}), notifier)
+        ).fired == 1
+        assert "NVDA.US" in notifier.calls[0][1]
+
+        self._seed_interval("TSLA.US", 344.5447, 351.5052)
+        notifier2 = FakeNotifier()
+        assert AlertRuleService(self._db()).evaluate(
+            FakeRunner(FakeBroker({"TSLA.US": 400.0, "NVDA.US": 210.0}), notifier2)
+        ).fired == 1
+        assert "TSLA.US" in notifier2.calls[0][1]
+        rows = AlertRuleService(self._db()).history(rid)
+        assert rows[0].symbol == "TSLA.US"
+
+    def test_explicit_symbol_still_pins_to_that_symbol(self) -> None:
+        self._seed_interval("NVDA.US", 191.0, 196.5)
+        self._seed_interval("TSLA.US", 344.5447, 351.5052)
+        AlertRuleService(self._db()).create(AlertRuleCreate(
+            name="pinned", symbol="NVDA.US", rule_type="interval_stale",
+            threshold=5.0, cooldown_seconds=0,
+        ))
+        notifier = FakeNotifier()
+        fired = AlertRuleService(self._db()).evaluate(
+            FakeRunner(FakeBroker({"NVDA.US": 210.0, "TSLA.US": 350.0}), notifier)
+        ).fired
+        assert fired == 1
+        assert "NVDA.US" in notifier.calls[0][1]

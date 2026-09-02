@@ -110,8 +110,14 @@ class AlertRuleService:
         notifier: _NotifierLike | None = getattr(runner, "notifier", None)
 
         rules = list(self._db.scalars(select(AlertRule).where(AlertRule.enabled.is_(True))))
-        symbols = sorted({r.symbol for r in rules if r.rule_type in QUOTED_RULES and r.symbol})
-        quote_map = _fetch_quotes(quote_provider, symbols)
+        symbols = {r.symbol for r in rules if r.rule_type in QUOTED_RULES and r.symbol}
+        if any(r.rule_type in INTERVAL_RULES and not r.symbol for r in rules):
+            primary = self._interval_symbol(
+                AlertRule(symbol="", rule_type="interval_stale")
+            )
+            if primary:
+                symbols.add(primary)
+        quote_map = _fetch_quotes(quote_provider, sorted(symbols))
         margin_infos = (
             _fetch_margin_infos(quote_provider)
             if any(r.rule_type in BROKER_ACCOUNT_RULES for r in rules)
@@ -135,7 +141,12 @@ class AlertRuleService:
                 value = self._current_value(rule, quote_map, margin_infos)
                 if value is None:
                     continue  # data unavailable (no quote / no state) — skip silently
-                triggered, message = _check(rule, value)
+                resolved_symbol = (
+                    self._interval_symbol(rule) or ""
+                    if rule.rule_type in INTERVAL_RULES
+                    else str(rule.symbol or "")
+                )
+                triggered, message = _check(rule, value, resolved_symbol)
                 if triggered and notifier is not None:
                     title = f"告警 · {rule.name}"
                     try:
@@ -148,7 +159,7 @@ class AlertRuleService:
                         fired += 1
                         firing_payloads.append({
                             "rule_id": int(rule.id),
-                            "symbol": str(rule.symbol or ""),
+                            "symbol": resolved_symbol,
                             "rule_type": str(rule.rule_type or ""),
                             "threshold": float(rule.threshold),
                             "trigger_value": float(value),
@@ -329,6 +340,21 @@ class AlertRuleService:
                 return 1.0 if state.kill_switch else 0.0
         return None
 
+    def _interval_symbol(self, rule: AlertRule) -> str | None:
+        """Resolve which symbol's interval a rule watches.
+
+        A blank symbol follows whichever symbol is currently primary, so one
+        rule keeps reporting drift across a primary switch. Pinning to a symbol
+        that is no longer configured resolves nothing and the rule goes quiet,
+        which is how the previous primary's rule stopped reporting.
+        """
+        if rule.symbol:
+            return rule.symbol
+        config = self._db.scalar(
+            select(StrategyConfig).order_by(StrategyConfig.id.desc())
+        )
+        return config.symbol if config is not None else None
+
     def _interval_deviation_pct(
         self,
         rule: AlertRule,
@@ -342,12 +368,15 @@ class AlertRuleService:
         the observable signature of that dead state. Returns 0.0 while price is
         inside the interval so a rule can only fire on real drift.
         """
-        price = quote_map.get(rule.symbol)
+        symbol = self._interval_symbol(rule)
+        if symbol is None:
+            return None
+        price = quote_map.get(symbol)
         if price is None or price <= 0:
             return None
         config = self._db.scalar(
             select(StrategyConfig)
-            .where(StrategyConfig.symbol == rule.symbol)
+            .where(StrategyConfig.symbol == symbol)
             .order_by(StrategyConfig.id.desc())
         )
         if config is None:
@@ -434,7 +463,8 @@ def _eligible(rule: AlertRule, now: datetime) -> bool:
     return (now - last).total_seconds() >= max(0, int(rule.cooldown_seconds))
 
 
-def _check(rule: AlertRule, value: float) -> tuple[bool, str]:
+def _check(rule: AlertRule, value: float, symbol: str | None = None) -> tuple[bool, str]:
+    display_symbol = rule.symbol if symbol is None else symbol
     if rule.rule_type == "price_above":
         triggered = value >= rule.threshold
         return triggered, f"{rule.symbol} 现价 {value:.2f} ≥ {rule.threshold:.2f}"
@@ -464,7 +494,7 @@ def _check(rule: AlertRule, value: float) -> tuple[bool, str]:
         # never fire on a healthy interval.
         triggered = value >= rule.threshold
         return triggered, (
-            f"{rule.symbol} 现价已偏离活动区间 {value:.2f}% ≥ 阈值 "
+            f"{display_symbol} 现价已偏离活动区间 {value:.2f}% ≥ 阈值 "
             f"{rule.threshold:.2f}%，区间可能已失效需人工复核"
         )
     if rule.rule_type == "margin_risk_level":
