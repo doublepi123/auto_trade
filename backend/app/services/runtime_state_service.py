@@ -21,18 +21,33 @@ _SNAPSHOT_FLOAT_TOLERANCE = 1e-9
 
 @dataclass(frozen=True)
 class RuntimeStateWrite:
-    """One planned ``runtime_state`` change, ready to issue as pure DML.
+    """One planned ``runtime_state`` change, ready to issue as batched DML.
 
     Planning is separated from writing so a caller can end its read phase
-    before the first write statement. Everything the write needs is captured
-    here as plain data, so applying it touches no ORM row that the
-    read-ending commit expired.
+    before the first write statement. Everything is captured as plain
+    parameters, so applying it touches no ORM row the read-ending commit
+    expired and rows of one shape can go out as a single executemany.
+
+    ``changed`` is False when the persisted row already holds exactly these
+    values, which makes the write a provable no-op worth skipping: the single
+    SQLite writer is shared with the research jobs.
     """
 
     symbol: str
     values: dict[str, Any]
-    row_exists: bool
-    snapshot: Any | None
+    row_id: int | None
+    changed: bool
+    snapshot_values: dict[str, Any] | None
+
+
+def _batched_by_shape(
+    rows: list[dict[str, Any]],
+) -> list[list[dict[str, Any]]]:
+    """Group parameter dicts so each group is one executemany statement."""
+    batches: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for row in rows:
+        batches.setdefault(tuple(sorted(row)), []).append(row)
+    return list(batches.values())
 
 
 
@@ -221,12 +236,49 @@ class RuntimeStateService:
                 created_at=captured_at,
             ),
         )
-        return row, RuntimeStateWrite(
-            symbol=primary_symbol,
+        return row, self._build_write(row, primary_symbol, values, snapshot)
+
+    def _build_write(
+        self,
+        row: Any | None,
+        symbol: str,
+        values: dict[str, Any],
+        snapshot: Any | None,
+    ) -> RuntimeStateWrite:
+        return RuntimeStateWrite(
+            symbol=symbol,
             values=values,
-            row_exists=row is not None,
-            snapshot=snapshot,
+            row_id=None if row is None else int(row.id),
+            changed=self._row_differs(row, values),
+            snapshot_values=(
+                None if snapshot is None else self._snapshot_params(snapshot)
+            ),
         )
+
+    @staticmethod
+    def _row_differs(row: Any | None, values: dict[str, Any]) -> bool:
+        """True when the persisted row does not already hold these values.
+
+        ``updated_at`` is excluded: it is the write-time clock, so including
+        it would mark every row dirty forever and defeat the check.
+        """
+        if row is None:
+            return True
+        return any(
+            getattr(row, column, None) != value
+            for column, value in values.items()
+            if column != "updated_at"
+        )
+
+    @staticmethod
+    def _snapshot_params(snapshot: Any) -> dict[str, Any]:
+        from sqlalchemy import inspect as sa_inspect
+
+        return {
+            column.key: getattr(snapshot, column.key)
+            for column in sa_inspect(type(snapshot)).mapper.column_attrs
+            if column.key != "id"
+        }
 
     def persist_risk(self, db: Any, risk: RiskController, *, symbol: str = "") -> None:
         from app.services.strategy_service import StrategyService
@@ -330,12 +382,7 @@ class RuntimeStateService:
                 created_at=captured_at,
             ),
         )
-        return row, RuntimeStateWrite(
-            symbol=runtime_symbol,
-            values=values,
-            row_exists=row is not None,
-            snapshot=snapshot,
-        )
+        return row, self._build_write(row, runtime_symbol, values, snapshot)
 
     @staticmethod
     def _stage_write(
@@ -343,46 +390,51 @@ class RuntimeStateService:
         row: Any | None,
         write: RuntimeStateWrite,
     ) -> None:
-        from app.models import RuntimeState
+        from app.models import RuntimeState, RuntimeStateSnapshot
 
         target = row if row is not None else RuntimeState(symbol=write.symbol)
         for column, value in write.values.items():
             setattr(target, column, value)
         db.add(target)
-        if write.snapshot is not None:
-            db.add(write.snapshot)
+        if write.snapshot_values is not None:
+            db.add(RuntimeStateSnapshot(**write.snapshot_values))
 
     @staticmethod
     def apply_writes(db: Any, writes: Sequence[RuntimeStateWrite]) -> None:
-        """Issue planned writes as the first statements of a transaction.
+        """Issue planned writes as batched DML in a fresh transaction.
 
-        Every statement here is DML. SQLite rejects a write that upgrades a
-        transaction whose read snapshot another connection has already
-        superseded, and it returns immediately instead of honouring
-        busy_timeout; the caller ends its read phase first so this takes an
-        ordinary write lock, which does wait.
+        Every statement is DML, so the transaction never upgrades a read
+        snapshot -- SQLite refuses that immediately instead of honouring
+        busy_timeout. Rows sharing a parameter shape go out as one
+        executemany, so the single writer is held for a constant number of
+        round-trips rather than one per row; the per-row form doubled writer
+        hold time and halved completed passes against the research cohort.
         """
         from sqlalchemy import insert, update
 
-        from app.models import RuntimeState
+        from app.models import RuntimeState, RuntimeStateSnapshot
 
-        for write in writes:
-            if write.row_exists:
-                db.execute(
-                    update(RuntimeState)
-                    .where(RuntimeState.symbol == write.symbol)
-                    .values(**write.values)
-                    .execution_options(synchronize_session=False)
-                )
-            else:
-                db.execute(
-                    insert(RuntimeState).values(
-                        symbol=write.symbol,
-                        **write.values,
-                    )
-                )
-            if write.snapshot is not None:
-                db.add(write.snapshot)
+        updates = [
+            {"id": write.row_id, **write.values}
+            for write in writes
+            if write.row_id is not None
+        ]
+        inserts = [
+            {"symbol": write.symbol, **write.values}
+            for write in writes
+            if write.row_id is None
+        ]
+        snapshots = [
+            write.snapshot_values
+            for write in writes
+            if write.snapshot_values is not None
+        ]
+        for batch in _batched_by_shape(updates):
+            db.execute(update(RuntimeState), batch)
+        for batch in _batched_by_shape(inserts):
+            db.execute(insert(RuntimeState), batch)
+        for batch in _batched_by_shape(snapshots):
+            db.execute(insert(RuntimeStateSnapshot), batch)
 
     def record_snapshot(self, db: Any, engine: StrategyEngine, risk: RiskController, *, symbol: str = "") -> None:
         from app.models import RuntimeStateSnapshot

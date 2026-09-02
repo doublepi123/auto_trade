@@ -295,9 +295,6 @@ class AppRunner:
         self._primary_generation = 0
         self._runtime_state_persist_stalls = 0
         self._runtime_state_persist_stall_alerted = False
-        self._secondary_state_fingerprints: dict[
-            str, tuple[tuple[str, Any], ...]
-        ] = {}
         self._reconciliation_incident_svc = ReconciliationIncidentService(
             settings.notify_dedup_window_seconds
         )
@@ -5891,6 +5888,11 @@ class AppRunner:
         path. A restart then reads a clean row for the live symbol and drops a
         real daily loss and kill switch. An attempt that raced a promotion is
         therefore replanned against the new primary rather than written.
+
+        A write whose values already match the persisted row is skipped, so
+        an idle pass takes the single SQLite writer zero times instead of
+        contending with the research jobs that share it. Everything that did
+        change goes out batched in one DML-opened transaction.
         """
         for _ in range(_RUNTIME_STATE_PERSIST_ATTEMPTS):
             if self._persist_runtime_state_attempt():
@@ -5991,33 +5993,22 @@ class AppRunner:
                     if symbol != primary_symbol
                 ]
             writes = [self._state_svc.plan(db, primary_engine, primary_risk)]
-            unchanged: dict[str, tuple[tuple[str, Any], ...]] = {}
-            staged: dict[str, tuple[tuple[str, Any], ...]] = {}
             for symbol, engine in secondaries:
-                write = self._state_svc.plan_symbol(db, engine, symbol)
-                fingerprint = tuple(
-                    (column, value)
-                    for column, value in sorted(write.values.items())
-                    if column != "updated_at"
-                )
-                if (
-                    write.row_exists
-                    and write.snapshot is None
-                    and self._secondary_state_fingerprints.get(symbol)
-                    == fingerprint
-                ):
-                    unchanged[symbol] = fingerprint
-                    continue
-                staged[symbol] = fingerprint
-                writes.append(write)
+                writes.append(self._state_svc.plan_symbol(db, engine, symbol))
+            pending = [
+                write
+                for write in writes
+                if write.changed or write.snapshot_values is not None
+            ]
             db.commit()
             if self._primary_changed_since(generation):
                 return False
-            self._state_svc.apply_writes(db, writes)
+            if not pending:
+                return True
+            self._state_svc.apply_writes(db, pending)
             db.commit()
             if self._primary_changed_since(generation):
                 return False
-            self._secondary_state_fingerprints = unchanged | staged
             return True
 
     def _decision_funnel_housekeeping(self) -> None:

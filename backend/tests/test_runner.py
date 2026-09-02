@@ -10175,16 +10175,15 @@ class TestRuntimeStatePersistence:
     def _delete_rows(cls) -> None:
         from app.models import RuntimeState, RuntimeStateSnapshot, TradeEvent
 
-        symbols = (cls._PRIMARY, *cls._SECONDARIES)
         with database.SessionLocal() as db:
             db.query(TradeEvent).filter(
                 TradeEvent.event_type == cls._STALL_EVENT
             ).delete(synchronize_session=False)
             db.query(RuntimeStateSnapshot).filter(
-                RuntimeStateSnapshot.symbol.in_(symbols)
+                RuntimeStateSnapshot.symbol.like("TXN%")
             ).delete(synchronize_session=False)
             db.query(RuntimeState).filter(
-                RuntimeState.symbol.in_(symbols)
+                RuntimeState.symbol.like("TXN%")
             ).delete(synchronize_session=False)
             db.commit()
 
@@ -10226,7 +10225,7 @@ class TestRuntimeStatePersistence:
     @contextmanager
     def _record_runtime_state_sql():
         """Record every runtime_state statement plus transaction boundaries."""
-        recorded: list[tuple[str, str]] = []
+        recorded: list[tuple[str, str, bool]] = []
 
         def _before_cursor_execute(
             _conn,
@@ -10234,15 +10233,18 @@ class TestRuntimeStatePersistence:
             statement: str,
             parameters,
             _context,
-            _executemany,
+            executemany,
         ) -> None:
             normalized = " ".join(statement.upper().split())
             if "RUNTIME_STATE" not in normalized:
                 return
-            recorded.append((normalized, str(parameters)))
+            recorded.append((normalized, str(parameters), bool(executemany)))
 
         def _on_commit(_conn) -> None:
-            recorded.append(("COMMIT", ""))
+            recorded.append(("COMMIT", "", False))
+
+        def _on_rollback(_conn) -> None:
+            recorded.append(("ROLLBACK", "", False))
 
         event.listen(
             database.engine,
@@ -10250,6 +10252,7 @@ class TestRuntimeStatePersistence:
             _before_cursor_execute,
         )
         event.listen(database.engine, "commit", _on_commit)
+        event.listen(database.engine, "rollback", _on_rollback)
         try:
             yield recorded
         finally:
@@ -10259,12 +10262,35 @@ class TestRuntimeStatePersistence:
                 _before_cursor_execute,
             )
             event.remove(database.engine, "commit", _on_commit)
+            event.remove(database.engine, "rollback", _on_rollback)
 
     @staticmethod
-    def _wrote(recorded: list[tuple[str, str]], symbol: str) -> bool:
+    def _wrote(recorded: list[tuple[str, str, bool]], symbol: str) -> bool:
         return any(
             statement.split()[0] in ("UPDATE", "INSERT") and symbol in params
-            for statement, params in recorded
+            for statement, params, _many in recorded
+        )
+
+    @staticmethod
+    def _writing_transactions(recorded: list[tuple[str, str, bool]]) -> int:
+        """Count transactions that issued DML -- i.e. writer-lock takes."""
+        takes = 0
+        wrote = False
+        for statement, _params, _many in recorded:
+            kind = statement.split()[0]
+            if kind in ("COMMIT", "ROLLBACK"):
+                takes += 1 if wrote else 0
+                wrote = False
+            elif kind in ("UPDATE", "INSERT", "DELETE"):
+                wrote = True
+        return takes + (1 if wrote else 0)
+
+    @staticmethod
+    def _dml_statements(recorded: list[tuple[str, str, bool]]) -> int:
+        return sum(
+            1
+            for statement, _params, _many in recorded
+            if statement.split()[0] in ("UPDATE", "INSERT", "DELETE")
         )
 
     def test_runtime_state_write_opens_its_own_transaction(self) -> None:
@@ -10273,7 +10299,7 @@ class TestRuntimeStatePersistence:
         with self._record_runtime_state_sql() as recorded:
             runner._persist_runtime_state()
 
-        kinds = [statement.split()[0] for statement, _ in recorded]
+        kinds = [statement.split()[0] for statement, _params, _many in recorded]
         dml_positions = [
             index
             for index, kind in enumerate(kinds)
@@ -10305,19 +10331,35 @@ class TestRuntimeStatePersistence:
         ]
         assert rewritten == []
 
-    def test_primary_runtime_state_persists_every_loop(self) -> None:
+    def test_primary_risk_change_persists_on_the_next_pass(self) -> None:
+        """A change to the primary's safety state is never deferred.
+
+        This replaces an assertion that the primary row was rewritten on
+        every pass. Rewriting a row that already holds the state is a
+        provable no-op that buys nothing and costs writer contention against
+        the research jobs; what must hold is that a CHANGE reaches the row
+        a restart reads on the very next pass.
+        """
         runner = self._runner()
         runner._persist_runtime_state()
+
+        runner.risk.daily_pnl = -412.5
+        runner.risk.consecutive_losses = 3
+        runner.risk.kill_switch = True
 
         with self._record_runtime_state_sql() as recorded:
             runner._persist_runtime_state()
 
         assert self._wrote(recorded, self._PRIMARY)
+        assert self._load_risk_state(self._PRIMARY) == {
+            self._PRIMARY: (-412.5, 3, True, False)
+        }
 
     def test_promoted_primary_is_not_skipped_by_dirty_filter(self) -> None:
-        runner = self._runner()
-        runner._persist_runtime_state()
         promoted = self._SECONDARIES[0]
+        runner = self._runner()
+        self._arm_losing_risk_state(runner)
+        runner._persist_runtime_state()
         promoted_engine = runner._symbol_runtimes[promoted].engine
 
         runner.engine.params = StrategyParams(
@@ -10342,6 +10384,12 @@ class TestRuntimeStatePersistence:
             runner._persist_runtime_state()
 
         assert self._wrote(recorded, promoted)
+        assert self._load_risk_state(promoted)[promoted] == (
+            -321.0,
+            2,
+            True,
+            True,
+        )
 
     def _arm_promotion(self, runner, monkeypatch, promoted: str):
         """Return a callable that performs a real primary promotion once."""
@@ -10608,5 +10656,85 @@ class TestRuntimeStatePersistence:
         assert risk_events == [self._STALL_EVENT]
         assert self._stall_event_count() == 1
         assert raised == []
+
+    def _bulk_runner(self, secondary_count: int) -> AppRunner:
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(
+            symbol=self._PRIMARY,
+            market="US",
+            buy_low=100.0,
+            sell_high=110.0,
+        )
+        runner.engine.last_price = 105.0
+        runtimes = {
+            self._PRIMARY: runner._build_symbol_runtime(
+                self._PRIMARY,
+                "US",
+                primary=True,
+            )
+        }
+        for index in range(secondary_count):
+            symbol = f"TXNBULK{index:03d}.US"
+            runtime = runner._build_symbol_runtime(symbol, "US")
+            runtime.engine.last_price = 50.0 + index
+            runtimes[symbol] = runtime
+        runner._symbol_runtimes = runtimes
+        return runner
+
+    @staticmethod
+    def _dirty_every_runtime(runner: AppRunner, offset: float) -> None:
+        for runtime in runner._symbol_runtimes.values():
+            runtime.engine.last_price += offset
+
+    def test_dirty_pass_batches_writes_into_one_writer_transaction(self) -> None:
+        """Cost must not scale with the number of dirty rows.
+
+        Issuing one execute() per row holds the single SQLite writer across
+        N sequential round-trips. Deployed against the quant-v6 cohort that
+        halved the runner's completed passes and doubled writer hold time,
+        so the statement count must stay flat as rows grow.
+        """
+        shapes = {}
+        batched = {}
+        for secondary_count in (2, 12):
+            self._delete_rows()
+            runner = self._bulk_runner(secondary_count)
+            runner._persist_runtime_state()
+            self._dirty_every_runtime(runner, 1.5)
+
+            with self._record_runtime_state_sql() as recorded:
+                runner._persist_runtime_state()
+
+            shapes[secondary_count] = (
+                self._writing_transactions(recorded),
+                self._dml_statements(recorded),
+            )
+            batched[secondary_count] = any(
+                many
+                for statement, _params, many in recorded
+                if statement.split()[0] in ("UPDATE", "INSERT")
+            )
+
+        assert shapes[2] == shapes[12]
+        writer_takes, dml_statements = shapes[2]
+        assert writer_takes == 1
+        assert dml_statements <= 3
+        assert batched[12] is True
+
+    def test_idle_pass_never_takes_the_writer(self) -> None:
+        """A pass with nothing to persist must not touch the writer at all.
+
+        Outside regular hours no quote moves, so every row already holds the
+        state the pass would write. Taking the writer anyway is pure
+        contention against the research jobs sharing the one SQLite writer.
+        """
+        runner = self._bulk_runner(4)
+        runner._persist_runtime_state()
+
+        with self._record_runtime_state_sql() as recorded:
+            runner._persist_runtime_state()
+
+        assert self._dml_statements(recorded) == 0
+        assert self._writing_transactions(recorded) == 0
 
 
