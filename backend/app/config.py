@@ -636,6 +636,26 @@ class Settings(BaseSettings):
             "growth caused by this job plus total compute-worker RSS."
         ),
     )
+    # Published quant-v6 artifacts are append-only by SQLite trigger and the
+    # retention window above must stay 0, so this evidence can never be
+    # pruned. Refusing to create more is therefore the only available control
+    # once the database — shared with the live trading loop — grows too large.
+    # The default sits above the current footprint so enabling the fence never
+    # kills a research pipeline an operator started on purpose.
+    watchlist_quant_v6_db_size_budget_mb: int = Field(
+        default=4_096,
+        ge=512,
+        le=16_384,
+        validation_alias=(
+            "AUTO_TRADE_WATCHLIST_QUANT_V6_DB_SIZE_BUDGET_MB"
+        ),
+        description=(
+            "Hard database-size budget in MB (1 MB = 1024*1024 bytes) above "
+            "which new quote-only quant-v6 evaluation ticks are skipped. "
+            "Existing evidence is never deleted or vacuumed; the fence only "
+            "refuses to publish more."
+        ),
+    )
     universe_selection_max_symbols: int = Field(
         default=12,
         ge=1,

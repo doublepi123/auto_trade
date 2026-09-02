@@ -179,6 +179,9 @@ _OPENING_RESEARCH_DEFERRED = object()
 _T = TypeVar("_T")
 _JOB_LEASE_RETRY_SECONDS = 60
 _JOB_LEASE_BUSY_DEFERRED = object()
+# An over-budget database stays over budget for days, so this defer waits the
+# regular research interval rather than the fast retry the transient defers use.
+_DATABASE_SIZE_BUDGET_DEFERRED = object()
 _LLM_STORAGE_MAINTENANCE_LEASE_KEY = (
     LLM_STORAGE_MAINTENANCE_LEASE_KEY
 )
@@ -1681,7 +1684,9 @@ def _watchlist_quant_v6_evaluation_tick_sync(
         WatchlistQuantV6PublicationService,
     )
     from app.services.watchlist_quant_v6_spawn_supervisor import (
+        QuantV6DatabaseSizeFence,
         QuantV6PipelineMemoryFence,
+        QuantV6SpawnResourceLimitError,
     )
 
     deadline = evaluation_deadline or QuantV6EvaluationDeadline(
@@ -1723,6 +1728,30 @@ def _watchlist_quant_v6_evaluation_tick_sync(
             try:
                 lease_guard.checkpoint()
                 deadline.checkpoint()
+                try:
+                    QuantV6DatabaseSizeFence.capture(
+                        size_budget_mb=(
+                            settings.watchlist_quant_v6_db_size_budget_mb
+                        ),
+                        session_factory=SessionLocal,
+                    ).checkpoint()
+                except QuantV6SpawnResourceLimitError as exc:
+                    logger.warning(
+                        "quant-v6 evaluation skipped: %s. Published evidence "
+                        "is kept intact; nothing is deleted or vacuumed.",
+                        exc,
+                    )
+                    return _DATABASE_SIZE_BUDGET_DEFERRED
+                except Exception:
+                    # Fail closed: a database whose size cannot be read cannot
+                    # be shown to be within budget, and the live trading loop
+                    # shares this file.
+                    logger.warning(
+                        "quant-v6 evaluation skipped: database size could not "
+                        "be measured",
+                        exc_info=True,
+                    )
+                    return _DATABASE_SIZE_BUDGET_DEFERRED
                 pipeline_memory_fence = QuantV6PipelineMemoryFence.capture(
                     memory_limit_mib=(
                         settings.watchlist_quant_v6_pipeline_memory_limit_mib

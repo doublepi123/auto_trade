@@ -15,8 +15,14 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from pydantic import ValidationError
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 import app.domain.watchlist_quant_v6.semantics as semantics_module
+from app.config import Settings
+from app.schemas import DatabaseHealthSnapshot
+from app.services import database_health_service
 from app.services import watchlist_quant_v6_publication_service as publication_module
 from app.domain.universe_selection import (
     INDEX_MEMBERSHIP_HISTORY,
@@ -1866,3 +1872,116 @@ def test_rss_fence_remains_active_during_final_parent_assembly(
         )
 
     assert assembly_started is True
+
+
+_DB_SIZE_BUDGET_ENV = "AUTO_TRADE_WATCHLIST_QUANT_V6_DB_SIZE_BUDGET_MB"
+
+
+def _database_snapshot(
+    database_size_bytes: int | None,
+) -> DatabaseHealthSnapshot:
+    return DatabaseHealthSnapshot(
+        checked_at=datetime.now(timezone.utc),
+        dialect="sqlite",
+        journal_mode="wal",
+        page_size_bytes=4_096,
+        page_count=None,
+        freelist_count=None,
+        used_page_count=None,
+        database_size_bytes=database_size_bytes,
+        free_space_bytes=None,
+        wal_size_bytes=None,
+    )
+
+
+def test_database_size_fence_accepts_exact_budget_and_rejects_one_byte_over() -> None:
+    budget_bytes = 512 * 1024 * 1024
+
+    supervisor.QuantV6DatabaseSizeFence(
+        database_size_bytes=budget_bytes,
+        size_budget_bytes=budget_bytes,
+    ).checkpoint()
+
+    with pytest.raises(
+        supervisor.QuantV6SpawnResourceLimitError,
+        match="exceeded its database-size budget",
+    ):
+        supervisor.QuantV6DatabaseSizeFence(
+            database_size_bytes=budget_bytes + 1,
+            size_budget_bytes=budget_bytes,
+        ).checkpoint()
+
+
+@pytest.mark.parametrize("budget_mb", [511, 16_385, 4_096.0])
+def test_database_size_fence_capture_rejects_out_of_bounds_budget(
+    budget_mb: object,
+) -> None:
+    def _unexpected_session() -> object:
+        pytest.fail("bounds validation opened a database session")
+
+    with pytest.raises(ValueError, match="size_budget_mb"):
+        supervisor.QuantV6DatabaseSizeFence.capture(
+            size_budget_mb=cast(int, budget_mb),
+            session_factory=cast(Any, _unexpected_session),
+        )
+
+
+def test_database_size_fence_capture_measures_bound_engine_read_only() -> None:
+    engine = create_engine("sqlite://")
+    session_factory = sessionmaker(bind=engine)
+
+    fence = supervisor.QuantV6DatabaseSizeFence.capture(
+        size_budget_mb=512,
+        session_factory=cast(Any, session_factory),
+    )
+
+    assert fence.size_budget_bytes == 512 * 1024 * 1024
+    assert 0 <= fence.database_size_bytes < fence.size_budget_bytes
+    fence.checkpoint()
+
+
+def test_database_size_fence_capture_fails_closed_when_size_is_unmeasurable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        database_health_service,
+        "snapshot_from_session",
+        lambda _session: _database_snapshot(None),
+    )
+    engine = create_engine("sqlite://")
+    session_factory = sessionmaker(bind=engine)
+
+    with pytest.raises(ValueError, match="database size is unmeasurable"):
+        supervisor.QuantV6DatabaseSizeFence.capture(
+            size_budget_mb=512,
+            session_factory=cast(Any, session_factory),
+        )
+
+
+def test_db_size_budget_setting_defaults_above_the_current_footprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(_DB_SIZE_BUDGET_ENV, raising=False)
+
+    assert Settings().watchlist_quant_v6_db_size_budget_mb == 4_096
+
+
+@pytest.mark.parametrize("value", ["512", "16384"])
+def test_db_size_budget_setting_accepts_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv(_DB_SIZE_BUDGET_ENV, value)
+
+    assert Settings().watchlist_quant_v6_db_size_budget_mb == int(value)
+
+
+@pytest.mark.parametrize("value", ["511", "16385"])
+def test_db_size_budget_setting_rejects_out_of_bounds(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+) -> None:
+    monkeypatch.setenv(_DB_SIZE_BUDGET_ENV, value)
+
+    with pytest.raises(ValidationError):
+        Settings()

@@ -11,11 +11,13 @@ import time
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from multiprocessing.connection import Connection
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
     from multiprocessing.process import BaseProcess
+
+    from sqlalchemy.orm import Session
 
     from app.services.watchlist_quant_v6_deadline import (
         QuantV6EvaluationDeadline,
@@ -44,6 +46,9 @@ _TERMINATE_JOIN_SECONDS = 1.0
 _KILL_JOIN_SECONDS = 1.0
 _WATCHDOG_TERMINATE_JOIN_SECONDS = 0.2
 _WATCHDOG_KILL_JOIN_SECONDS = 1.0
+_BYTES_PER_MB = 1024 * 1024
+_MIN_DB_SIZE_BUDGET_MB = 512
+_MAX_DB_SIZE_BUDGET_MB = 16_384
 
 
 class QuantV6SpawnSupervisorError(RuntimeError):
@@ -180,6 +185,71 @@ class QuantV6PipelineMemoryFence:
             states,
             parent_baseline_bytes=self.parent_baseline_bytes,
             memory_limit_bytes=self.memory_limit_bytes,
+        )
+
+
+@dataclass(frozen=True)
+class QuantV6DatabaseSizeFence:
+    """One measured database size and the budget new research must stay under.
+
+    Published quant-v6 artifacts are append-only by SQLite trigger, so the
+    only available control over their growth is refusing to publish more.
+    This fence therefore deletes nothing: it reuses the existing read-only
+    page-count probe on its own short-lived connection and reports whether a
+    new evaluation tick may run.
+    """
+
+    database_size_bytes: int
+    size_budget_bytes: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.database_size_bytes) is not int
+            or self.database_size_bytes < 0
+            or type(self.size_budget_bytes) is not int
+            or self.size_budget_bytes <= 0
+        ):
+            raise ValueError("database size fence values are invalid")
+
+    @classmethod
+    def capture(
+        cls,
+        *,
+        size_budget_mb: int,
+        session_factory: Callable[[], Session],
+    ) -> QuantV6DatabaseSizeFence:
+        if (
+            type(size_budget_mb) is not int
+            or not _MIN_DB_SIZE_BUDGET_MB
+            <= size_budget_mb
+            <= _MAX_DB_SIZE_BUDGET_MB
+        ):
+            raise ValueError(
+                "size_budget_mb must be between "
+                f"{_MIN_DB_SIZE_BUDGET_MB} and {_MAX_DB_SIZE_BUDGET_MB}"
+            )
+        # Imported here so spawn workers, which import this module at start-up,
+        # never pull the ORM health service in: the probe runs in the parent
+        # only, before any worker exists.
+        from app.services.database_health_service import snapshot_from_session
+
+        with session_factory() as session:
+            measured_bytes = snapshot_from_session(session).database_size_bytes
+        if measured_bytes is None:
+            raise ValueError("quant-v6 database size is unmeasurable")
+        return cls(
+            database_size_bytes=measured_bytes,
+            size_budget_bytes=size_budget_mb * _BYTES_PER_MB,
+        )
+
+    def checkpoint(self) -> None:
+        if self.database_size_bytes <= self.size_budget_bytes:
+            return
+        raise QuantV6SpawnResourceLimitError(
+            "quant-v6 research storage "
+            f"({self.database_size_bytes // _BYTES_PER_MB} MB) "
+            "exceeded its database-size budget "
+            f"({self.size_budget_bytes // _BYTES_PER_MB} MB)"
         )
 
 

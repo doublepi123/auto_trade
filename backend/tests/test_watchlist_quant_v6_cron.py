@@ -3,17 +3,22 @@ from __future__ import annotations
 import asyncio
 import ast
 import inspect
+import logging
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, event, text
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session, sessionmaker
 
 from app import database
 from app import main as main_module
 from app.models import Base
+from app.schemas import DatabaseHealthSnapshot
+from app.services import database_health_service
 from app.services import watchlist_quant_v6_evaluation_service
 from app.services import watchlist_quant_v6_historical_provider
 from app.services import watchlist_quant_v6_publication_service
@@ -1667,3 +1672,286 @@ async def test_quant_v6_cron_observation_does_not_alter_cancellation(
 
     with pytest.raises(asyncio.CancelledError):
         await main_module._watchlist_quant_v6_evaluation_cron()
+
+
+def _quant_v6_sqlite_environment(
+    database_path: Path,
+) -> tuple[Engine, sessionmaker[Session]]:
+    engine = create_engine(
+        f"sqlite:///{database_path}",
+        connect_args={"check_same_thread": False},
+    )
+
+    @event.listens_for(engine, "connect")
+    def enable_sqlite_contract(dbapi_connection, _record) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA recursive_triggers=ON")
+        finally:
+            cursor.close()
+
+    Base.metadata.create_all(engine)
+    database._ensure_watchlist_quant_v6_tables(engine)
+    return engine, sessionmaker(
+        bind=engine,
+        autoflush=False,
+        expire_on_commit=False,
+    )
+
+
+def _publication_count(engine: Engine) -> int:
+    with engine.connect() as connection:
+        return int(connection.scalar(text(
+            "SELECT count(*) FROM watchlist_quant_v6_publications"
+        )) or 0)
+
+
+def _database_snapshot(
+    database_size_bytes: int | None,
+) -> DatabaseHealthSnapshot:
+    return DatabaseHealthSnapshot(
+        checked_at=datetime.now(timezone.utc),
+        dialect="sqlite",
+        journal_mode="wal",
+        page_size_bytes=4_096,
+        page_count=None,
+        freelist_count=None,
+        used_page_count=None,
+        database_size_bytes=database_size_bytes,
+        free_space_bytes=None,
+        wal_size_bytes=None,
+    )
+
+
+def test_quant_v6_db_size_over_budget_skips_tick_without_deleting_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    _successful_durable_job_lease: SimpleNamespace,
+) -> None:
+    engine, session_factory = _quant_v6_sqlite_environment(
+        tmp_path / "quant-v6-db-size-over-budget.db",
+    )
+    statements: list[str] = []
+
+    def _capture(
+        _connection: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_db_size_budget_mb",
+        512,
+    )
+    monkeypatch.setattr(main_module, "SessionLocal", session_factory)
+    monkeypatch.setattr(
+        database_health_service,
+        "snapshot_from_session",
+        lambda _session: _database_snapshot(600 * 1024 * 1024),
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_evaluation_service,
+        "build_latest_quant_v6_registration_plan",
+        lambda **_kwargs: pytest.fail("over-budget tick built a plan"),
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_historical_provider,
+        "QuantV6HistoricalBarProvider",
+        lambda **_kwargs: pytest.fail("over-budget tick created a provider"),
+    )
+
+    event.listen(engine, "before_cursor_execute", _capture)
+    try:
+        with caplog.at_level(logging.WARNING):
+            outcome = main_module._watchlist_quant_v6_evaluation_tick_sync(
+                QuantV6EvaluationDeadline(30),
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", _capture)
+
+    assert outcome is main_module._DATABASE_SIZE_BUDGET_DEFERRED
+    assert [
+        statement
+        for statement in statements
+        if "DELETE" in statement.upper()
+    ] == []
+    assert _publication_count(engine) == 0
+    assert _successful_durable_job_lease.acquired_keys == [
+        main_module._WATCHLIST_QUANT_V6_EVALUATION_LEASE_KEY
+    ]
+    assert _successful_durable_job_lease.events[-1] == "keepalive-exit"
+    warnings = "\n".join(
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+    )
+    assert "600" in warnings
+    assert "512" in warnings
+
+
+def test_quant_v6_db_size_probe_failure_defers_tick_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+    _successful_durable_job_lease: SimpleNamespace,
+) -> None:
+    engine, session_factory = _quant_v6_sqlite_environment(
+        tmp_path / "quant-v6-db-size-probe-failure.db",
+    )
+
+    def _failing_probe(_session: object) -> DatabaseHealthSnapshot:
+        raise OSError("database size pragma probe failed")
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_db_size_budget_mb",
+        512,
+    )
+    monkeypatch.setattr(main_module, "SessionLocal", session_factory)
+    monkeypatch.setattr(
+        database_health_service,
+        "snapshot_from_session",
+        _failing_probe,
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_evaluation_service,
+        "build_latest_quant_v6_registration_plan",
+        lambda **_kwargs: pytest.fail("unmeasured tick built a plan"),
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_historical_provider,
+        "QuantV6HistoricalBarProvider",
+        lambda **_kwargs: pytest.fail("unmeasured tick created a provider"),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        outcome = main_module._watchlist_quant_v6_evaluation_tick_sync(
+            QuantV6EvaluationDeadline(30),
+        )
+
+    assert outcome is main_module._DATABASE_SIZE_BUDGET_DEFERRED
+    assert _publication_count(engine) == 0
+    assert _successful_durable_job_lease.events[-1] == "keepalive-exit"
+    assert any(
+        record.levelno >= logging.WARNING
+        and "database size" in record.getMessage()
+        for record in caplog.records
+    )
+    assert main_module._watchlist_quant_v6_evaluation_sync_lock.acquire(
+        blocking=False
+    )
+    main_module._watchlist_quant_v6_evaluation_sync_lock.release()
+
+
+class _EvaluationProceeded(RuntimeError):
+    pass
+
+
+def test_quant_v6_db_size_under_budget_proceeds_to_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    _successful_durable_job_lease: SimpleNamespace,
+) -> None:
+    _engine, session_factory = _quant_v6_sqlite_environment(
+        tmp_path / "quant-v6-db-size-under-budget.db",
+    )
+
+    def _reached(**_kwargs: object) -> object:
+        raise _EvaluationProceeded("registration planning was reached")
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_db_size_budget_mb",
+        512,
+    )
+    monkeypatch.setattr(main_module, "SessionLocal", session_factory)
+    # The pipeline RSS probe reads /proc, which only exists on Linux; pin it so
+    # this assertion observes the database-size fence on any platform.
+    monkeypatch.setattr(
+        watchlist_quant_v6_spawn_supervisor,
+        "_resident_bytes",
+        lambda _pid: 1024,
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_evaluation_service,
+        "build_latest_quant_v6_registration_plan",
+        _reached,
+    )
+
+    with pytest.raises(_EvaluationProceeded):
+        main_module._watchlist_quant_v6_evaluation_tick_sync(
+            QuantV6EvaluationDeadline(30),
+        )
+
+    assert _successful_durable_job_lease.acquired_keys == [
+        main_module._WATCHLIST_QUANT_V6_EVALUATION_LEASE_KEY
+    ]
+
+
+@pytest.mark.asyncio
+async def test_quant_v6_cron_records_db_size_budget_defer_as_clean_skip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    outcomes = iter((main_module._DATABASE_SIZE_BUDGET_DEFERRED, object()))
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) == 3:
+            raise asyncio.CancelledError
+
+    async def next_outcome() -> object:
+        return next(outcomes)
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_interval_minutes",
+        1_440,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_retry_interval_minutes",
+        30,
+    )
+    monkeypatch.setattr(main_module.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(
+        main_module,
+        "_run_watchlist_quant_v6_evaluation_tick",
+        next_outcome,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await main_module._watchlist_quant_v6_evaluation_cron()
+
+    assert sleeps == [
+        main_module._WATCHLIST_QUANT_V6_INITIAL_DELAY_SECONDS,
+        1_440 * 60,
+        1_440 * 60,
+    ]

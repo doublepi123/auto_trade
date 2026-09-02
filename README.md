@@ -819,6 +819,7 @@ auto_trade/
 | `AUTO_TRADE_WATCHLIST_QUANT_V6_PROVIDER_PAGE_TIMEOUT_SECONDS` | 单页 quote-only 历史 SDK 调用的硬超时（秒，`5-120`）；取消部署时会协作终止剩余 cohort | `30` |
 | `AUTO_TRADE_WATCHLIST_QUANT_V6_COMPUTE_WORKERS` | quote-only quant-v6 计算进程数（`2-4`）；只改变研究计算并行度，不改变 P0 交易语义 | `4` |
 | `AUTO_TRADE_WATCHLIST_QUANT_V6_PIPELINE_MEMORY_LIMIT_MIB` | quant-v6 作业导致的父进程 RSS 增量与所有计算 worker RSS 总和的 pipeline 内存预算（MiB，`512-8192`）；超限由研究作业失败关闭，不放宽 P0 | `2048` |
+| `AUTO_TRADE_WATCHLIST_QUANT_V6_DB_SIZE_BUDGET_MB` | quant-v6 研究证据的数据库容量预算（MB，`512-16384`）。已发布 artifact 由 SQLite 触发器保证 append-only、retention 必须为 `0`，因此无法清理；唯一可用的控制手段就是**不再产生新证据**。实测库大小超过该预算时跳过本次 quote-only 评估并记录 warning，**不删除任何已有证据、不执行 VACUUM**；无法测量库大小时同样 fail-closed 跳过。默认值高于当前占用，便于部署后仍有可用余量，可随时按需调小。仅影响研究作业，不改变 P0 与实盘交易 | `4096` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_MAX_SYMBOLS` | 每次最多入选标的数 | `12` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_EXPLORATION_MAX_SYMBOLS` | 先补足已入选风险组的残差基准同伴（可使用仅成交额处于实盘门槛 75%-100% 的 peer-only 标的），再保留冻结轮动与最高分新挑战者，剩余容量用于细行业和长期观察；自动新增或重新启用的标的仅观察、不会获得开仓资格，已启用的开仓池独立保留且不占探索配额，`0` 表示关闭 | `24` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_EXPLORATION_TOP_SCORE_CHALLENGERS` | 同伴与轮动覆盖完成后、长期观察标的占用容量前，优先保留的最高分硬门槛通过者数量；只收集前向证据，不会正式入选、切换主标的或下单 | `2` |
