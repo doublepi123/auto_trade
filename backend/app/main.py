@@ -5,11 +5,12 @@ import json
 import logging
 import math
 import sys
+from types import SimpleNamespace
 import threading
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING, Any, AsyncGenerator, cast
+from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, TypeVar, cast
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -175,6 +176,7 @@ _OPENING_MOMENTUM_POLL_SECONDS = 15
 _OPENING_MOMENTUM_PRIORITY_POLL_SECONDS = 5
 _OPENING_RESEARCH_DEFER_RETRY_SECONDS = 60
 _OPENING_RESEARCH_DEFERRED = object()
+_T = TypeVar("_T")
 _JOB_LEASE_RETRY_SECONDS = 60
 _JOB_LEASE_BUSY_DEFERRED = object()
 _LLM_STORAGE_MAINTENANCE_LEASE_KEY = (
@@ -1097,25 +1099,58 @@ def _llm_storage_maintenance_tick_sync() -> object | None:
         interval_seconds=settings.job_lease_heartbeat_seconds,
     ) as lease_guard:
         db = SessionLocal()
+        stage_failures: list[tuple[str, BaseException]] = []
+
+        def _run_stage(name: str, stage: Callable[[], _T], fallback: _T) -> _T:
+            """Isolate one retention stage from its siblings.
+
+            The stages prune independent tables, so one that cannot make
+            progress must not starve the ones queued behind it. Failures are
+            collected and re-raised together, keeping the tick's reported
+            health honest.
+            """
+            try:
+                return stage()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.exception("storage maintenance stage %s failed", name)
+                stage_failures.append((name, exc))
+                try:
+                    db.rollback()
+                except Exception:
+                    logger.exception(
+                        "storage maintenance rollback after %s failed", name
+                    )
+                return fallback
+
         try:
             service = LLMInteractionService(db)
-            pruned = service.prune_expired(
-                retention_days=settings.llm_interaction_retention_days,
-                no_action_retention_days=settings.llm_no_action_retention_days,
-                batch_size=settings.llm_storage_maintenance_batch_size,
-                max_batches=8,
-                transaction_fence=lease_guard.fence_in_transaction,
-                operation_checkpoint=lease_guard.checkpoint,
-            )
-            compacted = service.compact_oversized_contexts(
-                max_bytes=settings.llm_context_snapshot_max_bytes,
-                batch_size=min(
-                    25,
-                    settings.llm_storage_maintenance_batch_size,
+            pruned = _run_stage(
+                "llm_interaction_prune",
+                lambda: service.prune_expired(
+                    retention_days=settings.llm_interaction_retention_days,
+                    no_action_retention_days=settings.llm_no_action_retention_days,
+                    batch_size=settings.llm_storage_maintenance_batch_size,
+                    max_batches=8,
+                    transaction_fence=lease_guard.fence_in_transaction,
+                    operation_checkpoint=lease_guard.checkpoint,
                 ),
-                max_rows=settings.llm_storage_maintenance_batch_size,
-                transaction_fence=lease_guard.fence_in_transaction,
-                operation_checkpoint=lease_guard.checkpoint,
+                SimpleNamespace(deleted=0, batches=0),
+            )
+            compacted = _run_stage(
+                "llm_context_compaction",
+                lambda: service.compact_oversized_contexts(
+                    max_bytes=settings.llm_context_snapshot_max_bytes,
+                    batch_size=min(
+                        25,
+                        settings.llm_storage_maintenance_batch_size,
+                    ),
+                    max_rows=settings.llm_storage_maintenance_batch_size,
+                    transaction_fence=lease_guard.fence_in_transaction,
+                    operation_checkpoint=lease_guard.checkpoint,
+                ),
+                SimpleNamespace(compacted=0, inspected=0, batches=0),
             )
             shadow_service = StrategyV2ShadowService(
                 db,
@@ -1126,14 +1161,19 @@ def _llm_storage_maintenance_tick_sync() -> object | None:
                 settings.strategy_v2_forward_replay_artifact_retention_days
                 or None
             )
-            shadow_pruned = shadow_service.prune_expired_wait_decisions(
-                retention_days=settings.strategy_v2_wait_retention_days,
-                batch_size=settings.strategy_v2_wait_maintenance_batch_size,
-                max_batches=8,
-                replay_source_retention_days=replay_source_retention_days,
+            shadow_pruned = _run_stage(
+                "strategy_v2_wait_prune",
+                lambda: shadow_service.prune_expired_wait_decisions(
+                    retention_days=settings.strategy_v2_wait_retention_days,
+                    batch_size=settings.strategy_v2_wait_maintenance_batch_size,
+                    max_batches=8,
+                    replay_source_retention_days=replay_source_retention_days,
+                ),
+                SimpleNamespace(deleted=0, batches=0),
             )
-            diagnostic_pruned = (
-                shadow_service.prune_expired_diagnostic_wait_decisions(
+            diagnostic_pruned = _run_stage(
+                "strategy_v2_diagnostic_wait_prune",
+                lambda: shadow_service.prune_expired_diagnostic_wait_decisions(
                     retention_days=(
                         settings.strategy_v2_diagnostic_wait_retention_days
                     ),
@@ -1142,15 +1182,17 @@ def _llm_storage_maintenance_tick_sync() -> object | None:
                     ),
                     max_batches=8,
                     replay_source_retention_days=replay_source_retention_days,
-                )
+                ),
+                SimpleNamespace(deleted=0, batches=0),
             )
             artifact_retention = ResearchArtifactRetentionService(
                 db,
                 transaction_fence=lease_guard.fence_in_transaction,
                 operation_checkpoint=lease_guard.checkpoint,
             )
-            quant_v6_pruned = (
-                artifact_retention.prune_expired_quant_v6_publication_payloads(
+            quant_v6_pruned = _run_stage(
+                "quant_v6_artifact_prune",
+                lambda: artifact_retention.prune_expired_quant_v6_publication_payloads(
                     retention_days=(
                         settings.watchlist_quant_v6_artifact_retention_days
                     ),
@@ -1158,10 +1200,12 @@ def _llm_storage_maintenance_tick_sync() -> object | None:
                         settings.watchlist_quant_v6_artifact_maintenance_batch_size
                     ),
                     max_batches=8,
-                )
+                ),
+                SimpleNamespace(bindings_deleted=0, artifacts_deleted=0, batches=0),
             )
-            replay_pruned = (
-                artifact_retention.prune_expired_forward_replay_artifacts(
+            replay_pruned = _run_stage(
+                "forward_replay_artifact_prune",
+                lambda: artifact_retention.prune_expired_forward_replay_artifacts(
                     retention_days=(
                         settings.strategy_v2_forward_replay_artifact_retention_days
                     ),
@@ -1169,18 +1213,23 @@ def _llm_storage_maintenance_tick_sync() -> object | None:
                         settings.strategy_v2_forward_replay_artifact_maintenance_batch_size
                     ),
                     max_batches=8,
-                )
-            )
-            snapshots_pruned = RiskHistoryService(
-                db,
-                transaction_fence=lease_guard.fence_in_transaction,
-                operation_checkpoint=lease_guard.checkpoint,
-            ).prune_expired_snapshots(
-                retention_days=settings.runtime_state_snapshot_retention_days,
-                batch_size=(
-                    settings.runtime_state_snapshot_maintenance_batch_size
                 ),
-                max_batches=8,
+                SimpleNamespace(bindings_deleted=0, artifacts_deleted=0, batches=0),
+            )
+            snapshots_pruned = _run_stage(
+                "runtime_state_snapshot_prune",
+                lambda: RiskHistoryService(
+                    db,
+                    transaction_fence=lease_guard.fence_in_transaction,
+                    operation_checkpoint=lease_guard.checkpoint,
+                ).prune_expired_snapshots(
+                    retention_days=settings.runtime_state_snapshot_retention_days,
+                    batch_size=(
+                        settings.runtime_state_snapshot_maintenance_batch_size
+                    ),
+                    max_batches=8,
+                ),
+                SimpleNamespace(deleted=0, batches=0),
             )
             lease_guard.checkpoint()
             if pruned.deleted or compacted.compacted:
@@ -1229,6 +1278,11 @@ def _llm_storage_maintenance_tick_sync() -> object | None:
                     snapshots_pruned.deleted,
                     snapshots_pruned.batches,
                 )
+            if stage_failures:
+                names = ", ".join(name for name, _ in stage_failures)
+                raise RuntimeError(
+                    f"storage maintenance stages failed: {names}"
+                ) from stage_failures[0][1]
         finally:
             db.close()
 

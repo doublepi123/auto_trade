@@ -2841,3 +2841,116 @@ async def test_readiness_503_logs_warning(
     assert len(warnings) == 1
     assert "readiness" in warnings[0].getMessage().lower()
     assert "order_sync" in warnings[0].getMessage()
+
+
+def test_storage_maintenance_runs_later_stages_when_one_stage_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    handle = object()
+
+    class FakeSession:
+        def close(self) -> None:
+            events.append("session-close")
+
+        def rollback(self) -> None:
+            events.append("rollback")
+
+    db = FakeSession()
+
+    class FakeGuard:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> bool:
+            return False
+
+        def checkpoint(self) -> None:
+            return None
+
+        def fence_in_transaction(self, _session: object) -> None:
+            return None
+
+    guard = FakeGuard()
+
+    class FakeLeaseService:
+        def __init__(self, session_factory: object, **_kwargs: object) -> None:
+            pass
+
+        @staticmethod
+        def try_acquire(_lease_key: str) -> object:
+            return handle
+
+        @staticmethod
+        def keepalive(_acquired: object, **_kwargs: object) -> FakeGuard:
+            return guard
+
+    class FakeLLMService:
+        def __init__(self, session: object) -> None:
+            pass
+
+        @staticmethod
+        def prune_expired(**_kwargs: object) -> object:
+            events.append("llm-prune")
+            return SimpleNamespace(deleted=0, batches=0)
+
+        @staticmethod
+        def compact_oversized_contexts(**_kwargs: object) -> object:
+            events.append("llm-compact")
+            return SimpleNamespace(compacted=0, inspected=0, batches=0)
+
+    class FakeShadowService:
+        def __init__(self, session: object, **_kwargs: object) -> None:
+            pass
+
+        def prune_expired_wait_decisions(self, **_kwargs: object) -> object:
+            events.append("wait-prune")
+            return SimpleNamespace(deleted=0, batches=0)
+
+        def prune_expired_diagnostic_wait_decisions(self, **_kwargs: object) -> object:
+            events.append("diagnostic-wait-prune")
+            return SimpleNamespace(deleted=0, batches=0)
+
+    class FakeArtifactRetentionService:
+        def __init__(self, session: object, **_kwargs: object) -> None:
+            pass
+
+        def prune_expired_quant_v6_publication_payloads(self, **_kwargs: object) -> object:
+            events.append("quant-v6-prune")
+            raise RuntimeError("quant_v6 table is append-only")
+
+        def prune_expired_forward_replay_artifacts(self, **_kwargs: object) -> object:
+            events.append("replay-prune")
+            return SimpleNamespace(bindings_deleted=0, artifacts_deleted=0, batches=0)
+
+    class FakeRiskHistoryService:
+        def __init__(self, session: object, **_kwargs: object) -> None:
+            pass
+
+        def prune_expired_snapshots(self, **_kwargs: object) -> object:
+            events.append("snapshot-prune")
+            return SimpleNamespace(deleted=7, batches=1)
+
+    monkeypatch.setattr(main_module, "SessionLocal", lambda: db)
+    monkeypatch.setattr(
+        durable_job_lease_service, "DurableJobLeaseService", FakeLeaseService
+    )
+    monkeypatch.setattr(llm_interaction_service, "LLMInteractionService", FakeLLMService)
+    monkeypatch.setattr(
+        strategy_v2_shadow_service, "StrategyV2ShadowService", FakeShadowService
+    )
+    monkeypatch.setattr(
+        research_artifact_retention_service,
+        "ResearchArtifactRetentionService",
+        FakeArtifactRetentionService,
+    )
+    monkeypatch.setattr(risk_history_service, "RiskHistoryService", FakeRiskHistoryService)
+
+    with pytest.raises(Exception):
+        main_module._llm_storage_maintenance_tick_sync()
+
+    assert "quant-v6-prune" in events
+    assert "replay-prune" in events, "a failing stage must not skip later stages"
+    assert "snapshot-prune" in events, (
+        "runtime_state_snapshot pruning must still run; it is 71% of production DB pages"
+    )
