@@ -55,6 +55,7 @@ def _registration(
     db: Session,
     *,
     identity: str = "1" * 64,
+    registration_json: str = "{}",
 ) -> WatchlistQuantV6Registration:
     observed_at = _NOW - timedelta(days=60)
     registration = WatchlistQuantV6Registration(
@@ -80,7 +81,7 @@ def _registration(
         data_cutoff_at=observed_at,
         bar_period="MIN_5",
         adjustment_mode="NO_ADJUST",
-        registration_json="{}",
+        registration_json=registration_json,
         server_generated=True,
         short_entry_allowed=False,
         position_add_on_allowed=False,
@@ -561,3 +562,99 @@ def test_prune_forward_replay_artifacts_keeps_shared_artifact_and_window() -> No
     assert db.get(StrategyV2ForwardReplayArtifact, "a" * 64) is not None
     assert db.get(StrategyV2ForwardReplayArtifact, "d" * 64) is not None
     assert db.query(StrategyV2ForwardEvidenceArtifact).count() == 2
+
+
+def _engine_with_production_triggers() -> Engine:
+    from app.database import _ensure_watchlist_quant_v6_tables
+
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+
+    @event.listens_for(engine, "connect")
+    def _enable_pragmas(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA recursive_triggers=ON")
+        finally:
+            cursor.close()
+
+    Base.metadata.create_all(bind=engine)
+    _ensure_watchlist_quant_v6_tables(engine)
+    return engine
+
+
+def _seed_expired_publication(db: Session) -> None:
+    """Seed one expired publication that satisfies the reference triggers.
+
+    The publication and binding INSERT triggers re-derive cohort identity from
+    ``registration_json``, so the seed must carry a real member array whose
+    ordinal/symbol/market match the binding rather than the ``{}`` the
+    trigger-less fixtures get away with.
+    """
+    import json as _json
+
+    old = _NOW - timedelta(days=60)
+    registration = _registration(
+        db,
+        registration_json=_json.dumps(
+            {"cohort": {"member_count": 1, "members": [
+                {"ordinal": 0, "symbol": "AAPL.US", "market": "US"}
+            ]}}
+        ),
+    )
+    publication = _publication(db, registration, identity="8" * 64, published_at=old)
+    artifact = _v6_artifact(db, "a" * 64, created_at=old)
+    _v6_binding(
+        db,
+        publication.id,
+        artifact_sha256=artifact.digest_sha256,
+        artifact_kind=artifact.kind,
+        binding_sha256="b" * 64,
+        created_at=old,
+    )
+    db.commit()
+
+
+def test_production_triggers_block_delete_on_every_quant_v6_table() -> None:
+    from sqlalchemy import text
+
+    db = Session(bind=_engine_with_production_triggers())
+    _seed_expired_publication(db)
+
+    for table in (
+        "watchlist_quant_v6_publication_artifacts",
+        "watchlist_quant_v6_artifacts",
+        "watchlist_quant_v6_publications",
+        "watchlist_quant_v6_registrations",
+    ):
+        try:
+            db.execute(text(f"DELETE FROM {table}"))
+            db.commit()
+            raise AssertionError(f"DELETE FROM {table} must abort as append-only")
+        except AssertionError:
+            raise
+        except Exception as exc:
+            assert "append-only" in str(exc), f"{table} -> {exc}"
+            db.rollback()
+    db.close()
+
+
+def test_configured_quant_v6_retention_default_survives_production_triggers() -> None:
+    from app.config import settings
+
+    db = Session(bind=_engine_with_production_triggers())
+    _seed_expired_publication(db)
+
+    result = ResearchArtifactRetentionService(db).prune_expired_quant_v6_publication_payloads(
+        retention_days=settings.watchlist_quant_v6_artifact_retention_days,
+        batch_size=settings.watchlist_quant_v6_artifact_maintenance_batch_size,
+        max_batches=8,
+        now=_NOW,
+    )
+    assert result.bindings_deleted == 0
+    assert result.artifacts_deleted == 0
+    db.close()

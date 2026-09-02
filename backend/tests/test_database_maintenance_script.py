@@ -269,11 +269,18 @@ def test_apply_prunes_expired_rows_and_keeps_provenance(
     maintenance: ModuleType,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path = tmp_path / "auto_trade.db"
     backups = tmp_path / "data" / "backups"
     dest = tmp_path / "offsite"
     _seed_db(db_path)
+    # The shipped default is 0 because the bindings are append-only in a
+    # trigger-equipped database; enable a window explicitly so this still
+    # exercises the prune path rather than the disabled short-circuit.
+    monkeypatch.setattr(
+        maintenance.settings, "watchlist_quant_v6_artifact_retention_days", 30
+    )
 
     exit_code = maintenance.main(_argv(db_path, backups, dest, "--apply"))
     payload = json.loads(capsys.readouterr().out)

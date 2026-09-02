@@ -276,8 +276,13 @@ class Settings(BaseSettings):
             "AUTO_TRADE_STRATEGY_V2_FORWARD_REPLAY_ARTIFACT_MAINTENANCE_BATCH_SIZE"
         ),
     )
+    # Must be 0 while publication bindings carry append-only manifest
+    # provenance: any non-zero window makes the prune issue a DELETE the
+    # trigger aborts, which fails the whole maintenance tick. Safe to raise
+    # only once artifact metadata and expirable blob bytes live in separate
+    # tables.
     watchlist_quant_v6_artifact_retention_days: int = Field(
-        default=30,
+        default=0,
         ge=0,
         le=3650,
         validation_alias="AUTO_TRADE_WATCHLIST_QUANT_V6_ARTIFACT_RETENTION_DAYS",
