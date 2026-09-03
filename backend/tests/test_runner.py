@@ -9407,17 +9407,20 @@ class TestDurableFillReconciliationFailure:
         persisted: list[bool] = []
         broadcasts: list[bool] = []
 
+        # Both doubles accept the optional ``db`` the latch now hands them: it
+        # reuses the caller's session instead of opening a nested one, which
+        # is what exhausted the pool on 2026-09-03.
         monkeypatch.setattr(
             runner,
             "_record_risk_event",
-            lambda reason, event_type="RISK_REJECTION": risk_events.append(
+            lambda reason, event_type="RISK_REJECTION", db=None: risk_events.append(
                 (event_type, reason)
             ),
         )
         monkeypatch.setattr(
             runner,
             "_persist_risk_pause_best_effort",
-            lambda: persisted.append(True),
+            lambda db=None: persisted.append(True),
         )
         monkeypatch.setattr(
             runner,
@@ -9579,6 +9582,7 @@ class TestDurableFillReconciliationFailure:
         def failing_record_risk_event(
             _reason: str,
             event_type: str = "RISK_REJECTION",
+            db: object | None = None,
         ) -> None:
             raise RuntimeError(self._LOCK_ERROR)
 
@@ -9586,7 +9590,7 @@ class TestDurableFillReconciliationFailure:
         monkeypatch.setattr(
             runner,
             "_persist_risk_pause_best_effort",
-            lambda: persisted.append(True),
+            lambda db=None: persisted.append(True),
         )
         monkeypatch.setattr(
             runner,
@@ -9713,11 +9717,12 @@ class TestDurableFillReconciliationFailure:
         def record_risk_event(
             reason: str,
             event_type: str = "RISK_REJECTION",
+            db: object | None = None,
         ) -> None:
             if failing_surface == "record_risk_event":
                 raise RuntimeError(self._LOCK_ERROR)
 
-        def persist_risk_pause() -> None:
+        def persist_risk_pause(db: object | None = None) -> None:
             if failing_surface == "persist":
                 raise RuntimeError(self._LOCK_ERROR)
             persisted.append(True)

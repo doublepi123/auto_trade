@@ -4,7 +4,7 @@ import sqlite3
 from datetime import date
 
 import pytest
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
@@ -1822,6 +1822,88 @@ def test_execution_ledger_migration_freezes_legacy_fill_fee(tmp_path) -> None:
     assert row[1] == "ESTIMATED"
     assert {"decision_bid", "actual_fee", "slippage_bps", "mfe_pct"} <= columns
 
+
+
+def test_engine_pool_is_sized_for_the_concurrent_workload(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """P0 incident 2026-09-03: 1768 x ``QueuePool limit of size 5 overflow 10``.
+
+    ``create_engine`` was called without pool arguments, so the process ran on
+    SQLAlchemy's defaults of ``pool_size=5, max_overflow=10`` -- 15 connections
+    total. A py-spy dump taken during the 65-minute outage showed all 15
+    checked out with only three threads in SQL, and all three parked in
+    ``queue.py:201`` waiting for a connection that could never arrive: a
+    re-entrant nested-session deadlock, not slow-query saturation. 15 was the
+    binding constraint, and SQLite in WAL mode serves many concurrent readers
+    fine.
+
+    ``pool_timeout`` is pinned low on purpose: at the 30s default a health
+    check blocks long enough for the container to be marked unhealthy, so the
+    outage is reported as an opaque hang instead of a fast, explicit failure.
+    """
+    import importlib
+
+    from sqlalchemy.pool import QueuePool
+
+    db_file = tmp_path / "pool.db"
+    monkeypatch.setenv("AUTO_TRADE_DATABASE_URL", f"sqlite:///{db_file}")
+    from app import database as _db_module
+
+    importlib.reload(_db_module)
+
+    pool = _db_module.engine.pool
+    assert isinstance(pool, QueuePool)
+    assert pool.size() >= 20, f"pool_size was {pool.size()}"
+    assert int(getattr(pool, "_max_overflow")) >= 30, (
+        f"max_overflow was {getattr(pool, '_max_overflow')}"
+    )
+    assert pool.timeout() <= 10, f"pool_timeout was {pool.timeout()}"
+
+
+@pytest.mark.parametrize("memory_url", ["sqlite://", "sqlite:///:memory:"])
+def test_engine_still_builds_for_every_in_memory_sqlite_url(
+    memory_url: str,
+) -> None:
+    """In-memory SQLite is served by ``SingletonThreadPool``, not ``QueuePool``.
+
+    ``SingletonThreadPool`` rejects ``pool_size`` / ``max_overflow`` /
+    ``pool_timeout`` outright with ``TypeError: Invalid argument(s) ... sent
+    to create_engine()``, so the sizing added for the 2026-09-03
+    pool-exhaustion incident must only be passed where a real queue pool is
+    used.
+
+    Both spellings are load-bearing. ``sqlite://`` carries no ``:memory:``
+    substring yet is equally in-memory, and
+    ``tests/test_watchlist_quant_v6_reader_import_isolation.py`` boots a fresh
+    interpreter with exactly that URL -- a substring check on ``:memory:``
+    alone lets it through and breaks the import of ``app.database`` itself.
+    """
+    assert database.queue_pool_kwargs(memory_url) == {}
+    engine = create_engine(
+        memory_url,
+        connect_args={"check_same_thread": False},
+        **database.queue_pool_kwargs(memory_url),
+    )
+    try:
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT 1")).scalar() == 1
+    finally:
+        engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "file_url",
+    ["sqlite:///./data/auto_trade.db", "sqlite:////app/data/auto_trade.db"],
+)
+def test_file_backed_sqlite_urls_get_the_sized_queue_pool(file_url: str) -> None:
+    """Real deployments (local relative path and the Docker absolute path)."""
+    assert database.queue_pool_kwargs(file_url) == {
+        "pool_size": database.POOL_SIZE,
+        "max_overflow": database.MAX_OVERFLOW,
+        "pool_timeout": database.POOL_TIMEOUT_SECONDS,
+    }
 
 
 def test_sqlite_wal_and_busy_timeout_enabled(tmp_path, monkeypatch) -> None:

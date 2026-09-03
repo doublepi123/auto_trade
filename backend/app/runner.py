@@ -784,10 +784,24 @@ class AppRunner:
         self._persist_risk_pause_best_effort()
         self._broadcast_status()
 
-    def _persist_risk_pause_best_effort(self) -> None:
+    def _persist_risk_pause_best_effort(self, db: Session | None = None) -> None:
+        """Persist the paused runtime state, reusing ``db`` when supplied.
+
+        See ``_db_session_or``: on the durable-fill latch path the caller
+        already holds a session, and opening another one there is what
+        exhausted the pool on 2026-09-03.
+        """
         try:
-            with self._db_session() as db:
-                self._state_svc.persist(db, self.engine, self.risk)
+            with self._db_session_or(db) as session:
+                try:
+                    self._state_svc.persist(session, self.engine, self.risk)
+                except Exception:
+                    # A borrowed session outlives this call; the caller must
+                    # not inherit a failed transaction from a best-effort
+                    # write it did not ask for.
+                    if db is not None:
+                        session.rollback()
+                    raise
         except Exception:
             logger.critical("failed to persist operational risk pause", exc_info=True)
 
@@ -7025,6 +7039,29 @@ class AppRunner:
         finally:
             db.close()
 
+    @staticmethod
+    @contextmanager
+    def _db_session_or(db: Session | None) -> Generator[Session, None, None]:
+        """Reuse the caller's session, or own one when none was supplied.
+
+        Opening a SECOND session while the caller still holds the first is the
+        re-entrancy that deadlocked the connection pool on 2026-09-03: 1768 x
+        ``QueuePool limit of size 5 overflow 10 reached`` over ~65 minutes,
+        with a py-spy dump showing all 15 connections checked out and every
+        thread that wanted one parked in ``queue.py:201`` -- none of them
+        executing SQL. Helpers reached from a path that already holds a
+        session take an optional ``db`` and route through here; the lifetime
+        of a borrowed session belongs to its owner, so it is never closed.
+        """
+        if db is not None:
+            yield db
+            return
+        owned = SessionLocal()
+        try:
+            yield owned
+        finally:
+            owned.close()
+
     def _load_credentials(self) -> PlainCredentials:
         with self._db_session() as db:
             try:
@@ -7526,21 +7563,67 @@ class AppRunner:
         self,
         reason: str,
         event_type: str = "RISK_REJECTION",
+        db: Session | None = None,
     ) -> None:
-        with self._db_session() as db:
-            self._state_svc.record_risk_event(db, reason, event_type=event_type)
-            record_trade_event(
-                db,
-                event_type=(
-                    "DRAWDOWN_LIMIT"
-                    if event_type == "DRAWDOWN_LIMIT"
-                    else "RISK_PAUSED"
-                ),
-                status="PAUSED",
-                message=reason,
-                payload={"source": "risk_controller"},
-            )
-            db.commit()
+        """Write the risk event, reusing ``db`` when the caller holds one.
+
+        The ``trade_events`` type stays ``RISK_PAUSED`` (or ``DRAWDOWN_LIMIT``)
+        deliberately: it is load-bearing for ``review_service.has_risk_pause``,
+        the ``event_list_service`` severity map, ``labels.ts``, Review.vue,
+        DecisionTimeline.vue and Dashboard.vue. Passing ``event_type`` straight
+        through would silently move every one of those consumers.
+
+        But hardcoding it also erased the cause. During the 2026-09-03 halt
+        ``risk_events`` recorded ``DURABLE_FILL_RECONCILIATION_FAILED`` at
+        11:07 and 11:15 while ``trade_events`` -- the Decision Timeline's
+        source -- showed a generic ``RISK_PAUSED`` and zero rows of the real
+        type. The true type therefore travels in the payload, which keeps
+        every filter, severity mapping and pinned test intact while making the
+        cause queryable.
+
+        The commit is kept even on a borrowed session. This helper's only
+        write is that evidence; durable proof of a halt must not depend on the
+        caller's later success. On the latch path the caller's own write
+        (``_persist_durable_fill_reconciliation_evidence``) has already
+        committed one line earlier, so there is nothing unintended in flight,
+        and ``RuntimeStateService.record_risk_event`` commits internally
+        regardless. A failure rolls a BORROWED session back before
+        propagating: the caller keeps using that session afterwards, and
+        handing it back inside a failed transaction would turn one lost row
+        into a second silent halt.
+        """
+        with self._db_session_or(db) as session:
+            try:
+                self._state_svc.record_risk_event(
+                    session,
+                    reason,
+                    event_type=event_type,
+                )
+                record_trade_event(
+                    session,
+                    event_type=(
+                        "DRAWDOWN_LIMIT"
+                        if event_type == "DRAWDOWN_LIMIT"
+                        else "RISK_PAUSED"
+                    ),
+                    status="PAUSED",
+                    message=reason,
+                    payload={
+                        "source": "risk_controller",
+                        "risk_event_type": event_type,
+                    },
+                )
+                session.commit()
+            except Exception:
+                if db is not None:
+                    try:
+                        session.rollback()
+                    except Exception:
+                        logger.exception(
+                            "failed to roll back a borrowed session after a "
+                            "risk-event write failure"
+                        )
+                raise
 
     def _load_tracked_entries(self, db) -> None:
         try:
@@ -7732,13 +7815,20 @@ class AppRunner:
         # took the durable row AND every operator signal with it, because they
         # shared one try/except: the system stayed halted ~4.5h in silence.
         # Each surface is therefore guarded on its own. In particular the
-        # notification must not sit behind ``_record_risk_event``, which opens
-        # its own session and commits and so raises under the very lock that
-        # caused the incident.
+        # notification must not sit behind ``_record_risk_event``, which
+        # commits and so raises under the very lock that caused the incident.
+        #
+        # Both helpers below are handed THIS session. Until 2026-09-03 they
+        # each opened their own while this one was still checked out: +2
+        # nested connections per iteration of a 5-second loop, during a
+        # failure storm. That re-entrancy exhausted the pool and deadlocked
+        # the process for ~65 minutes. The evidence write above has already
+        # committed, so reusing the session commits nothing unintended.
         try:
             self._record_risk_event(
                 effective_reason,
                 event_type="DURABLE_FILL_RECONCILIATION_FAILED",
+                db=db,
             )
         except Exception:
             logger.exception("failed to record durable-fill reconciliation risk event")
@@ -7752,7 +7842,7 @@ class AppRunner:
                 "failed to send durable-fill reconciliation risk notification"
             )
         try:
-            self._persist_risk_pause_best_effort()
+            self._persist_risk_pause_best_effort(db=db)
         except Exception:
             logger.exception("failed to persist durable-fill reconciliation pause state")
         try:

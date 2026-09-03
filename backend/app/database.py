@@ -30,7 +30,64 @@ settings.ensure_data_dir()
 _connect_args: dict[str, object] = {}
 if settings.database_url.startswith("sqlite"):
     _connect_args["check_same_thread"] = False
-engine = create_engine(settings.database_url, connect_args=_connect_args)
+
+# Connection-pool sizing. These are deliberately hardcoded rather than exposed
+# as ``Settings`` fields: a knob that can be turned down is a knob that can
+# reproduce the outage, and the safe value does not vary per deployment.
+#
+# On 2026-09-03 the backend went unresponsive for ~65 minutes with 1768 x
+# ``sqlalchemy.exc.TimeoutError: QueuePool limit of size 5 overflow 10
+# reached``. ``create_engine`` had never been given pool arguments, so the
+# process ran on SQLAlchemy's defaults (5 + 10 = 15 connections). A py-spy
+# dump taken during the outage showed all 15 checked out while only three
+# threads were inside SQL -- and all three were parked in ``queue.py:201``
+# waiting for a connection that could never arrive. That is a re-entrant
+# nested-session deadlock (a caller holding one ``Session`` opening a second),
+# not slow-query saturation, so 15 was simply the binding constraint. SQLite
+# in WAL mode serves many concurrent readers without contention.
+#
+# ``POOL_TIMEOUT_SECONDS`` is lowered from SQLAlchemy's 30s default on
+# purpose: at 30s a health-check request blocks long enough for the container
+# to be marked unhealthy, which reports the fault as an opaque hang. 10s
+# surfaces the exhaustion as an explicit, attributable error instead.
+POOL_SIZE = 20
+MAX_OVERFLOW = 30
+POOL_TIMEOUT_SECONDS = 10
+
+
+def queue_pool_kwargs(database_url: str) -> dict[str, object]:
+    """Pool sizing for ``database_url``, empty when it is not queue-pooled.
+
+    An in-memory SQLite database is served by ``SingletonThreadPool``, which
+    rejects ``pool_size`` / ``max_overflow`` / ``pool_timeout`` outright with
+    ``TypeError: Invalid argument(s) ... sent to create_engine()``. Both
+    in-memory spellings must be recognised: ``sqlite:///:memory:`` and the
+    bare ``sqlite://``, which carries no ``:memory:`` substring yet is equally
+    in-memory and is what
+    ``tests/test_watchlist_quant_v6_reader_import_isolation.py`` boots a fresh
+    interpreter with.
+    """
+    if not database_url.startswith("sqlite"):
+        return {
+            "pool_size": POOL_SIZE,
+            "max_overflow": MAX_OVERFLOW,
+            "pool_timeout": POOL_TIMEOUT_SECONDS,
+        }
+    path = database_url.split("://", 1)[1].lstrip("/")
+    if path in ("", ":memory:"):
+        return {}
+    return {
+        "pool_size": POOL_SIZE,
+        "max_overflow": MAX_OVERFLOW,
+        "pool_timeout": POOL_TIMEOUT_SECONDS,
+    }
+
+
+engine = create_engine(
+    settings.database_url,
+    connect_args=_connect_args,
+    **queue_pool_kwargs(settings.database_url),
+)
 
 
 if settings.database_url.startswith("sqlite"):
