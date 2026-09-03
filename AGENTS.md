@@ -246,10 +246,14 @@ New tables since the last refresh (all with `_ensure_*` runtime migrations in `d
 ### Sequence
 
 1. Gates 1–3 pass → `git commit` (atomic; production + its tests in one commit; never `.env`, secrets, or `credential_private_key.pem`).
-2. `docker compose up --build -d`.
-3. Gate 4. Verify the deployed image actually contains the change (grep a new symbol inside the container) — a healthy container proves nothing if it is still running the old image.
-4. `POST /api/trade/control/resume` if the system is paused and the pause reason is resolved by this change. On `409`, read the `detail`, resolve the named condition, retry; escalate to `force-resume` only when the 409 reason is demonstrably stale.
-5. Report what shipped, with the literal gate output as evidence.
+2. `git push origin main`. Committing without pushing is not shipping: the work is invisible to CI, to Docker Hub, and to every other machine.
+3. Watch the run to a conclusion (`/repos/:owner/:repo/actions/runs?branch=main`). Compare its failing jobs against the **previous** run before judging: `main` can already be red, in which case the bar is "no job fails that was not already failing", not "green". A red `main` that predates your change is still a defect to report, not to inherit silently.
+4. `docker compose up --build -d`.
+5. Gate 4. Verify the deployed image actually contains the change (grep a new symbol inside the container) — a healthy container proves nothing if it is still running the old image.
+6. `POST /api/trade/control/resume` if the system is paused and the pause reason is resolved by this change. On `409`, read the `detail`, resolve the named condition, retry; escalate to `force-resume` only when the 409 reason is demonstrably stale.
+7. Report what shipped, with the literal gate output as evidence.
+
+Local deploy does not wait on CI — the image is built from the working tree, so a slow or flaky pipeline never blocks restoring a halted system. But CI failing on your own SHA still has to be chased down to a verdict, because `Build and push Docker images` is gated behind every test job: while it is red, no image reaches Docker Hub and any other deployment target silently keeps the old code.
 
 ### Rollback (not optional)
 
