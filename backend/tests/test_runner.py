@@ -9311,6 +9311,453 @@ class TestRecentQuotesDequeBound:
         assert runner.engine.state == EngineState.FLAT
 
 
+class TestDurableFillReconciliationFailure:
+    """The durable-fill latch must scream, not just try to write a row.
+
+    On 2026-09-02 21:02:46 UTC the deployed system latched this pause and
+    stayed halted for ~4.5 hours with zero operator signal. The live DB
+    proves it: ``trade_events`` holds 0 ``DURABLE_FILL_RECONCILIATION_FAILED``
+    rows ever, and 0 trade_events / 0 risk_events / 0 notifications after
+    21:02:07. A SQLite ``database is locked`` error rolled back the only
+    durable write, and that write was also the only operator signal because
+    both sat inside one swallow-everything ``try``/``except``.
+
+    Two independent defects therefore have to be locked down:
+    (1) a momentary writer collision must be retried, not surrendered to; and
+    (2) the notification / risk event / runtime persist / last-action /
+    broadcast surfaces must each be guarded on their own, so no single
+    failure can silence the rest. In particular the notification must not sit
+    behind ``_record_risk_event``: that helper opens its own session and
+    commits, so under the very lock that caused this incident it raises, and
+    a shared ``try`` would just move the silence one line down.
+    """
+
+    _SYMBOL = "DURABLELATCH.US"
+    _EVENT_TYPE = "DURABLE_FILL_RECONCILIATION_FAILED"
+    _LOCK_ERROR = "(sqlite3.OperationalError) database is locked"
+
+    @pytest.fixture(autouse=True)
+    def _isolate_durable_fill_rows(self):
+        self._delete_rows()
+        yield
+        self._delete_rows()
+
+    @classmethod
+    def _delete_rows(cls) -> None:
+        from app.models import RuntimeState, RuntimeStateSnapshot, TradeEvent
+
+        with database.SessionLocal() as db:
+            db.query(TradeEvent).filter(
+                TradeEvent.event_type == cls._EVENT_TYPE
+            ).delete(synchronize_session=False)
+            db.query(RuntimeStateSnapshot).filter(
+                RuntimeStateSnapshot.symbol.like("DURABLELATCH%")
+            ).delete(synchronize_session=False)
+            db.query(RuntimeState).filter(
+                RuntimeState.symbol.like("DURABLELATCH%")
+            ).delete(synchronize_session=False)
+            db.commit()
+
+    @classmethod
+    def _durable_rows(cls) -> list[tuple[str, str]]:
+        """Read the landed evidence back through a *fresh* session."""
+        from app.models import TradeEvent
+
+        with database.SessionLocal() as db:
+            return [
+                (str(row.status), str(row.message))
+                for row in db.query(TradeEvent)
+                .filter(TradeEvent.event_type == cls._EVENT_TYPE)
+                .all()
+            ]
+
+    class _RecordingNotifier:
+        def __init__(self, *, fail: bool = False) -> None:
+            self.events: list[tuple[str, str]] = []
+            self._fail = fail
+
+        def notify_order(self, *_args: object) -> bool:
+            return True
+
+        def notify_risk_event(self, event_type: str, reason: str) -> bool:
+            self.events.append((event_type, reason))
+            if self._fail:
+                raise RuntimeError("notification channel unavailable")
+            return True
+
+    def _runner(self, notifier: object) -> AppRunner:
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(
+            symbol=self._SYMBOL,
+            market="US",
+            buy_low=100.0,
+            sell_high=110.0,
+        )
+        runner.engine.last_price = 105.0
+        runner.notifier = notifier
+        return runner
+
+    @staticmethod
+    def _wire_surfaces(
+        runner: AppRunner,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> dict[str, list[object]]:
+        """Record every operator surface the fixed latch has to reach."""
+        risk_events: list[tuple[str, str]] = []
+        persisted: list[bool] = []
+        broadcasts: list[bool] = []
+
+        monkeypatch.setattr(
+            runner,
+            "_record_risk_event",
+            lambda reason, event_type="RISK_REJECTION": risk_events.append(
+                (event_type, reason)
+            ),
+        )
+        monkeypatch.setattr(
+            runner,
+            "_persist_risk_pause_best_effort",
+            lambda: persisted.append(True),
+        )
+        monkeypatch.setattr(
+            runner,
+            "_broadcast_status",
+            lambda: broadcasts.append(True),
+        )
+        return {
+            "risk_events": cast(list[object], risk_events),
+            "persisted": cast(list[object], persisted),
+            "broadcasts": cast(list[object], broadcasts),
+        }
+
+    def _latch(self, runner: AppRunner, error: Exception) -> object:
+        with database.SessionLocal() as db:
+            return runner._latch_durable_fill_reconciliation_failure(
+                db,
+                {self._SYMBOL},
+                source="test_durable_fill_latch",
+                error=error,
+            )
+
+    def test_latch_surfaces_operator_signals(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A silent halt is the incident. Every operator surface must fire."""
+        notifier = self._RecordingNotifier()
+        runner = self._runner(notifier)
+        surfaces = self._wire_surfaces(runner, monkeypatch)
+
+        result = self._latch(runner, RuntimeError("durable fills unprovable"))
+
+        effective_reason = runner.risk.pause_reason
+        assert runner.risk.paused is True
+        assert effective_reason.startswith("POSITION_RECONCILIATION_UNCERTAIN:")
+        assert surfaces["risk_events"] == [(self._EVENT_TYPE, effective_reason)]
+        assert notifier.events == [(self._EVENT_TYPE, effective_reason)]
+        assert surfaces["persisted"] == [True]
+        assert surfaces["broadcasts"] == [True]
+        assert runner.last_action_message.startswith(
+            "POSITION_RECONCILIATION_UNCERTAIN:"
+        )
+        assert self._SYMBOL in runner._unsettled_position_symbols
+        assert result == []
+        assert (
+            AppRunner._latch_durable_fill_reconciliation_failure.__annotations__[
+                "return"
+            ]
+            == "list[tuple[str, _ReductionIntent]]"
+        )
+
+    def test_latch_retries_transient_database_lock(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The 2026-09-02 halt lost its only evidence row to a writer collision.
+
+        Write-upgrade conflicts clear in milliseconds, so a bounded retry
+        recovers the durable evidence that a single attempt threw away.
+        """
+        real_record_trade_event = runner_module.record_trade_event
+        attempts: list[str] = []
+
+        def flaky_record_trade_event(db, **kwargs: object):
+            attempts.append(str(kwargs.get("event_type")))
+            if len(attempts) < runner_module._RUNTIME_STATE_PERSIST_ATTEMPTS:
+                raise RuntimeError(self._LOCK_ERROR)
+            return real_record_trade_event(db, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(
+            runner_module,
+            "record_trade_event",
+            flaky_record_trade_event,
+        )
+        notifier = self._RecordingNotifier()
+        runner = self._runner(notifier)
+        self._wire_surfaces(runner, monkeypatch)
+
+        result = self._latch(runner, RuntimeError("durable fills unprovable"))
+
+        effective_reason = runner.risk.pause_reason
+        assert attempts == [self._EVENT_TYPE] * (
+            runner_module._RUNTIME_STATE_PERSIST_ATTEMPTS
+        )
+        assert self._durable_rows() == [("ERROR", effective_reason)]
+        assert notifier.events == [(self._EVENT_TYPE, effective_reason)]
+        assert result == []
+
+    def test_latch_stays_fail_closed_when_database_is_unwritable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A permanently locked DB must still reach the operator."""
+        attempts: list[str] = []
+
+        def locked_record_trade_event(_db, **kwargs: object):
+            attempts.append(str(kwargs.get("event_type")))
+            raise RuntimeError(self._LOCK_ERROR)
+
+        monkeypatch.setattr(
+            runner_module,
+            "record_trade_event",
+            locked_record_trade_event,
+        )
+        notifier = self._RecordingNotifier()
+        runner = self._runner(notifier)
+        self._wire_surfaces(runner, monkeypatch)
+
+        result = self._latch(runner, RuntimeError("durable fills unprovable"))
+
+        assert len(attempts) == runner_module._RUNTIME_STATE_PERSIST_ATTEMPTS
+        assert runner.risk.paused is True
+        assert runner.risk.pause_auto_resumable is False
+        assert notifier.events == [(self._EVENT_TYPE, runner.risk.pause_reason)]
+        assert result == []
+
+    def test_latch_does_not_retry_deterministic_write_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only lock contention is transient; retrying a real bug wastes time."""
+        attempts: list[str] = []
+
+        def broken_record_trade_event(_db, **kwargs: object):
+            attempts.append(str(kwargs.get("event_type")))
+            raise RuntimeError("deterministic serialization failure")
+
+        monkeypatch.setattr(
+            runner_module,
+            "record_trade_event",
+            broken_record_trade_event,
+        )
+        notifier = self._RecordingNotifier()
+        runner = self._runner(notifier)
+        self._wire_surfaces(runner, monkeypatch)
+
+        result = self._latch(runner, RuntimeError("durable fills unprovable"))
+
+        assert len(attempts) == 1
+        assert runner.risk.paused is True
+        assert notifier.events == [(self._EVENT_TYPE, runner.risk.pause_reason)]
+        assert result == []
+
+    def test_notification_survives_risk_event_write_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """``_record_risk_event`` opens its own session and commits.
+
+        Under the same lock that caused the 2026-09-02 halt it raises. If the
+        notification is sequenced behind it inside a shared ``try``, the defect
+        simply moves one line down and the operator is still never told.
+        """
+        notifier = self._RecordingNotifier()
+        runner = self._runner(notifier)
+        persisted: list[bool] = []
+        broadcasts: list[bool] = []
+
+        def failing_record_risk_event(
+            _reason: str,
+            event_type: str = "RISK_REJECTION",
+        ) -> None:
+            raise RuntimeError(self._LOCK_ERROR)
+
+        monkeypatch.setattr(runner, "_record_risk_event", failing_record_risk_event)
+        monkeypatch.setattr(
+            runner,
+            "_persist_risk_pause_best_effort",
+            lambda: persisted.append(True),
+        )
+        monkeypatch.setattr(
+            runner,
+            "_broadcast_status",
+            lambda: broadcasts.append(True),
+        )
+
+        result = self._latch(runner, RuntimeError("durable fills unprovable"))
+
+        assert notifier.events == [(self._EVENT_TYPE, runner.risk.pause_reason)]
+        assert persisted == [True]
+        assert broadcasts == [True]
+        assert result == []
+
+    def test_latch_emits_the_reason_the_runtime_actually_holds(
+        self,
+    ) -> None:
+        """Every surface must quote the reason the runtime really latched.
+
+        The latch runs on top of whatever pause is already in force — during
+        the 2026-09-02 halt a preceding operational diagnosis was entirely
+        plausible. ``risk.pause()`` owns which reason survives, so the emitted
+        signals are read back from ``risk.pause_reason`` rather than from the
+        locally built string. This test uses the REAL ``risk.pause`` and never
+        hardcodes which reason wins: whichever one the runtime ends up holding
+        is the one the operator must be told about. ``pause()``'s own guard
+        semantics are pinned separately in
+        ``test_operational_pause_guard_semantics``.
+        """
+        incumbent = (
+            "ORDER_SUBMISSION_UNCERTAIN: broker acknowledgement never proved"
+        )
+        notifier = self._RecordingNotifier()
+        runner = self._runner(notifier)
+        runner.risk.pause(incumbent, auto_resumable=False)
+        assert runner.risk.pause_reason == incumbent
+
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            surfaces = self._wire_surfaces(runner, monkeypatch)
+            result = self._latch(runner, RuntimeError("durable fills unprovable"))
+
+        effective_reason = runner.risk.pause_reason
+        assert runner.risk.paused is True
+        assert runner.risk.pause_auto_resumable is False
+        assert effective_reason.startswith(runner_module._OPERATIONAL_PAUSE_PREFIXES)
+        assert self._SYMBOL in runner._unsettled_position_symbols
+        assert surfaces["risk_events"] == [(self._EVENT_TYPE, effective_reason)]
+        assert notifier.events == [(self._EVENT_TYPE, effective_reason)]
+        assert runner.last_action_message == effective_reason
+        assert surfaces["persisted"] == [True]
+        assert surfaces["broadcasts"] == [True]
+        assert result == []
+
+    def test_operational_pause_guard_semantics(self) -> None:
+        """Pin the real ``RiskController.pause`` guard both directions.
+
+        core/risk.py:326-331 declines to overwrite an incumbent operational
+        pause ONLY when the incoming reason is non-operational. The durable-fill
+        latch's reason starts with ``POSITION_RECONCILIATION_UNCERTAIN:``, which
+        IS in ``_OPERATIONAL_PAUSE_PREFIXES``, so from that call site ``pause()``
+        always overwrites and the fresh diagnosis always wins.
+
+        The production latch still re-reads ``risk.pause_reason`` after pausing.
+        That is deliberate and free: if this guard, the prefix tuple, or the
+        latch's own reason ever changes, the emitted operator signal keeps
+        matching reality instead of quietly lying — which is exactly the class
+        of silence that produced the 2026-09-02 unannounced 4.5-hour halt.
+        """
+        from app.core.risk import RiskController
+
+        incumbent = (
+            "ORDER_SUBMISSION_UNCERTAIN: broker acknowledgement never proved"
+        )
+        latch_reason = (
+            f"{runner_module._POSITION_RECONCILIATION_UNCERTAIN_PREFIX} recent "
+            "durable fills could not be proved before position reconciliation"
+        )
+        assert incumbent.startswith(runner_module._OPERATIONAL_PAUSE_PREFIXES)
+        assert latch_reason.startswith(runner_module._OPERATIONAL_PAUSE_PREFIXES)
+
+        # Operational incumbent + operational incoming -> overwritten.
+        operational = RiskController()
+        operational.pause(incumbent, auto_resumable=False)
+        operational.pause(latch_reason, auto_resumable=False)
+        assert operational.pause_reason == latch_reason
+
+        # Operational incumbent + non-operational incoming -> retained.
+        non_operational_reason = "manual operator pause"
+        assert not non_operational_reason.startswith(
+            runner_module._OPERATIONAL_PAUSE_PREFIXES
+        )
+        retained = RiskController()
+        retained.pause(incumbent, auto_resumable=False)
+        retained.pause(non_operational_reason)
+        assert retained.pause_reason == incumbent
+
+    @pytest.mark.parametrize(
+        ("failing_surface", "survivors"),
+        [
+            ("record_risk_event", ("notifier", "persist", "last_action", "broadcast")),
+            ("notifier", ("persist", "last_action", "broadcast")),
+            ("persist", ("last_action", "broadcast")),
+            ("last_action", ("broadcast",)),
+        ],
+    )
+    def test_latch_isolates_each_operator_surface_failure(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        failing_surface: str,
+        survivors: tuple[str, ...],
+    ) -> None:
+        """Each surface needs its OWN try/except — never a shared one.
+
+        The 2026-09-02 halt proves the failure mode: one exception inside a
+        shared guard silenced every remaining signal. Whichever surface breaks,
+        the later independent ones must still run and nothing may escape.
+        """
+        notifier = self._RecordingNotifier(fail=failing_surface == "notifier")
+        runner = self._runner(notifier)
+        persisted: list[bool] = []
+        last_actions: list[str] = []
+        broadcasts: list[bool] = []
+
+        def record_risk_event(
+            reason: str,
+            event_type: str = "RISK_REJECTION",
+        ) -> None:
+            if failing_surface == "record_risk_event":
+                raise RuntimeError(self._LOCK_ERROR)
+
+        def persist_risk_pause() -> None:
+            if failing_surface == "persist":
+                raise RuntimeError(self._LOCK_ERROR)
+            persisted.append(True)
+
+        def set_last_action_message(message: str) -> None:
+            if failing_surface == "last_action":
+                raise RuntimeError("runtime state lock unavailable")
+            last_actions.append(message)
+
+        monkeypatch.setattr(runner, "_record_risk_event", record_risk_event)
+        monkeypatch.setattr(
+            runner,
+            "_persist_risk_pause_best_effort",
+            persist_risk_pause,
+        )
+        monkeypatch.setattr(
+            runner,
+            "_set_last_action_message",
+            set_last_action_message,
+        )
+        monkeypatch.setattr(
+            runner,
+            "_broadcast_status",
+            lambda: broadcasts.append(True),
+        )
+
+        result = self._latch(runner, RuntimeError("durable fills unprovable"))
+
+        assert result == []
+        assert runner.risk.paused is True
+        if "notifier" in survivors:
+            assert notifier.events == [(self._EVENT_TYPE, runner.risk.pause_reason)]
+        if "persist" in survivors:
+            assert persisted == [True]
+        if "last_action" in survivors:
+            assert last_actions == [runner.risk.pause_reason]
+        if "broadcast" in survivors:
+            assert broadcasts == [True]
+
+
 class TestMarkFillProcessed:
     """_mark_fill_processed 现在要求 symbol 为必填参数,并按不同 symbol 分别记录时间戳。"""
 

@@ -7713,28 +7713,110 @@ class AppRunner:
             "could not be proved before position reconciliation"
         )
         self.risk.pause(reason, auto_resumable=False)
-        logger.critical("%s: %s", reason, error)
+        # ``risk.pause`` declines to overwrite an already latched operational
+        # pause (core/risk.py), so the incumbent diagnosis -- not the reason
+        # proposed here -- is what the runtime actually holds. Every signal
+        # below therefore quotes the effective reason; unlike the orphan
+        # tracked-position latch this boundary never skips emission when they
+        # differ, because a halt nobody is told about is the incident itself.
+        effective_reason = self.risk.pause_reason
+        logger.critical("%s: %s", effective_reason, error)
+        self._persist_durable_fill_reconciliation_evidence(
+            db,
+            reason=effective_reason,
+            source=source,
+            symbols=sorted(unsafe_symbols),
+            error=error,
+        )
+        # On 2026-09-02 21:02:46 UTC a single ``database is locked`` rollback
+        # took the durable row AND every operator signal with it, because they
+        # shared one try/except: the system stayed halted ~4.5h in silence.
+        # Each surface is therefore guarded on its own. In particular the
+        # notification must not sit behind ``_record_risk_event``, which opens
+        # its own session and commits and so raises under the very lock that
+        # caused the incident.
         try:
-            record_trade_event(
-                db,
+            self._record_risk_event(
+                effective_reason,
                 event_type="DURABLE_FILL_RECONCILIATION_FAILED",
-                status="ERROR",
-                message=reason,
-                payload={
-                    "source": source,
-                    "symbols": sorted(unsafe_symbols),
-                    "error": str(error),
-                },
             )
-            self._state_svc.persist(db, self.engine, self.risk)
-            db.commit()
         except Exception:
-            logger.exception("failed to persist durable-fill reconciliation pause")
-            try:
-                db.rollback()
-            except Exception:
-                pass
+            logger.exception("failed to record durable-fill reconciliation risk event")
+        try:
+            self.notifier.notify_risk_event(
+                "DURABLE_FILL_RECONCILIATION_FAILED",
+                effective_reason,
+            )
+        except Exception:
+            logger.exception(
+                "failed to send durable-fill reconciliation risk notification"
+            )
+        try:
+            self._persist_risk_pause_best_effort()
+        except Exception:
+            logger.exception("failed to persist durable-fill reconciliation pause state")
+        try:
+            self._set_last_action_message(effective_reason)
+        except Exception:
+            logger.exception("failed to surface durable-fill reconciliation last action")
+        try:
+            self._broadcast_status()
+        except Exception:
+            logger.exception("failed to broadcast durable-fill reconciliation pause")
         return []
+
+    def _persist_durable_fill_reconciliation_evidence(
+        self,
+        db: Session,
+        *,
+        reason: str,
+        source: str,
+        symbols: list[str],
+        error: Exception,
+    ) -> None:
+        """Retry the durable evidence write past a momentary writer collision.
+
+        The 2026-09-02 halt lost its only ``DURABLE_FILL_RECONCILIATION_FAILED``
+        row to a SQLite write-upgrade conflict that clears in milliseconds, so a
+        bounded immediate retry recovers evidence a single attempt discarded.
+        Only lock contention is transient: a deterministic write failure repeats
+        identically, and retrying it merely delays the operator signals that
+        follow, so it gets exactly one attempt. The whole block is replayed --
+        the rollback that frees the lock also discards the pending event row.
+        """
+        lock_markers = ("database is locked", "database table is locked")
+        last_attempt = _RUNTIME_STATE_PERSIST_ATTEMPTS - 1
+        for attempt in range(_RUNTIME_STATE_PERSIST_ATTEMPTS):
+            try:
+                record_trade_event(
+                    db,
+                    event_type="DURABLE_FILL_RECONCILIATION_FAILED",
+                    status="ERROR",
+                    message=reason,
+                    payload={
+                        "source": source,
+                        "symbols": symbols,
+                        "error": str(error),
+                    },
+                )
+                self._state_svc.persist(db, self.engine, self.risk)
+                db.commit()
+                return
+            except Exception as exc:
+                logger.exception("failed to persist durable-fill reconciliation pause")
+                transient = any(
+                    marker in str(exc).lower() for marker in lock_markers
+                )
+                try:
+                    db.rollback()
+                except Exception:
+                    logger.exception(
+                        "durable-fill reconciliation rollback failed; "
+                        "session is unusable, abandoning the durable write"
+                    )
+                    return
+                if not transient or attempt == last_attempt:
+                    return
 
     def _reconcile_tracked_entries_with_broker(
         self,
