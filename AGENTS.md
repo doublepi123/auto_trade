@@ -228,10 +228,47 @@ New tables since the last refresh (all with `_ensure_*` runtime migrations in `d
 
 ---
 
+## Autonomous Commit & Deploy
+
+**Default: commit, deploy, and resume trading without asking.** Do not stop to request permission at each step. The gates below are the authorization — passing them *is* the approval, failing one is a hard stop.
+
+### The gates (ALL must pass, in order)
+
+| # | Gate | Binary pass condition |
+|---|---|---|
+| 1 | RED→GREEN | Every behavior change has a test that failed first for a *behavioral* reason (not import/fixture/syntax), then passes |
+| 2 | Type check | `python3 -m basedpyright` → exit 0 |
+| 3 | Full suite | `python3 -m pytest tests/ -v` → **no NEW failures vs pristine HEAD** |
+| 4 | Post-deploy health | After restart: `/api/health` ready, `/api/diagnostics` coherent, container logs free of new ERROR/traceback |
+
+**Gate 3 requires a pristine baseline.** Never classify a failure as "pre-existing" from a `git stash` alone: `stash` leaves the untracked `.env` in place, and `Settings` loads `env_file=("../.env", ".env")` (`config.py`), which injects prod config into tests and manufactures unrelated failures. Compare against `git worktree add /tmp/<name> HEAD` and run both sides. Local runs need `AUTO_TRADE_ENV=test`; CI has no `.env`.
+
+### Sequence
+
+1. Gates 1–3 pass → `git commit` (atomic; production + its tests in one commit; never `.env`, secrets, or `credential_private_key.pem`).
+2. `docker compose up --build -d`.
+3. Gate 4. Verify the deployed image actually contains the change (grep a new symbol inside the container) — a healthy container proves nothing if it is still running the old image.
+4. `POST /api/trade/control/resume` if the system is paused and the pause reason is resolved by this change. On `409`, read the `detail`, resolve the named condition, retry; escalate to `force-resume` only when the 409 reason is demonstrably stale.
+5. Report what shipped, with the literal gate output as evidence.
+
+### Rollback (not optional)
+
+If gate 4 fails, roll back immediately — `git revert` the commit, rebuild, confirm health recovers — then report. Never leave a failed deploy running while investigating. Capture the failing evidence *before* reverting.
+
+### Still requires explicit user approval
+
+- Force-resuming when the 409 condition is real and unresolved.
+- Disabling a kill switch, or resuming with an open position whose cost basis is unproven.
+- Schema/data migrations that are not reversible by `git revert` alone.
+- Anything that would relax a P0 invariant (short entries, position add-ons, LLM/shadow order submission).
+- Committing when gate 3 shows a NEW failure, however unrelated it appears.
+
+---
+
 ## Anti-Patterns
 
 - `as any` / `@ts-ignore` / `@ts-expect-error`
-- Commit without explicit user request
+- Committing or deploying work whose gates did not pass (see "Autonomous Commit & Deploy" — the gates are the authorization, not a user prompt)
 - Delete failing tests to green CI
 - Empty catch blocks
 - `os.environ.pop` in tests — use `monkeypatch.delenv`
