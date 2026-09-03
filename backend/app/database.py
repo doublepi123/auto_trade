@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import traceback
 from collections.abc import Generator
 from typing import Any
 
@@ -16,6 +18,7 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
+from app.core.log_throttle import RepeatedLogThrottle
 
 logger = logging.getLogger("auto_trade.database")
 
@@ -83,11 +86,197 @@ def queue_pool_kwargs(database_url: str) -> dict[str, object]:
     }
 
 
+SESSION_REENTRANCY_LOG_WINDOW_SECONDS = 300.0
+_REENTRANCY_OWNER_KEY = "_session_reentrancy_owner"
+
+
+class SessionReentrancyViolation(RuntimeError):
+    """One thread checked out a second pooled connection while holding one."""
+
+
+class SessionReentrancyGuard:
+    """Runtime detector for the 2026-09-03 nested-session pool deadlock.
+
+    A static audit can show that no helper opens a second ``Session``
+    lexically inside a caller that holds one, but it cannot see a runner
+    method handing control to a *service object* that opens its own
+    ``SessionLocal()``. That is a cross-module, dynamic-dispatch shape, and
+    its failure mode is a 65-minute production hang, not a red test. The pool
+    itself sees every checkout regardless of which module caused it, so the
+    detector lives there.
+
+    Threshold is exactly one connection per thread, and there is no path
+    allowlist. That is not arbitrary: with ``QueuePool`` every ``Session``
+    that touches the database holds its own connection until closed, so a
+    thread needs a second one only when it has re-entered -- which is the
+    incident. A per-path exemption list would be exactly the "silence it"
+    move that lets the next one through.
+
+    ``strict`` selects what a violation costs rather than whether it counts.
+    Strict guards raise under ``env == "test"`` so a regression fails a test;
+    observing guards only warn. Installing a strict guard on the process
+    engine turned the whole suite into an audit, and that audit found 24 real
+    sites -- see the install site below for why the process engine observes
+    for now and what has to land before it can be flipped. Counting and stack
+    capture are identical in both modes, so an observing guard still names
+    the offending path.
+
+    Cost on the happy path is one dict lookup, one integer add and one dict
+    store under a lock. Nothing is formatted and no stack is captured unless
+    the count actually exceeds one.
+
+    Safety: raising is confined to ``env == "test"`` even in strict mode. In
+    prod/dev a violation is counted, its stack recorded, and a throttled
+    warning emitted -- a guard that halted a live trading system would be
+    worse than the bug it guards against.
+    """
+
+    def __init__(
+        self,
+        *,
+        strict: bool = True,
+        log_window_seconds: float = SESSION_REENTRANCY_LOG_WINDOW_SECONDS,
+    ) -> None:
+        self._strict = strict
+        self._lock = threading.Lock()
+        self._held: dict[int, int] = {}
+        self._violations = 0
+        self._last_stack: str | None = None
+        self._throttle = RepeatedLogThrottle(window_seconds=log_window_seconds)
+
+    def install(self, target_engine: Engine) -> None:
+        """Attach the checkout/checkin accounting to ``target_engine``.
+
+        Safe on any pool. An in-memory SQLite engine is served by
+        ``SingletonThreadPool``, which returns one connection per thread and
+        so emits no second checkout; the guard is simply inert there rather
+        than wrong, which matters because many tests build such engines.
+        """
+        event.listen(target_engine, "checkout", self._on_checkout)
+        event.listen(target_engine, "checkin", self._on_checkin)
+
+    @property
+    def strict(self) -> bool:
+        """Whether a violation raises under ``env == "test"``."""
+        return self._strict
+
+    @property
+    def violation_count(self) -> int:
+        with self._lock:
+            return self._violations
+
+    @property
+    def last_violation_stack(self) -> str | None:
+        with self._lock:
+            return self._last_stack
+
+    def _on_checkout(
+        self,
+        _dbapi_connection: object,
+        connection_record: Any,
+        _connection_proxy: object,
+    ) -> None:
+        thread_id = threading.get_ident()
+        record_info = connection_record.record_info
+        if record_info is not None:
+            record_info[_REENTRANCY_OWNER_KEY] = thread_id
+        with self._lock:
+            depth = self._held.get(thread_id, 0) + 1
+            self._held[thread_id] = depth
+        if depth > 1:
+            self._report(depth)
+
+    def _on_checkin(
+        self,
+        _dbapi_connection: object,
+        connection_record: Any,
+    ) -> None:
+        """Credit the checkin to the thread that checked the connection out.
+
+        SQLAlchemy fires ``checkin`` on whichever thread closes the session,
+        which need not be the one that opened it -- the runner closes some
+        sessions from its post-fill-persist thread and from
+        ``ThreadPoolExecutor`` callbacks. Decrementing the *closing* thread
+        would leak a permanent +1 on the owner (every later session there
+        would false-positive) and drive the closing thread negative, masking a
+        real violation. The owner is stamped on the connection record at
+        checkout and read back here, so both counts stay exact.
+        """
+        record_info = connection_record.record_info
+        owner = threading.get_ident()
+        if record_info is not None:
+            owner = record_info.pop(_REENTRANCY_OWNER_KEY, owner)
+        with self._lock:
+            depth = self._held.get(owner, 0) - 1
+            if depth > 0:
+                self._held[owner] = depth
+            else:
+                # Drop the key rather than store 0: threads are transient
+                # (daemon loops, pool workers) and a per-thread entry that
+                # outlives its thread is a slow leak.
+                self._held.pop(owner, None)
+
+    def _report(self, depth: int) -> None:
+        stack = "".join(traceback.format_stack())
+        with self._lock:
+            self._violations += 1
+            self._last_stack = stack
+        if self._strict and settings.env == "test":
+            raise SessionReentrancyViolation(
+                "re-entrant database session: this thread already holds "
+                f"{depth - 1} pooled connection(s). A caller holding a Session "
+                "reached a helper that opened another one; pass the caller's "
+                "session down instead (see AppRunner._db_session_or).\n"
+                f"{stack}"
+            )
+        if self._throttle.should_log("session_reentrancy"):
+            suppressed = self._throttle.take_suppressed_count()
+            logger.warning(
+                "re-entrant database session detected (thread holds %d "
+                "connections); %d similar occurrence(s) suppressed since the "
+                "last report. Second checkout at:\n%s",
+                depth,
+                suppressed,
+                stack,
+            )
+
+
 engine = create_engine(
     settings.database_url,
     connect_args=_connect_args,
     **queue_pool_kwargs(settings.database_url),
 )
+
+#: Process-engine guard. ``strict=False``: it counts violations and logs the
+#: offending stack, but never raises, in ANY environment.
+#:
+#: Installing it strict turned the full suite into an audit, and that audit
+#: found 24 distinct cross-module re-entrancy sites -- precisely the blind
+#: spot a static audit cannot see. Four were in this module's own ``_ensure_*``
+#: migrations and are fixed above. The remaining twenty are live paths, and
+#: they split into two kinds that must NOT be fixed with one edit:
+#:
+#: * Genuine re-entrancy. ``PUT /api/strategy`` holds the request ``db`` and
+#:   calls ``AppRunner.reload_strategy``, which opens its own ``SessionLocal``;
+#:   ``AppRunner._initialize_runner`` holds a session across
+#:   ``_load_credentials``, which opens another; the today-order sync holds one
+#:   through ``_upsert_broker_order``. These are the incident shape and want
+#:   the ``fa983919`` treatment -- thread the caller's session down.
+#: * Deliberate independence. ``AuditLogger.record`` owns its session by
+#:   design so an audit row survives the caller's rollback (``app/core/audit.py``
+#:   swallows its own failures for the same reason). Making it borrow would
+#:   silently couple audit durability to the transaction being audited. That is
+#:   a product decision, not a refactor.
+#:
+#: Twenty live paths -- several inside the order-persistence path, which is not
+#: territory to rewrite alongside the guard that found them -- is a separate
+#: change with its own tests. Shipping the detector first is what makes that
+#: change reviewable: prod/dev behaviour is unchanged either way (never raises),
+#: while the warning names each offending stack. Flipping this to ``strict=True``
+#: is the follow-up, and it is gated on those twenty being resolved --
+#: individually, each either threaded or argued as deliberate.
+session_reentrancy_guard = SessionReentrancyGuard(strict=False)
+session_reentrancy_guard.install(engine)
 
 
 if settings.database_url.startswith("sqlite"):
@@ -420,6 +609,17 @@ def _ensure_order_execution_ledger_columns(db_engine: Engine) -> None:
         "mfe_pct": "FLOAT",
         "mae_pct": "FLOAT",
     }
+    # Read the schema BEFORE opening the transaction. ``inspector`` is bound
+    # to the engine, not to ``connection``, so querying it from inside the
+    # ``begin()`` block below checks out a SECOND pooled connection while the
+    # first is still held -- the 2026-09-03 re-entrancy shape, caught by
+    # ``SessionReentrancyGuard``.
+    strategy_columns = (
+        {column["name"] for column in inspector.get_columns("strategy_config")}
+        if "strategy_config" in inspector.get_table_names()
+        else set()
+    )
+
     with db_engine.begin() as connection:
         for name, column_type in missing_columns.items():
             if name not in columns:
@@ -429,11 +629,6 @@ def _ensure_order_execution_ledger_columns(db_engine: Engine) -> None:
 
         # Freeze a best-effort cost for legacy fills. Future reads must not
         # rewrite history merely because the active strategy fee rate changed.
-        strategy_columns = (
-            {column["name"] for column in inspector.get_columns("strategy_config")}
-            if "strategy_config" in inspector.get_table_names()
-            else set()
-        )
         fee_us = (
             connection.execute(
                 text("SELECT fee_rate_us FROM strategy_config ORDER BY id DESC LIMIT 1")
@@ -530,21 +725,26 @@ def _ensure_strategy_config_session_columns(db_engine: Engine) -> None:
 def _ensure_drawdown_columns(db_engine: Engine) -> None:
     inspector = inspect(db_engine)
     table_names = set(inspector.get_table_names())
+    # Inspector reads happen before ``begin()``: it is engine-bound, so a
+    # query issued inside the transaction below would check out a second
+    # pooled connection on this thread (see SessionReentrancyGuard).
+    strategy_columns = (
+        {column["name"] for column in inspector.get_columns("strategy_config")}
+        if "strategy_config" in table_names
+        else set()
+    )
+    runtime_columns = (
+        {column["name"] for column in inspector.get_columns("runtime_state")}
+        if "runtime_state" in table_names
+        else set()
+    )
     with db_engine.begin() as connection:
         if "strategy_config" in table_names:
-            strategy_columns = {
-                column["name"]
-                for column in inspector.get_columns("strategy_config")
-            }
             if "max_drawdown_amount" not in strategy_columns:
                 connection.exec_driver_sql(
                     "ALTER TABLE strategy_config ADD COLUMN max_drawdown_amount FLOAT"
                 )
         if "runtime_state" in table_names:
-            runtime_columns = {
-                column["name"]
-                for column in inspector.get_columns("runtime_state")
-            }
             if "cumulative_realized_pnl" not in runtime_columns:
                 connection.exec_driver_sql(
                     "ALTER TABLE runtime_state ADD COLUMN "
@@ -588,10 +788,22 @@ def _ensure_runtime_state_symbol_columns(db_engine: Engine) -> None:
     inspector = inspect(db_engine)
     table_names = set(inspector.get_table_names())
 
+    # Engine-bound inspector: read the schema before holding a connection, or
+    # the reads below check out a second one (see SessionReentrancyGuard).
+    state_columns = (
+        {column["name"] for column in inspector.get_columns("runtime_state")}
+        if "runtime_state" in table_names
+        else set()
+    )
+    snapshot_columns = (
+        {column["name"] for column in inspector.get_columns("runtime_state_snapshots")}
+        if "runtime_state_snapshots" in table_names
+        else set()
+    )
+
     with db_engine.begin() as connection:
         if "runtime_state" in table_names:
-            columns = {column["name"] for column in inspector.get_columns("runtime_state")}
-            if "symbol" not in columns:
+            if "symbol" not in state_columns:
                 connection.exec_driver_sql(
                     "ALTER TABLE runtime_state ADD COLUMN symbol VARCHAR(50) DEFAULT '' NOT NULL"
                 )
@@ -599,8 +811,7 @@ def _ensure_runtime_state_symbol_columns(db_engine: Engine) -> None:
                     "CREATE INDEX IF NOT EXISTS ix_runtime_state_symbol ON runtime_state (symbol)"
                 )
         if "runtime_state_snapshots" in table_names:
-            columns = {column["name"] for column in inspector.get_columns("runtime_state_snapshots")}
-            if "symbol" not in columns:
+            if "symbol" not in snapshot_columns:
                 connection.exec_driver_sql(
                     "ALTER TABLE runtime_state_snapshots ADD COLUMN symbol VARCHAR(50) DEFAULT '' NOT NULL"
                 )
@@ -2522,9 +2733,17 @@ def _ensure_report_query_indexes(db_engine: Engine) -> None:
     """Create indexes for report and query performance if they do not exist."""
     inspector = inspect(db_engine)
     table_names = set(inspector.get_table_names())
+    # Engine-bound inspector: collect every index name before opening the
+    # transaction, or these reads check out a second pooled connection while
+    # the first is held (see SessionReentrancyGuard).
+    indexes_by_table = {
+        table: {index["name"] for index in inspector.get_indexes(table)}
+        for table in ("orders", "trade_events", "llm_interactions")
+        if table in table_names
+    }
     with db_engine.begin() as connection:
         if "orders" in table_names:
-            existing_indexes = {i["name"] for i in inspector.get_indexes("orders")}
+            existing_indexes = indexes_by_table["orders"]
             if "ix_orders_symbol_filled_at" not in existing_indexes:
                 connection.exec_driver_sql(
                     "CREATE INDEX IF NOT EXISTS ix_orders_symbol_filled_at ON orders (symbol, filled_at)"
@@ -2538,7 +2757,7 @@ def _ensure_report_query_indexes(db_engine: Engine) -> None:
                     "CREATE INDEX IF NOT EXISTS ix_orders_status ON orders (status)"
                 )
         if "trade_events" in table_names:
-            existing_indexes = {i["name"] for i in inspector.get_indexes("trade_events")}
+            existing_indexes = indexes_by_table["trade_events"]
             if "ix_trade_events_symbol_created_at" not in existing_indexes:
                 connection.exec_driver_sql(
                     "CREATE INDEX IF NOT EXISTS ix_trade_events_symbol_created_at ON trade_events (symbol, created_at)"
@@ -2548,7 +2767,7 @@ def _ensure_report_query_indexes(db_engine: Engine) -> None:
                     "CREATE INDEX IF NOT EXISTS ix_trade_events_event_type ON trade_events (event_type)"
                 )
         if "llm_interactions" in table_names:
-            existing_indexes = {i["name"] for i in inspector.get_indexes("llm_interactions")}
+            existing_indexes = indexes_by_table["llm_interactions"]
             if "ix_llm_interactions_symbol_created_at" not in existing_indexes:
                 connection.exec_driver_sql(
                     "CREATE INDEX IF NOT EXISTS ix_llm_interactions_symbol_created_at ON llm_interactions (symbol, created_at)"
