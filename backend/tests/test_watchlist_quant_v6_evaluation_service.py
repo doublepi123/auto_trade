@@ -207,8 +207,22 @@ def test_historical_evaluator_manifest_has_exact_source_closure() -> None:
 
 
 def test_historical_evaluator_manifest_golden_digest() -> None:
+    """Pin the evaluator digest so a source change cannot pass unnoticed.
+
+    This digest is *derived* from the seven modules in the manifest closure,
+    and published registrations bind it, so changing any of them legitimately
+    moves it. That makes this test an acknowledgement gate, not a frozen
+    parameter: update the constant in the same commit that changes evaluator
+    source, and say in the message what moved. It is emphatically not the
+    preregistration hash, which must never be updated to silence a failure.
+
+    The value below was last moved by d04b927d, which added
+    ``QuantV6DatabaseSizeFence`` to ``watchlist_quant_v6_spawn_supervisor``.
+    That commit changed the closure but kept the old constant, so `main` CI
+    stayed red for nine commits -- the gate fired correctly and was ignored.
+    """
     assert quant_v6_historical_evaluator_digest_sha256() == (
-        "31fd7466dd5db58a493c1506d663c5c220d4d0aeb3ec48897966da28257de619"
+        "a6360a87b15d9b11cf6b61c869cb76c797dff5f15b91faf4e253dfa985eedade"
     )
 
 

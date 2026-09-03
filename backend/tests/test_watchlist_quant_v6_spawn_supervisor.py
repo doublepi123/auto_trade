@@ -327,7 +327,22 @@ def _ordinal_failure_worker(
                 return
             ordinal = value.ordinal
             if ordinal == 5:
-                time.sleep(0.8)
+                # Ordinal 5 failing is what makes the parent stop waiting and
+                # tear down, and abnormal teardown terminates children without
+                # a cooperative frame. A blind sleep here therefore raced the
+                # higher ordinal's cancel observation: the parent reached
+                # terminate() about 600ms after the cancel was written, so on a
+                # loaded runner the child was killed between two 10ms polls and
+                # `[1] == [0]` failed with nothing actually broken. Wait for the
+                # observation instead of guessing a duration -- this cannot mask
+                # a real lost cancel, it only stops the parent from ending the
+                # run before the child could report one.
+                release_at = time.monotonic() + 15.0
+                while time.monotonic() < release_at:
+                    with high_ordinal_stats.get_lock():
+                        if high_ordinal_stats[1] >= 1:
+                            break
+                    time.sleep(0.01)
                 failure = supervisor._failure_wire(
                     ordinal=ordinal,
                     kind="EVALUATION",
