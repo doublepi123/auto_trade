@@ -30,10 +30,19 @@ logger = logging.getLogger("auto_trade.strategy")
 router = APIRouter(prefix="/api", tags=["strategy"])
 
 
-def _reload_strategy_after_save() -> None:
+def _reload_strategy_after_save(db: Session | None = None) -> None:
+    """Confirm the saved strategy in the live runner, lending it ``db``.
+
+    Every caller has already committed its save before reaching here
+    (``StrategyService.update_config`` and ``IntervalApplicationService`` both
+    commit internally), so the runner re-reads a durable row and a borrowed
+    session carries nothing that could still be rolled back. Handing it the
+    request session stops the runner opening a second pooled connection while
+    this handler still holds its own -- the 2026-09-03 deadlock shape.
+    """
     runner = get_runner()
     try:
-        runner.reload_strategy()
+        runner.reload_strategy(db=db)
     except Exception:
         pause_preserving_operational = getattr(
             runner,
@@ -94,13 +103,13 @@ def update_strategy_with_runtime_reload(
     }
     config, diff = svc.update_config(merged)
     try:
-        _reload_strategy_after_save()
+        _reload_strategy_after_save(db=svc.db)
     except Exception as exc:
         logger.exception("failed to confirm strategy update in the live runner; rolling back")
         rollback_error: Exception | None = None
         try:
             svc.update_config(previous)
-            _reload_strategy_after_save()
+            _reload_strategy_after_save(db=svc.db)
         except Exception as rollback_exc:
             rollback_error = rollback_exc
             logger.critical("failed to roll back strategy after live reload failure", exc_info=True)

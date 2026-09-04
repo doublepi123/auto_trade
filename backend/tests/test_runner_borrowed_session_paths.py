@@ -136,6 +136,31 @@ def _runner(notifier: _RecordingNotifier | None = None) -> AppRunner:
     return runner
 
 
+def _runner_on_persisted_symbol() -> AppRunner:
+    """A runner already pointed at the persisted config's symbol.
+
+    ``reload_strategy`` treats a differing symbol as a primary switch and
+    refuses it unless the runner is running and flat. These tests are about
+    which session the reload uses, so they start from the no-switch case.
+    """
+    from app.models import StrategyConfig
+
+    runner = AppRunner()
+    with database.SessionLocal() as db:
+        config = (
+            db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
+        )
+        symbol = str(getattr(config, "symbol", "") or "")
+        market = str(getattr(config, "market", "US") or "US")
+    runner.engine.params = StrategyParams(
+        symbol=symbol,
+        market=market,
+        buy_low=100.0,
+        sell_high=110.0,
+    )
+    return runner
+
+
 def _runtime_state_model() -> Any:
     from app.models import RuntimeState
 
@@ -375,3 +400,91 @@ def test_initialize_runner_startup_block_opens_no_nested_session(
 
     assert counter.opened == 0
     assert len(applied) == 1
+
+
+def test_reload_strategy_reuses_the_callers_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#4/#9: ``PUT /api/strategy`` holds the request session across the reload.
+
+    ``update_strategy_with_runtime_reload`` commits the save and then calls
+    ``AppRunner.reload_strategy``, which opened its own ``SessionLocal``. The
+    request session is still checked out for the rest of the handler
+    (``record_version``, the audit record), so that is two connections per
+    strategy save -- and the reload reads the row the caller just committed,
+    so there is nothing the borrow can miss.
+
+    Two of the sweep's sites live on this one call: ``StrategyService.get_config``
+    and, when the primary symbol changes, ``load_symbol_runtime``.
+    """
+    runner = _runner_on_persisted_symbol()
+    counter = _SessionCounter(monkeypatch)
+
+    with database.SessionLocal() as db:
+        runner.reload_strategy(db=db)
+
+    assert counter.opened == 0, (
+        f"reload_strategy opened {counter.opened} nested session(s) while the "
+        "request handler still held its own"
+    )
+
+
+def test_reload_strategy_still_owns_a_session_when_none_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The cron and auto-switch callers hold nothing and must be unchanged."""
+    runner = _runner_on_persisted_symbol()
+    counter = _SessionCounter(monkeypatch)
+
+    runner.reload_strategy()
+
+    assert counter.opened == 1
+
+
+def test_reload_strategy_does_not_close_a_borrowed_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A borrowed session belongs to its owner and must outlive the borrow.
+
+    ``put_strategy`` keeps using the request session after the reload returns
+    -- ``StrategyVersionService.record_version`` writes through it. If the
+    reload closed it, the version snapshot would fail on a save that had
+    already succeeded.
+    """
+    runner = _runner_on_persisted_symbol()
+
+    with database.SessionLocal() as db:
+        runner.reload_strategy(db=db)
+        rows = db.query(_runtime_state_model()).all()
+
+    assert isinstance(rows, list)
+
+
+def test_put_strategy_reload_borrows_the_request_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the API call site, not just the runner's new parameter.
+
+    The save must be committed before the session is lent out: the reload
+    reads ``strategy_config`` back and a borrow that carried an uncommitted
+    write would let the runner act on a row that could still be rolled back.
+    ``StrategyService.update_config`` commits internally, so by the time
+    ``_reload_strategy_after_save`` runs there is nothing in flight.
+    """
+    from app.api import strategy as strategy_api
+
+    reloads: list[object] = []
+
+    class _FakeRunner:
+        def reload_strategy(self, db: object = None) -> None:
+            reloads.append(db)
+
+    monkeypatch.setattr(strategy_api, "get_runner", lambda: _FakeRunner())
+
+    with database.SessionLocal() as db:
+        strategy_api._reload_strategy_after_save(db=db)
+
+    assert reloads == [db], (
+        "the strategy-save reload must hand the runner the request session it "
+        "is already holding"
+    )

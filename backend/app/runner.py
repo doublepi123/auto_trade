@@ -2509,145 +2509,165 @@ class AppRunner:
                     + ", ".join(exposed_symbols)
                 )
 
-    def reload_strategy(self) -> None:
-        db = SessionLocal()
-        try:
-            svc = StrategyService(db)
-            config = svc.get_config()
-            new_params = StrategyParams(
-                symbol=config.symbol,
-                market=config.market,
-                buy_low=config.buy_low,
-                sell_high=config.sell_high,
-                short_selling=bool(config.short_selling and settings.allow_short_entries),
-                min_profit_amount=config.min_profit_amount,
-                auto_resume_minutes=config.auto_resume_minutes,
-                fee_rate_us=config.fee_rate_us,
-                fee_rate_hk=config.fee_rate_hk,
-                min_repricing_pct=config.min_repricing_pct,
-                llm_action_cooldown_seconds=config.llm_action_cooldown_seconds,
-                allow_position_addons=bool(
-                    getattr(config, "allow_position_addons", False)
-                    and settings.hard_allow_position_addons
-                ),
-                stop_loss_pct=hard_ceiling_float(
-                    getattr(config, "stop_loss_pct", settings.hard_stop_loss_pct),
-                    settings.hard_stop_loss_pct,
-                ),
-                max_holding_minutes=hard_ceiling_int(
-                    getattr(
-                        config,
-                        "max_holding_minutes",
-                        settings.hard_max_holding_minutes,
-                    ),
+    def reload_strategy(self, db: Session | None = None) -> None:
+        """Re-read the strategy config, reusing ``db`` when the caller holds one.
+
+        ``PUT /api/strategy`` (and the preset / rollback / watchlist-switch
+        handlers that share ``update_strategy_with_runtime_reload``) keep the
+        request session checked out across this call, so opening another here
+        cost two connections per strategy save. Two of the detector's sites
+        live on this one path: ``StrategyService.get_config`` and, when the
+        primary symbol changes, ``load_symbol_runtime``.
+
+        Every caller that passes a session has already committed its save --
+        ``StrategyService.update_config`` and ``IntervalApplicationService``
+        both commit internally before the reload runs -- so the reload never
+        reads an uncommitted write, and a borrow cannot let the runner act on
+        a row that might still be rolled back.
+
+        The borrowed session is never closed here: ``put_strategy`` keeps
+        writing through it afterwards (``StrategyVersionService.record_version``).
+        ``db`` stays optional for the cron and auto-primary-switch callers,
+        which hold none.
+        """
+        with self._db_session_or(db) as session:
+            self._reload_strategy_with_session(session)
+
+    def _reload_strategy_with_session(self, db: Session) -> None:
+        svc = StrategyService(db)
+        config = svc.get_config()
+        new_params = StrategyParams(
+            symbol=config.symbol,
+            market=config.market,
+            buy_low=config.buy_low,
+            sell_high=config.sell_high,
+            short_selling=bool(config.short_selling and settings.allow_short_entries),
+            min_profit_amount=config.min_profit_amount,
+            auto_resume_minutes=config.auto_resume_minutes,
+            fee_rate_us=config.fee_rate_us,
+            fee_rate_hk=config.fee_rate_hk,
+            min_repricing_pct=config.min_repricing_pct,
+            llm_action_cooldown_seconds=config.llm_action_cooldown_seconds,
+            allow_position_addons=bool(
+                getattr(config, "allow_position_addons", False)
+                and settings.hard_allow_position_addons
+            ),
+            stop_loss_pct=hard_ceiling_float(
+                getattr(config, "stop_loss_pct", settings.hard_stop_loss_pct),
+                settings.hard_stop_loss_pct,
+            ),
+            max_holding_minutes=hard_ceiling_int(
+                getattr(
+                    config,
+                    "max_holding_minutes",
                     settings.hard_max_holding_minutes,
                 ),
-                entry_cutoff_minutes_before_close=hard_floor_int(
-                    getattr(
-                        config,
-                        "entry_cutoff_minutes_before_close",
-                        settings.hard_entry_cutoff_minutes_before_close,
-                    ),
+                settings.hard_max_holding_minutes,
+            ),
+            entry_cutoff_minutes_before_close=hard_floor_int(
+                getattr(
+                    config,
+                    "entry_cutoff_minutes_before_close",
                     settings.hard_entry_cutoff_minutes_before_close,
                 ),
-                flatten_minutes_before_close=hard_floor_int(
-                    getattr(
-                        config,
-                        "flatten_minutes_before_close",
-                        settings.hard_flatten_minutes_before_close,
-                    ),
+                settings.hard_entry_cutoff_minutes_before_close,
+            ),
+            flatten_minutes_before_close=hard_floor_int(
+                getattr(
+                    config,
+                    "flatten_minutes_before_close",
                     settings.hard_flatten_minutes_before_close,
                 ),
-            )
-            new_risk_config = RiskConfig(
-                max_daily_loss=config.max_daily_loss,
-                max_consecutive_losses=config.max_consecutive_losses,
-                max_drawdown_amount=getattr(config, "max_drawdown_amount", None),
-            )
-            mode = getattr(config, "trading_session_mode", None)
-            new_session_mode = mode if mode else "ANY"
+                settings.hard_flatten_minutes_before_close,
+            ),
+        )
+        new_risk_config = RiskConfig(
+            max_daily_loss=config.max_daily_loss,
+            max_consecutive_losses=config.max_consecutive_losses,
+            max_drawdown_amount=getattr(config, "max_drawdown_amount", None),
+        )
+        mode = getattr(config, "trading_session_mode", None)
+        new_session_mode = mode if mode else "ANY"
 
-            with self._state_lock:
-                previous_symbol = self.engine.params.symbol
-                previous_market = self.engine.params.market
-            primary_changed = (
-                new_params.symbol != previous_symbol or new_params.market != previous_market
+        with self._state_lock:
+            previous_symbol = self.engine.params.symbol
+            previous_market = self.engine.params.market
+        primary_changed = (
+            new_params.symbol != previous_symbol or new_params.market != previous_market
+        )
+        candidate_engine: StrategyEngine | None = None
+        if primary_changed:
+            self.assert_primary_switch_safe(new_params.symbol, new_params.market)
+            candidate_engine = StrategyEngine(new_params)
+            self._state_svc.load_symbol_runtime(
+                db,
+                candidate_engine,
+                new_params.symbol,
             )
-            candidate_engine: StrategyEngine | None = None
+            if self._running:
+                candidate_engine.sync_state(False, False)
+
+        need_resubscribe = False
+        resubscribe_symbols: list[str] = []
+        with self._protective_runtime_state_guard():
             if primary_changed:
+                # Re-check under the same lock used by quote evaluation so
+                # no trigger can appear between the broker proof and swap.
                 self.assert_primary_switch_safe(new_params.symbol, new_params.market)
-                candidate_engine = StrategyEngine(new_params)
-                self._state_svc.load_symbol_runtime(
-                    db,
-                    candidate_engine,
-                    new_params.symbol,
-                )
-                if self._running:
-                    candidate_engine.sync_state(False, False)
+            previous_quote_symbols = set(self._desired_quote_symbols_locked())
+            if candidate_engine is not None:
+                self.engine = candidate_engine
+                self._primary_generation += 1
+            else:
+                self.engine.params = new_params
+            self.risk.config = new_risk_config
+            self._trading_session_mode = new_session_mode
+            self._configure_live_safety(config)
+            self._sync_symbol_runtimes(db)
+            resubscribe_symbols = self._desired_quote_symbols_locked()
+            quote_symbols_changed = previous_quote_symbols != set(resubscribe_symbols)
+            if self._running and quote_symbols_changed:
+                self._reset_quote_tracking(clear_history=True)
+                if self._quotes_subscribed:
+                    need_resubscribe = True
+                    self._quotes_subscribed = False
+                    self._advance_protective_runtime_generation_locked()
 
-            need_resubscribe = False
-            resubscribe_symbols: list[str] = []
-            with self._protective_runtime_state_guard():
-                if primary_changed:
-                    # Re-check under the same lock used by quote evaluation so
-                    # no trigger can appear between the broker proof and swap.
-                    self.assert_primary_switch_safe(new_params.symbol, new_params.market)
-                previous_quote_symbols = set(self._desired_quote_symbols_locked())
-                if candidate_engine is not None:
-                    self.engine = candidate_engine
-                    self._primary_generation += 1
-                else:
-                    self.engine.params = new_params
-                self.risk.config = new_risk_config
-                self._trading_session_mode = new_session_mode
-                self._configure_live_safety(config)
-                self._sync_symbol_runtimes(db)
-                resubscribe_symbols = self._desired_quote_symbols_locked()
-                quote_symbols_changed = previous_quote_symbols != set(resubscribe_symbols)
-                if self._running and quote_symbols_changed:
-                    self._reset_quote_tracking(clear_history=True)
-                    if self._quotes_subscribed:
-                        need_resubscribe = True
-                        self._quotes_subscribed = False
-                        self._advance_protective_runtime_generation_locked()
+        # Observer-only: reset symbol-bound/current-window quote state
+        # whenever the primary symbol changed, independently of whether a
+        # resubscription is needed, the desired symbol set is unchanged,
+        # the broker is already disconnected, or a resubscription later
+        # succeeds/fails. This does NOT mark the stream subscribed/
+        # unsubscribed, increment counters, invoke broker methods, or alter
+        # pause/recovery or resubscription decisions.
+        if primary_changed:
+            self._observe_primary_symbol_changed(new_params.symbol or "")
 
-            # Observer-only: reset symbol-bound/current-window quote state
-            # whenever the primary symbol changed, independently of whether a
-            # resubscription is needed, the desired symbol set is unchanged,
-            # the broker is already disconnected, or a resubscription later
-            # succeeds/fails. This does NOT mark the stream subscribed/
-            # unsubscribed, increment counters, invoke broker methods, or alter
-            # pause/recovery or resubscription decisions.
-            if primary_changed:
-                self._observe_primary_symbol_changed(new_params.symbol or "")
-
-            if need_resubscribe:
+        if need_resubscribe:
+            try:
+                self.broker.unsubscribe_quotes()
+            except Exception:
+                logger.warning("failed to unsubscribe old symbols during strategy reload")
+            if resubscribe_symbols:
                 try:
-                    self.broker.unsubscribe_quotes()
-                except Exception:
-                    logger.warning("failed to unsubscribe old symbols during strategy reload")
-                if resubscribe_symbols:
-                    try:
-                        self._subscribe_quote_symbols(self.broker, resubscribe_symbols)
-                        with self._protective_runtime_state_guard():
-                            self._quotes_subscribed = True
-                            self._last_push_quote_at = time.monotonic()
-                            self._advance_protective_runtime_generation_locked()
-                        # Observer-only: record the successful resubscribe.
-                        self._observe_quote_subscription(True)
-                        logger.info(
-                            "re-subscribed to quote streams after strategy reload: %s",
-                            ", ".join(resubscribe_symbols),
-                        )
-                    except Exception as exc:
-                        logger.error("quote subscription failed after strategy reload: %s", exc)
-                        # Observer-only: failed resubscribe stays unsubscribed.
-                        self._observe_quote_subscription(False)
-                        reason = f"quote subscription failed after strategy reload: {exc}"
-                        self.risk.pause(reason, auto_resumable=False)
-                        raise RuntimeError(reason) from exc
-        finally:
-            db.close()
+                    self._subscribe_quote_symbols(self.broker, resubscribe_symbols)
+                    with self._protective_runtime_state_guard():
+                        self._quotes_subscribed = True
+                        self._last_push_quote_at = time.monotonic()
+                        self._advance_protective_runtime_generation_locked()
+                    # Observer-only: record the successful resubscribe.
+                    self._observe_quote_subscription(True)
+                    logger.info(
+                        "re-subscribed to quote streams after strategy reload: %s",
+                        ", ".join(resubscribe_symbols),
+                    )
+                except Exception as exc:
+                    logger.error("quote subscription failed after strategy reload: %s", exc)
+                    # Observer-only: failed resubscribe stays unsubscribed.
+                    self._observe_quote_subscription(False)
+                    reason = f"quote subscription failed after strategy reload: {exc}"
+                    self.risk.pause(reason, auto_resumable=False)
+                    raise RuntimeError(reason) from exc
 
     def _evaluate_quote_trigger(self, quote: Quote, *, is_push: bool = True) -> _QuoteTriggerDecision:
         """Evaluate a quote under state lock; returns trigger decision."""

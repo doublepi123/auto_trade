@@ -4374,7 +4374,7 @@ class TestAppRunner:
         monkeypatch.setattr(runner, "_db_session", fake_db_session)
         monkeypatch.setattr(runner._state_svc, "load", lambda db, engine, risk: FakeConfig())
         monkeypatch.setattr(runner, "_load_tracked_entries", lambda db: None)
-        monkeypatch.setattr(runner, "_load_credentials", lambda: None)
+        monkeypatch.setattr(runner, "_load_credentials", lambda db=None: None)
         monkeypatch.setattr(runner, "_apply_credentials", lambda credentials, *, resubscribe: None)
         monkeypatch.setattr(runner, "_register_broker_disconnect_hook", lambda: None)
         monkeypatch.setattr(runner, "_refresh_trading_session_mode", lambda: None)
