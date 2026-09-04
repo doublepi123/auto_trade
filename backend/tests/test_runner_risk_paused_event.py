@@ -75,8 +75,11 @@ def test_risk_paused_event_recorded_after_pause() -> None:
     assert reason.startswith("ORDER_RECONCILIATION_UNCERTAIN:")
     assert "AAPL.US=[order-live-1]" in reason
     runner.risk.pause.assert_called_once_with(reason, auto_resumable=False)
-    runner._record_risk_event.assert_called_once_with(reason)
-    runner._persist_risk_pause_best_effort.assert_called_once_with()
+    # Both helpers receive the caller's session. This path is reached from
+    # ``_initialize_runner``, which holds one across the whole block; letting
+    # either open its own is the 2026-09-03 nested-session pool deadlock.
+    runner._record_risk_event.assert_called_once_with(reason, db=db)
+    runner._persist_risk_pause_best_effort.assert_called_once_with(db=db)
     runner._broadcast_status.assert_called_once_with()
     assert runner._unresolved_live_order_ids == ["order-live-1"]
 
@@ -94,7 +97,7 @@ def test_risk_pause_keeps_complete_live_order_inventory() -> None:
     assert "order-old" in reason
     assert "order-new" in reason
     assert runner._unresolved_live_order_ids == ["order-new", "order-old"]
-    runner._record_risk_event.assert_called_once_with(reason)
+    runner._record_risk_event.assert_called_once_with(reason, db=db)
 
 
 def test_record_event_exception_does_not_block_pause() -> None:
@@ -107,8 +110,8 @@ def test_record_event_exception_does_not_block_pause() -> None:
     assert result is True
     reason = runner.risk.pause.call_args.args[0]
     runner.risk.pause.assert_called_once_with(reason, auto_resumable=False)
-    runner._record_risk_event.assert_called_once_with(reason)
-    runner._persist_risk_pause_best_effort.assert_called_once_with()
+    runner._record_risk_event.assert_called_once_with(reason, db=db)
+    runner._persist_risk_pause_best_effort.assert_called_once_with(db=db)
     runner._broadcast_status.assert_called_once_with()
 
 

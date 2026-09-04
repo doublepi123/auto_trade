@@ -1267,7 +1267,22 @@ class AppRunner:
         issues: list[str],
         *,
         require_any_live_order: bool = False,
+        db: Session | None = None,
     ) -> bool:
+        """Latch an unresolved-live-order halt, reusing ``db`` when supplied.
+
+        Both helpers this reaches have taken an optional session since
+        ``fa983919``; the call sites here simply omitted it. Reached from
+        ``_pause_if_unresolved_live_order_exists`` the caller is already inside
+        ``with self._db_session() as db`` in ``_initialize_runner``, so each
+        omission checked out an extra pooled connection on a thread that was
+        already holding one -- the 2026-09-03 shape.
+
+        ``db`` stays optional because two of the three latch sites in
+        ``_sync_today_orders_from_broker_serialized`` fire from OUTSIDE its
+        session block; there is nothing to borrow there and forcing one would
+        reintroduce the very nesting this removes.
+        """
         primary_symbol = str(self.engine.params.symbol or "").strip().upper()
         non_primary = {
             symbol: order_ids
@@ -1317,9 +1332,9 @@ class AppRunner:
         logger.critical(reason)
         self.risk.pause(reason, auto_resumable=False)
         self._set_last_action_message(reason)
-        self._persist_risk_pause_best_effort()
+        self._persist_risk_pause_best_effort(db=db)
         try:
-            self._record_risk_event(reason)
+            self._record_risk_event(reason, db=db)
         except Exception:
             logger.exception("failed to record live-order reconciliation risk")
         self._broadcast_status()
@@ -1335,6 +1350,7 @@ class AppRunner:
             inventory,
             issues,
             require_any_live_order=True,
+            db=db,
         )
 
     def pause_for_manual_control(self, reason: str) -> bool:
