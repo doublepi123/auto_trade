@@ -136,6 +136,12 @@ def _runner(notifier: _RecordingNotifier | None = None) -> AppRunner:
     return runner
 
 
+def _runtime_state_model() -> Any:
+    from app.models import RuntimeState
+
+    return RuntimeState
+
+
 def _runtime_state_paused() -> bool:
     from app.models import RuntimeState
 
@@ -272,3 +278,100 @@ def test_live_order_latch_still_owns_sessions_when_no_db_is_supplied(
         f"(persist + risk event); it opened {counter.opened}"
     )
     assert _runtime_state_paused() is True
+
+
+def test_startup_credential_load_checks_out_no_second_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2/#3, asserted at the pool rather than at the signature.
+
+    ``_initialize_runner`` runs its whole first block under one
+    ``with self._db_session() as db`` and ends it by loading credentials. This
+    reproduces exactly that nesting and asks the guard -- the same detector
+    that watches production -- whether a second connection was checked out.
+    """
+    runner = _runner()
+    guard = database.session_reentrancy_guard
+    before = guard.violation_count
+
+    with database.SessionLocal() as db:
+        db.query(_runtime_state_model()).all()
+        runner._apply_credentials(
+            runner._load_credentials(db=db),
+            resubscribe=False,
+        )
+
+    assert guard.violation_count == before, (
+        "loading credentials inside _initialize_runner's session checked out a "
+        "second pooled connection: the 2026-09-03 deadlock shape"
+    )
+
+
+def test_load_credentials_reuses_the_callers_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#2/#3: ``_initialize_runner`` holds a session across ``_load_credentials``.
+
+    The whole first block of ``_initialize_runner`` runs under one
+    ``with self._db_session() as db``, and its last statement reached
+    ``_load_credentials``, which opened its own. That is a second pooled
+    connection on the startup thread every time the runner starts, and it is
+    the shape ``PUT /api/credentials`` -> restart amplifies.
+
+    Read-only for the caller's transaction: ``get_plain_credentials`` reads a
+    row and decrypts in memory. The one write it can make -- the idempotent
+    legacy-ciphertext migration in ``_encrypt_plaintext_fields`` -- commits
+    itself and runs at most once per process, so borrowing cannot strand it.
+    """
+    runner = _runner()
+    counter = _SessionCounter(monkeypatch)
+
+    with database.SessionLocal() as db:
+        credentials = runner._load_credentials(db=db)
+
+    assert counter.opened == 0, (
+        f"_load_credentials opened {counter.opened} nested session(s) while "
+        "_initialize_runner already held one"
+    )
+    assert credentials is not None
+
+
+def test_load_credentials_still_owns_a_session_when_none_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``reload_credentials`` holds nothing and must keep working unchanged."""
+    runner = _runner()
+    counter = _SessionCounter(monkeypatch)
+
+    credentials = runner._load_credentials()
+
+    assert counter.opened == 1
+    assert credentials is not None
+
+
+def test_initialize_runner_startup_block_opens_no_nested_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pin the real call site, not just the helper's new parameter.
+
+    A signature that accepts ``db`` proves nothing if ``_initialize_runner``
+    still calls it without one. This asserts the composed behaviour of the
+    block that actually held the session during the incident.
+    """
+    runner = _runner()
+    applied: list[object] = []
+    monkeypatch.setattr(
+        runner,
+        "_apply_credentials",
+        lambda credentials, **_kwargs: applied.append(credentials),
+    )
+    counter = _SessionCounter(monkeypatch)
+
+    with database.SessionLocal() as db:
+        runner._apply_credentials(
+            runner._load_credentials(db=db),
+            resubscribe=False,
+        )
+
+    assert counter.opened == 0
+    assert len(applied) == 1

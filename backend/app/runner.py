@@ -813,7 +813,10 @@ class AppRunner:
             self._sync_symbol_runtimes(db)
             self._load_opening_execution_registry(db)
             self._restore_reduction(db)
-            self._apply_credentials(self._load_credentials(), resubscribe=False)
+            self._apply_credentials(
+                self._load_credentials(db=db),
+                resubscribe=False,
+            )
         self._register_broker_disconnect_hook()
         self._refresh_trading_session_mode()
 
@@ -7078,10 +7081,25 @@ class AppRunner:
         finally:
             owned.close()
 
-    def _load_credentials(self) -> PlainCredentials:
-        with self._db_session() as db:
+    def _load_credentials(self, db: Session | None = None) -> PlainCredentials:
+        """Read the decrypted credentials, reusing ``db`` when supplied.
+
+        ``_initialize_runner`` runs its whole first block under one session and
+        ends it here, so opening another checked out a second pooled connection
+        on the startup thread -- the 2026-09-03 shape.
+
+        Safe to borrow: this is a read. ``get_plain_credentials`` loads one row
+        and decrypts in memory. The single write it can reach is the idempotent
+        legacy-ciphertext migration in ``_encrypt_plaintext_fields``, which
+        commits itself and runs at most once per process, so borrowing cannot
+        strand it in the caller's transaction.
+
+        ``reload_credentials`` holds no session and passes nothing, so ``db``
+        stays optional.
+        """
+        with self._db_session_or(db) as session:
             try:
-                return CredentialsService(db).get_plain_credentials()
+                return CredentialsService(session).get_plain_credentials()
             except CredentialIntegrityError as exc:
                 logger.error(
                     "credential integrity check failed: %s — refusing to apply "
