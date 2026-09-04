@@ -13,6 +13,7 @@ from typing import Callable, Optional
 from sqlalchemy import case, desc, func, or_, select
 from sqlalchemy.orm import Session
 
+from app.database import independent_session
 from app.models import NotificationLog
 from app.schemas import (
     NotificationDailyPoint,
@@ -310,18 +311,40 @@ class NotificationLogSink:
         error: str = "",
     ) -> None:
         try:
-            db = self._sf()
-            try:
-                db.add(NotificationLog(
-                    title=(title or "")[:200],
-                    content=(content or "")[:2000],
-                    severity=(severity or "INFO"),
-                    success=bool(success),
-                    error=(error or "")[:500],
-                ))
-                db.commit()
-            finally:
-                db.close()
+            # Declared independent, not accidentally nested. Reached from
+            # ``_alert_rules_cron`` -> ``AlertRuleService.evaluate`` ->
+            # ``MultiChannelNotifier.send`` -> ``_dispatch`` while the cron
+            # still holds its own ``Session``, which is re-entrancy by the
+            # pool's definition and the one genuine instance among the twelve
+            # warning blocks observed on 2026-09-04.
+            #
+            # It stays independent on purpose, same class as
+            # ``AuditLogger.record``: dispatch has already happened by the time
+            # this runs -- the user's phone buzzed -- so the delivery record
+            # must survive a rollback of the evaluation that triggered it.
+            # Borrowing the caller's session would make the "we notified you"
+            # row vanish whenever a later rule in the same loop raised, which
+            # is a log that lies rather than a refactor.
+            #
+            # The waiver covers only the region that owns the session; an
+            # unmarked nesting elsewhere under the same caller still reports.
+            with independent_session(
+                "notification delivery record must survive the rollback of the "
+                "alert evaluation that triggered it: the notification has "
+                "already been dispatched and cannot be un-sent"
+            ):
+                db = self._sf()
+                try:
+                    db.add(NotificationLog(
+                        title=(title or "")[:200],
+                        content=(content or "")[:2000],
+                        severity=(severity or "INFO"),
+                        success=bool(success),
+                        error=(error or "")[:500],
+                    ))
+                    db.commit()
+                finally:
+                    db.close()
         except Exception:
             logger.debug("notification log sink failed", exc_info=True)
 
