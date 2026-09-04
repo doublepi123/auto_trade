@@ -176,7 +176,7 @@ class TestAPI:
             def assert_primary_switch_safe(self, _symbol: str, _market: str) -> None:
                 return None
 
-            def reload_strategy(self) -> None:
+            def reload_strategy(self, db: object = None) -> None:
                 time.sleep(0.2)
 
         monkeypatch.setattr(strategy_api, "get_runner", lambda: SlowRunner())
@@ -218,7 +218,7 @@ class TestAPI:
             def __init__(self) -> None:
                 self.reload_calls = 0
 
-            def reload_strategy(self) -> None:
+            def reload_strategy(self, db: object = None) -> None:
                 self.reload_calls += 1
                 if self.reload_calls == 1:
                     raise RuntimeError("reload failed")

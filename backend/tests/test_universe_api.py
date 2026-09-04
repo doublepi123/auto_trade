@@ -326,7 +326,7 @@ def test_applied_refresh_retries_runtime_reload_after_transient_failure(
     class _Runner:
         reload_calls = 0
 
-        def reload_strategy(self) -> None:
+        def reload_strategy(self, db: object = None) -> None:
             self.reload_calls += 1
             if self.reload_calls == 1:
                 raise RuntimeError("injected transient reload failure")

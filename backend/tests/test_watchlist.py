@@ -114,7 +114,7 @@ class TestWatchlistApi:
             def assert_primary_switch_safe(self, _symbol: str, _market: str) -> None:
                 pass
 
-            def reload_strategy(self) -> None:
+            def reload_strategy(self, db: object = None) -> None:
                 pass
 
         runner = FlatRunner()
@@ -185,7 +185,7 @@ class TestWatchlistApi:
             def assert_primary_switch_safe(self, _symbol: str, _market: str) -> None:
                 pass
 
-            def reload_strategy(self) -> None:
+            def reload_strategy(self, db: object = None) -> None:
                 pass
 
         runner = FlatRunner()

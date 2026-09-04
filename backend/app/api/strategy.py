@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -30,6 +31,20 @@ logger = logging.getLogger("auto_trade.strategy")
 router = APIRouter(prefix="/api", tags=["strategy"])
 
 
+def _reload_session_kwargs(runner: object, db: Session | None) -> dict[str, Session]:
+    """``{"db": db}`` when this runner's reload can borrow, else ``{}``."""
+    if db is None:
+        return {}
+    reload_strategy = getattr(runner, "reload_strategy", None)
+    if reload_strategy is None:
+        return {}
+    try:
+        signature = inspect.signature(reload_strategy)
+    except (TypeError, ValueError):
+        return {}
+    return {"db": db} if "db" in signature.parameters else {}
+
+
 def _reload_strategy_after_save(db: Session | None = None) -> None:
     """Confirm the saved strategy in the live runner, lending it ``db``.
 
@@ -39,10 +54,20 @@ def _reload_strategy_after_save(db: Session | None = None) -> None:
     session carries nothing that could still be rolled back. Handing it the
     request session stops the runner opening a second pooled connection while
     this handler still holds its own -- the 2026-09-03 deadlock shape.
+
+    The lend is an optimisation, not a contract. A runner whose
+    ``reload_strategy`` does not accept ``db`` is called without it rather than
+    treated as a failed activation: this helper's exception path rolls the save
+    back and can pause trading, so a signature mismatch must never reach it.
+    Opening its own session is the old, correct-but-costlier behaviour.
+
+    Compatibility is decided by inspecting the signature, not by catching
+    ``TypeError``: a genuine ``TypeError`` raised from inside a reload that DID
+    accept the session must still propagate to the rollback path.
     """
     runner = get_runner()
     try:
-        runner.reload_strategy(db=db)
+        runner.reload_strategy(**_reload_session_kwargs(runner, db))
     except Exception:
         pause_preserving_operational = getattr(
             runner,

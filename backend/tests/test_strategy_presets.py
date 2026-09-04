@@ -84,7 +84,7 @@ class TestStrategyPresetAPI(_Base):
         )
         monkeypatch.setattr(
             "app.api.strategy._reload_strategy_after_save",
-            lambda: reloads.append(True),
+            lambda db=None: reloads.append(True),
         )
         create = self.client.post("/api/strategy-presets", json={
             "name": "conservative",

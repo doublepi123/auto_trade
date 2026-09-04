@@ -505,6 +505,60 @@ def test_put_strategy_reload_borrows_the_request_session(
     )
 
 
+def test_a_runner_that_cannot_borrow_is_still_a_successful_activation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A signature mismatch must not be reported as a failed strategy save.
+
+    ``_reload_strategy_after_save``'s failure path rolls the save back and can
+    pause trading. Lending the session is an optimisation, so a runner whose
+    ``reload_strategy`` takes no ``db`` is called without one instead of being
+    treated as an activation failure -- otherwise every such caller turns a
+    healthy save into a 503 and a paused runner.
+    """
+    from app.api import strategy as strategy_api
+
+    calls: list[str] = []
+
+    class _LegacyRunner:
+        def reload_strategy(self) -> None:
+            calls.append("reloaded")
+
+    monkeypatch.setattr(strategy_api, "get_runner", lambda: _LegacyRunner())
+
+    with database.SessionLocal() as db:
+        strategy_api._reload_strategy_after_save(db=db)
+
+    assert calls == ["reloaded"]
+
+
+def test_a_type_error_from_inside_the_reload_still_propagates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Compatibility is decided by the signature, never by swallowing TypeError.
+
+    A runner that DOES accept ``db`` and then raises ``TypeError`` from inside
+    the reload has genuinely failed to activate. Catching ``TypeError`` to
+    detect the old signature would silently retry it and then report success,
+    leaving the live engine on the previous config while the API says the save
+    took effect.
+    """
+    from app.api import strategy as strategy_api
+
+    class _BrokenRunner:
+        def reload_strategy(self, db: object = None) -> None:
+            raise TypeError("genuine failure inside the reload")
+
+        def pause_for_manual_control(self, _reason: str) -> bool:
+            return True
+
+    monkeypatch.setattr(strategy_api, "get_runner", lambda: _BrokenRunner())
+
+    with database.SessionLocal() as db:
+        with pytest.raises(TypeError):
+            strategy_api._reload_strategy_after_save(db=db)
+
+
 def test_sync_symbol_runtimes_reads_opening_policies_on_the_given_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

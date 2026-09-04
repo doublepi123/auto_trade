@@ -772,7 +772,7 @@ def test_universe_tick_reloads_before_optional_quant_failure(
         broker = object()
         reloads = 0
 
-        def reload_strategy(self) -> None:
+        def reload_strategy(self, db: object = None) -> None:
             self.reloads += 1
 
     response = SimpleNamespace(
@@ -1747,7 +1747,7 @@ class TestLLMAnalysisTick:
                 apply_suggestion=lambda **kw: {"applied": True, "reason": "ok"}
             ),
         )
-        monkeypatch.setattr("app.api.strategy._reload_strategy_after_save", lambda: None)
+        monkeypatch.setattr("app.api.strategy._reload_strategy_after_save", lambda db=None: None)
 
         return analyze_calls
 

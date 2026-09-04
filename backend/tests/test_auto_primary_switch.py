@@ -93,7 +93,7 @@ class _Runner:
         if self.block is not None:
             raise self.block
 
-    def reload_strategy(self) -> None:
+    def reload_strategy(self, db: object = None) -> None:
         self.reloads += 1
         if self.trace is not None:
             self.trace.append("reload")
