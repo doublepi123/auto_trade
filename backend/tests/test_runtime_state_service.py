@@ -169,7 +169,12 @@ class TestRuntimeStateService:
         db.close()
 
         db = self._get_db()
-        state = svc.get_runtime_state(symbol="NVDA.US")
+        # Read through the session this block opens, not through ``svc``: that
+        # service still holds the first, already-closed session, and querying
+        # it silently reopens a connection nobody closes. The leak survives the
+        # test and the next test's cleanup becomes a second checkout on the
+        # same thread -- a fabricated re-entrancy the strict guard rejects.
+        state = StrategyService(db).get_runtime_state(symbol="NVDA.US")
         db.close()
 
         assert state.engine_state == "short"
@@ -295,7 +300,9 @@ class TestRuntimeStateService:
         db.close()
 
         db = self._get_db()
-        state = svc.get_primary_runtime_state()
+        # Not ``svc``: it holds the first, already-closed session, and reading
+        # through it reopens a connection nobody closes (see test_persist_saves_state).
+        state = StrategyService(db).get_primary_runtime_state()
         db.close()
 
         assert state.daily_pnl == -25.0
@@ -640,7 +647,9 @@ class TestRuntimeStateService:
         db.close()
 
         db = self._get_db()
-        state = svc.get_runtime_state(symbol="NVDA.US")
+        # Not ``svc``: it holds the first, already-closed session, and reading
+        # through it reopens a connection nobody closes (see test_persist_saves_state).
+        state = StrategyService(db).get_runtime_state(symbol="NVDA.US")
         db.close()
 
         from datetime import datetime, timezone

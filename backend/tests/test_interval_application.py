@@ -18,8 +18,33 @@ class TestIntervalApplicationService:
     def _enable_live_interval_application(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(settings, "llm_shadow_mode", False)
 
+    @pytest.fixture(autouse=True)
+    def _close_sessions_this_test_opened(self):
+        """Close every session the test opened, however the test ends.
+
+        Each test here opens ``self._get_db()`` and never closes it, so the
+        connection stayed checked out past the test and the NEXT test's
+        ``_cleanup`` became a second checkout on the same thread -- a
+        re-entrancy the tests fabricate and no production path produces. The
+        strict process guard rejects it, correctly.
+
+        Owned by a fixture rather than by 25 rewritten test bodies: teardown
+        also runs when a test fails mid-way, which a per-test ``close()`` at
+        the end of the body would skip exactly when the pool is already under
+        stress.
+        """
+        self._opened_sessions = []
+        try:
+            yield
+        finally:
+            for session in self._opened_sessions:
+                session.close()
+            self._opened_sessions = []
+
     def _get_db(self):
-        return database.SessionLocal()
+        session = database.SessionLocal()
+        self._opened_sessions.append(session)
+        return session
 
     def _cleanup(self) -> None:
         db = self._get_db()
