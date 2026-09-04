@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import io
+import statistics
 from dataclasses import asdict
 from datetime import datetime, timezone
 
@@ -484,21 +485,36 @@ def _sweep_multiple_testing(
     # The engine appends one equity point per bar, and Sharpe is computed from
     # the differences between consecutive points.
     sample_size = max(bar_count - 1, 0)
+    # V[SR_n] in Bailey & Lopez de Prado (2014) eq. (2)/(6) is the cross-trial
+    # variance of the trial Sharpe estimates, and it is what puts the benchmark
+    # in the same units as observed_sharpe. A sweep ran every trial, so it is
+    # measured here rather than assumed. Combinations that never traded report
+    # no Sharpe and are excluded: they carry no information about the dispersion
+    # of the scored trials, and including them as zeros would inflate V.
+    trial_sharpes = [
+        float(row.metrics.sharpe_ratio)
+        for row in result.rows
+        if row.metrics.sharpe_ratio is not None
+    ]
+    trial_variance = (
+        statistics.variance(trial_sharpes) if len(trial_sharpes) > 1 else None
+    )
     stats = deflated_sharpe_ratio(
         observed_sharpe=float(best.metrics.sharpe_ratio),
         n_trials=trials,
         sample_size=sample_size,
+        trial_sharpe_variance=trial_variance,
     )
     return BacktestSweepMultipleTesting(
         n_trials=trials,
         sample_size=sample_size,
-        observed_sharpe=stats["observed_sharpe"],
-        expected_max_null_sharpe=stats["expected_max_null_sharpe"],
-        deflated_sharpe=stats["deflated_sharpe"],
-        psr=stats["psr"],
-        distinguishable_from_luck=(
-            stats["deflated_sharpe"] > 0.0 and stats["psr"] > 0.5
-        ),
+        observed_sharpe=float(stats["observed_sharpe"]),
+        expected_max_null_sharpe=float(stats["expected_max_null_sharpe"]),
+        deflated_sharpe=float(stats["deflated_sharpe"]),
+        psr=float(stats["psr"]),
+        trial_sharpe_variance=float(stats["trial_sharpe_variance"]),
+        trial_variance_assumed=bool(stats["trial_variance_assumed"]),
+        distinguishable_from_luck=bool(stats["distinguishable_from_luck"]),
     )
 
 

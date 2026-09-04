@@ -5,6 +5,8 @@ mirroring test_backtest.py's no-DB approach.
 """
 from __future__ import annotations
 
+import math
+import statistics
 from datetime import datetime, timezone
 from typing import Any, TypedDict, cast
 
@@ -20,6 +22,7 @@ from app.core.backtest import (
     sweep_backtest,
 )
 from app.main import app
+from app.platform.overfitting import _norm_inv_cdf
 
 client = TestClient(app)
 
@@ -402,27 +405,68 @@ class TestSweepMultipleTesting:
             == data["best"]["metrics"]["sharpe_ratio"]
         )
 
-    def test_same_winner_loses_significance_when_more_were_tried(self) -> None:
+    def test_same_winner_loses_significance_when_the_search_was_wider(self) -> None:
         """The correction's whole purpose, on one fixture.
 
-        Identical data and an identical winning Sharpe: searching a denser grid
-        is the only thing that changes. The wider search raises the bar the
-        winner must clear, and the same result stops being distinguishable from
-        luck. PSR is unmoved because it never sees the trial count -- which is
-        why the verdict requires the deflated Sharpe too.
+        Identical data and an identical winning Sharpe: only the search widens.
+        A wider search raises the bar the winner must clear, and the same result
+        stops being distinguishable from luck. PSR is unmoved because it never
+        sees the search at all -- which is why the verdict requires the deflated
+        Sharpe too.
+
+        The bar is ``sqrt(V[SR_n]) * bracket(N)`` (Bailey & Lopez de Prado 2014
+        eq. 2/6), so BOTH the trial count and the dispersion of the trial
+        Sharpes push it up. Denser sampling of one narrow axis moves N but
+        barely moves V -- correctly, because near-duplicate neighbours are not
+        independent trials. The flip therefore needs a search that is genuinely
+        wider, not merely finer.
+
+        Before the calibration fix this assertion held for a 3 -> 11 point
+        refinement of a single axis, using an ``expected_max`` that ignored
+        ``V[SR_n]`` entirely and understated the published bracket by ~22% at
+        N=11. That version flipped the verdict on grid density alone.
         """
         few = self._multiple_testing(
             grid={"buy_low": {"range": {"start": 100, "end": 110, "step": 5}}}
         )
         many = self._multiple_testing(
-            grid={"buy_low": {"range": {"start": 100, "end": 110, "step": 1}}}
+            grid={
+                "buy_low": {"values": [100, 105, 110]},
+                "fee_rate": {"values": [0, 0.4, 0.9]},
+                "slippage_pct": {"values": [0, 40, 80]},
+                "stop_loss_pct": {"values": [0.5, 5]},
+            }
         )
 
         assert many["observed_sharpe"] == few["observed_sharpe"]
         assert many["psr"] == few["psr"]
+        assert many["n_trials"] > few["n_trials"]
+        assert many["trial_sharpe_variance"] > few["trial_sharpe_variance"]
+        assert many["expected_max_null_sharpe"] > few["expected_max_null_sharpe"]
         assert few["deflated_sharpe"] > 0 > many["deflated_sharpe"]
         assert few["distinguishable_from_luck"] is True
         assert many["distinguishable_from_luck"] is False
+
+    def test_refining_one_axis_barely_moves_the_bar(self) -> None:
+        """Companion to the above, and the reason it had to change.
+
+        Sampling one narrow axis 11 times instead of 3 does raise the trial
+        count, but the neighbours are near-duplicates: the dispersion of the
+        trial Sharpes barely changes, so the luck bar barely moves. A winner
+        that cleared the bar at 3 trials still clears it at 11. Treating grid
+        density alone as evidence of overfitting is what the old single-term
+        benchmark did, and it is not what the paper says.
+        """
+        few = self._multiple_testing(
+            grid={"buy_low": {"range": {"start": 100, "end": 110, "step": 5}}}
+        )
+        fine = self._multiple_testing(
+            grid={"buy_low": {"range": {"start": 100, "end": 110, "step": 1}}}
+        )
+        assert fine["n_trials"] > few["n_trials"]
+        assert fine["observed_sharpe"] == few["observed_sharpe"]
+        assert fine["expected_max_null_sharpe"] < 0.1
+        assert fine["distinguishable_from_luck"] is True
 
     def test_absent_when_no_combination_produces_a_sharpe(self) -> None:
         # buy_low far below every low -> no trades -> flat equity -> Sharpe None.
@@ -432,3 +476,88 @@ class TestSweepMultipleTesting:
         ))
         assert resp.status_code == 200, resp.text
         assert resp.json()["multiple_testing"] is None
+
+
+class TestSweepBenchmarkUsesMeasuredTrialVariance:
+    """The luck bar is ``sqrt(V[SR_n]) * bracket(N)``. ``V[SR_n]`` is the
+    cross-trial variance of the trial Sharpes, and a sweep has every one of
+    them, so the endpoint must measure it rather than assume a unit.
+
+    Assuming ``V=1`` compares a benchmark in "standard normal" units against an
+    observed Sharpe in per-bar-return units. That is not a conservative
+    approximation in a known direction — it is a unit error, so the verdict has
+    to report which of the two it used.
+    """
+
+    def _multiple_testing(self, **overrides: Any) -> dict[str, Any]:
+        resp = client.post("/api/backtest/sweep", json=_sweep_body(**overrides))
+        assert resp.status_code == 200, resp.text
+        return cast(dict[str, Any], resp.json()["multiple_testing"])
+
+    def test_declares_the_trial_variance_as_measured(self) -> None:
+        stats = self._multiple_testing()
+        assert stats["trial_variance_assumed"] is False
+
+    def test_reports_the_variance_of_the_trial_sharpes_actually_run(self) -> None:
+        resp = client.post("/api/backtest/sweep", json=_sweep_body())
+        data = resp.json()
+        sharpes = [
+            row["metrics"]["sharpe_ratio"]
+            for row in data["rows"]
+            if row["metrics"]["sharpe_ratio"] is not None
+        ]
+        assert len(sharpes) > 1
+        assert data["multiple_testing"]["trial_sharpe_variance"] == pytest.approx(
+            statistics.variance(sharpes)
+        )
+
+    def test_benchmark_is_the_published_bracket_scaled_by_the_measured_sd(
+        self,
+    ) -> None:
+        resp = client.post("/api/backtest/sweep", json=_sweep_body())
+        stats = resp.json()["multiple_testing"]
+        n = stats["n_trials"]
+        gamma = 0.5772156649015329
+        bracket = (1.0 - gamma) * _norm_inv_cdf(1.0 - 1.0 / n) + gamma * _norm_inv_cdf(
+            1.0 - 1.0 / (n * math.e)
+        )
+        assert stats["expected_max_null_sharpe"] == pytest.approx(
+            math.sqrt(stats["trial_sharpe_variance"]) * bracket
+        )
+
+    def test_a_wider_spread_of_trial_sharpes_raises_the_bar(self) -> None:
+        """Two sweeps, same winner, same trial count. The one whose losers are
+        far worse has a wider ``V[SR_n]``, so more of the winner's edge is
+        attributable to search. Trial count alone cannot express that; this is
+        exactly what the missing ``sqrt(V[SR_n])`` factor was discarding.
+        """
+        tight = self._multiple_testing(
+            grid={"buy_low": {"range": {"start": 100, "end": 110, "step": 1}}}
+        )
+        wide = self._multiple_testing(
+            grid={
+                "buy_low": {
+                    "values": [100, 105, 110, 140, 150, 160, 170, 180, 190, 195, 198]
+                }
+            }
+        )
+        assert wide["n_trials"] == tight["n_trials"]
+        assert wide["observed_sharpe"] == tight["observed_sharpe"]
+        assert wide["trial_sharpe_variance"] > tight["trial_sharpe_variance"]
+        assert wide["expected_max_null_sharpe"] > tight["expected_max_null_sharpe"]
+        assert wide["deflated_sharpe"] < tight["deflated_sharpe"]
+
+    def test_a_single_scoring_trial_cannot_measure_a_variance_so_fails_closed(
+        self,
+    ) -> None:
+        """One combination produces a Sharpe and the other never trades. A
+        one-element sample has no variance, so the benchmark would have to be
+        assumed — and an assumed benchmark must not certify a winner.
+        """
+        stats = self._multiple_testing(
+            base={"buy_low": 105, "sell_high": 200, "quantity": 2},
+            grid={"buy_low": {"values": [10, 105]}},
+        )
+        assert stats["n_trials"] == 2
+        assert stats["trial_variance_assumed"] is True
+        assert stats["distinguishable_from_luck"] is False

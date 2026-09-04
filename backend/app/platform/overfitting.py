@@ -31,6 +31,10 @@ from typing import Sequence
 
 __all__ = ["probability_of_backtest_overfitting", "deflated_sharpe_ratio", "_norm_cdf"]
 
+# Euler-Mascheroni constant, the weight on the two terms of the expected-maximum
+# Sharpe benchmark in Bailey & López de Prado (2014) eq. (2)/(6).
+_EULER_MASCHERONI = 0.5772156649015329
+
 
 def _norm_cdf(x: float) -> float:
     """Standard normal CDF via the error function (exact, deterministic)."""
@@ -143,22 +147,70 @@ def deflated_sharpe_ratio(
     sample_size: int,
     skewness: float = 0.0,
     kurtosis: float = 3.0,
-) -> dict[str, float]:
+    trial_sharpe_variance: float | None = None,
+) -> dict[str, float | bool]:
     """Deflated Sharpe Ratio (Bailey & López de Prado 2014).
 
+    Bailey, D. H. and López de Prado, M. (2014), "The Deflated Sharpe Ratio:
+    Correcting for Selection Bias, Backtest Overfitting, and Non-Normality",
+    *Journal of Portfolio Management* 40(5) 94-107.
+
     Given an ``observed_sharpe`` from the best of ``n_trials`` strategy trials,
-    a return ``sample_size`` (number of observations), and the return series'
-    ``skewness``/raw ``kurtosis`` (defaults assume Normality, K=3), compute:
+    a return ``sample_size`` (number of observations) and the return series'
+    ``skewness`` / ``kurtosis``, compute:
 
-    * the expected maximum Sharpe under the null (zero true Sharpe) across
-      ``n_trials`` trials — the multiple-testing benchmark;
-    * the variance of the Sharpe estimate adjusted for non-Normality;
-    * the Deflated Sharpe — the observed Sharpe re-centered by the expected
-      max null and scaled by the adjusted standard deviation;
-    * ``psr`` — the Probabilistic Sharpe Ratio: probability the true Sharpe > 0.
+    * ``expected_max_null_sharpe`` — the multiple-testing benchmark, i.e. the
+      Sharpe the luckiest of ``n_trials`` zero-edge trials would be expected to
+      show. Paper eq. (2)/(6)::
 
-    A DSR <= 0 (or PSR <= 0.5) means the observed edge is not statistically
-    distinguishable from luck given the number of trials.
+          E[max SR] ~= sqrt(V[SR_n]) * ( (1 - g) * Phi^-1(1 - 1/N)
+                                         + g * Phi^-1(1 - 1/(N * e)) )
+
+      with ``g`` the Euler-Mascheroni constant, ``Phi^-1`` the standard-normal
+      inverse CDF, ``e`` Euler's number and ``V[SR_n]`` the **cross-trial
+      variance of the trial Sharpe estimates**. Both terms are required: a
+      single ``Phi^-1(1 - 1/N)`` term understates the benchmark by up to ~35%
+      at small N, which makes a lucky search winner look significant.
+    * ``sharpe_std`` — the standard deviation of the Sharpe estimator adjusted
+      for non-Normality.
+    * ``deflated_sharpe`` — the observed Sharpe re-centred on the benchmark and
+      scaled by ``sharpe_std``.
+    * ``psr`` — the Probabilistic Sharpe Ratio: probability the true Sharpe
+      exceeds zero. It does **not** see ``n_trials``, so it can never stand in
+      for the multiple-testing correction on its own.
+    * ``distinguishable_from_luck`` — the verdict: ``deflated_sharpe > 0`` and
+      ``psr > 0.5``, and never true on an assumed benchmark (see below).
+
+    **Kurtosis convention (one convention, both paths).** ``kurtosis`` is RAW
+    (``g4``; Normal = 3, the default), not excess. The estimator variance is
+    the paper's::
+
+        Var(SR) = (1 - g3 * SR + (g4 - 1) / 4 * SR^2) / (T - 1)
+
+    so at ``g3 = 0``, ``g4 = 3``, ``SR = 1`` the bracket is 1.5. Both
+    ``deflated_sharpe`` and ``psr`` are built from this one ``sharpe_std``;
+    they cannot drift apart.
+
+    **Units contract for ``trial_sharpe_variance`` (``V[SR_n]``).** The
+    benchmark is only comparable to ``observed_sharpe`` when both are in the
+    same units, and ``V[SR_n]`` is what carries those units. When the caller
+    does not supply it this function assumes ``1.0``, reports
+    ``trial_variance_assumed=True``, and **fails closed**: for ``n_trials > 1``
+    the benchmark is non-zero and unit-unverified, so
+    ``distinguishable_from_luck`` is forced ``False``. An assumed benchmark can
+    still be inspected — ``deflated_sharpe`` and ``psr`` are returned as
+    computed — but it can never certify a swept winner. At ``n_trials == 1``
+    the benchmark is exactly zero in every unit system, so nothing is assumed
+    and the verdict stands on its own.
+
+    **Effective N.** ``n_trials`` is the *nominal* trial count. A dense sweep
+    grid has strongly correlated neighbours, so the effective number of
+    independent trials is smaller — often far smaller — than the nominal one
+    (paper, Appendix 3). Passing a nominal N is therefore conservative in the
+    right direction for the benchmark itself, but no ``N_eff`` shrinkage is
+    applied here: an unprincipled correction would be worse than none. Callers
+    that can measure the trial Sharpe correlation structure should reduce
+    ``n_trials`` themselves and say so.
     """
     if n_trials < 1 or sample_size < 2:
         return {
@@ -167,26 +219,61 @@ def deflated_sharpe_ratio(
             "sharpe_std": 0.0,
             "deflated_sharpe": observed_sharpe,
             "psr": 0.5,
+            "trial_sharpe_variance": (
+                1.0 if trial_sharpe_variance is None else float(trial_sharpe_variance)
+            ),
+            "trial_variance_assumed": trial_sharpe_variance is None,
+            "distinguishable_from_luck": False,
         }
-    # Expected max of n_trials standard normals (Bailey/LdP approximation).
-    n = n_trials
-    expected_max = (1.0 - 0.5 / (1.0 + n)) * _norm_inv_cdf(1.0 - 1.0 / n) if n > 1 else 0.0
 
-    # Variance of annualized Sharpe estimator adjusted for skew/kurtosis.
-    # Lo (2002): Var(SR) ~= (1 - skew*SR + (kurt-1)/4 * SR^2) / (T-1)
+    variance_assumed = trial_sharpe_variance is None
+    trial_variance = 1.0 if trial_sharpe_variance is None else float(trial_sharpe_variance)
+    if trial_variance < 0.0:
+        raise ValueError("trial_sharpe_variance cannot be negative")
+
+    # Expected max Sharpe over n_trials zero-edge trials — Bailey & López de
+    # Prado (2014) eq. (2)/(6), both Euler-Mascheroni-weighted terms.
+    n = n_trials
+    if n > 1:
+        bracket = (1.0 - _EULER_MASCHERONI) * _norm_inv_cdf(1.0 - 1.0 / n) + (
+            _EULER_MASCHERONI * _norm_inv_cdf(1.0 - 1.0 / (n * math.e))
+        )
+        expected_max = math.sqrt(trial_variance) * bracket
+    else:
+        expected_max = 0.0
+
+    # Variance of the Sharpe estimator adjusted for skew/raw kurtosis.
+    # Bailey & López de Prado (2014), after Lo (2002):
+    #   Var(SR) = (1 - g3*SR + (g4 - 1)/4 * SR^2) / (T - 1)   with RAW g4.
     sr = observed_sharpe
-    var_sr = (1.0 - skewness * sr + (kurtosis - 3.0 + 1.0) / 4.0 * sr ** 2) / (sample_size - 1)
+    var_sr = (
+        1.0 - skewness * sr + (kurtosis - 1.0) / 4.0 * sr ** 2
+    ) / (sample_size - 1)
     std_sr = max(var_sr ** 0.5, 1e-9)
 
-    deflated = (sr - expected_max) / std_sr if std_sr > 0 else 0.0
-    psr = _norm_cdf((sr - 0.0) * ((sample_size - 1) ** 0.5) / ((1.0 - skewness * sr + (kurtosis - 2.0) / 4.0 * sr ** 2) ** 0.5)) if sample_size > 1 else 0.5
+    deflated = (sr - expected_max) / std_sr
+    # Same std_sr, so PSR and the deflated Sharpe cannot disagree about the
+    # distributional assumptions.
+    psr = min(max(_norm_cdf(sr / std_sr), 0.0), 1.0)
+
+    # Fail closed: a non-zero benchmark whose units were assumed rather than
+    # measured must not certify anything.
+    benchmark_is_unit_bearing = n > 1
+    certified = (
+        deflated > 0.0
+        and psr > 0.5
+        and not (variance_assumed and benchmark_is_unit_bearing)
+    )
 
     return {
         "observed_sharpe": observed_sharpe,
         "expected_max_null_sharpe": expected_max,
         "sharpe_std": std_sr,
         "deflated_sharpe": deflated,
-        "psr": min(max(psr, 0.0), 1.0),
+        "psr": psr,
+        "trial_sharpe_variance": trial_variance,
+        "trial_variance_assumed": variance_assumed,
+        "distinguishable_from_luck": certified,
     }
 
 

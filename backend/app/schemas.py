@@ -3072,6 +3072,12 @@ class BacktestSweepMultipleTesting(BaseModel):
     a per-combination return panel split into in-sample and out-of-sample
     blocks, which this endpoint neither retains nor splits. It belongs to
     walk-forward evaluation, where those splits exist.
+
+    ``n_trials`` is the NOMINAL combination count. Neighbouring grid points are
+    strongly correlated, so the effective number of independent trials is
+    smaller (Bailey & Lopez de Prado 2014, Appendix 3). No effective-N shrinkage
+    is applied — an unprincipled one would be worse than none — so a dense grid
+    over a narrow range reports a slightly stricter bar than it has earned.
     """
 
     n_trials: int
@@ -3080,6 +3086,8 @@ class BacktestSweepMultipleTesting(BaseModel):
     expected_max_null_sharpe: float
     deflated_sharpe: float
     psr: float
+    trial_sharpe_variance: float
+    trial_variance_assumed: bool
     distinguishable_from_luck: bool
 
 
