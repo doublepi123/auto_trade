@@ -488,3 +488,70 @@ def test_put_strategy_reload_borrows_the_request_session(
         "the strategy-save reload must hand the runner the request session it "
         "is already holding"
     )
+
+
+def test_sync_symbol_runtimes_reads_opening_policies_on_the_given_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#12: ``active_policies`` is a pure read and already borrows.
+
+    The sweep attributed one event to
+    ``OpeningMomentumExecutionService.active_policies``, but the stack shows the
+    second connection was checked out by ``reload_strategy`` further up --
+    ``active_policies`` was simply the frame that first touched the database
+    after it. It takes the caller's ``db`` and opens nothing, and
+    ``_sync_symbol_runtimes`` passes the session it was given.
+
+    This pins that, so a refactor that gave either an owned session would fail
+    here rather than resurface as a pool warning.
+    """
+    runner = _runner()
+    counter = _SessionCounter(monkeypatch)
+    guard = database.session_reentrancy_guard
+    before = guard.violation_count
+
+    with database.SessionLocal() as db:
+        runner._sync_symbol_runtimes(db)
+
+    assert counter.opened == 0
+    assert guard.violation_count == before
+
+
+def test_today_order_sync_reloads_tracked_entries_on_its_own_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#10: the sync already reuses its session; the sweep event was an artifact.
+
+    ``_sync_today_orders_from_broker_serialized`` calls ``_load_tracked_entries(db)``
+    one line after ``db.commit()``, inside its own
+    ``with self._db_session() as db``. It passes that session, opens nothing,
+    and the commit has ended the transaction, so no uncommitted order write
+    crosses the read.
+
+    The event the sweep attributed here came from
+    ``tests/test_trade_event_sync.py``, which calls
+    ``_load_tracked_entries(SessionLocal())`` and never closes that session.
+    The leaked connection is still checked out when the test then runs the real
+    sync, so the sync's own first checkout is the thread's second. The site is
+    correct; the caller in the test leaks.
+
+    Pinned at the pool, so a future edit that made this path own a session
+    would fail here.
+    """
+    class _Broker:
+        def get_today_orders(self) -> list[object]:
+            return []
+
+    runner = _runner()
+    runner.broker = cast(Any, _Broker())
+    guard = database.session_reentrancy_guard
+    before = guard.violation_count
+
+    runner.sync_today_orders_from_broker(force=True)
+
+    assert guard.violation_count == before, (
+        "the today-order sync checked out a second pooled connection"
+    )
+    assert database.engine.pool.checkedout() == 0, (
+        "the today-order sync leaked a pooled connection"
+    )

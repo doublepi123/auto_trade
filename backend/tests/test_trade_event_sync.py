@@ -655,7 +655,8 @@ class TestTradeEventSync:
                 )
             )
             db.commit()
-        runner._load_tracked_entries(SessionLocal())
+        with SessionLocal() as db:
+            runner._load_tracked_entries(db)
 
         assert runner.sync_today_orders_from_broker(force=True) == 1
 
@@ -716,7 +717,8 @@ class TestTradeEventSync:
 
         runner = AppRunner()
         runner.broker = Broker()
-        runner._load_tracked_entries(SessionLocal())
+        with SessionLocal() as db:
+            runner._load_tracked_entries(db)
         runner._trade_svc.load_pending_orders(
             [
                 _PendingOrder(
