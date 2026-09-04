@@ -309,8 +309,12 @@ class TestAppRunner:
         monkeypatch,
     ) -> None:
         runner = AppRunner()
-        monkeypatch.setattr(runner, "_persist_risk_pause_best_effort", lambda: None)
-        monkeypatch.setattr(runner, "_record_risk_event", lambda _reason: None)
+        monkeypatch.setattr(
+            runner, "_persist_risk_pause_best_effort", lambda db=None: None
+        )
+        monkeypatch.setattr(
+            runner, "_record_risk_event", lambda _reason, db=None: None
+        )
         monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
 
         inventory = {"AAPL.US": ["live-1", "live-2"]}
@@ -403,7 +407,9 @@ class TestAppRunner:
             "_persist_risk_pause_best_effort",
             lambda: None,
         )
-        monkeypatch.setattr(runner, "_record_risk_event", lambda _reason: None)
+        monkeypatch.setattr(
+            runner, "_record_risk_event", lambda _reason, db=None: None
+        )
         monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
 
         assert runner._sync_risk_from_order_ledger() is False
@@ -431,7 +437,9 @@ class TestAppRunner:
             "_persist_risk_pause_best_effort",
             lambda: None,
         )
-        monkeypatch.setattr(runner, "_record_risk_event", lambda _reason: None)
+        monkeypatch.setattr(
+            runner, "_record_risk_event", lambda _reason, db=None: None
+        )
         monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
 
         runner._defer_incomplete_pnl_latch = True
@@ -981,7 +989,9 @@ class TestAppRunner:
             "_persist_risk_pause_best_effort",
             lambda: None,
         )
-        monkeypatch.setattr(runner, "_record_risk_event", lambda _reason: None)
+        monkeypatch.setattr(
+            runner, "_record_risk_event", lambda _reason, db=None: None
+        )
         monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
 
         runner._mark_fill_processed("AAPL.US")
@@ -1002,8 +1012,12 @@ class TestAppRunner:
 
         runner = AppRunner()
         runner.broker = cast(Any, Broker())
-        monkeypatch.setattr(runner, "_persist_risk_pause_best_effort", lambda: None)
-        monkeypatch.setattr(runner, "_record_risk_event", lambda _reason: None)
+        monkeypatch.setattr(
+            runner, "_persist_risk_pause_best_effort", lambda db=None: None
+        )
+        monkeypatch.setattr(
+            runner, "_record_risk_event", lambda _reason, db=None: None
+        )
         monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
 
         assert runner.sync_today_orders_from_broker(force=True) == 0
@@ -4459,7 +4473,9 @@ class TestAppRunner:
         })
         runner.risk.pause("ORDER_EXECUTION_BLOCKED: operator review")
         assert runner.risk.permit_protective_exits() is True
-        monkeypatch.setattr(runner, "_persist_risk_pause_best_effort", lambda: None)
+        monkeypatch.setattr(
+            runner, "_persist_risk_pause_best_effort", lambda db=None: None
+        )
 
         assert runner._sync_engine_state_with_positions(force=True) is False
         assert runner.risk.protective_exit_permitted is False
@@ -6240,7 +6256,7 @@ class TestAppRunner:
         runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
         runner.risk.pause("testing")
         runner.notifier = _NoopNotifier()
-        runner._record_risk_event = lambda reason: None
+        runner._record_risk_event = lambda reason, db=None: None
 
         runner._on_quote(Quote(symbol="AAPL.US", last_price=99.0, bid=98.5, ask=99.5, timestamp=_fresh_timestamp()))
 
@@ -6458,7 +6474,9 @@ class TestAppRunner:
                 RuntimeError("runtime state write failed")
             ),
         )
-        monkeypatch.setattr(runner, "_persist_risk_pause_best_effort", lambda: None)
+        monkeypatch.setattr(
+            runner, "_persist_risk_pause_best_effort", lambda db=None: None
+        )
         monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
 
         resumed = runner._auto_resume_pause_if_due(now=now)
@@ -7307,7 +7325,9 @@ class TestAppRunner:
             )
         })
         monkeypatch.setattr(runner, "_record_risk_event", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(runner, "_persist_risk_pause_best_effort", lambda: None)
+        monkeypatch.setattr(
+            runner, "_persist_risk_pause_best_effort", lambda db=None: None
+        )
         monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
 
         # last loses 9, while the executable cover ask loses exactly 10.
@@ -7343,7 +7363,9 @@ class TestAppRunner:
             )
         })
         monkeypatch.setattr(runner, "_record_risk_event", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(runner, "_persist_risk_pause_best_effort", lambda: None)
+        monkeypatch.setattr(
+            runner, "_persist_risk_pause_best_effort", lambda db=None: None
+        )
         monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
 
         runner._on_quote(
@@ -7378,7 +7400,9 @@ class TestAppRunner:
             )
         })
         monkeypatch.setattr(runner, "_record_risk_event", lambda *_args, **_kwargs: None)
-        monkeypatch.setattr(runner, "_persist_risk_pause_best_effort", lambda: None)
+        monkeypatch.setattr(
+            runner, "_persist_risk_pause_best_effort", lambda db=None: None
+        )
         monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
 
         runner._on_quote(
@@ -7407,7 +7431,7 @@ class TestAppRunner:
         risk_events: list[str] = []
         runner._running = True
         runner.notifier = notifier
-        runner._record_risk_event = lambda reason: risk_events.append(reason)
+        runner._record_risk_event = lambda reason, db=None: risk_events.append(reason)
         runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
         runner.risk.pause("manual")
 
@@ -7460,7 +7484,7 @@ class TestAppRunner:
         runner.engine.params = StrategyParams(symbol="AAPL.US", buy_low=100.0, sell_high=200.0)
         runner.engine.state = EngineState.LONG
         runner.notifier = _NoopNotifier()
-        runner._record_risk_event = lambda reason: None
+        runner._record_risk_event = lambda reason, db=None: None
 
         runner._on_quote(Quote(symbol="AAPL.US", last_price=201.0, bid=200.5, ask=201.5, timestamp=_fresh_timestamp()))
 
