@@ -274,13 +274,12 @@ def test_guard_never_raises_outside_test_env(
 def test_observing_guard_never_raises_even_in_test_env(tmp_path, _test_env) -> None:
     """``strict=False`` downgrades the test-env raise to a counted warning.
 
-    The process engine is wired this way, because installing a strict guard on
-    it turned the whole suite into an audit that found 24 pre-existing
-    cross-module re-entrancy sites. Resolving those is a separate change --
-    several sit in the order-persistence path, and ``AuditLogger.record`` owns
-    its session deliberately so an audit row outlives the caller's rollback.
-    Detection has to be able to ship ahead of that work, and an observing
-    guard still counts and still names the path.
+    The process engine shipped this way while the audit's thirteen sites were
+    being resolved: detection had to be able to land ahead of the fixes, and
+    an observing guard still counts and still names the path. Those sites are
+    resolved now and the process guard is strict, but the observing mode
+    remains part of the class's contract -- a caller installing a guard on a
+    secondary engine may legitimately want diagnosis without a verdict.
     """
     engine = _queue_pooled_engine(tmp_path, "observing.db")
     guard = SessionReentrancyGuard(strict=False)
@@ -301,18 +300,74 @@ def test_observing_guard_never_raises_even_in_test_env(tmp_path, _test_env) -> N
     assert guard.last_violation_stack is not None
 
 
-def test_process_engine_guard_is_installed_and_observing() -> None:
-    """The shipped guard must be attached, and must never raise anywhere.
+def test_process_engine_guard_is_installed_and_strict() -> None:
+    """The shipped guard must be attached, and strict.
 
-    Attached, because a detector nobody installed detects nothing. Observing,
-    because until the 24 sites above are resolved a strict process guard would
-    fail unrelated tests -- and because a guard that can raise inside a live
-    trading system is the one thing this must never become.
+    Attached, because a detector nobody installed detects nothing. Strict,
+    because the thirteen sites the first audit found are now resolved --
+    eleven threaded onto the caller's session, two declared through
+    ``independent_session`` at the site that owns them. With none left, a new
+    unannotated re-entrancy is a regression and must fail CI rather than add
+    one more line to a warning log nobody reads.
+
+    Strict changes only what a violation COSTS, and only under
+    ``env == "test"``. In prod/dev it is still counted, its stack still
+    recorded, and a throttled warning still emitted -- see
+    ``test_guard_never_raises_outside_test_env`` and
+    ``test_process_engine_guard_cannot_raise_in_prod_or_dev``, which pin that
+    a guard near a live trading system can never halt it.
     """
     from app import database
 
     assert isinstance(database.session_reentrancy_guard, SessionReentrancyGuard)
-    assert database.session_reentrancy_guard.strict is False
+    assert database.session_reentrancy_guard.strict is True
+
+
+@pytest.mark.parametrize("env", ["prod", "dev"])
+def test_process_engine_guard_cannot_raise_in_prod_or_dev(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    env: str,
+) -> None:
+    """The SHIPPED guard object, strict, against a real nested session.
+
+    ``test_guard_never_raises_outside_test_env`` proves the rule for a guard
+    this test constructs. This proves it for the one production actually runs:
+    the same object, in strict mode, driven through a genuine second checkout
+    on one thread with ``settings.env`` pinned to prod and to dev.
+
+    A guard that raised inside a live trading system would be strictly worse
+    than the bug it detects -- it would abort an order path mid-flight over a
+    diagnostic. Raising stays confined to ``env == "test"``, whatever
+    ``strict`` says.
+    """
+    from app import database
+
+    guard = database.session_reentrancy_guard
+    assert guard.strict is True, "this test is only meaningful on a strict guard"
+
+    monkeypatch.setattr(settings, "env", env)
+    engine = _queue_pooled_engine(tmp_path, f"shipped_{env}.db")
+    guard.install(engine)
+    factory = sessionmaker(bind=engine)
+    before = guard.violation_count
+
+    outer = factory()
+    inner = factory()
+    try:
+        _touch(outer)
+        # Must NOT raise: no pytest.raises, no try/except. If the shipped
+        # guard ever raises here, this line fails the test directly.
+        _touch(inner)
+    finally:
+        inner.close()
+        outer.close()
+        engine.dispose()
+
+    assert guard.violation_count == before + 1, (
+        "prod/dev must still COUNT the violation -- observing is not ignoring"
+    )
+    assert guard.last_violation_stack is not None
 
 
 @pytest.mark.parametrize(

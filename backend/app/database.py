@@ -136,10 +136,12 @@ def _independent_session_scope(reason: str) -> Generator[None, None, None]:
 def independent_session(reason: str) -> AbstractContextManager[None]:
     """Declare that a nested session inside this block is deliberate.
 
-    A handful of sites open a second ``Session`` on purpose:
-    ``AuditLogger.record`` owns its own so an audit row survives the rollback
-    of the transaction being audited, and coupling audit durability to the
-    audited transaction would be a product change rather than a refactor.
+    Two production sites open a second ``Session`` on purpose, and both do it
+    so their record survives the rollback of the thing being recorded:
+    ``AuditLogger.record`` (an audit row must outlive the transaction it
+    audits) and ``app/api/trade.py:_record_control_trace`` (a failed forensic
+    trace must not roll back the control handler's own transaction). Coupling
+    either to its caller would be a product change rather than a refactor.
     Those sites are still re-entrancy by the pool's definition, and a detector
     that warns forever about known-good paths is one nobody reads.
 
@@ -185,21 +187,33 @@ class SessionReentrancyGuard:
     itself sees every checkout regardless of which module caused it, so the
     detector lives there.
 
-    Threshold is exactly one connection per thread, and there is no path
-    allowlist. That is not arbitrary: with ``QueuePool`` every ``Session``
-    that touches the database holds its own connection until closed, so a
-    thread needs a second one only when it has re-entered -- which is the
-    incident. A per-path exemption list would be exactly the "silence it"
-    move that lets the next one through.
+    Threshold is exactly one connection per thread. That is not arbitrary:
+    with ``QueuePool`` every ``Session`` that touches the database holds its
+    own connection until closed, so a thread needs a second one only when it
+    has re-entered -- which is the incident.
+
+    The sanctioned opt-out is ``independent_session(reason)``, applied at the
+    site that owns the nesting, for the duration of one ``with`` block, with a
+    written justification. Two production sites use it: ``AuditLogger.record``
+    (an audit row must survive the rollback of the transaction it audits) and
+    ``app/api/trade.py:_record_control_trace`` (a failed forensic trace must
+    not roll back the control handler's own transaction). Both commit on a
+    session they own; borrowing would couple the record to the very thing it
+    exists to outlive, which is a product change rather than a refactor.
+
+    That contract is deliberately NOT a central allowlist -- no path pattern,
+    module name or config entry a future site can be added to from a distance.
+    The justification has to live at the call site so it appears in the diff
+    that introduces the nesting and is reviewed there; an allowlist edited in
+    one file is exactly the "silence it" move that lets the next outage
+    through. The waiver is scoped and thread-local, so it exempts only the
+    block that declared it and an unmarked nested checkout a moment later on
+    the same thread still reports.
 
     ``strict`` selects what a violation costs rather than whether it counts.
     Strict guards raise under ``env == "test"`` so a regression fails a test;
-    observing guards only warn. Installing a strict guard on the process
-    engine turned the whole suite into an audit, and that audit found 24 real
-    sites -- see the install site below for why the process engine observes
-    for now and what has to land before it can be flipped. Counting and stack
-    capture are identical in both modes, so an observing guard still names
-    the offending path.
+    observing guards only warn. Counting and stack capture are identical in
+    both modes, so an observing guard still names the offending path.
 
     Cost on the happy path is one dict lookup, one integer add and one dict
     store under a lock. Nothing is formatted and no stack is captured unless
@@ -331,35 +345,36 @@ engine = create_engine(
     **queue_pool_kwargs(settings.database_url),
 )
 
-#: Process-engine guard. ``strict=False``: it counts violations and logs the
-#: offending stack, but never raises, in ANY environment.
+#: Process-engine guard. ``strict=True``: a violation raises under
+#: ``env == "test"``, so a NEW unannotated re-entrancy fails CI. In prod and
+#: dev it never raises, in either mode -- it counts, records the stack and
+#: emits a throttled warning. A guard that halted a live trading system would
+#: be worse than the bug it detects, so that boundary is enforced in
+#: ``_report`` and pinned by
+#: ``test_process_engine_guard_cannot_raise_in_prod_or_dev``.
 #:
-#: Installing it strict turned the full suite into an audit, and that audit
-#: found 24 distinct cross-module re-entrancy sites -- precisely the blind
-#: spot a static audit cannot see. Four were in this module's own ``_ensure_*``
-#: migrations and are fixed above. The remaining twenty are live paths, and
-#: they split into two kinds that must NOT be fixed with one edit:
+#: It shipped observing first, deliberately: installing it strict turned the
+#: full suite into an audit, and that audit measured 216 events across 13
+#: distinct cross-module re-entrancy sites -- precisely the blind spot a
+#: static audit cannot see. Detection had to land ahead of the fixes so the
+#: fixes were reviewable, and the sites split into two kinds that must NOT be
+#: fixed with one edit:
 #:
-#: * Genuine re-entrancy. ``PUT /api/strategy`` holds the request ``db`` and
-#:   calls ``AppRunner.reload_strategy``, which opens its own ``SessionLocal``;
-#:   ``AppRunner._initialize_runner`` holds a session across
-#:   ``_load_credentials``, which opens another; the today-order sync holds one
-#:   through ``_upsert_broker_order``. These are the incident shape and want
-#:   the ``fa983919`` treatment -- thread the caller's session down.
-#: * Deliberate independence. ``AuditLogger.record`` owns its session by
-#:   design so an audit row survives the caller's rollback (``app/core/audit.py``
-#:   swallows its own failures for the same reason). Making it borrow would
-#:   silently couple audit durability to the transaction being audited. That is
-#:   a product decision, not a refactor.
+#: * Genuine re-entrancy -- eleven sites, now threaded. ``PUT /api/strategy``
+#:   held the request ``db`` and called ``AppRunner.reload_strategy``, which
+#:   opened its own ``SessionLocal``; ``AppRunner._initialize_runner`` held one
+#:   across ``_load_credentials``; the today-order sync held one through
+#:   ``_upsert_broker_order``. These are the incident shape and got the
+#:   ``fa983919`` treatment -- the caller's session threaded down.
+#: * Deliberate independence -- two sites, now declared. ``AuditLogger.record``
+#:   and ``app/api/trade.py:_record_control_trace`` each own a session so their
+#:   record survives the rollback of the thing they record, and each states why
+#:   through ``independent_session`` at the site itself.
 #:
-#: Twenty live paths -- several inside the order-persistence path, which is not
-#: territory to rewrite alongside the guard that found them -- is a separate
-#: change with its own tests. Shipping the detector first is what makes that
-#: change reviewable: prod/dev behaviour is unchanged either way (never raises),
-#: while the warning names each offending stack. Flipping this to ``strict=True``
-#: is the follow-up, and it is gated on those twenty being resolved --
-#: individually, each either threaded or argued as deliberate.
-session_reentrancy_guard = SessionReentrancyGuard(strict=False)
+#: With the sweep at zero unannotated violations, an observing guard would only
+#: accumulate warnings nobody reads. Strict makes the next one a red test on
+#: the commit that introduces it.
+session_reentrancy_guard = SessionReentrancyGuard(strict=True)
 session_reentrancy_guard.install(engine)
 
 
