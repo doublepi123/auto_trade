@@ -2035,6 +2035,20 @@ class SignalEdgeFirstPassage(BaseModel):
     matched_trades: int = Field(ge=0)
     provenance_excluded_trades: int = Field(ge=0)
     missing_pnl_excluded: int = Field(ge=0)
+    # Trades exiting on the TIME barrier carry no first-passage outcome and are
+    # conditioned out of `resolved`. Disclosed here with the floor/ceiling the
+    # observed rate would take if every one of them were reallocated to STOP or
+    # to TARGET; reporting only, they never enter the verdict.
+    time_exit_excluded: int = Field(default=0, ge=0)
+    time_exit_fraction: Optional[float] = Field(
+        default=None, ge=0, le=1, allow_inf_nan=False
+    )
+    observed_rate_floor: Optional[float] = Field(
+        default=None, ge=0, le=1, allow_inf_nan=False
+    )
+    observed_rate_ceiling: Optional[float] = Field(
+        default=None, ge=0, le=1, allow_inf_nan=False
+    )
     observed_rate: Optional[float] = Field(default=None, ge=0, le=1, allow_inf_nan=False)
     baseline_rate: float = Field(ge=0, le=1, allow_inf_nan=False)
     edge_pp: Optional[float] = Field(default=None, allow_inf_nan=False)

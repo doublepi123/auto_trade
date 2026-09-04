@@ -73,6 +73,15 @@ class FirstPassageResult:
     matched_trades: int = 0
     provenance_excluded_trades: int = 0
     missing_pnl_excluded: int = 0
+    # The first-passage test conditions on price-barrier resolution, so trades
+    # exiting on the TIME barrier leave the denominator. The statistic stays
+    # valid under the driftless null (strong Markov property), but the reader
+    # must be able to see how much evidence the conditioning removed, and
+    # whether the verdict survives the extreme allocations of it.
+    time_exit_excluded: int = 0
+    time_exit_fraction: float | None = None
+    observed_rate_floor: float | None = None
+    observed_rate_ceiling: float | None = None
 
 
 def assess_first_passage(
@@ -87,6 +96,7 @@ def assess_first_passage(
     matched_trades: int = 0,
     provenance_excluded_trades: int = 0,
     missing_pnl_excluded: int = 0,
+    time_exit_excluded: int = 0,
 ) -> FirstPassageResult:
     """Compare the realised target-before-stop rate against a random walk."""
     counts = (
@@ -97,6 +107,7 @@ def assess_first_passage(
         matched_trades,
         provenance_excluded_trades,
         missing_pnl_excluded,
+        time_exit_excluded,
     )
     if any(count < 0 for count in counts):
         raise ValueError("hit counts must be non-negative")
@@ -105,6 +116,7 @@ def assess_first_passage(
 
     baseline = first_passage_baseline(stop_pct=stop_pct, target_pct=target_pct)
     resolved = target_hits + stop_hits
+    cohort = resolved + time_exit_excluded
     result_fields = {
         "target_hits": target_hits,
         "stop_hits": stop_hits,
@@ -115,6 +127,17 @@ def assess_first_passage(
         "matched_trades": matched_trades,
         "provenance_excluded_trades": provenance_excluded_trades,
         "missing_pnl_excluded": missing_pnl_excluded,
+        "time_exit_excluded": time_exit_excluded,
+        "time_exit_fraction": (
+            time_exit_excluded / cohort if cohort > 0 else None
+        ),
+        # Sensitivity bounds: every time exit reallocated to STOP (floor) or to
+        # TARGET (ceiling). They are reported alongside the conditional rate and
+        # never feed the verdict.
+        "observed_rate_floor": target_hits / cohort if cohort > 0 else None,
+        "observed_rate_ceiling": (
+            (target_hits + time_exit_excluded) / cohort if cohort > 0 else None
+        ),
     }
     if resolved == 0:
         return FirstPassageResult(

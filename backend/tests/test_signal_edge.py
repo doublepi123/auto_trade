@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import math
-from datetime import date
+from datetime import date, timedelta
 
 from app.domain.strategy_v2.signal_edge import (
     VERDICT_FAIL,
     VERDICT_INSUFFICIENT_DATA,
     VERDICT_PASS,
+    FirstPassageResult,
     assess_first_passage,
     assess_signal_edge,
     binomial_p_upper,
@@ -103,6 +104,232 @@ class TestAssessFirstPassage:
         assert result.observed_rate is None
         assert result.p_value is None
         assert result.beats_baseline is False
+
+
+class TestTimeExitConditioningDisclosure:
+    """The first-passage test conditions on price-barrier resolution.
+
+    Trades that exit on the TIME barrier are silently dropped from the
+    denominator.  The statistic is valid (strong Markov property under a
+    driftless null) and is deliberately NOT changed here; what was missing
+    is any way for a reader to see HOW MUCH evidence the conditioning
+    removed, and whether the verdict survives the worst-case allocation of
+    those trades.
+    """
+
+    def test_time_exit_count_and_fraction_are_first_class(self) -> None:
+        # Given the live cohort: 44 target, 88 stop, 150 time exits.
+        result = assess_first_passage(
+            target_hits=44,
+            stop_hits=88,
+            time_exit_excluded=150,
+            stop_pct=0.45,
+            target_pct=0.80,
+        )
+        # Then the conditioning is disclosed as data, not buried in prose.
+        assert result.resolved == 132
+        assert result.time_exit_excluded == 150
+        assert result.time_exit_fraction is not None
+        assert math.isclose(result.time_exit_fraction, 150 / 282, rel_tol=1e-12)
+
+    def test_sensitivity_bounds_bracket_the_reported_rate(self) -> None:
+        # Given the same live cohort.
+        result = assess_first_passage(
+            target_hits=44,
+            stop_hits=88,
+            time_exit_excluded=150,
+            stop_pct=0.45,
+            target_pct=0.80,
+        )
+        # Then the floor allocates every time exit to STOP, the ceiling to TARGET,
+        # and the as-reported conditional rate lies strictly between them.
+        assert result.observed_rate_floor is not None
+        assert result.observed_rate_ceiling is not None
+        assert result.observed_rate is not None
+        assert math.isclose(result.observed_rate_floor, 44 / 282, rel_tol=1e-12)
+        assert math.isclose(result.observed_rate_ceiling, 194 / 282, rel_tol=1e-12)
+        assert math.isclose(result.observed_rate, 44 / 132, rel_tol=1e-12)
+        assert (
+            result.observed_rate_floor
+            < result.observed_rate
+            < result.observed_rate_ceiling
+        )
+
+    def test_only_the_impossible_all_to_target_allocation_clears_baseline(
+        self,
+    ) -> None:
+        # Given the live cohort against its own driftless baseline.
+        result = assess_first_passage(
+            target_hits=44,
+            stop_hits=88,
+            time_exit_excluded=150,
+            stop_pct=0.45,
+            target_pct=0.80,
+        )
+        # Then the verdict survives the conditioning: only the physically
+        # impossible allocation of every time exit to TARGET beats the baseline.
+        assert result.observed_rate_floor is not None
+        assert result.observed_rate_ceiling is not None
+        assert result.observed_rate_floor < result.baseline_rate
+        assert result.observed_rate is not None
+        assert result.observed_rate < result.baseline_rate
+        assert result.observed_rate_ceiling > result.baseline_rate
+
+    def test_disclosure_does_not_move_the_verdict_math(self) -> None:
+        # Given identical barrier outcomes, disclosed and undisclosed.
+        disclosed = assess_first_passage(
+            target_hits=44,
+            stop_hits=88,
+            time_exit_excluded=150,
+            stop_pct=0.45,
+            target_pct=0.80,
+        )
+        undisclosed = assess_first_passage(
+            target_hits=44, stop_hits=88, stop_pct=0.45, target_pct=0.80
+        )
+        # Then every statistic that feeds a decision is byte-identical.
+        assert disclosed.resolved == undisclosed.resolved
+        assert disclosed.observed_rate == undisclosed.observed_rate
+        assert disclosed.baseline_rate == undisclosed.baseline_rate
+        assert disclosed.edge_pp == undisclosed.edge_pp
+        assert disclosed.p_value == undisclosed.p_value
+        assert disclosed.beats_baseline == undisclosed.beats_baseline
+
+    def test_no_time_exits_collapses_the_bounds_onto_the_rate(self) -> None:
+        # Given a cohort with no time-barrier exits at all.
+        result = assess_first_passage(
+            target_hits=44, stop_hits=88, stop_pct=0.45, target_pct=0.80
+        )
+        # Then there is nothing to condition away and the bounds are degenerate.
+        assert result.time_exit_excluded == 0
+        assert result.time_exit_fraction == 0.0
+        assert result.observed_rate_floor == result.observed_rate
+        assert result.observed_rate_ceiling == result.observed_rate
+
+    def test_empty_cohort_reports_no_bounds(self) -> None:
+        # Given no trades of any kind.
+        result = assess_first_passage(
+            target_hits=0, stop_hits=0, stop_pct=0.45, target_pct=0.80
+        )
+        # Then bounds are absent rather than a fabricated zero.
+        assert result.time_exit_excluded == 0
+        assert result.time_exit_fraction is None
+        assert result.observed_rate_floor is None
+        assert result.observed_rate_ceiling is None
+
+    def test_rejects_a_negative_time_exit_count(self) -> None:
+        try:
+            assess_first_passage(
+                target_hits=44,
+                stop_hits=88,
+                time_exit_excluded=-1,
+                stop_pct=0.45,
+                target_pct=0.80,
+            )
+            raise AssertionError("expected ValueError")
+        except ValueError:
+            pass
+
+    def test_existing_constructions_without_the_new_fields_still_work(self) -> None:
+        # Given a caller that predates the disclosure fields.
+        result = FirstPassageResult(
+            target_hits=1,
+            stop_hits=1,
+            resolved=2,
+            barrier_mismatch_excluded=0,
+            observed_rate=0.5,
+            baseline_rate=0.36,
+            edge_pp=14.0,
+            p_value=0.5,
+            beats_baseline=False,
+        )
+        # Then it still constructs, with inert defaults for the new fields.
+        assert result.time_exit_excluded == 0
+        assert result.time_exit_fraction is None
+        assert result.observed_rate_floor is None
+        assert result.observed_rate_ceiling is None
+
+
+class TestLiveShapedVerdictInvariance:
+    """Anti-regression: the disclosure must not change the live verdict."""
+
+    def _live_shaped_observations(self) -> list[tuple[date, float]]:
+        # 282 closed trades over 31 days, gross mean slightly negative with
+        # day-level noise calibrated to the measured day-clustered t of ~-0.6.
+        observations: list[tuple[date, float]] = []
+        for day_index in range(31):
+            trades = 10 if day_index < 3 else 9
+            shock = 0.50 if day_index % 2 == 0 else -0.50
+            observations.extend(
+                (date(2026, 7, 1) + timedelta(days=day_index), -0.0716 + shock)
+                for _ in range(trades)
+            )
+        return observations
+
+    def test_live_shaped_cohort_still_fails_with_disclosure(self) -> None:
+        # Given the live cohort with the time-exit conditioning now disclosed.
+        first_passage = assess_first_passage(
+            target_hits=44,
+            stop_hits=88,
+            time_exit_excluded=150,
+            stop_pct=0.45,
+            target_pct=0.80,
+        )
+        gross = clustered_t_test(self._live_shaped_observations())
+        net = clustered_t_test(
+            [(day, value - 0.4) for day, value in self._live_shaped_observations()]
+        )
+
+        # When the promotion gate assesses it.
+        verdict = assess_signal_edge(
+            first_passage=first_passage, clustered=net, gross=gross
+        )
+
+        # Then the verdict is unchanged: FAIL, baseline not beaten.
+        assert (gross.observations, gross.distinct_days) == (282, 31)
+        assert gross.clustered_t is not None
+        assert math.isclose(gross.clustered_t, -0.6, abs_tol=0.05)
+        assert verdict.verdict == VERDICT_FAIL
+        assert verdict.first_passage.beats_baseline is False
+        assert any("random-walk baseline" in reason for reason in verdict.reasons)
+        # And the disclosure travelled with the verdict.
+        assert verdict.first_passage.time_exit_excluded == 150
+
+    def test_verdict_is_identical_with_and_without_the_disclosure(self) -> None:
+        # Given the same evidence, only the disclosure differs.
+        gross = clustered_t_test(self._live_shaped_observations())
+        net = clustered_t_test(
+            [(day, value - 0.4) for day, value in self._live_shaped_observations()]
+        )
+        disclosed = assess_signal_edge(
+            first_passage=assess_first_passage(
+                target_hits=44,
+                stop_hits=88,
+                time_exit_excluded=150,
+                stop_pct=0.45,
+                target_pct=0.80,
+            ),
+            clustered=net,
+            gross=gross,
+        )
+        undisclosed = assess_signal_edge(
+            first_passage=assess_first_passage(
+                target_hits=44, stop_hits=88, stop_pct=0.45, target_pct=0.80
+            ),
+            clustered=net,
+            gross=gross,
+        )
+        # Then the verdict label and every decision statistic agree.
+        assert disclosed.verdict == undisclosed.verdict
+        assert (
+            disclosed.first_passage.beats_baseline
+            == undisclosed.first_passage.beats_baseline
+        )
+        assert disclosed.first_passage.p_value == undisclosed.first_passage.p_value
+        assert (
+            disclosed.first_passage.observed_rate
+            == undisclosed.first_passage.observed_rate
+        )
 
 
 class TestClusteredTTest:

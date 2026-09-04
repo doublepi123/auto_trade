@@ -169,6 +169,74 @@ class TestSignalEdgeApi(_Base):
             "unavailable or did not match the tested barriers"
         ) in body.reasons
 
+    def test_get_exposes_time_exit_conditioning_and_sensitivity_bounds(self) -> None:
+        # Given: the live exit mix of 44 target, 88 stop and 150 time-barrier exits.
+        now = datetime.now(timezone.utc)
+        with self.session_factory() as db:
+            db.add(StrategyV2ShadowConfig(
+                symbol="COND.US",
+                enabled=True,
+                stop_loss_pct=0.45,
+                profit_target_pct=0.80,
+            ))
+            db.add(StrategyV2ShadowVersion(
+                symbol="COND.US",
+                config_version="v1",
+                config_json=json.dumps({
+                    "stop_loss_pct": 0.45,
+                    "profit_target_pct": 0.80,
+                }),
+                activated_at=now,
+            ))
+            outcomes = (
+                ["PROFIT_TARGET"] * 44
+                + ["PRICE_STOP"] * 88
+                + ["MAX_HOLD"] * 135
+                + ["EOD_FLATTEN"] * 15
+            )
+            for index, exit_reason in enumerate(outcomes):
+                exit_at = now - timedelta(days=index % 25 + 1, minutes=index)
+                db.add(StrategyV2ShadowTrade(
+                    symbol="COND.US",
+                    config_version="v1",
+                    status="CLOSED",
+                    entry_at=exit_at - timedelta(minutes=30),
+                    exit_at=exit_at,
+                    entry_price=100.0,
+                    quantity=1.0,
+                    gross_pnl=0.1 if index % 2 == 0 else -0.12,
+                    net_pnl=-0.4 if index % 2 == 0 else -0.62,
+                    exit_reason=exit_reason,
+                ))
+            db.commit()
+
+        # When: the public read-only endpoint is requested.
+        response = self.client.get(
+            "/api/strategy-shadow/signal-edge",
+            params={"symbol": "COND.US"},
+        )
+
+        # Then: the response schema carries the conditioning and its bounds.
+        assert response.status_code == 200
+        body = SignalEdgeResponse.model_validate_json(response.content)
+        first_passage = body.first_passage
+        assert first_passage.time_exit_excluded == 150
+        assert first_passage.time_exit_fraction is not None
+        assert math.isclose(
+            first_passage.time_exit_fraction, 150 / 282, rel_tol=1e-12
+        )
+        assert first_passage.observed_rate_floor is not None
+        assert first_passage.observed_rate_ceiling is not None
+        assert math.isclose(first_passage.observed_rate_floor, 44 / 282, rel_tol=1e-12)
+        assert math.isclose(
+            first_passage.observed_rate_ceiling, 194 / 282, rel_tol=1e-12
+        )
+
+        # And: the verdict math is untouched by the disclosure.
+        assert body.verdict == "FAIL"
+        assert first_passage.beats_baseline is False
+        assert first_passage.resolved == 132
+
 
 class TestSignalEdgeEstimator:
     def test_reproduces_production_shaped_gross_and_net_intervals(self) -> None:

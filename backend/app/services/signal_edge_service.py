@@ -35,6 +35,9 @@ from app.services.strategy_v2_shadow_service import _ALGORITHM_VERSION
 
 EXIT_TARGET = "PROFIT_TARGET"
 EXIT_STOP = "PRICE_STOP"
+# Time-barrier exits: the position closed on elapsed time, not on a price
+# barrier, so it carries no first-passage outcome and leaves that denominator.
+EXIT_TIME_BARRIER = frozenset({"MAX_HOLD", "EOD_FLATTEN"})
 
 
 class _BarrierSnapshot(BaseModel):
@@ -96,6 +99,7 @@ class SignalEdgeService:
 
         target_hits = 0
         stop_hits = 0
+        time_exit_excluded = 0
         barrier_mismatch_excluded = 0
         matched_trades = 0
         provenance_excluded_trades = 0
@@ -122,6 +126,8 @@ class SignalEdgeService:
                 target_hits += 1
             elif exit_reason == EXIT_STOP:
                 stop_hits += 1
+            elif exit_reason in EXIT_TIME_BARRIER:
+                time_exit_excluded += 1
             if exit_at is None:
                 missing_pnl_excluded += 1
                 continue
@@ -156,6 +162,7 @@ class SignalEdgeService:
             matched_trades=matched_trades,
             provenance_excluded_trades=provenance_excluded_trades,
             missing_pnl_excluded=missing_pnl_excluded,
+            time_exit_excluded=time_exit_excluded,
         )
         gross = clustered_t_test(gross_observations, t_critical=t_critical)
         net = clustered_t_test(net_observations, t_critical=t_critical)

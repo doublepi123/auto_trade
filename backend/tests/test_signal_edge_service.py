@@ -375,6 +375,71 @@ class TestSignalEdgeService(_Base):
         assert verdict.first_passage.resolved == 0
         assert verdict.clustered.observations == 10
 
+    def test_time_exit_conditioning_is_counted_and_disclosed(self) -> None:
+        # Given the live exit mix: 44 target, 88 stop, 135 MAX_HOLD, 15 EOD_FLATTEN.
+        self._config("LIVE.US", stop=0.45, target=0.80)
+        outcomes = (
+            ["PROFIT_TARGET"] * 44
+            + ["PRICE_STOP"] * 88
+            + ["MAX_HOLD"] * 135
+            + ["EOD_FLATTEN"] * 15
+        )
+        for index, exit_reason in enumerate(outcomes):
+            self._trade(
+                "LIVE.US",
+                exit_reason=exit_reason,
+                net_pnl=-0.05,
+                day_offset=index % 25,
+            )
+
+        # When the gate assesses the cohort.
+        verdict, _, _, _ = SignalEdgeService(self._db()).assess(symbol="LIVE.US")
+
+        # Then both time-barrier exit reasons are threaded in as excluded evidence.
+        assert verdict.first_passage.resolved == 132
+        assert verdict.first_passage.matched_trades == 282
+        assert verdict.first_passage.time_exit_excluded == 150
+        assert verdict.first_passage.time_exit_fraction is not None
+        assert math.isclose(
+            verdict.first_passage.time_exit_fraction, 150 / 282, rel_tol=1e-12
+        )
+
+    def test_live_shaped_cohort_reports_sensitivity_bounds_and_still_fails(
+        self,
+    ) -> None:
+        # Given the live exit mix over enough days to clear the evidence floors.
+        self._config("BOUND.US", stop=0.45, target=0.80)
+        outcomes = (
+            ["PROFIT_TARGET"] * 44
+            + ["PRICE_STOP"] * 88
+            + ["MAX_HOLD"] * 135
+            + ["EOD_FLATTEN"] * 15
+        )
+        for index, exit_reason in enumerate(outcomes):
+            self._trade(
+                "BOUND.US",
+                exit_reason=exit_reason,
+                gross_pnl=0.1 if index % 2 == 0 else -0.12,
+                net_pnl=-0.4 if index % 2 == 0 else -0.62,
+                day_offset=index % 25,
+            )
+
+        # When the gate assesses it against its own driftless baseline.
+        verdict, _, _, _ = SignalEdgeService(self._db()).assess(symbol="BOUND.US")
+
+        # Then the bounds bracket the reported rate and the verdict is still FAIL.
+        first_passage = verdict.first_passage
+        assert first_passage.observed_rate_floor is not None
+        assert first_passage.observed_rate_ceiling is not None
+        assert math.isclose(first_passage.observed_rate_floor, 44 / 282, rel_tol=1e-12)
+        assert math.isclose(
+            first_passage.observed_rate_ceiling, 194 / 282, rel_tol=1e-12
+        )
+        assert first_passage.observed_rate_floor < first_passage.baseline_rate
+        assert first_passage.observed_rate_ceiling > first_passage.baseline_rate
+        assert verdict.verdict == VERDICT_FAIL
+        assert first_passage.beats_baseline is False
+
     def test_missing_config_without_explicit_barriers_is_rejected(self) -> None:
         self._trade("GS.US", exit_reason="PROFIT_TARGET", net_pnl=0.8)
         try:
