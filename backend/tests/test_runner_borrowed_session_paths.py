@@ -38,6 +38,7 @@ from typing import Any, cast
 
 import pytest
 from sqlalchemy.orm import Session
+from sqlalchemy.pool import QueuePool
 
 from app import database
 from app import runner as runner_module
@@ -134,6 +135,20 @@ def _runner(notifier: _RecordingNotifier | None = None) -> AppRunner:
         MultiChannelNotifier, notifier if notifier is not None else _RecordingNotifier()
     )
     return runner
+
+
+def _checked_out_connections() -> int:
+    """Connections the process engine currently has checked out.
+
+    ``checkedout`` is defined on ``QueuePool``, not on the ``Pool`` base that
+    ``Engine.pool`` is typed as, so it is narrowed rather than suppressed --
+    an in-memory SQLite run is served by ``SingletonThreadPool``, which does
+    not implement it at all.
+    """
+    pool = database.engine.pool
+    if not isinstance(pool, QueuePool):
+        return 0
+    return pool.checkedout()
 
 
 def _runner_on_persisted_symbol() -> AppRunner:
@@ -552,6 +567,6 @@ def test_today_order_sync_reloads_tracked_entries_on_its_own_session(
     assert guard.violation_count == before, (
         "the today-order sync checked out a second pooled connection"
     )
-    assert database.engine.pool.checkedout() == 0, (
+    assert _checked_out_connections() == 0, (
         "the today-order sync leaked a pooled connection"
     )
