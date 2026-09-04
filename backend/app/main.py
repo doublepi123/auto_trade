@@ -22,7 +22,7 @@ from app.platform.portfolio_api import router as portfolio_router
 from app.platform.registry import get_default_registry
 from app.platform.runner import PlatformRunner
 from app.services.strategy_service import StrategyService
-from app.database import SessionLocal
+from app.database import SessionLocal, SessionScopeMiddleware
 from app.api.backtest import router as backtest_router
 from app.api.audit_pack import router as audit_pack_router
 from app.api.audit_log import router as audit_log_router
@@ -2327,6 +2327,17 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "X-API-Key", "Content-Type", "Accept"],
 )
+
+# Outermost, so the scope token is set before any dependency resolves and the
+# threadpool hop copies it into the sync handler. ``SessionReentrancyGuard``
+# attributes pooled checkouts to this token instead of the thread id: FastAPI
+# dispatches sync-dependency teardown onto a separate exit limiter, so one
+# anyio worker routinely holds the previous request's not-yet-returned
+# connection while checking out the next request's -- which read as re-entrancy
+# and produced a false-positive storm against innocent endpoints. Pure ASGI
+# pass-through for non-HTTP scopes, so ``/ws`` and streaming routes are
+# untouched.
+app.add_middleware(SessionScopeMiddleware)
 
 app.include_router(platform_router, prefix="/api/platform")
 app.include_router(portfolio_router, prefix="/api/portfolio")

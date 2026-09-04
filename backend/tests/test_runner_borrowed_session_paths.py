@@ -205,13 +205,15 @@ def _drop_guard_depth_for(thread_id: int) -> None:
 
     When the strict guard raises inside a checkout, the connection is never
     handed out, so no ``checkin`` fires and the guard's held-depth entry for
-    that thread leaks. Thread ids are reused, and a phantom depth inherited by
-    a later test would raise on that test's first session. The entry belongs
-    to a thread this test itself ran and is removed nowhere else.
+    that scope leaks. The cron threads these tests run have no request scope,
+    so their identity is the ``("thread", <id>)`` fallback; thread ids are
+    reused, and a phantom depth inherited by a later test would raise on that
+    test's first session. The entry belongs to a thread this test itself ran
+    and is removed nowhere else.
     """
     guard = database.session_reentrancy_guard
     with guard._lock:
-        guard._held.pop(thread_id, None)
+        guard._held.pop(("thread", thread_id), None)
 
 
 def _runner_on_persisted_symbol() -> AppRunner:

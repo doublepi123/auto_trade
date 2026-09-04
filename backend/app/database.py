@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import itertools
 import logging
 import threading
 import traceback
-from collections.abc import Generator
+from collections.abc import Awaitable, Callable, Generator, MutableMapping
 from contextlib import AbstractContextManager, contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from sqlalchemy import (
@@ -89,6 +91,108 @@ def queue_pool_kwargs(database_url: str) -> dict[str, object]:
 
 SESSION_REENTRANCY_LOG_WINDOW_SECONDS = 300.0
 _REENTRANCY_OWNER_KEY = "_session_reentrancy_owner"
+
+#: Identity of the caller a pooled connection is held *on behalf of*. Either
+#: ``("request", <monotonic id>)`` for work inside a declared scope, or
+#: ``("thread", <thread id>)`` for work that has none.
+SessionScope = tuple[str, int]
+
+_scope_ids = itertools.count(1)
+_current_scope: ContextVar[SessionScope | None] = ContextVar(
+    "auto_trade_session_scope", default=None
+)
+
+
+def current_session_scope() -> SessionScope:
+    """The identity a checkout right here should be attributed to.
+
+    Thread identity is the WRONG identity under FastAPI, and this is the whole
+    correction. A sync ``db = Depends(get_db)`` generator dependency runs
+    through ``fastapi.concurrency.contextmanager_in_threadpool``, which
+    deliberately dispatches ``__exit__`` on a separate ``CapacityLimiter(1)``
+    so a teardown can never block waiting for the pool token its own checkout
+    is holding. Request A's ``db.close()`` therefore lands on whichever anyio
+    worker is free -- measured at 513 of 600 requests on a thread other than
+    the one that checked out.
+
+    The owner stamp credits that decrement back correctly, and that very
+    correctness manufactures the false positive: while A's teardown is queued,
+    the freed worker picks up request B and checks out again. The thread now
+    genuinely holds two connections, but they belong to two independent
+    requests time-sharing a worker -- ``depth == 2`` is arithmetically true and
+    semantically meaningless. On 2026-09-04 that blamed seven unrelated
+    single-query endpoints for over an hour while ``pool.checkedout()`` sat at
+    zero and not one ``QueuePool limit`` error occurred.
+
+    A scope token fixes the attribution without blunting the detector, because
+    it is inherited exactly where nesting is real and not where it is not:
+
+    * Inside one request, a nested call runs in the SAME context and reads the
+      same token, so genuine re-entrancy still reports.
+    * The next request scheduled onto that worker gets its own token from the
+      middleware, so it cannot inherit the previous one.
+
+    The ``("thread", ...)`` fallback is not a degraded mode. Crons and the
+    runner loop have no request scope, are single-threaded sequential workers,
+    and there thread identity IS correct -- a thread holding two connections is
+    the 2026-09-03 incident shape.
+    """
+    scope = _current_scope.get()
+    if scope is not None:
+        return scope
+    return ("thread", threading.get_ident())
+
+
+@contextmanager
+def session_scope() -> Generator[SessionScope, None, None]:
+    """Run the block under a fresh session-attribution scope.
+
+    Used by :class:`SessionScopeMiddleware` per request, and available to any
+    caller that dispatches independent units of work onto a shared worker and
+    wants each attributed separately. Ids come from a process-wide counter
+    rather than ``id()`` so a reused object address can never alias two live
+    scopes into one.
+    """
+    scope: SessionScope = ("request", next(_scope_ids))
+    token = _current_scope.set(scope)
+    try:
+        yield scope
+    finally:
+        _current_scope.reset(token)
+
+
+class SessionScopeMiddleware:
+    """Give every request its own session-attribution scope.
+
+    Pure ASGI, deliberately not ``BaseHTTPMiddleware``: that class wraps each
+    request in an extra anyio task group and buffers the response, which would
+    add latency to the 5-second trading loop and break streaming and the ``/ws``
+    endpoint. This sets one ``ContextVar`` and awaits the app -- non-HTTP scopes
+    (``lifespan``, ``websocket``) are forwarded untouched, since a WebSocket
+    lives across many messages and has no request boundary to scope.
+
+    It must be async and it must be here, in front of the threadpool hop:
+    ``anyio.to_thread.run_sync`` copies the current context into the worker, so
+    the token propagates into the sync handler AND into the dependency teardown
+    that FastAPI dispatches separately. A token set inside the worker instead
+    would be visible to whatever request the worker picked up next.
+    """
+
+    def __init__(self, app: Callable[..., Awaitable[None]]) -> None:
+        self.app = app
+
+    async def __call__(
+        self,
+        scope: MutableMapping[str, Any],
+        receive: Callable[[], Awaitable[MutableMapping[str, Any]]],
+        send: Callable[[MutableMapping[str, Any]], Awaitable[None]],
+    ) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        with session_scope():
+            await self.app(scope, receive, send)
+
 
 
 class _IndependentSessionState(threading.local):
@@ -187,10 +291,21 @@ class SessionReentrancyGuard:
     itself sees every checkout regardless of which module caused it, so the
     detector lives there.
 
-    Threshold is exactly one connection per thread. That is not arbitrary:
+    Threshold is exactly one connection per *scope*. That is not arbitrary:
     with ``QueuePool`` every ``Session`` that touches the database holds its
-    own connection until closed, so a thread needs a second one only when it
+    own connection until closed, so one caller needs a second one only when it
     has re-entered -- which is the incident.
+
+    The scope, not the thread, is the identity. See
+    :func:`current_session_scope`: under FastAPI a worker thread routinely
+    holds one request's not-yet-returned connection while checking out the
+    next request's, because dependency teardown is dispatched onto a separate
+    limiter. Keyed by thread that read as ``depth == 2`` and blamed seven
+    innocent single-query endpoints for an hour on 2026-09-04 while
+    ``pool.checkedout()`` sat at zero. Keyed by scope, two requests
+    time-sharing a worker are two scopes and report nothing, while a nested
+    session inside ONE request inherits the same context, the same token, and
+    still reports.
 
     The sanctioned opt-out is ``independent_session(reason)``, applied at the
     site that owns the nesting, for the duration of one ``with`` block, with a
@@ -233,7 +348,7 @@ class SessionReentrancyGuard:
     ) -> None:
         self._strict = strict
         self._lock = threading.Lock()
-        self._held: dict[int, int] = {}
+        self._held: dict[SessionScope, int] = {}
         self._violations = 0
         self._last_stack: str | None = None
         self._throttle = RepeatedLogThrottle(window_seconds=log_window_seconds)
@@ -264,21 +379,34 @@ class SessionReentrancyGuard:
         with self._lock:
             return self._last_stack
 
+    @property
+    def held_scopes(self) -> dict[SessionScope, int]:
+        """Snapshot of currently-held connections, keyed by owning scope.
+
+        A copy, so a caller cannot mutate the guard's accounting. This is the
+        other half of the 2026-09-04 diagnosis and worth exposing rather than
+        reaching into ``_held``: hundreds of reports against an EMPTY map is
+        misattribution, whereas a genuine leak leaves entries behind. It tells
+        an operator which of the two they are looking at without a debugger.
+        """
+        with self._lock:
+            return dict(self._held)
+
     def _on_checkout(
         self,
         _dbapi_connection: object,
         connection_record: Any,
         _connection_proxy: object,
     ) -> None:
-        thread_id = threading.get_ident()
+        scope = current_session_scope()
         record_info = connection_record.record_info
         if record_info is not None:
-            record_info[_REENTRANCY_OWNER_KEY] = thread_id
+            record_info[_REENTRANCY_OWNER_KEY] = scope
         with self._lock:
-            depth = self._held.get(thread_id, 0) + 1
-            self._held[thread_id] = depth
+            depth = self._held.get(scope, 0) + 1
+            self._held[scope] = depth
         # Accounting runs unconditionally -- the connection IS held, and a
-        # later unmarked checkout on this thread must still see the right
+        # later unmarked checkout in this scope must still see the right
         # depth. Only the verdict is waived, and only for the block that
         # declared itself independent (see ``independent_session``).
         if depth > 1 and active_independent_session_reason() is None:
@@ -289,29 +417,38 @@ class SessionReentrancyGuard:
         _dbapi_connection: object,
         connection_record: Any,
     ) -> None:
-        """Credit the checkin to the thread that checked the connection out.
+        """Credit the checkin to the SCOPE that checked the connection out.
 
         SQLAlchemy fires ``checkin`` on whichever thread closes the session,
-        which need not be the one that opened it -- the runner closes some
-        sessions from its post-fill-persist thread and from
-        ``ThreadPoolExecutor`` callbacks. Decrementing the *closing* thread
-        would leak a permanent +1 on the owner (every later session there
-        would false-positive) and drive the closing thread negative, masking a
-        real violation. The owner is stamped on the connection record at
-        checkout and read back here, so both counts stay exact.
+        which need not be the one that opened it. Under FastAPI that is not an
+        edge case but the norm: ``contextmanager_in_threadpool`` dispatches the
+        dependency's ``__exit__`` on a separate ``CapacityLimiter(1)``, so
+        teardown lands on whatever anyio worker is free.
+
+        Attributing the decrement to the *closing* worker would leak a
+        permanent +1 on the owner and drive the closer negative, masking a real
+        violation. The owning scope is stamped on the connection record at
+        checkout and read back here, so both counts stay exact wherever the
+        teardown lands. ``record_info`` is a ``ro_memoized_property`` that
+        survives recycle and invalidate (only ``.info`` is cleared) and the
+        record object is reused rather than recreated, so the stamp is durable
+        across the paths that matter; ``detach()`` is the one genuinely
+        unbalanced path and is not on this code path.
         """
         record_info = connection_record.record_info
-        owner = threading.get_ident()
+        owner: SessionScope = current_session_scope()
         if record_info is not None:
-            owner = record_info.pop(_REENTRANCY_OWNER_KEY, owner)
+            stamped = record_info.pop(_REENTRANCY_OWNER_KEY, owner)
+            if isinstance(stamped, tuple):
+                owner = stamped
         with self._lock:
             depth = self._held.get(owner, 0) - 1
             if depth > 0:
                 self._held[owner] = depth
             else:
-                # Drop the key rather than store 0: threads are transient
-                # (daemon loops, pool workers) and a per-thread entry that
-                # outlives its thread is a slow leak.
+                # Drop the key rather than store 0: scopes are transient (one
+                # per request, one per transient thread) and an entry that
+                # outlives its scope is a slow leak.
                 self._held.pop(owner, None)
 
     def _report(self, depth: int) -> None:
@@ -321,7 +458,7 @@ class SessionReentrancyGuard:
             self._last_stack = stack
         if self._strict and settings.env == "test":
             raise SessionReentrancyViolation(
-                "re-entrant database session: this thread already holds "
+                "re-entrant database session: this caller already holds "
                 f"{depth - 1} pooled connection(s). A caller holding a Session "
                 "reached a helper that opened another one; pass the caller's "
                 "session down instead (see AppRunner._db_session_or).\n"
@@ -330,7 +467,7 @@ class SessionReentrancyGuard:
         if self._throttle.should_log("session_reentrancy"):
             suppressed = self._throttle.take_suppressed_count()
             logger.warning(
-                "re-entrant database session detected (thread holds %d "
+                "re-entrant database session detected (caller holds %d "
                 "connections); %d similar occurrence(s) suppressed since the "
                 "last report. Second checkout at:\n%s",
                 depth,
