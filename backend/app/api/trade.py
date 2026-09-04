@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.api.auth import require_api_key
 from app.api.deps import extract_actor, get_audit_logger
 from app.core.audit import AuditLogger
-from app.database import SessionLocal, get_db
+from app.database import SessionLocal, get_db, independent_session
 from app.models import AuditLog, OrderRecord, TradeEvent
 from app.runner import DrawdownResetBlockedError, get_runner
 from app.schemas import AccountResponse, CashBalanceSchema, ControlRequest, DrawdownResetRequest, DrawdownResetResponse, ForceResumeRequest, ForceResumeResponse, MarginInfoSchema, MessageResponse, OrderCancelAllRequest, OrderCancelAllResponse, OrderCancelFailure, OrderCancelResponse, OrderPageResponse, OrderResponse, PositionSchema, TradeEventPageResponse
@@ -102,25 +102,44 @@ def _record_control_trace(
     message: str,
     payload: dict[str, Any],
 ) -> None:
-    db = SessionLocal()
-    try:
-        record_trade_event(
-            db,
-            event_type=event_type,
-            symbol=payload.get("primary_symbol", ""),
-            status=status,
-            message=message,
-            payload=payload,
-        )
-        db.commit()
-    except Exception:
+    """Write the forensic trace for a control action on its own session.
+
+    Every ``/api/trade/control/*`` handler holds the request ``db`` across this
+    call, so opening ``SessionLocal()`` here is a second pooled checkout on one
+    thread -- the 2026-09-03 deadlock shape by the pool's definition. It stays
+    that way deliberately: the failure path below calls ``rollback()``, and on
+    a borrowed session that would discard the handler's own uncommitted work.
+    A failed trace would then turn a successful pause into a silent no-op, and
+    a pause whose forensic trace disappears when the pause errors is the gap
+    you never want. Independence is what keeps the failure contained to the
+    trace.
+    """
+    # Scoped to this session's lifetime only, so an unmarked nesting later on
+    # the same request thread is still reported.
+    with independent_session(
+        "a failed control trace must not roll back the control handler's own "
+        "transaction: the pause must survive a trace failure, and the trace "
+        "must survive a pause failure"
+    ):
+        db = SessionLocal()
         try:
-            db.rollback()
+            record_trade_event(
+                db,
+                event_type=event_type,
+                symbol=payload.get("primary_symbol", ""),
+                status=status,
+                message=message,
+                payload=payload,
+            )
+            db.commit()
         except Exception:
-            logger.exception("failed to rollback in control trace for %s", event_type)
-        logger.exception("failed to record control trace for %s", event_type)
-    finally:
-        db.close()
+            try:
+                db.rollback()
+            except Exception:
+                logger.exception("failed to rollback in control trace for %s", event_type)
+            logger.exception("failed to record control trace for %s", event_type)
+        finally:
+            db.close()
 
 
 def _is_today(value: datetime | None) -> bool:

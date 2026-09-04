@@ -33,18 +33,40 @@ class AuditLogger:
     ) -> None:
         try:
             summary_str = self._normalize_summary(request_summary)
-            with self._session_factory() as db:
-                db.add(
-                    AuditLog(
-                        action=action,
-                        severity=severity,
-                        actor_hash=actor_hash,
-                        source_ip=source_ip,
-                        request_summary=summary_str,
-                        result=result,
+            # Imported inside the call, not at module scope: `core` imports
+            # nothing upward (see the layer map in the root AGENTS.md), and
+            # `app.database` builds the process engine at import time. The
+            # lookup is one `sys.modules` hit on a path that already writes a
+            # row.
+            from app.database import independent_session
+
+            # Owns its session on purpose: the audit row must survive the
+            # rollback of the transaction being audited. Every mutating handler
+            # calls this while still holding the request session, so this is a
+            # second pooled checkout on one thread -- the 2026-09-03 deadlock
+            # shape by the pool's definition. Borrowing the caller's session
+            # would delete the audit of a failed operation together with the
+            # operation, which is precisely the record you cannot afford to
+            # lose; that is a product change, not a refactor. Scoped to the
+            # session's own lifetime so a later unmarked nesting on this thread
+            # is still reported.
+            with independent_session(
+                "audit rows must survive the rollback of the transaction they "
+                "audit: borrowing the caller's session would erase the audit "
+                "of a failed operation along with the operation"
+            ):
+                with self._session_factory() as db:
+                    db.add(
+                        AuditLog(
+                            action=action,
+                            severity=severity,
+                            actor_hash=actor_hash,
+                            source_ip=source_ip,
+                            request_summary=summary_str,
+                            result=result,
+                        )
                     )
-                )
-                db.commit()
+                    db.commit()
         except Exception as exc:
             logger.warning("audit write failed: action=%s err=%s", action, exc)
 
