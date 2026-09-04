@@ -10868,7 +10868,18 @@ class TestRuntimeStatePersistence:
         )
 
     def _arm_promotion(self, runner, monkeypatch, promoted: str):
-        """Return a callable that performs a real primary promotion once."""
+        """Return a callable that performs a real primary promotion once.
+
+        The promotion borrows the session the persist pass is already holding.
+        In production a promotion never originates on the runner loop inside
+        that pass -- it arrives from ``PUT /api/strategy`` on a request thread
+        or from the auto-primary-switch cron on its own -- so a fixture that
+        opened a second ``SessionLocal`` here would manufacture a nested
+        checkout that no live path can produce, and with the process guard
+        strict that fabricated shape would fail the suite while the real code
+        was clean. Borrowing keeps the race deterministic and the connection
+        accounting honest.
+        """
         from app.services.strategy_service import StrategyService
 
         watchlist_symbols = (self._PRIMARY, *self._SECONDARIES)
@@ -10917,11 +10928,15 @@ class TestRuntimeStatePersistence:
 
         promotions: list[str] = []
 
-        def promote_once() -> None:
+        def promote_once(db) -> None:
             if promotions:
                 return
             promotions.append(promoted)
-            runner.reload_strategy()
+            # Borrow the session the persist pass already holds. Opening a
+            # second one here is a nested checkout no production path can
+            # reach, so it would be the fixture -- not the code -- failing the
+            # strict guard.
+            runner.reload_strategy(db=db)
 
         return promotions, promote_once
 
@@ -10972,7 +10987,7 @@ class TestRuntimeStatePersistence:
         plan_symbol = runner._state_svc.plan_symbol
 
         def promote_during_planning(db, engine, symbol=None, risk=None):
-            promote_once()
+            promote_once(db)
             return plan_symbol(db, engine, symbol, risk)
 
         monkeypatch.setattr(
@@ -10981,8 +10996,16 @@ class TestRuntimeStatePersistence:
             promote_during_planning,
         )
 
+        guard = database.session_reentrancy_guard
+        before = guard.violation_count
+
         runner._persist_runtime_state()
 
+        assert guard.violation_count == before, (
+            "the promotion fixture checked out a second pooled connection "
+            "inside the persist pass; production promotions arrive on a "
+            "request thread or the switch cron, never nested inside this pass"
+        )
         assert promotions == [promoted]
         assert runner.engine.params.symbol == promoted
         assert self._load_risk_state(promoted) == {
@@ -11013,7 +11036,7 @@ class TestRuntimeStatePersistence:
         apply_writes = runner._state_svc.apply_writes
 
         def promote_during_write(db, writes):
-            promote_once()
+            promote_once(db)
             return apply_writes(db, writes)
 
         monkeypatch.setattr(
@@ -11022,8 +11045,16 @@ class TestRuntimeStatePersistence:
             promote_during_write,
         )
 
+        guard = database.session_reentrancy_guard
+        before = guard.violation_count
+
         runner._persist_runtime_state()
 
+        assert guard.violation_count == before, (
+            "the promotion fixture checked out a second pooled connection "
+            "inside the persist pass; production promotions arrive on a "
+            "request thread or the switch cron, never nested inside this pass"
+        )
         assert promotions == [promoted]
         assert runner.engine.params.symbol == promoted
         assert self._load_risk_state(promoted) == {
