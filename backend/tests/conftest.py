@@ -26,6 +26,12 @@ os.environ["AUTO_TRADE_DATABASE_URL"] = os.environ.get(
     "AUTO_TRADE_TEST_DATABASE_URL",
     f"sqlite:///{tempfile.gettempdir()}/auto_trade_pytest_{os.getpid()}.db",
 )
+# The strict session-reentrancy guard raises only under ``env == "test"``, so
+# without this the suite ran at the ``dev`` default and the guard was installed,
+# strict, and inert: a new nested session logged a warning into captured output
+# and the run stayed green. Pin the environment so "a new re-entrancy fails CI"
+# does not depend on how the runner happened to be invoked.
+os.environ["AUTO_TRADE_ENV"] = "test"
 os.environ["AUTO_TRADE_CREDENTIAL_KEY_PATH"] = os.path.join(
     tempfile.gettempdir(),
     f"auto_trade_cred_key_{os.getpid()}.pem",

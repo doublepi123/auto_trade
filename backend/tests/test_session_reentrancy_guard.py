@@ -29,6 +29,7 @@ a live trading system down would be strictly worse than the bug it guards.
 
 from __future__ import annotations
 
+import os
 import threading
 
 import pytest
@@ -321,6 +322,27 @@ def test_process_engine_guard_is_installed_and_strict() -> None:
 
     assert isinstance(database.session_reentrancy_guard, SessionReentrancyGuard)
     assert database.session_reentrancy_guard.strict is True
+
+
+def test_pytest_runs_under_the_env_that_arms_the_strict_guard() -> None:
+    """Strict must actually be armed while the suite runs.
+
+    ``strict`` only decides the cost of a violation, and the cost is a raise
+    solely under ``env == "test"``. ``conftest.py`` pins every credential and
+    the database URL but historically never pinned ``AUTO_TRADE_ENV``, so the
+    suite ran at the ``dev`` default unless the operator happened to export
+    ``test``. The guard was therefore installed, strict, and inert: a new
+    nested session logged a warning into captured output and the run stayed
+    green -- the exact "one more line in a log nobody reads" outcome that
+    flipping strict was meant to end.
+
+    This pins the environment itself, so the promise that a new re-entrancy
+    fails CI cannot depend on how the runner was invoked.
+    """
+    from app.config import settings
+
+    assert os.environ["AUTO_TRADE_ENV"] == "test"
+    assert settings.env == "test"
 
 
 @pytest.mark.parametrize("env", ["prod", "dev"])
