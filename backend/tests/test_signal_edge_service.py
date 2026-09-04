@@ -101,6 +101,29 @@ class _Base:
 
 
 class TestSignalEdgeService(_Base):
+    def test_futility_is_invariant_to_the_reporting_t_critical(self) -> None:
+        self._config("FIXED.US", stop=0.45, target=0.80)
+        for index in range(40):
+            gross_pnl = 0.02 if index % 2 == 0 else -0.03
+            self._trade(
+                "FIXED.US",
+                exit_reason="PROFIT_TARGET" if index < 32 else "PRICE_STOP",
+                gross_pnl=gross_pnl,
+                net_pnl=gross_pnl - 0.10,
+                day_offset=index % 20,
+            )
+
+        default, _, _, _ = SignalEdgeService(self._db()).assess(
+            symbol="FIXED.US",
+        )
+        permissive, _, _, _ = SignalEdgeService(self._db()).assess(
+            symbol="FIXED.US",
+            t_critical=0.3,
+        )
+
+        assert default.gross.ci_upper != permissive.gross.ci_upper
+        assert default.futility == permissive.futility
+
     def test_distinguishes_fee_blocked_gross_edge_from_no_edge(self) -> None:
         # Given: both cohorts beat first passage, but only one has positive gross returns.
         gross_edge = (0.8, 1.0, 1.2, 0.9, 1.1)

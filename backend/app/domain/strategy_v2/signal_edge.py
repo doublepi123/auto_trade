@@ -14,6 +14,16 @@ from app.domain.strategy_v2.clustered_returns import (
     ClusteredTTestResult,
     clustered_t_test,
 )
+from app.domain.strategy_v2.futility import (
+    FUTILITY_BOUND_CRITICAL_VALUE,
+    PREREGISTERED_COST_FLOOR_BPS,
+    PREREGISTERED_POWER,
+    PREREGISTERED_SIGMA_DAY_BPS,
+    FutilityResult,
+    FutilityStatusLabel,
+    assess_futility,
+    minimum_detectable_effect_bps,
+)
 
 DEFAULT_ALPHA = 0.05
 # Minimum evidence before a verdict means anything. The day floor matters more
@@ -166,6 +176,7 @@ class SignalEdgeVerdict:
     first_passage: FirstPassageResult
     gross: ClusteredTTestResult
     net: ClusteredTTestResult
+    futility: FutilityResult
 
     @property
     def clustered(self) -> ClusteredTTestResult:
@@ -227,6 +238,12 @@ def assess_signal_edge(
                 f"only {evidence.distinct_days} {label} trading days "
                 + f"(need {min_distinct_days})"
             )
+    evidence_sufficient = not reasons
+    futility = assess_futility(
+        gross=gross_evidence,
+        net=clustered,
+        evidence_sufficient=evidence_sufficient,
+    )
     if reasons:
         if barrier_exclusion_reason is not None:
             reasons.append(barrier_exclusion_reason)
@@ -238,6 +255,7 @@ def assess_signal_edge(
             first_passage=first_passage,
             gross=gross_evidence,
             net=clustered,
+            futility=futility,
         )
 
     if not first_passage.beats_baseline:
@@ -283,14 +301,18 @@ def assess_signal_edge(
         first_passage=first_passage,
         gross=gross_evidence,
         net=clustered,
+        futility=futility,
     )
 
 
 __all__ = [
     "ClusteredTTestResult", "DEFAULT_ALPHA", "DEFAULT_MIN_DISTINCT_DAYS",
-    "DEFAULT_MIN_RESOLVED_TRADES", "DEFAULT_T_CRITICAL", "FirstPassageResult",
-    "SignalEdgeVerdict", "SignalEdgeVerdictLabel", "VERDICT_FAIL",
-    "VERDICT_FEE_BLOCKED", "VERDICT_INSUFFICIENT_DATA", "VERDICT_PASS",
-    "assess_first_passage", "assess_signal_edge", "binomial_p_upper",
-    "clustered_t_test", "first_passage_baseline",
+    "DEFAULT_MIN_RESOLVED_TRADES", "DEFAULT_T_CRITICAL",
+    "FUTILITY_BOUND_CRITICAL_VALUE", "FirstPassageResult", "FutilityResult",
+    "FutilityStatusLabel", "PREREGISTERED_COST_FLOOR_BPS",
+    "PREREGISTERED_POWER", "PREREGISTERED_SIGMA_DAY_BPS", "SignalEdgeVerdict",
+    "SignalEdgeVerdictLabel", "VERDICT_FAIL", "VERDICT_FEE_BLOCKED",
+    "VERDICT_INSUFFICIENT_DATA", "VERDICT_PASS", "assess_first_passage",
+    "assess_futility", "assess_signal_edge", "binomial_p_upper",
+    "clustered_t_test", "first_passage_baseline", "minimum_detectable_effect_bps",
 ]

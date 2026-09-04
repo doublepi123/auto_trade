@@ -2,7 +2,13 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from datetime import date, timedelta
+from pathlib import Path
+
+import pytest
+
+import app.domain.strategy_v2.signal_edge as signal_edge
 
 from app.domain.strategy_v2.signal_edge import (
     VERDICT_FAIL,
@@ -15,6 +21,194 @@ from app.domain.strategy_v2.signal_edge import (
     clustered_t_test,
     first_passage_baseline,
 )
+
+
+def _clustered(
+    mean_pct: float,
+    se_pct: float,
+    days: int,
+    n: int,
+) -> signal_edge.ClusteredTTestResult:
+    return signal_edge.ClusteredTTestResult(
+        observations=n,
+        distinct_days=days,
+        naive_t=mean_pct / se_pct,
+        clustered_t=mean_pct / se_pct,
+        naive_mean=mean_pct,
+        day_mean=mean_pct,
+        clustered_standard_error=se_pct,
+        ci_lower=mean_pct - 2.0 * se_pct,
+        ci_upper=mean_pct + 2.0 * se_pct,
+        inflation_factor=math.sqrt(n / days),
+        significant=mean_pct / se_pct > 2.0,
+    )
+
+
+class TestFutilityAssessment:
+    def test_mde_reproduces_preregistered_table_and_shrinks_with_days(self) -> None:
+        expected = {24: 10.15, 31: 8.93, 60: 6.42, 100: 4.97}
+
+        measured = {
+            days: signal_edge.minimum_detectable_effect_bps(
+                sigma_day_bps=20.0,
+                distinct_days=days,
+            )
+            for days in expected
+        }
+
+        assert {days: round(value, 2) for days, value in measured.items()} == expected
+        assert all(
+            earlier > later
+            for earlier, later in zip(measured.values(), list(measured.values())[1:])
+        )
+        at_96_days = signal_edge.minimum_detectable_effect_bps(
+            sigma_day_bps=20.0,
+            distinct_days=96,
+        )
+        assert math.isclose(measured[24] / at_96_days, 2.0, rel_tol=1e-12)
+
+    @pytest.mark.parametrize(
+        ("sigma_day_bps", "distinct_days", "alpha", "power"),
+        [
+            (0.0, 31, 0.05, 0.80),
+            (-1.0, 31, 0.05, 0.80),
+            (float("nan"), 31, 0.05, 0.80),
+            (20.0, 0, 0.05, 0.80),
+            (20.0, 31, 0.0, 0.80),
+            (20.0, 31, 1.0, 0.80),
+            (20.0, 31, 0.05, 0.0),
+            (20.0, 31, 0.05, 1.0),
+        ],
+    )
+    def test_mde_rejects_invalid_inputs(
+        self,
+        sigma_day_bps: float,
+        distinct_days: int,
+        alpha: float,
+        power: float,
+    ) -> None:
+        with pytest.raises(ValueError):
+            signal_edge.minimum_detectable_effect_bps(
+                sigma_day_bps=sigma_day_bps,
+                distinct_days=distinct_days,
+                alpha=alpha,
+                power=power,
+            )
+
+    def test_live_cohort_is_futile_with_preregistered_inputs(self) -> None:
+        gross = _clustered(-0.0057, 0.0255, 31, 232)
+        net = _clustered(-0.1057, 0.0255, 31, 232)
+
+        result = signal_edge.assess_futility(
+            gross=gross,
+            net=net,
+            evidence_sufficient=True,
+        )
+
+        assert result.status == "FUTILE"
+        assert math.isclose(result.gross_upper_bound_bps or 0.0, 4.53, abs_tol=0.01)
+        assert math.isclose(result.required_effect_bps or 0.0, 10.57, abs_tol=0.01)
+        assert math.isclose(result.mde_bps or 0.0, 8.93, abs_tol=0.01)
+        assert math.isclose(result.measured_cost_bps or 0.0, 10.0, abs_tol=0.01)
+        assert math.isclose(
+            result.sigma_day_measured_bps or 0.0,
+            14.2,
+            abs_tol=0.1,
+        )
+        assert any("human ratification" in reason for reason in result.reasons)
+
+    def test_underpowered_cohort_is_insufficient_not_futile(self) -> None:
+        result = signal_edge.assess_futility(
+            gross=_clustered(-0.0057, 0.0255, 10, 232),
+            net=_clustered(-0.1057, 0.0255, 10, 232),
+            evidence_sufficient=True,
+        )
+
+        assert result.status == "INSUFFICIENT_DATA"
+        assert math.isclose(result.mde_bps or 0.0, 15.73, abs_tol=0.01)
+        assert result.upper_bound_below_cost_floor is True
+        assert result.powered_for_required_effect is False
+        assert any("underpowered" in reason for reason in result.reasons)
+
+    def test_upper_bound_equal_to_cost_floor_is_alive(self) -> None:
+        result = signal_edge.assess_futility(
+            gross=_clustered(0.049, 0.0255, 31, 232),
+            net=_clustered(-0.051, 0.0255, 31, 232),
+            evidence_sufficient=True,
+        )
+
+        assert math.isclose(result.gross_upper_bound_bps or 0.0, 10.0)
+        assert result.status == "ALIVE"
+        assert result.upper_bound_below_cost_floor is False
+
+    def test_bound_is_recomputed_instead_of_trusting_input_ci(self) -> None:
+        gross = replace(
+            _clustered(-0.0057, 0.0255, 31, 232),
+            ci_upper=999.0,
+        )
+
+        result = signal_edge.assess_futility(
+            gross=gross,
+            net=_clustered(-0.1057, 0.0255, 31, 232),
+            evidence_sufficient=True,
+        )
+
+        assert math.isclose(result.gross_upper_bound_bps or 0.0, 4.53, abs_tol=0.01)
+        assert result.status == "FUTILE"
+
+    def test_verdict_evidence_floors_gate_futility_but_keep_mde(self) -> None:
+        result = signal_edge.assess_futility(
+            gross=_clustered(-0.0057, 0.0255, 31, 232),
+            net=_clustered(-0.1057, 0.0255, 31, 232),
+            evidence_sufficient=False,
+        )
+
+        assert result.status == "INSUFFICIENT_DATA"
+        assert result.mde_bps is not None
+        assert any("verdict evidence floors not met" in reason for reason in result.reasons)
+
+    def test_empty_cohort_is_insufficient_without_fabricated_bound(self) -> None:
+        empty = clustered_t_test([])
+
+        result = signal_edge.assess_futility(
+            gross=empty,
+            net=empty,
+            evidence_sufficient=False,
+        )
+
+        assert result.status == "INSUFFICIENT_DATA"
+        assert result.gross_upper_bound_bps is None
+
+    @pytest.mark.parametrize("cost_floor_bps", [0.0, -1.0, float("nan")])
+    def test_invalid_cost_floor_fails_closed(self, cost_floor_bps: float) -> None:
+        with pytest.raises(ValueError):
+            signal_edge.assess_futility(
+                gross=_clustered(-0.0057, 0.0255, 31, 232),
+                net=_clustered(-0.1057, 0.0255, 31, 232),
+                evidence_sufficient=True,
+                cost_floor_bps=cost_floor_bps,
+            )
+
+    def test_non_positive_bound_critical_value_is_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            signal_edge.assess_futility(
+                gross=_clustered(-0.0057, 0.0255, 31, 232),
+                net=_clustered(-0.1057, 0.0255, 31, 232),
+                evidence_sufficient=True,
+                bound_critical_value=0.0,
+            )
+
+    def test_constants_match_preregistration_and_auto_abandon_stays_absent(self) -> None:
+        preregistration = (
+            Path(__file__).parents[1]
+            / "app/domain/strategy_v2/PREREGISTRATION.md"
+        ).read_text(encoding="utf-8")
+
+        assert signal_edge.PREREGISTERED_COST_FLOOR_BPS == 10.0
+        assert signal_edge.PREREGISTERED_SIGMA_DAY_BPS == 20.0
+        assert "PREREGISTERED_COST_FLOOR_BPS" in preregistration
+        assert "PREREGISTERED_SIGMA_DAY_BPS" in preregistration
+        assert "自动弃置同样不存在" in preregistration
 
 
 class TestFirstPassageBaseline:
@@ -292,6 +486,7 @@ class TestLiveShapedVerdictInvariance:
         assert verdict.verdict == VERDICT_FAIL
         assert verdict.first_passage.beats_baseline is False
         assert any("random-walk baseline" in reason for reason in verdict.reasons)
+        assert all("futil" not in reason.lower() for reason in verdict.reasons)
         # And the disclosure travelled with the verdict.
         assert verdict.first_passage.time_exit_excluded == 150
 
@@ -407,6 +602,7 @@ class TestSignalEdgeVerdict:
         verdict = assess_signal_edge(first_passage=fp, clustered=clustered)
         assert verdict.verdict == VERDICT_PASS
         assert verdict.reasons == ()
+        assert verdict.futility.status != "FUTILE"
 
     def test_thin_evidence_is_reported_separately_from_failure(self) -> None:
         """Not-yet-provable and proven-absent demand different actions."""
