@@ -7,6 +7,8 @@ import tempfile
 from collections.abc import Generator
 from datetime import date, datetime, timedelta, timezone
 
+import pytest
+
 os.environ["AUTO_TRADE_DATABASE_URL"] = (
     f"sqlite:///{tempfile.gettempdir()}/auto_trade_test_signal_edge_api_{os.getpid()}.db"
 )
@@ -110,6 +112,7 @@ class TestSignalEdgeApi(_Base):
                 "symbol": "API.US",
                 "min_resolved_trades": 1,
                 "min_distinct_days": 2,
+                "cost_floor_bps": 1.0,
             },
         )
 
@@ -118,10 +121,60 @@ class TestSignalEdgeApi(_Base):
         body = SignalEdgeResponse.model_validate_json(response.content)
         assert body.gross.naive_mean == 1.5
         assert body.net.naive_mean == 1.0
+        assert body.futility.cost_floor_bps == 10.0
         for estimand in (body.gross, body.net):
             assert estimand.clustered_t is not None
             assert estimand.ci_lower is not None
             assert estimand.ci_upper is not None
+
+    def test_response_rejects_payload_without_futility(self) -> None:
+        clustered = {
+            "observations": 0,
+            "distinct_days": 0,
+            "naive_t": None,
+            "clustered_t": None,
+            "naive_mean": None,
+            "day_mean": None,
+            "clustered_standard_error": None,
+            "ci_lower": None,
+            "ci_upper": None,
+            "inflation_factor": None,
+            "significant": False,
+        }
+        payload = {
+            "generated_at": datetime.now(timezone.utc),
+            "symbol": None,
+            "lookback_days": 90,
+            "stop_pct": 0.45,
+            "target_pct": 0.80,
+            "verdict": "INSUFFICIENT_DATA",
+            "reasons": [],
+            "first_passage": {
+                "target_hits": 0,
+                "stop_hits": 0,
+                "resolved": 0,
+                "barrier_mismatch_excluded": 0,
+                "matched_versions": 0,
+                "matched_trades": 0,
+                "provenance_excluded_trades": 0,
+                "missing_pnl_excluded": 0,
+                "time_exit_excluded": 0,
+                "time_exit_fraction": None,
+                "observed_rate_floor": None,
+                "observed_rate_ceiling": None,
+                "observed_rate": None,
+                "baseline_rate": 0.36,
+                "edge_pp": None,
+                "p_value": None,
+                "beats_baseline": False,
+            },
+            "gross": clustered,
+            "net": clustered,
+            "clustered": clustered,
+        }
+
+        with pytest.raises(ValueError):
+            SignalEdgeResponse.model_validate(payload)
 
     def test_get_reports_unresolvable_barrier_provenance(self) -> None:
         # Given: resolved trades reference a version with no immutable snapshot.

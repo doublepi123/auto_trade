@@ -14,6 +14,7 @@ from app.schemas import (
     LiveExitChallengerReport,
     SignalEdgeClustered,
     SignalEdgeFirstPassage,
+    SignalEdgeFutility,
     SignalEdgeResponse,
     StrategyV2AdxChallengerRequest,
     StrategyV2AdxChallengerResponse,
@@ -429,5 +430,9 @@ def get_signal_edge(
         ),
         gross=gross,
         net=net,
+        futility=SignalEdgeFutility.model_validate(
+            verdict.futility,
+            from_attributes=True,
+        ),
         clustered=net,
     )

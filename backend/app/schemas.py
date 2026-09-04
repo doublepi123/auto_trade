@@ -2081,6 +2081,30 @@ class SignalEdgeClustered(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class SignalEdgeFutility(BaseModel):
+    """Report-only futility; abandonment remains a written human decision."""
+
+    status: Literal["ALIVE", "FUTILE", "INSUFFICIENT_DATA"]
+    reasons: tuple[str, ...]
+    distinct_days: int = Field(ge=0)
+    cost_floor_bps: float = Field(gt=0, allow_inf_nan=False)
+    sigma_day_bps: float = Field(gt=0, allow_inf_nan=False)
+    alpha: float = Field(gt=0, lt=1, allow_inf_nan=False)
+    power: float = Field(gt=0, lt=1, allow_inf_nan=False)
+    bound_critical_value: float = Field(gt=0, allow_inf_nan=False)
+    gross_mean_bps: Optional[float] = Field(default=None, allow_inf_nan=False)
+    gross_upper_bound_bps: Optional[float] = Field(default=None, allow_inf_nan=False)
+    net_mean_bps: Optional[float] = Field(default=None, allow_inf_nan=False)
+    measured_cost_bps: Optional[float] = Field(default=None, allow_inf_nan=False)
+    sigma_day_measured_bps: Optional[float] = Field(default=None, allow_inf_nan=False)
+    mde_bps: Optional[float] = Field(default=None, allow_inf_nan=False)
+    required_effect_bps: Optional[float] = Field(default=None, allow_inf_nan=False)
+    upper_bound_below_cost_floor: bool
+    powered_for_required_effect: bool
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class SignalEdgeResponse(BaseModel):
     """Read-only evidence that a signal has edge before its exits are tuned.
 
@@ -2097,6 +2121,7 @@ class SignalEdgeResponse(BaseModel):
     first_passage: SignalEdgeFirstPassage
     gross: SignalEdgeClustered
     net: SignalEdgeClustered
+    futility: SignalEdgeFutility
     clustered: SignalEdgeClustered
 
     model_config = ConfigDict(extra="forbid")
