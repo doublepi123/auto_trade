@@ -306,9 +306,28 @@ class RuntimeStateService:
         db.commit()
 
     def load_symbol_runtime(self, db: Any, engine: StrategyEngine, symbol: str) -> None:
-        from app.services.strategy_service import StrategyService
+        """Read one secondary runtime's persisted state, transaction-neutral.
 
-        state = StrategyService(db).get_runtime_state(symbol=symbol)
+        Reached from ``_sync_symbol_runtimes`` on a BORROWED session (the
+        opening-momentum cron's, during a registry refresh), so this must not
+        commit, roll back, flush or close: the lifetime and outcome of the
+        caller's transaction belong to the caller. A missing row therefore
+        returns without touching the engine instead of get-or-creating one --
+        the old ``get_runtime_state`` path committed the caller's transaction
+        whenever the row was absent, finalizing writes the caller had not
+        committed. A fresh in-memory engine already holds exactly what a
+        fresh row would have loaded, so nothing is lost by skipping.
+        """
+        from app.models import RuntimeState
+
+        normalized = (symbol or "").strip().upper()
+        state = (
+            db.query(RuntimeState)
+            .filter(RuntimeState.symbol == normalized)
+            .first()
+        )
+        if state is None:
+            return
         engine.state = self._coerce_engine_state(state.engine_state)
         engine.last_price = state.last_price
         engine.last_trigger_price = state.last_trigger_price

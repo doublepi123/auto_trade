@@ -25,6 +25,14 @@ out all 15 pooled connections and deadlocked the process for ~65 minutes on
   across the whole block.
 * ``reload_strategy`` from ``PUT /api/strategy``, whose request session has
   already committed its save.
+* ``OpeningMomentumExecutionService.tick`` from the opening-momentum cron:
+  the cron holds its ``SessionLocal`` across the tick, and the tick's
+  ``_refresh_runner_registry`` reached
+  ``AppRunner.refresh_opening_execution_registry``, which opened its own
+  session for ``_sync_symbol_runtimes`` / ``_load_opening_execution_registry``
+  -- the 2026-09-04 live violation. The service now lends its session and
+  the runner borrows it, and ``load_symbol_runtime`` is transaction-neutral
+  so the borrow cannot finalize the cron's work.
 
 Each is asserted by counting the sessions the runner opens for itself while a
 caller's session is held. The caller's own session comes straight from
@@ -34,14 +42,19 @@ not a smaller number.
 
 from __future__ import annotations
 
+import logging
+import threading
+from datetime import date, datetime, timezone
 from typing import Any, cast
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import QueuePool
 
 from app import database
 from app import runner as runner_module
+from app.config import settings
 from app.core.engine import StrategyParams
 from app.core.notifiers.multi_channel import MultiChannelNotifier
 from app.runner import AppRunner
@@ -85,12 +98,14 @@ class _SessionCounter:
 
 def _clean_rows() -> None:
     from app.models import (
+        OpeningMomentumExecution,
         OrderRecord,
         RiskEvent,
         RuntimeState,
         RuntimeStateSnapshot,
         TrackedEntry,
         TradeEvent,
+        WatchlistItem,
     )
 
     with database.SessionLocal() as db:
@@ -111,6 +126,12 @@ def _clean_rows() -> None:
         ).delete(synchronize_session=False)
         db.query(RuntimeState).filter(
             RuntimeState.symbol.like("BORROWSESSION%")
+        ).delete(synchronize_session=False)
+        db.query(OpeningMomentumExecution).filter(
+            OpeningMomentumExecution.symbol.like("BORROWSESSION%")
+        ).delete(synchronize_session=False)
+        db.query(WatchlistItem).filter(
+            WatchlistItem.symbol.like("BORROWSESSION%")
         ).delete(synchronize_session=False)
         db.commit()
 
@@ -149,6 +170,48 @@ def _checked_out_connections() -> int:
     if not isinstance(pool, QueuePool):
         return 0
     return pool.checkedout()
+
+
+class _CheckoutDepthTracker:
+    """Measure how many pooled connections are held AT ONCE.
+
+    Installed alongside the guard on the process engine. The guard is
+    registered first, so when it raises inside a checkout (the RED path under
+    ``env == "test"``) this tracker never sees that checkout -- which is fine:
+    the tracker exists to prove the GREEN path never exceeds depth 1, while
+    the guard's own counter proves no violation was counted.
+    """
+
+    def __init__(self) -> None:
+        self.depth = 0
+        self.max_depth = 0
+        event.listen(database.engine, "checkout", self._on_checkout)
+        event.listen(database.engine, "checkin", self._on_checkin)
+
+    def _on_checkout(self, *_args: object) -> None:
+        self.depth += 1
+        self.max_depth = max(self.max_depth, self.depth)
+
+    def _on_checkin(self, *_args: object) -> None:
+        self.depth -= 1
+
+    def remove(self) -> None:
+        event.remove(database.engine, "checkout", self._on_checkout)
+        event.remove(database.engine, "checkin", self._on_checkin)
+
+
+def _drop_guard_depth_for(thread_id: int) -> None:
+    """Test hygiene for the RED path only.
+
+    When the strict guard raises inside a checkout, the connection is never
+    handed out, so no ``checkin`` fires and the guard's held-depth entry for
+    that thread leaks. Thread ids are reused, and a phantom depth inherited by
+    a later test would raise on that test's first session. The entry belongs
+    to a thread this test itself ran and is removed nowhere else.
+    """
+    guard = database.session_reentrancy_guard
+    with guard._lock:
+        guard._held.pop(thread_id, None)
 
 
 def _runner_on_persisted_symbol() -> AppRunner:
@@ -623,4 +686,142 @@ def test_today_order_sync_reloads_tracked_entries_on_its_own_session(
     )
     assert _checked_out_connections() == 0, (
         "the today-order sync leaked a pooled connection"
+    )
+
+
+def test_opening_momentum_cron_tick_holds_one_connection_through_registry_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The 2026-09-04 live violation: the cron's session plus the runner's own.
+
+    ``_opening_momentum_shadow_tick_sync`` opens one ``SessionLocal`` and
+    holds it across ``OpeningMomentumExecutionService.tick``. With execution
+    disabled (the P0 clamp forces it off) the tick takes the registry-refresh
+    branch, which reached ``AppRunner.refresh_opening_execution_registry`` --
+    and that opened a SECOND session for ``_sync_symbol_runtimes`` /
+    ``_load_opening_execution_registry`` while the cron still held the first.
+
+    Runs the REAL cron entry point on a worker thread, exactly as production
+    does via ``asyncio.to_thread``. The service must lend the cron its
+    session, the runner must borrow it, and the borrow must be provably
+    inert: one connection held, zero runner-owned sessions, no guard
+    violation, and the registry genuinely refreshed on the borrowed session.
+    """
+    from app import main as main_module
+    from app.models import OpeningMomentumExecution, RuntimeState, WatchlistItem
+
+    runner = _runner()
+    monkeypatch.setattr(main_module, "get_runner", lambda: runner)
+    monkeypatch.setattr(settings, "opening_momentum_shadow_enabled", False)
+    monkeypatch.setattr(settings, "opening_momentum_challenger_enabled", False)
+
+    secondary_symbol = "BORROWSESSION2.US"
+    with database.SessionLocal() as db:
+        # A watchlist symbol with NO persisted runtime row: the borrowed
+        # refresh reaches load_symbol_runtime for it, which must not create
+        # a row or finalize the cron's transaction.
+        db.add(WatchlistItem(symbol=secondary_symbol, market="US"))
+        db.add(
+            OpeningMomentumExecution(
+                session_date=date(2026, 9, 4),
+                algorithm_version="borrow-session-test",
+                config_version="borrow-session-test",
+                universe_source="BORROWSESSION",
+                status="ARMED",
+                symbol=SYMBOL,
+                signal_at=datetime(2026, 9, 4, 13, 32, tzinfo=timezone.utc),
+                armed_at=datetime(2026, 9, 4, 13, 32, tzinfo=timezone.utc),
+                entry_due_at=datetime(2026, 9, 4, 13, 34, tzinfo=timezone.utc),
+                entry_deadline_at=datetime(
+                    2026, 9, 4, 13, 36, tzinfo=timezone.utc
+                ),
+                max_price_deviation_bps=200.0,
+                stop_loss_pct=1.0,
+                max_holding_minutes=60,
+            )
+        )
+        db.commit()
+
+    tracker = _CheckoutDepthTracker()
+    counter = _SessionCounter(monkeypatch)
+    guard = database.session_reentrancy_guard
+    violations_before = guard.violation_count
+    failures: list[BaseException] = []
+    tick_thread_ids: list[int] = []
+
+    def run_tick() -> None:
+        tick_thread_ids.append(threading.get_ident())
+        try:
+            main_module._opening_momentum_shadow_tick_sync()
+        except BaseException as exc:  # reported, never swallowed
+            failures.append(exc)
+
+    try:
+        with caplog.at_level(logging.WARNING):
+            tick_thread = threading.Thread(
+                target=run_tick,
+                name="opening-momentum-cron-test",
+            )
+            tick_thread.start()
+            tick_thread.join(timeout=30)
+    finally:
+        tracker.remove()
+        for thread_id in tick_thread_ids:
+            _drop_guard_depth_for(thread_id)
+
+    assert tick_thread.is_alive() is False, "the opening-momentum tick hung"
+    assert failures == []
+    assert counter.opened == 0, (
+        f"the registry refresh opened {counter.opened} session(s) of its own "
+        "while the opening-momentum cron still held its session"
+    )
+    assert tracker.max_depth == 1, (
+        f"the tick held {tracker.max_depth} pooled connections at once; the "
+        "cron's session must be the only one"
+    )
+    assert guard.violation_count == violations_before, (
+        "the opening-momentum tick checked out a second pooled connection: "
+        "the 2026-09-04 live violation shape"
+    )
+    assert "re-entrant database session" not in caplog.text
+    assert "opening momentum execution tick failed" not in caplog.text
+    # The registry was genuinely refreshed on the borrowed session, not
+    # silently emptied by a swallowed failure.
+    policy = runner._opening_execution_policies.get(SYMBOL)
+    assert policy is not None
+    assert policy.status == "ARMED"
+    # And the borrowed path left no runtime row behind for the symbol that
+    # has none: a get-or-create there would commit the cron's transaction.
+    with database.SessionLocal() as db:
+        assert (
+            db.query(RuntimeState)
+            .filter(RuntimeState.symbol == secondary_symbol)
+            .first()
+            is None
+        )
+
+
+def test_registry_refresh_without_a_caller_session_still_owns_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Characterization: legacy no-db callers keep owning exactly one session.
+
+    The post-fill refresh (called after its session has ended) and the
+    reduction refresh (same shape) both call
+    ``refresh_opening_execution_registry()`` with no argument, as does
+    ``tests/test_runner.py``. Making ``db`` optional must not change that
+    shape: one session opened, one connection returned to the pool.
+    """
+    runner = _runner()
+    counter = _SessionCounter(monkeypatch)
+
+    runner.refresh_opening_execution_registry()
+
+    assert counter.opened == 1, (
+        "a registry refresh with no caller session must own the one session "
+        f"it needs; it opened {counter.opened}"
+    )
+    assert _checked_out_connections() == 0, (
+        "the registry refresh leaked a pooled connection"
     )

@@ -73,7 +73,10 @@ class OpeningExecutionRunner(Protocol):
         signal_context: dict[str, object],
     ) -> dict[str, object]: ...
 
-    def refresh_opening_execution_registry(self) -> None: ...
+    def refresh_opening_execution_registry(
+        self,
+        db: Session | None = None,
+    ) -> None: ...
 
 
 class OpeningMomentumExecutionService:
@@ -763,7 +766,10 @@ class OpeningMomentumExecutionService:
     def _refresh_runner_registry(self) -> None:
         if self.runner is None:
             return
-        self.runner.refresh_opening_execution_registry()
+        # Lend the tick's own session: the cron holds it across the whole
+        # tick, and the runner opening a second one inside the refresh was
+        # the 2026-09-04 live re-entrancy violation.
+        self.runner.refresh_opening_execution_registry(db=self.db)
 
     @staticmethod
     def _response(

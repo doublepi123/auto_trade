@@ -988,16 +988,32 @@ class AppRunner:
         with self._state_lock:
             self._opening_execution_policies = policies
 
-    def refresh_opening_execution_registry(self) -> None:
-        with self._trade_svc.submission_guard():
-            self._refresh_opening_execution_registry_under_submission_guard()
+    def refresh_opening_execution_registry(self, db: Session | None = None) -> None:
+        """Refresh symbol runtimes and opening-execution quote policies.
 
-    def _refresh_opening_execution_registry_under_submission_guard(self) -> None:
+        Given ``db``, the database work borrows it instead of opening a second
+        session: the opening-momentum cron holds its session across
+        ``OpeningMomentumExecutionService.tick``, and this refresh opening its
+        own inside the tick was the 2026-09-04 live re-entrancy violation.
+        Safe to borrow: every statement on the refresh path is a read, and
+        ``load_symbol_runtime`` is transaction-neutral, so the borrow neither
+        reads uncommitted data nor finalizes the caller's transaction.
+
+        ``db`` stays optional: the post-fill and reduction refreshes call
+        here AFTER their sessions have ended and must keep owning one.
+        """
+        with self._trade_svc.submission_guard():
+            self._refresh_opening_execution_registry_under_submission_guard(db)
+
+    def _refresh_opening_execution_registry_under_submission_guard(
+        self,
+        db: Session | None = None,
+    ) -> None:
         with self._state_lock:
             previous_symbols = set(self._desired_quote_symbols_locked())
-        with self._db_session() as db:
-            self._sync_symbol_runtimes(db)
-            self._load_opening_execution_registry(db)
+        with self._db_session_or(db) as session:
+            self._sync_symbol_runtimes(session)
+            self._load_opening_execution_registry(session)
         with self._state_lock:
             desired_symbols = self._desired_quote_symbols_locked()
             should_resubscribe = (

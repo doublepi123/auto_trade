@@ -733,3 +733,109 @@ class TestRuntimeStateService:
 
         assert [point.last_price for point in points] == [220.0, 221.0]
         assert [point.symbol for point in points] == ["", "AAPL.US"]
+
+    def test_load_symbol_runtime_does_not_take_the_callers_transaction(
+        self,
+    ) -> None:
+        """A missing secondary runtime row must not finalize the caller's work.
+
+        ``AppRunner._sync_symbol_runtimes`` reaches this method on a BORROWED
+        session -- the opening-momentum cron's, during a registry refresh.
+        The old get-or-create path committed (or rolled back) whenever the
+        row was missing, which finalizes whatever the caller had staged:
+        the 2026-09-04 incident shape once the refresh borrows the cron's
+        session. The load must be transaction-neutral -- query only, no
+        commit/rollback/flush/close -- and a missing row must leave the
+        in-memory engine exactly as the caller left it.
+        """
+        self._cleanup()
+        sentinel_symbol = "TXNSENTINEL.US"
+        missing_symbol = "TXNMISSING.US"
+        engine = StrategyEngine(
+            StrategyParams(symbol=missing_symbol, market="US")
+        )
+        engine.state = EngineState.LONG
+        engine.last_price = 123.0
+        engine.last_trigger_price = 45.0
+
+        db = self._get_db()
+        try:
+            db.add(
+                RuntimeState(
+                    symbol=sentinel_symbol,
+                    engine_state="long",
+                    last_price=42.0,
+                )
+            )
+            db.flush()
+            assert db.in_transaction() is True
+
+            RuntimeStateService().load_symbol_runtime(
+                db, engine, missing_symbol
+            )
+
+            # The caller's transaction is still alive and still owns
+            # everything staged so far: the sentinel is visible inside it,
+            # and no row was created for the missing symbol.
+            assert db.in_transaction() is True
+            staged_symbols = {
+                str(row.symbol) for row in db.query(RuntimeState).all()
+            }
+            assert sentinel_symbol in staged_symbols
+            assert missing_symbol not in staged_symbols
+        finally:
+            db.rollback()
+            db.close()
+
+        # ...so a rollback removes the sentinel, and nothing was committed
+        # behind the caller's back.
+        db = self._get_db()
+        try:
+            assert (
+                db.query(RuntimeState)
+                .filter(RuntimeState.symbol == sentinel_symbol)
+                .first()
+                is None
+            )
+            assert (
+                db.query(RuntimeState)
+                .filter(RuntimeState.symbol == missing_symbol)
+                .first()
+                is None
+            )
+        finally:
+            db.close()
+
+        # The engine keeps whatever the caller had in memory.
+        assert engine.state == EngineState.LONG
+        assert engine.last_price == 123.0
+        assert engine.last_trigger_price == 45.0
+
+    def test_load_symbol_runtime_restores_a_persisted_row(self) -> None:
+        """Positive control: an existing row still loads into the engine."""
+        self._cleanup()
+        symbol = "TXNEXISTING.US"
+        db = self._get_db()
+        try:
+            db.add(
+                RuntimeState(
+                    symbol=symbol,
+                    engine_state="long",
+                    last_price=77.5,
+                    last_trigger_price=76.25,
+                )
+            )
+            db.commit()
+        finally:
+            db.close()
+
+        engine = StrategyEngine(StrategyParams(symbol=symbol, market="US"))
+        db = self._get_db()
+        try:
+            RuntimeStateService().load_symbol_runtime(db, engine, symbol)
+        finally:
+            db.close()
+
+        assert engine.state == EngineState.LONG
+        assert engine.last_price == 77.5
+        assert engine.last_trigger_price == 76.25

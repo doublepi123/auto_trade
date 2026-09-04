@@ -30,6 +30,7 @@ class _FakeRunner:
         self.results = list(results)
         self.calls: list[dict[str, object]] = []
         self.refresh_count = 0
+        self.refresh_sessions: list[object] = []
 
     def execute_opening_momentum_entry(
         self,
@@ -38,8 +39,12 @@ class _FakeRunner:
         self.calls.append(dict(kwargs))
         return self.results.pop(0)
 
-    def refresh_opening_execution_registry(self) -> None:
+    def refresh_opening_execution_registry(
+        self,
+        db: object = None,
+    ) -> None:
         self.refresh_count += 1
+        self.refresh_sessions.append(db)
 
 
 def _database() -> tuple[Engine, Session]:
@@ -221,6 +226,10 @@ def test_tick_does_not_evaluate_before_forward_evidence_start(
         assert evaluated == []
         assert db.query(OpeningMomentumExecution).count() == 0
         assert runner.refresh_count == 1
+        assert runner.refresh_sessions == [db], (
+            "the registry refresh must borrow the tick's own session, not "
+            "make the runner open a second one"
+        )
     finally:
         db.close()
         Base.metadata.drop_all(bind=engine)
