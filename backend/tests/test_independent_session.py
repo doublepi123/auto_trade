@@ -32,13 +32,26 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from app import database
 from app.config import settings
 from app.database import (
     SessionReentrancyGuard,
-    SessionReentrancyViolation,
     active_independent_session_reason,
     independent_session,
 )
+
+
+def _violation_type() -> type[Exception]:
+    """Resolve the exception class from the LIVE ``app.database`` module.
+
+    ``tests/test_database.py`` calls ``importlib.reload(app.database)`` to
+    exercise the engine-construction paths against a temporary URL. That
+    rebinds every class in the module, so a ``SessionReentrancyViolation``
+    captured at import time is no longer the class a later guard raises, and
+    ``pytest.raises`` would miss a violation that did occur. Resolving through
+    the module attribute keeps this test correct in any suite order.
+    """
+    return database.SessionReentrancyViolation
 
 
 def _queue_pooled_engine(tmp_path, name: str = "independent.db") -> Engine:
@@ -138,7 +151,7 @@ def test_unmarked_nested_checkout_still_violates(tmp_path, _test_env) -> None:
             pass
         inner = factory()
         try:
-            with pytest.raises(SessionReentrancyViolation):
+            with pytest.raises(_violation_type()):
                 _touch(inner)
         finally:
             inner.close()
@@ -172,7 +185,7 @@ def test_marker_is_restored_when_the_body_raises(tmp_path, _test_env) -> None:
         _touch(outer)
         inner = factory()
         try:
-            with pytest.raises(SessionReentrancyViolation):
+            with pytest.raises(_violation_type()):
                 _touch(inner)
         finally:
             inner.close()
