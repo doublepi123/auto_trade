@@ -4,6 +4,7 @@ import logging
 import threading
 import traceback
 from collections.abc import Generator
+from contextlib import AbstractContextManager, contextmanager
 from typing import Any
 
 from sqlalchemy import (
@@ -88,6 +89,85 @@ def queue_pool_kwargs(database_url: str) -> dict[str, object]:
 
 SESSION_REENTRANCY_LOG_WINDOW_SECONDS = 300.0
 _REENTRANCY_OWNER_KEY = "_session_reentrancy_owner"
+
+
+class _IndependentSessionState(threading.local):
+    """Per-thread stack of independent-session justifications.
+
+    ``threading.local`` and not a module global on purpose. The runner loop,
+    the post-fill-persist thread and every API request thread share one
+    process engine and therefore one :class:`SessionReentrancyGuard`. A
+    process-wide flag would let a deliberate audit write on the runner loop
+    blind the detector to a genuine nested session on a request thread -- the
+    exact shape that hung production for 65 minutes on 2026-09-03.
+    """
+
+    def __init__(self) -> None:
+        self.reasons: list[str] = []
+
+
+_independent_session_state = _IndependentSessionState()
+
+
+def active_independent_session_reason() -> str | None:
+    """The innermost declared reason on this thread, or ``None``.
+
+    Read by :meth:`SessionReentrancyGuard._on_checkout` to decide whether a
+    second checkout is the incident or a declared exception, and available to
+    callers that want to name the reason in a diagnostic.
+    """
+    reasons = _independent_session_state.reasons
+    return reasons[-1] if reasons else None
+
+
+@contextmanager
+def _independent_session_scope(reason: str) -> Generator[None, None, None]:
+    reasons = _independent_session_state.reasons
+    reasons.append(reason)
+    try:
+        yield
+    finally:
+        # Restored on every exit path, including an exception. A leaked marker
+        # would exempt every later session on this thread, silencing the
+        # detector exactly when the process is already in trouble.
+        reasons.pop()
+
+
+def independent_session(reason: str) -> AbstractContextManager[None]:
+    """Declare that a nested session inside this block is deliberate.
+
+    A handful of sites open a second ``Session`` on purpose:
+    ``AuditLogger.record`` owns its own so an audit row survives the rollback
+    of the transaction being audited, and coupling audit durability to the
+    audited transaction would be a product change rather than a refactor.
+    Those sites are still re-entrancy by the pool's definition, and a detector
+    that warns forever about known-good paths is one nobody reads.
+
+    This is deliberately NOT an allowlist. There is no path pattern, module
+    name or config entry a future site can be added to from a distance: a site
+    opts itself out for the duration of one ``with`` block, in the code that
+    does the nesting, and must state why. ``reason`` is therefore required --
+    a marker with no written justification is precisely the "silence it" move
+    that lets the next outage through. It is validated before the block is
+    entered so an empty reason cannot sit unexercised in a rarely-taken branch
+    and read as justified.
+
+    Re-entrant and exception-safe: the prior state is restored on the way out
+    including when the body raises. A leaked marker would be worse than none,
+    because every later session on that thread would be exempt -- the detector
+    going quiet exactly when the process is already in trouble.
+
+    It does NOT suppress anything else. The guard's accounting still runs, the
+    connection is still counted, and an unmarked nested checkout on the same
+    thread a moment later still reports.
+    """
+    if not reason.strip():
+        raise ValueError(
+            "independent_session requires a non-empty reason: a marker with no "
+            "written justification is the 'silence it' move that let the "
+            "2026-09-03 pool deadlock through"
+        )
+    return _independent_session_scope(reason)
 
 
 class SessionReentrancyViolation(RuntimeError):
@@ -183,7 +263,11 @@ class SessionReentrancyGuard:
         with self._lock:
             depth = self._held.get(thread_id, 0) + 1
             self._held[thread_id] = depth
-        if depth > 1:
+        # Accounting runs unconditionally -- the connection IS held, and a
+        # later unmarked checkout on this thread must still see the right
+        # depth. Only the verdict is waived, and only for the block that
+        # declared itself independent (see ``independent_session``).
+        if depth > 1 and active_independent_session_reason() is None:
             self._report(depth)
 
     def _on_checkin(
