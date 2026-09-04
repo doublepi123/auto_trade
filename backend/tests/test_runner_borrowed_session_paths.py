@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
 
 import pytest
@@ -724,20 +724,25 @@ def test_opening_momentum_cron_tick_holds_one_connection_through_registry_refres
         # refresh reaches load_symbol_runtime for it, which must not create
         # a row or finalize the cron's transaction.
         db.add(WatchlistItem(symbol=secondary_symbol, market="US"))
+        # Anchored on the CURRENT session, not a literal date. Pinned to
+        # 2026-09-04 this passed on the day it was written and failed every
+        # day after: the tick expires an ARMED row once its entry deadline is
+        # in the past, so the registry came back empty and `policy is None`.
+        # What is under test is that the refresh borrows the cron's session,
+        # which must not depend on what day it is run.
+        armed_at = datetime.now(timezone.utc) + timedelta(minutes=30)
         db.add(
             OpeningMomentumExecution(
-                session_date=date(2026, 9, 4),
+                session_date=armed_at.date(),
                 algorithm_version="borrow-session-test",
                 config_version="borrow-session-test",
                 universe_source="BORROWSESSION",
                 status="ARMED",
                 symbol=SYMBOL,
-                signal_at=datetime(2026, 9, 4, 13, 32, tzinfo=timezone.utc),
-                armed_at=datetime(2026, 9, 4, 13, 32, tzinfo=timezone.utc),
-                entry_due_at=datetime(2026, 9, 4, 13, 34, tzinfo=timezone.utc),
-                entry_deadline_at=datetime(
-                    2026, 9, 4, 13, 36, tzinfo=timezone.utc
-                ),
+                signal_at=armed_at,
+                armed_at=armed_at,
+                entry_due_at=armed_at + timedelta(minutes=2),
+                entry_deadline_at=armed_at + timedelta(minutes=4),
                 max_price_deviation_bps=200.0,
                 stop_loss_pct=1.0,
                 max_holding_minutes=60,
