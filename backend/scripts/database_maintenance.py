@@ -120,12 +120,25 @@ def _row_counts(engine: Engine, names: Sequence[str]) -> dict[str, int]:
     return counts
 
 
+def _retention_window_enabled(retention_days: int) -> bool:
+    if retention_days < 0:
+        raise ValueError("retention_days must be non-negative")
+    return retention_days > 0
+
+
 def _quant_v6_plan(
     session: Session,
     *,
     retention_days: int,
     now: datetime,
 ) -> dict[str, int]:
+    if not _retention_window_enabled(retention_days):
+        return {
+            "retention_days": retention_days,
+            "expired_publications": 0,
+            "bindings": 0,
+            "artifacts": 0,
+        }
     cutoff = now - timedelta(days=retention_days)
     expired_publications = (
         session.query(WatchlistQuantV6Publication)
@@ -173,6 +186,13 @@ def _forward_replay_plan(
     retention_days: int,
     now: datetime,
 ) -> dict[str, int]:
+    if not _retention_window_enabled(retention_days):
+        return {
+            "retention_days": retention_days,
+            "expired_evidence": 0,
+            "bindings": 0,
+            "artifacts": 0,
+        }
     cutoff = now - timedelta(days=retention_days)
     expired_evidence = (
         session.query(StrategyV2ForwardEvidence)
@@ -220,6 +240,16 @@ def _diagnostic_wait_plan(
     retention_days: int,
     now: datetime,
 ) -> DiagnosticWaitPlan:
+    if not _retention_window_enabled(retention_days):
+        return {
+            "retention_days": retention_days,
+            "decisions": 0,
+            "note": (
+                "forward replay source protection is not evaluated in preview; "
+                "apply may delete fewer rows"
+            ),
+            "est_freed_bytes": 0,
+        }
     cutoff = now - timedelta(days=retention_days)
     decisions = (
         session.query(StrategyV2ShadowDecision)

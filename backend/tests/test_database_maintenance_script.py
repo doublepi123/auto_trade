@@ -222,12 +222,16 @@ def test_preview_reports_plan_without_mutating(
     maintenance: ModuleType,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db_path = tmp_path / "auto_trade.db"
     backups = tmp_path / "data" / "backups"
     dest = tmp_path / "offsite"
     _seed_db(db_path)
     _backups(backups, ["auto_trade-2026-08-05.db", "auto_trade-2026-08-22.db"])
+    monkeypatch.setattr(
+        maintenance.settings, "watchlist_quant_v6_artifact_retention_days", 30
+    )
 
     exit_code = maintenance.main(_argv(db_path, backups, dest))
     payload = json.loads(capsys.readouterr().out)
