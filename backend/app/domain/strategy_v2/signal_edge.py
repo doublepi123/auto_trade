@@ -18,6 +18,8 @@ from app.domain.strategy_v2.clustered_returns import (
 from app.domain.strategy_v2.futility import (
     FUTILITY_BOUND_CRITICAL_VALUE,
     PREREGISTERED_COST_FLOOR_BPS,
+    PREREGISTERED_MIN_DISTINCT_DAYS,
+    PREREGISTERED_MIN_RESOLVED_BRACKETS,
     PREREGISTERED_POWER,
     PREREGISTERED_SIGMA_DAY_BPS,
     FutilityResult,
@@ -29,8 +31,8 @@ from app.domain.strategy_v2.futility import (
 DEFAULT_ALPHA = 0.05
 # Minimum evidence before a verdict means anything. The day floor matters more
 # than the trade floor: 200 trades spread over 5 days carry ~5 observations.
-DEFAULT_MIN_RESOLVED_TRADES = 30
-DEFAULT_MIN_DISTINCT_DAYS = 20
+DEFAULT_MIN_RESOLVED_TRADES: Final = PREREGISTERED_MIN_RESOLVED_BRACKETS
+DEFAULT_MIN_DISTINCT_DAYS: Final = PREREGISTERED_MIN_DISTINCT_DAYS
 # PREREGISTRATION.md section 3: promotion floors, not analysis/reporting floors.
 PROMOTION_MIN_DISTINCT_DAYS: Final = 60
 PROMOTION_MIN_RESOLVED_BRACKETS: Final = 180
@@ -307,11 +309,10 @@ def assess_signal_edge(
                 f"only {evidence.distinct_days} {label} trading days "
                 + f"(need {min_distinct_days})"
             )
-    evidence_sufficient = not reasons
     futility = assess_futility(
         gross=gross_evidence,
         net=clustered,
-        evidence_sufficient=evidence_sufficient,
+        resolved_brackets=first_passage.resolved,
     )
     promotion = assess_promotion(first_passage, clustered)
     if reasons:

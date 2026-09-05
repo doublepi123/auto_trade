@@ -13,6 +13,8 @@ from app.domain.strategy_v2.clustered_returns import (
 
 PREREGISTERED_COST_FLOOR_BPS: Final = 10.0
 PREREGISTERED_SIGMA_DAY_BPS: Final = 20.0
+PREREGISTERED_MIN_RESOLVED_BRACKETS: Final = 30
+PREREGISTERED_MIN_DISTINCT_DAYS: Final = 20
 PREREGISTERED_POWER: Final = 0.80
 FUTILITY_BOUND_CRITICAL_VALUE: Final = DEFAULT_T_CRITICAL
 _PERCENT_TO_BPS: Final = 100.0
@@ -53,6 +55,10 @@ class FutilityResult:
     status: FutilityStatusLabel
     reasons: tuple[str, ...]
     distinct_days: int
+    resolved_brackets: int
+    required_resolved_brackets: int
+    required_distinct_days: int
+    evidence_floor_met: bool
     cost_floor_bps: float
     sigma_day_bps: float
     alpha: float
@@ -73,7 +79,7 @@ def assess_futility(
     *,
     gross: ClusteredTTestResult,
     net: ClusteredTTestResult,
-    evidence_sufficient: bool,
+    resolved_brackets: int,
     cost_floor_bps: float = PREREGISTERED_COST_FLOOR_BPS,
     sigma_day_bps: float = PREREGISTERED_SIGMA_DAY_BPS,
     alpha: float = 0.05,
@@ -98,6 +104,14 @@ def assess_futility(
         raise ValueError(message)
 
     distinct_days = gross.distinct_days
+    # Derive the governance floor here; reporting callers supply evidence, not permission.
+    evidence_floor_met = (
+        resolved_brackets >= PREREGISTERED_MIN_RESOLVED_BRACKETS
+        and gross.observations >= PREREGISTERED_MIN_RESOLVED_BRACKETS
+        and net.observations >= PREREGISTERED_MIN_RESOLVED_BRACKETS
+        and gross.distinct_days >= PREREGISTERED_MIN_DISTINCT_DAYS
+        and net.distinct_days >= PREREGISTERED_MIN_DISTINCT_DAYS
+    )
     gross_mean_bps = (
         gross.naive_mean * _PERCENT_TO_BPS
         if gross.naive_mean is not None
@@ -163,7 +177,7 @@ def assess_futility(
     if unavailable:
         status: FutilityStatusLabel = "INSUFFICIENT_DATA"
         reasons = ("gross or net mean or clustered standard error unavailable",)
-    elif not evidence_sufficient:
+    elif not evidence_floor_met:
         status = "INSUFFICIENT_DATA"
         reasons = ("verdict evidence floors not met",)
     elif not upper_bound_below_cost_floor:
@@ -182,6 +196,10 @@ def assess_futility(
         status=status,
         reasons=reasons,
         distinct_days=distinct_days,
+        resolved_brackets=resolved_brackets,
+        required_resolved_brackets=PREREGISTERED_MIN_RESOLVED_BRACKETS,
+        required_distinct_days=PREREGISTERED_MIN_DISTINCT_DAYS,
+        evidence_floor_met=evidence_floor_met,
         cost_floor_bps=cost_floor_bps,
         sigma_day_bps=sigma_day_bps,
         alpha=alpha,
@@ -202,6 +220,8 @@ def assess_futility(
 __all__ = [
     "FUTILITY_BOUND_CRITICAL_VALUE",
     "PREREGISTERED_COST_FLOOR_BPS",
+    "PREREGISTERED_MIN_RESOLVED_BRACKETS",
+    "PREREGISTERED_MIN_DISTINCT_DAYS",
     "PREREGISTERED_POWER",
     "PREREGISTERED_SIGMA_DAY_BPS",
     "FutilityResult",

@@ -2089,6 +2089,10 @@ class SignalEdgeFutility(BaseModel):
     status: Literal["ALIVE", "FUTILE", "INSUFFICIENT_DATA"]
     reasons: tuple[str, ...]
     distinct_days: int = Field(ge=0)
+    resolved_brackets: int = Field(ge=0)
+    required_resolved_brackets: int = Field(gt=0)
+    required_distinct_days: int = Field(gt=0)
+    evidence_floor_met: bool
     cost_floor_bps: float = Field(gt=0, allow_inf_nan=False)
     sigma_day_bps: float = Field(gt=0, allow_inf_nan=False)
     alpha: float = Field(gt=0, lt=1, allow_inf_nan=False)

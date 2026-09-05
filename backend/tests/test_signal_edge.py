@@ -102,7 +102,7 @@ class TestFutilityAssessment:
         result = signal_edge.assess_futility(
             gross=gross,
             net=net,
-            evidence_sufficient=True,
+            resolved_brackets=232,
         )
 
         assert result.status == "FUTILE"
@@ -119,13 +119,14 @@ class TestFutilityAssessment:
 
     def test_underpowered_cohort_is_insufficient_not_futile(self) -> None:
         result = signal_edge.assess_futility(
-            gross=_clustered(-0.0057, 0.0255, 10, 232),
-            net=_clustered(-0.1057, 0.0255, 10, 232),
-            evidence_sufficient=True,
+            gross=_clustered(-0.0057, 0.0255, 21, 232),
+            net=_clustered(-0.1057, 0.0255, 21, 232),
+            resolved_brackets=232,
         )
 
         assert result.status == "INSUFFICIENT_DATA"
-        assert math.isclose(result.mde_bps or 0.0, 15.73, abs_tol=0.01)
+        assert math.isclose(result.mde_bps or 0.0, 10.85, abs_tol=0.01)
+        assert result.evidence_floor_met is True
         assert result.upper_bound_below_cost_floor is True
         assert result.powered_for_required_effect is False
         assert any("underpowered" in reason for reason in result.reasons)
@@ -134,7 +135,7 @@ class TestFutilityAssessment:
         result = signal_edge.assess_futility(
             gross=_clustered(0.049, 0.0255, 31, 232),
             net=_clustered(-0.051, 0.0255, 31, 232),
-            evidence_sufficient=True,
+            resolved_brackets=232,
         )
 
         assert math.isclose(result.gross_upper_bound_bps or 0.0, 10.0)
@@ -150,7 +151,7 @@ class TestFutilityAssessment:
         result = signal_edge.assess_futility(
             gross=gross,
             net=_clustered(-0.1057, 0.0255, 31, 232),
-            evidence_sufficient=True,
+            resolved_brackets=232,
         )
 
         assert math.isclose(result.gross_upper_bound_bps or 0.0, 4.53, abs_tol=0.01)
@@ -160,7 +161,7 @@ class TestFutilityAssessment:
         result = signal_edge.assess_futility(
             gross=_clustered(-0.0057, 0.0255, 31, 232),
             net=_clustered(-0.1057, 0.0255, 31, 232),
-            evidence_sufficient=False,
+            resolved_brackets=29,
         )
 
         assert result.status == "INSUFFICIENT_DATA"
@@ -173,7 +174,7 @@ class TestFutilityAssessment:
         result = signal_edge.assess_futility(
             gross=empty,
             net=empty,
-            evidence_sufficient=False,
+            resolved_brackets=0,
         )
 
         assert result.status == "INSUFFICIENT_DATA"
@@ -185,7 +186,7 @@ class TestFutilityAssessment:
             signal_edge.assess_futility(
                 gross=_clustered(-0.0057, 0.0255, 31, 232),
                 net=_clustered(-0.1057, 0.0255, 31, 232),
-                evidence_sufficient=True,
+                resolved_brackets=232,
                 cost_floor_bps=cost_floor_bps,
             )
 
@@ -194,7 +195,7 @@ class TestFutilityAssessment:
             signal_edge.assess_futility(
                 gross=_clustered(-0.0057, 0.0255, 31, 232),
                 net=_clustered(-0.1057, 0.0255, 31, 232),
-                evidence_sufficient=True,
+                resolved_brackets=232,
                 bound_critical_value=0.0,
             )
 

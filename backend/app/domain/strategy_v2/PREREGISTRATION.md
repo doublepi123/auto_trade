@@ -76,10 +76,11 @@ API、service 与 domain 的 `t_critical` 缺省均为 `None`，缺省才查表�
 60 天 / 180 个已结算 bracket 下限及 DSR 失败关闭不变。df≥61 时该精确临界值
 略低于旧的 2.0，这是同一固定置信水平的数学结果，不是按观察结果调门槛。
 
-**futility 完全不改。** `DEFAULT_T_CRITICAL = 2.0` 与弃置上界的固定 `2.0·SE`
+**futility 上界口径不改。** `DEFAULT_T_CRITICAL = 2.0` 与弃置上界的固定 `2.0·SE`
 继续保留；不得把弃置上界改为 df-aware，也不得让查询参数操纵它来诱导 `FUTILE`。
 这是防止弃置判定被操纵的独立约束，不与晋级共用可调阈值。第 9 节的功效规则仍然
-随 D 变化，本修订不改变其行为。冻结 v5 参数、参数哈希、负对照收集与 P0 边界均不变。
+随 D 变化；证据下限的独立执行见第 9.3 节的 2026-09-06 实现纠错。
+冻结 v5 参数、参数哈希、负对照收集与 P0 边界均不变。
 
 ## 4. 证据时钟（evidence clock）
 
@@ -183,9 +184,28 @@ API、service 与 domain 的 `t_critical` 缺省均为 `None`，缺省才查表�
 以上三条由 `futility.py` 的 `assess_futility` 机械计算，固定采用
 `PREREGISTERED_COST_FLOOR_BPS = 10.0` 与
 `PREREGISTERED_SIGMA_DAY_BPS = 20.0`。gross 上界固定按 `mean + 2.0·SE`
-计算，比名义单侧 95% 更保守；计算还必须先通过第 3 节 verdict 的证据下限，并以
+计算，比名义单侧 95% 更保守；计算还必须先通过第 3.1 节的固定分析证据下限，并以
 `/api/strategy-shadow/signal-edge` 的 `futility` 字段只读披露。实测 σ 与实测成本仅供人工
 交叉核对，不进入判定。
+
+**2026-09-06 实现纠错：证据下限必须由弃置域自身推导。** 既有实现把调用方可调的
+verdict 下限转换为 `evidence_sufficient` 布尔值传给 `assess_futility`，可被双向操纵：
+调低下限可在薄样本上制造 `FUTILE`，调高下限则可压制合法的 `FUTILE` / `ALIVE`。
+这违反第 3.2 节的独立约束，不能因为当前真实 cohort 在功效轴上仍不足就视为安全。
+
+现删除该调用方可信布尔参数，只接收 gross、net 与 `resolved_brackets` 证据；
+`futility.py` 内以 `PREREGISTERED_MIN_RESOLVED_BRACKETS = 30` 和
+`PREREGISTERED_MIN_DISTINCT_DAYS = 20` 独立推导：已结算 bracket、gross 笔数、net 笔数
+分别至少 30，gross 与 net 的独立交易日分别至少 20，五项全部满足才通过。
+响应披露 `resolved_brackets`、`required_resolved_brackets`、`required_distinct_days`
+与 `evidence_floor_met`；verdict 默认值引用同一常量，查询下限只影响 verdict / reasons，
+不能制造或压制弃置诊断。独立推导必须留在 `futility.py`，不得移回上游后再传布尔值，
+否则下一个调用方仍可重开漏洞。
+
+此处是 **30 / 20 分析下限，不是 180 / 60 晋级下限**：第 9 节补上晋级之外的弃置出口，
+若弃置也必须等到晋级预算才可评估，便在此之前重新成为只有一个出口的证据机器。
+`FUTILITY_BOUND_CRITICAL_VALUE` 保持 **2.0**，成本、日离散度、功效规则和默认读数不变。
+这只是合同执行边界的纠错；不放宽 AND #4，不认证冻结 v5，不自动弃置。
 
 ### 9.4 regime 条款：「等一个合适的市场状态」在本数据上没有依据（写入 doctrine）
 
@@ -219,5 +239,5 @@ API、service 与 domain 的 `t_critical` 缺省均为 `None`，缺省才查表�
 ### 9.6 与其它条款的关系
 
 - 本节**不修改**第 3 节的四条晋级门，也**不修改** `signal_edge` 的任何统计口径、阈值或判定标签。弃置是一个**治理决定**，其输入是既有统计量的读数。
-- 本节引入两个预注册代码常量与一个只读计算字段，但不引入运行期开关，也不是自动化的 kill switch。自动晋级永久禁止（第 7 节），自动弃置同样不存在；弃置仍必须完成第 9.5.4 条的书面决定。
+- 本节以预注册成本、日离散度与分析证据下限常量驱动只读计算，但不引入运行期开关，也不是自动化的 kill switch。自动晋级永久禁止（第 7 节），自动弃置同样不存在；弃置仍必须完成第 9.5.4 条的书面决定。
 - `INSUFFICIENT_DATA` 的地位不变（第 4 节）：9.3 的第 3 条明确禁止把证据不足读成弃置理由。

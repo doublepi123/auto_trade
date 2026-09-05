@@ -97,13 +97,16 @@ def test_futility_bound_and_powered_verdict_stay_fixed(
     days: int, critical: float | None,
 ) -> None:
     # Given: fixed mean/SE with ample power at every tested D; only CI policy varies.
-    evidence = clustered_returns.clustered_t_test(_observations(days), t_critical=critical)
+    evidence = clustered_returns.clustered_t_test(
+        _observations(days) * 2, t_critical=critical,
+    )
     gross = replace(evidence, naive_mean=-0.2, clustered_standard_error=0.01)
     net = replace(evidence, naive_mean=-0.3, clustered_standard_error=0.01)
     # When: futility recomputes its own bound instead of using the input CI.
-    result = assess_futility(gross=gross, net=net, evidence_sufficient=True)
+    result = assess_futility(gross=gross, net=net, resolved_brackets=2 * days)
     # Then: D still affects MDE, but never the bound multiplier or this powered verdict.
     assert clustered_returns.DEFAULT_T_CRITICAL == FUTILITY_BOUND_CRITICAL_VALUE == 2.0
     assert result.bound_critical_value == 2.0
+    assert result.evidence_floor_met is True
     assert result.gross_upper_bound_bps == pytest.approx(-18.0)
     assert result.status == "FUTILE"
