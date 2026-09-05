@@ -37,6 +37,22 @@ Strategy v2 前向影子证据（248 笔已平仓交易，2026-07-14 至 2026-08
 
 四条是 AND 关系。任何一条不过，不晋级。
 
+### 3.1 晋级门的机器执行（2026-09-05 修订）
+
+`domain/strategy_v2/signal_edge.py` 以独立的 `promotion` 块机械计算四条 AND；
+样本门固定为 `PROMOTION_MIN_DISTINCT_DAYS = 60` 与
+`PROMOTION_MIN_RESOLVED_BRACKETS = 180`，调用方的查询参数不能降低它们。
+分析下限（30 个已结算 bracket / 20 个交易日）只决定统计诊断何时足以报告，
+与晋级下限（60 个交易日 / 180 个已结算 bracket）明确分离，二者互不替代。
+原有 `PASS` / `FAIL` / `FEE_BLOCKED` / `INSUFFICIENT_DATA` 与 futility 诊断保持原义；
+分析 `PASS` 不等于具备晋级资格，在线换标的门还必须要求 `promotion.eligible`。
+
+第 4 条目前因前向影子 cohort 的 DSR **尚未计算而失败关闭**，不得伪造数值，
+也不得从纯 domain 层导入 platform 实现。后续日级 DSR 必须取
+**T = 独立交易日数，而不是交易笔数**（例如当前是 28 天，不是 276 笔）；
+把同日相关交易当成独立样本会低估 Sharpe 标准误并制造虚假置信度
+（Bailey & López de Prado 2014）。本修订不改变冻结 v5 参数与负对照运行。
+
 ## 4. 证据时钟（evidence clock）
 
 - **任何参数变更都把证据收集窗口归零**。此前的交易日与已平仓交易全部归属旧参数集，不得计入新参数集的晋级判定。

@@ -1186,15 +1186,21 @@ class TestSignalEdgeGate(_Base):
         self._reach("AAPL.US", closed=9, reached=8)
         return _Runner()
 
-    def test_proven_edge_lets_the_switch_through(self) -> None:
+    def test_analysis_pass_blocks_switch_without_promotion_evidence(self) -> None:
+        # Given: the existing analysis-PASS cohort is below promotion floors.
         runner = self._switch_scenario()
         self._barriers()
         self._edge_trades(targets=32, stops=8, days=20)
 
+        # When: the live symbol switch is evaluated.
         result = AutoPrimarySwitchService(self._db()).evaluate(runner)
 
-        assert result.outcome == OUTCOME_SWITCHED
-        assert result.candidate == "AAPL.US"
+        # Then: PASS alone cannot authorize a switch.
+        assert result.outcome == OUTCOME_SIGNAL_EDGE_UNPROVEN
+        assert "PASS" in result.detail
+        assert "AND #3" in result.detail
+        assert "AND #4" in result.detail
+        assert runner.calls == []
 
     def test_signal_without_edge_blocks_the_switch(self) -> None:
         runner = self._switch_scenario()

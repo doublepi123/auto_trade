@@ -2105,6 +2105,23 @@ class SignalEdgeFutility(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class SignalEdgePromotion(BaseModel):
+    """Four mandatory promotion ANDs, separate from the analysis verdict."""
+
+    net_significant: bool
+    first_passage_beats_baseline: bool
+    sample_size_met: bool
+    deflated_sharpe_distinguishable: bool
+    eligible: bool
+    reasons: tuple[str, ...]
+    distinct_days: int = Field(ge=0)
+    resolved_brackets: int = Field(ge=0)
+    required_distinct_days: int = Field(gt=0)
+    required_resolved_brackets: int = Field(gt=0)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class SignalEdgeResponse(BaseModel):
     """Read-only evidence that a signal has edge before its exits are tuned.
 
@@ -2122,6 +2139,7 @@ class SignalEdgeResponse(BaseModel):
     gross: SignalEdgeClustered
     net: SignalEdgeClustered
     futility: SignalEdgeFutility
+    promotion: SignalEdgePromotion
     clustered: SignalEdgeClustered
 
     model_config = ConfigDict(extra="forbid")

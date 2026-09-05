@@ -571,9 +571,11 @@ class AutoPrimarySwitchService:
                 detail=f"signal edge not assessable: {exc}",
                 unassessable=True,
             )
-        if verdict.verdict == VERDICT_PASS:
+        if verdict.verdict == VERDICT_PASS and verdict.promotion.eligible:
             return None
         detail = "; ".join(verdict.reasons)
+        if verdict.verdict == VERDICT_PASS:
+            detail = "; ".join((*verdict.reasons, *verdict.promotion.reasons))
         first_passage = verdict.first_passage
         provenance_unassessable = first_passage.matched_versions == 0 or (
             first_passage.matched_trades == 0

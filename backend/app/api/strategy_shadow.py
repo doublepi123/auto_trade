@@ -15,6 +15,7 @@ from app.schemas import (
     SignalEdgeClustered,
     SignalEdgeFirstPassage,
     SignalEdgeFutility,
+    SignalEdgePromotion,
     SignalEdgeResponse,
     StrategyV2AdxChallengerRequest,
     StrategyV2AdxChallengerResponse,
@@ -432,6 +433,10 @@ def get_signal_edge(
         net=net,
         futility=SignalEdgeFutility.model_validate(
             verdict.futility,
+            from_attributes=True,
+        ),
+        promotion=SignalEdgePromotion.model_validate(
+            verdict.promotion,
             from_attributes=True,
         ),
         clustered=net,

@@ -111,7 +111,7 @@ class TestSignalEdgeApi(_Base):
             params={
                 "symbol": "API.US",
                 "min_resolved_trades": 1,
-                "min_distinct_days": 2,
+                "min_distinct_days": 1,
                 "cost_floor_bps": 1.0,
             },
         )
@@ -122,6 +122,12 @@ class TestSignalEdgeApi(_Base):
         assert body.gross.naive_mean == 1.5
         assert body.net.naive_mean == 1.0
         assert body.futility.cost_floor_bps == 10.0
+        promotion = response.json().get("promotion")
+        assert promotion is not None, "query parameters must not bypass promotion floors"
+        assert promotion["sample_size_met"] is False
+        assert promotion["eligible"] is False
+        assert promotion["required_distinct_days"] == 60
+        assert promotion["required_resolved_brackets"] == 180
         for estimand in (body.gross, body.net):
             assert estimand.clustered_t is not None
             assert estimand.ci_lower is not None

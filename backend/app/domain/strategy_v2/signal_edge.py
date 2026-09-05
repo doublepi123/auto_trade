@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Literal
+from typing import Final, Literal
 
 from app.domain.strategy_v2.clustered_returns import (
     DEFAULT_T_CRITICAL,
@@ -30,6 +30,9 @@ DEFAULT_ALPHA = 0.05
 # than the trade floor: 200 trades spread over 5 days carry ~5 observations.
 DEFAULT_MIN_RESOLVED_TRADES = 30
 DEFAULT_MIN_DISTINCT_DAYS = 20
+# PREREGISTRATION.md section 3: promotion floors, not analysis/reporting floors.
+PROMOTION_MIN_DISTINCT_DAYS: Final = 60
+PROMOTION_MIN_RESOLVED_BRACKETS: Final = 180
 
 SignalEdgeVerdictLabel = Literal[
     "PASS",
@@ -170,6 +173,70 @@ def assess_first_passage(
 
 
 @dataclass(frozen=True)
+class PromotionResult:
+    net_significant: bool
+    first_passage_beats_baseline: bool
+    sample_size_met: bool
+    deflated_sharpe_distinguishable: bool
+    eligible: bool
+    reasons: tuple[str, ...]
+    distinct_days: int
+    resolved_brackets: int
+    required_distinct_days: int
+    required_resolved_brackets: int
+
+
+def assess_promotion(
+    first_passage: FirstPassageResult,
+    net: ClusteredTTestResult,
+) -> PromotionResult:
+    """Apply all four preregistered ANDs independently of reporting floors."""
+    net_significant = (
+        net.naive_mean is not None
+        and net.clustered_standard_error is not None
+        and net.naive_mean - DEFAULT_T_CRITICAL * net.clustered_standard_error > 0
+    )
+    first_passage_beats_baseline = (
+        first_passage.observed_rate is not None
+        and first_passage.p_value is not None
+        and first_passage.observed_rate > first_passage.baseline_rate
+        and first_passage.p_value < DEFAULT_ALPHA
+    )
+    sample_size_met = (
+        net.distinct_days >= PROMOTION_MIN_DISTINCT_DAYS
+        and first_passage.resolved >= PROMOTION_MIN_RESOLVED_BRACKETS
+    )
+    # Forward-cohort DSR is not computed. Future DSR must use T = distinct DAYS,
+    # never trade count: correlated intraday trades understate Sharpe uncertainty.
+    deflated_sharpe_distinguishable = False
+    reasons: list[str] = []
+    if not net_significant:
+        reasons.append("AND #1: net day-clustered CI lower bound unavailable or not positive")
+    if not first_passage_beats_baseline:
+        reasons.append("AND #2: version-specific first-passage unavailable or does not beat baseline")
+    if not sample_size_met:
+        reasons.append(
+            f"AND #3: {net.distinct_days} trading days (need {PROMOTION_MIN_DISTINCT_DAYS}), "
+            + f"{first_passage.resolved} resolved brackets (need {PROMOTION_MIN_RESOLVED_BRACKETS})"
+        )
+    if not deflated_sharpe_distinguishable:
+        reasons.append("AND #4: deflated Sharpe not yet computed for forward shadow cohort")
+    return PromotionResult(
+        net_significant=net_significant,
+        first_passage_beats_baseline=first_passage_beats_baseline,
+        sample_size_met=sample_size_met,
+        deflated_sharpe_distinguishable=deflated_sharpe_distinguishable,
+        eligible=all((net_significant, first_passage_beats_baseline,
+                      sample_size_met, deflated_sharpe_distinguishable)),
+        reasons=tuple(reasons),
+        distinct_days=net.distinct_days,
+        resolved_brackets=first_passage.resolved,
+        required_distinct_days=PROMOTION_MIN_DISTINCT_DAYS,
+        required_resolved_brackets=PROMOTION_MIN_RESOLVED_BRACKETS,
+    )
+
+
+@dataclass(frozen=True)
 class SignalEdgeVerdict:
     verdict: SignalEdgeVerdictLabel
     reasons: tuple[str, ...]
@@ -177,6 +244,7 @@ class SignalEdgeVerdict:
     gross: ClusteredTTestResult
     net: ClusteredTTestResult
     futility: FutilityResult
+    promotion: PromotionResult
 
     @property
     def clustered(self) -> ClusteredTTestResult:
@@ -244,6 +312,7 @@ def assess_signal_edge(
         net=clustered,
         evidence_sufficient=evidence_sufficient,
     )
+    promotion = assess_promotion(first_passage, clustered)
     if reasons:
         if barrier_exclusion_reason is not None:
             reasons.append(barrier_exclusion_reason)
@@ -256,6 +325,7 @@ def assess_signal_edge(
             gross=gross_evidence,
             net=clustered,
             futility=futility,
+            promotion=promotion,
         )
 
     if not first_passage.beats_baseline:
@@ -302,6 +372,7 @@ def assess_signal_edge(
         gross=gross_evidence,
         net=clustered,
         futility=futility,
+        promotion=promotion,
     )
 
 
