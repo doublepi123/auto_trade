@@ -381,6 +381,17 @@ class TestSweepMultipleTesting:
         stats = self._multiple_testing()
         assert stats["n_trials"] == 3
 
+    def test_reports_dsr_probability_separately_from_the_z_score(self) -> None:
+        # Given: the real sweep request and in-memory backtest engine.
+        # When: the HTTP endpoint serializes its multiple-testing block.
+        stats = self._multiple_testing()
+        # Then: the probability survives the API schema and governs certification.
+        assert stats["dsr_probability"] == statistics.NormalDist().cdf(stats["deflated_sharpe"])
+        assert stats["trial_variance_assumed"] is False
+        assert stats["distinguishable_from_luck"] is (
+            stats["dsr_probability"] >= 0.95 and stats["psr"] > 0.5
+        )
+
     def test_sample_size_is_one_less_than_the_bar_count(self) -> None:
         stats = self._multiple_testing()
         assert stats["sample_size"] == 5
@@ -405,26 +416,9 @@ class TestSweepMultipleTesting:
             == data["best"]["metrics"]["sharpe_ratio"]
         )
 
-    def test_same_winner_loses_significance_when_the_search_was_wider(self) -> None:
-        """The correction's whole purpose, on one fixture.
-
-        Identical data and an identical winning Sharpe: only the search widens.
-        A wider search raises the bar the winner must clear, and the same result
-        stops being distinguishable from luck. PSR is unmoved because it never
-        sees the search at all -- which is why the verdict requires the deflated
-        Sharpe too.
-
-        The bar is ``sqrt(V[SR_n]) * bracket(N)`` (Bailey & Lopez de Prado 2014
-        eq. 2/6), so BOTH the trial count and the dispersion of the trial
-        Sharpes push it up. Denser sampling of one narrow axis moves N but
-        barely moves V -- correctly, because near-duplicate neighbours are not
-        independent trials. The flip therefore needs a search that is genuinely
-        wider, not merely finer.
-
-        Before the calibration fix this assertion held for a 3 -> 11 point
-        refinement of a single axis, using an ``expected_max`` that ignored
-        ``V[SR_n]`` entirely and understated the published bracket by ~22% at
-        N=11. That version flipped the verdict on grid density alone.
+    def test_same_winner_has_lower_dsr_probability_when_the_search_was_wider(self) -> None:
+        """Widening the search lowers DSR, not PSR. The narrow winner's 92.7%
+        probability was certified by the old z > 0 bug, but never met 95%.
         """
         few = self._multiple_testing(
             grid={"buy_low": {"range": {"start": 100, "end": 110, "step": 5}}}
@@ -444,18 +438,14 @@ class TestSweepMultipleTesting:
         assert many["trial_sharpe_variance"] > few["trial_sharpe_variance"]
         assert many["expected_max_null_sharpe"] > few["expected_max_null_sharpe"]
         assert few["deflated_sharpe"] > 0 > many["deflated_sharpe"]
-        assert few["distinguishable_from_luck"] is True
+        assert 0.5 < few["dsr_probability"] < 0.95
+        assert many["dsr_probability"] < 0.5
+        assert few["distinguishable_from_luck"] is False
         assert many["distinguishable_from_luck"] is False
 
     def test_refining_one_axis_barely_moves_the_bar(self) -> None:
-        """Companion to the above, and the reason it had to change.
-
-        Sampling one narrow axis 11 times instead of 3 does raise the trial
-        count, but the neighbours are near-duplicates: the dispersion of the
-        trial Sharpes barely changes, so the luck bar barely moves. A winner
-        that cleared the bar at 3 trials still clears it at 11. Treating grid
-        density alone as evidence of overfitting is what the old single-term
-        benchmark did, and it is not what the paper says.
+        """Near-duplicate neighbours barely move the benchmark. Neither this
+        92.5% winner nor the coarse grid's 92.7% winner meets the 95% contract.
         """
         few = self._multiple_testing(
             grid={"buy_low": {"range": {"start": 100, "end": 110, "step": 5}}}
@@ -466,7 +456,9 @@ class TestSweepMultipleTesting:
         assert fine["n_trials"] > few["n_trials"]
         assert fine["observed_sharpe"] == few["observed_sharpe"]
         assert fine["expected_max_null_sharpe"] < 0.1
-        assert fine["distinguishable_from_luck"] is True
+        assert 0.5 < fine["dsr_probability"] < few["dsr_probability"] < 0.95
+        assert fine["distinguishable_from_luck"] is False
+        assert few["distinguishable_from_luck"] is False
 
     def test_absent_when_no_combination_produces_a_sharpe(self) -> None:
         # buy_low far below every low -> no trades -> flat equity -> Sharpe None.

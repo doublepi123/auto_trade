@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import math
 from itertools import combinations
-from typing import Sequence
+from typing import Final, Sequence
+
+DSR_CONFIDENCE_LEVEL: Final[float] = 0.95
 
 __all__ = ["probability_of_backtest_overfitting", "deflated_sharpe_ratio", "_norm_cdf"]
 
@@ -174,12 +176,18 @@ def deflated_sharpe_ratio(
     * ``sharpe_std`` — the standard deviation of the Sharpe estimator adjusted
       for non-Normality.
     * ``deflated_sharpe`` — the observed Sharpe re-centred on the benchmark and
-      scaled by ``sharpe_std``.
+      scaled by ``sharpe_std``: a z-score, NOT a probability (legacy key).
+    * ``dsr_probability`` — the DSR probability ``Phi(deflated_sharpe)``.
     * ``psr`` — the Probabilistic Sharpe Ratio: probability the true Sharpe
       exceeds zero. It does **not** see ``n_trials``, so it can never stand in
       for the multiple-testing correction on its own.
-    * ``distinguishable_from_luck`` — the verdict: ``deflated_sharpe > 0`` and
-      ``psr > 0.5``, and never true on an assumed benchmark (see below).
+    * ``distinguishable_from_luck`` — requires ``dsr_probability >= 0.95``
+      (95% level; z >= 1.6448536269514722), retains ``psr > 0.5`` as defence
+      in depth, and is never true on an assumed benchmark (see below).
+
+    With fewer than one trial or two observations, both probabilities are the
+    neutral 0.5 and certification is False. The legacy ``deflated_sharpe``
+    fallback remains the raw observed Sharpe, not a usable z-score.
 
     **Kurtosis convention (one convention, both paths).** ``kurtosis`` is RAW
     (``g4``; Normal = 3, the default), not excess. The estimator variance is
@@ -218,6 +226,7 @@ def deflated_sharpe_ratio(
             "expected_max_null_sharpe": 0.0,
             "sharpe_std": 0.0,
             "deflated_sharpe": observed_sharpe,
+            "dsr_probability": 0.5,
             "psr": 0.5,
             "trial_sharpe_variance": (
                 1.0 if trial_sharpe_variance is None else float(trial_sharpe_variance)
@@ -252,6 +261,7 @@ def deflated_sharpe_ratio(
     std_sr = max(var_sr ** 0.5, 1e-9)
 
     deflated = (sr - expected_max) / std_sr
+    dsr_probability = _norm_cdf(deflated)
     # Same std_sr, so PSR and the deflated Sharpe cannot disagree about the
     # distributional assumptions.
     psr = min(max(_norm_cdf(sr / std_sr), 0.0), 1.0)
@@ -260,7 +270,7 @@ def deflated_sharpe_ratio(
     # measured must not certify anything.
     benchmark_is_unit_bearing = n > 1
     certified = (
-        deflated > 0.0
+        dsr_probability >= DSR_CONFIDENCE_LEVEL
         and psr > 0.5
         and not (variance_assumed and benchmark_is_unit_bearing)
     )
@@ -270,6 +280,7 @@ def deflated_sharpe_ratio(
         "expected_max_null_sharpe": expected_max,
         "sharpe_std": std_sr,
         "deflated_sharpe": deflated,
+        "dsr_probability": dsr_probability,
         "psr": psr,
         "trial_sharpe_variance": trial_variance,
         "trial_variance_assumed": variance_assumed,

@@ -3144,6 +3144,7 @@ class BacktestSweepMultipleTesting(BaseModel):
     observed_sharpe: float
     expected_max_null_sharpe: float
     deflated_sharpe: float
+    dsr_probability: float
     psr: float
     trial_sharpe_variance: float
     trial_variance_assumed: bool

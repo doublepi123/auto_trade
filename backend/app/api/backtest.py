@@ -511,6 +511,7 @@ def _sweep_multiple_testing(
         observed_sharpe=float(stats["observed_sharpe"]),
         expected_max_null_sharpe=float(stats["expected_max_null_sharpe"]),
         deflated_sharpe=float(stats["deflated_sharpe"]),
+        dsr_probability=float(stats["dsr_probability"]),
         psr=float(stats["psr"]),
         trial_sharpe_variance=float(stats["trial_sharpe_variance"]),
         trial_variance_assumed=bool(stats["trial_variance_assumed"]),

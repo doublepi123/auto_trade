@@ -33,7 +33,7 @@ Strategy v2 前向影子证据（248 笔已平仓交易，2026-07-14 至 2026-08
 1. **净值显著为正**：net 收益的 day-clustered 双侧 95% CI 下界 **> 0**（按第 3.2 节使用 `df = D − 1`；gross 一并报告，对照固定的约 10 bps 往返成本模型）。
 2. **版本专属 first-passage**：该版本实测 target-first 比例的下界，高于**该版本自己**的 driftless 基准 `stop/(stop+target)`。换屏障就换基准，不许跨版本借用。
 3. **样本量**：**≥ 60 个独立交易日** 且 **约 180 个独立已结算 bracket 结果**。功效说明：在观测到的约 20 bps 日离散度下，以 80% power 检出 +5 bps 的 net edge，大约需要 **100 个独立交易日**。样本不够就是不够，结论只能是 `INSUFFICIENT_DATA`。
-4. **Deflated Sharpe Ratio**（Bailey & López de Prado 2014）：按已注册的试验次数校正后，在 95% 水平上与运气可区分（`distinguishable_from_luck`）。注意：仓库**已实现**该计算，`POST /api/backtest/sweep` 返回的 `multiple_testing` 块包含 deflated Sharpe 与 `distinguishable_from_luck`。本条要求是把既有实现**应用为门**，不是重新造一个。
+4. **Deflated Sharpe Ratio**（Bailey & López de Prado 2014）：按已注册的试验次数校正后，在 95% 水平上与运气可区分（`distinguishable_from_luck`）。**2026-09-06 实现纠错**：既有实现以 `z > 0`（第 50 百分位）认证，未满足本合同约定的 95% 水平；现纠正为 `Φ(z) ≥ 0.95`（`z ≥ 1.644853626951`，计算不截断临界精度）。`POST /api/backtest/sweep` 的 `multiple_testing` 块分别报告保留原值的 z-score（`deflated_sharpe`）与概率（`dsr_probability`），并保留 PSR 与未测量试验方差的失败关闭守卫。这是**不符合合同的实现之纠正，认证变得更严格**，不是放宽合同。Strategy v2 前向影子 cohort 尚无已注册试验次数与已记载的选择族，**AND #4 继续失败关闭**；本次仅纠正接线前的底层计算，不接入前向影子晋级门，不启用晋级。
 
 四条是 AND 关系。任何一条不过，不晋级。
 
