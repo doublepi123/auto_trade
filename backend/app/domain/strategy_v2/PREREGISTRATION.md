@@ -30,7 +30,7 @@ Strategy v2 前向影子证据（248 笔已平仓交易，2026-07-14 至 2026-08
 
 ## 3. 晋级门槛（promotion 必须同时满足全部四条）
 
-1. **净值显著为正**：net 收益的 day-clustered 单侧 95% CI 下界 **> 0**（gross 一并报告，对照固定的约 10 bps 往返成本模型）。
+1. **净值显著为正**：net 收益的 day-clustered 双侧 95% CI 下界 **> 0**（按第 3.2 节使用 `df = D − 1`；gross 一并报告，对照固定的约 10 bps 往返成本模型）。
 2. **版本专属 first-passage**：该版本实测 target-first 比例的下界，高于**该版本自己**的 driftless 基准 `stop/(stop+target)`。换屏障就换基准，不许跨版本借用。
 3. **样本量**：**≥ 60 个独立交易日** 且 **约 180 个独立已结算 bracket 结果**。功效说明：在观测到的约 20 bps 日离散度下，以 80% power 检出 +5 bps 的 net edge，大约需要 **100 个独立交易日**。样本不够就是不够，结论只能是 `INSUFFICIENT_DATA`。
 4. **Deflated Sharpe Ratio**（Bailey & López de Prado 2014）：按已注册的试验次数校正后，在 95% 水平上与运气可区分（`distinguishable_from_luck`）。注意：仓库**已实现**该计算，`POST /api/backtest/sweep` 返回的 `multiple_testing` 块包含 deflated Sharpe 与 `distinguishable_from_luck`。本条要求是把既有实现**应用为门**，不是重新造一个。
@@ -52,6 +52,34 @@ Strategy v2 前向影子证据（248 笔已平仓交易，2026-07-14 至 2026-08
 **T = 独立交易日数，而不是交易笔数**（例如当前是 28 天，不是 276 笔）；
 把同日相关交易当成独立样本会低估 Sharpe 标准误并制造虚假置信度
 （Bailey & López de Prado 2014）。本修订不改变冻结 v5 参数与负对照运行。
+
+### 3.2 日聚类临界值的有限样本修正（2026-09-05 修订）
+
+CR1 标准误的渐近依据是**独立交易日簇数 D**，不是交易笔数；固定 `2.0`
+不能代表所有 D 的 95% 临界值。依据 Petersen (2009), *Estimating Standard Errors
+in Finance Panel Data Sets*, Review of Financial Studies 22(1): 435–480，以及
+Cameron, Gelbach & Miller (2011), *Robust Inference with Multiway Clustering*,
+Journal of Business & Economic Statistics 29(2): 238–249，本次将统计诊断默认值与
+晋级 AND #1 明确统一为 **Student-t 双侧 95%（p=0.975），df = D − 1**。
+这是推断口径修正，不声称 Student-t 能消除小簇样本 CR1 的全部偏差。
+
+`DAY_CLUSTER_T95_BY_DF` 是预注册不可变固定表，覆盖 df=1..120（D=2..121），
+保留 12 位小数；D=28 时临界值为 `2.051830516480`，不再使用偏宽松的 `2.0`。
+表由 `math.lgamma`、Lentz 连分式的正则化不完全 beta 函数与 CDF 二分反演生成；
+测试逐项复核，并以 quant-v6 已冻结的 29 项单侧 p=0.90 表及大 df 正态极限
+交叉验证。运行时不引入 SciPy 或数值求根器。越过表范围必须硬报错，禁止静默回退；
+扩表需另一次书面修订。D<2 的诊断仍报告统计量不可用，不伪造置信区间。
+
+API、service 与 domain 的 `t_critical` 缺省均为 `None`，缺省才查表；显式数值
+覆盖仅保留统计诊断的兼容行为。gross/net/clustered 披露实际 `t_critical` 与
+`degrees_of_freedom`；晋级 AND #1 独立查预注册表，不读取查询参数或传入 CI。
+60 天 / 180 个已结算 bracket 下限及 DSR 失败关闭不变。df≥61 时该精确临界值
+略低于旧的 2.0，这是同一固定置信水平的数学结果，不是按观察结果调门槛。
+
+**futility 完全不改。** `DEFAULT_T_CRITICAL = 2.0` 与弃置上界的固定 `2.0·SE`
+继续保留；不得把弃置上界改为 df-aware，也不得让查询参数操纵它来诱导 `FUTILE`。
+这是防止弃置判定被操纵的独立约束，不与晋级共用可调阈值。第 9 节的功效规则仍然
+随 D 变化，本修订不改变其行为。冻结 v5 参数、参数哈希、负对照收集与 P0 边界均不变。
 
 ## 4. 证据时钟（evidence clock）
 

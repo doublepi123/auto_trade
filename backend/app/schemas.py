@@ -2077,6 +2077,8 @@ class SignalEdgeClustered(BaseModel):
     # sqrt(trades/days): how much a per-trade t-statistic overstates significance.
     inflation_factor: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     significant: bool
+    t_critical: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    degrees_of_freedom: int | None = Field(default=None, ge=1)
 
     model_config = ConfigDict(extra="forbid")
 

@@ -68,6 +68,46 @@ class _Base:
 
 
 class TestSignalEdgeApi(_Base):
+    @pytest.mark.parametrize("override", [None, 2.0])
+    def test_omitted_critical_uses_df_table_through_http(self, override: float | None) -> None:
+        # Given: 28 days with t=2.025, distinguishable only by critical-value policy.
+        now = datetime.now(timezone.utc).replace(hour=12, minute=0, second=0)
+        with self.session_factory() as db:
+            db.add(StrategyV2ShadowConfig(
+                symbol="DF.US", enabled=True, stop_loss_pct=0.45, profit_target_pct=0.80,
+            ))
+            db.add(StrategyV2ShadowVersion(
+                symbol="DF.US", config_version="v1", activated_at=now,
+                config_json=json.dumps({"stop_loss_pct": 0.45, "profit_target_pct": 0.80}),
+            ))
+            for index in range(28):
+                exit_at = now - timedelta(days=index + 1)
+                pnl = 2.025 / math.sqrt(27) + (-1.0 if index % 2 else 1.0)
+                db.add(StrategyV2ShadowTrade(
+                    symbol="DF.US", config_version="v1", status="CLOSED",
+                    entry_at=exit_at - timedelta(minutes=30), exit_at=exit_at,
+                    entry_price=100.0, quantity=1.0, gross_pnl=pnl, net_pnl=pnl,
+                    exit_reason="PROFIT_TARGET",
+                ))
+            db.commit()
+        params: dict[str, str | float | int] = {
+            "symbol": "DF.US", "min_resolved_trades": 1, "min_distinct_days": 1,
+        }
+        if override is not None:
+            params["t_critical"] = override
+        # When: the real router parses an absent versus explicitly supplied parameter.
+        response = self.client.get("/api/strategy-shadow/signal-edge", params=params)
+        # Then: omission reaches the df-aware domain default; promotion cannot be coerced.
+        assert response.status_code == 200
+        body = SignalEdgeResponse.model_validate_json(response.content)
+        assert body.net.significant is (override is not None)
+        assert body.net.t_critical == pytest.approx(override or 2.051830516480, abs=5e-12)
+        assert body.net.degrees_of_freedom == 27
+        assert body.promotion.net_significant is False
+        assert body.promotion.eligible is False
+        assert body.promotion.required_distinct_days == 60
+        assert body.promotion.required_resolved_brackets == 180
+
     def test_get_exposes_gross_and_net_clustered_statistics(self) -> None:
         # Given: one immutable barrier cohort with distinct gross and net returns.
         now = datetime.now(timezone.utc)
@@ -318,11 +358,11 @@ class TestSignalEdgeEstimator:
         gross = clustered_t_test(gross_observations)
         net = clustered_t_test(net_observations)
 
-        # Then: means and 95% intervals match the known production-shaped figures.
+        # Then: means are unchanged; df=23 gives the corrected two-sided 95% intervals.
         assert (gross.observations, gross.distinct_days) == (232, 24)
         assert math.isclose((gross.naive_mean or 0.0) * 100, -0.57, abs_tol=0.01)
         assert math.isclose((net.naive_mean or 0.0) * 100, -10.57, abs_tol=0.01)
-        assert math.isclose((gross.ci_lower or 0.0) * 100, -5.66, abs_tol=0.02)
-        assert math.isclose((gross.ci_upper or 0.0) * 100, 4.53, abs_tol=0.02)
-        assert math.isclose((net.ci_lower or 0.0) * 100, -15.66, abs_tol=0.02)
-        assert math.isclose((net.ci_upper or 0.0) * 100, -5.48, abs_tol=0.02)
+        assert math.isclose((gross.ci_lower or 0.0) * 100, -5.84, abs_tol=0.02)
+        assert math.isclose((gross.ci_upper or 0.0) * 100, 4.70, abs_tol=0.02)
+        assert math.isclose((net.ci_lower or 0.0) * 100, -15.84, abs_tol=0.02)
+        assert math.isclose((net.ci_upper or 0.0) * 100, -5.30, abs_tol=0.02)

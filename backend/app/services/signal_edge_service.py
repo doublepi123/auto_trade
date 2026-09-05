@@ -60,7 +60,7 @@ class SignalEdgeService:
         stop_pct: float | None = None,
         target_pct: float | None = None,
         alpha: float = DEFAULT_ALPHA,
-        t_critical: float = DEFAULT_T_CRITICAL,
+        t_critical: float | None = None,
         min_resolved_trades: int = DEFAULT_MIN_RESOLVED_TRADES,
         min_distinct_days: int = DEFAULT_MIN_DISTINCT_DAYS,
         now: datetime | None = None,

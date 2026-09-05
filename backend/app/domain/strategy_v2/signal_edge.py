@@ -13,6 +13,7 @@ from app.domain.strategy_v2.clustered_returns import (
     DEFAULT_T_CRITICAL,
     ClusteredTTestResult,
     clustered_t_test,
+    day_cluster_t_critical,
 )
 from app.domain.strategy_v2.futility import (
     FUTILITY_BOUND_CRITICAL_VALUE,
@@ -194,7 +195,7 @@ def assess_promotion(
     net_significant = (
         net.naive_mean is not None
         and net.clustered_standard_error is not None
-        and net.naive_mean - DEFAULT_T_CRITICAL * net.clustered_standard_error > 0
+        and net.naive_mean - day_cluster_t_critical(net.distinct_days) * net.clustered_standard_error > 0
     )
     first_passage_beats_baseline = (
         first_passage.observed_rate is not None

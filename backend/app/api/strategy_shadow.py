@@ -390,7 +390,7 @@ def get_signal_edge(
     stop_pct: float | None = Query(default=None, gt=0, le=100),
     target_pct: float | None = Query(default=None, gt=0, le=100),
     alpha: float = Query(default=DEFAULT_ALPHA, gt=0, lt=1),
-    t_critical: float = Query(default=DEFAULT_T_CRITICAL, gt=0, le=10),
+    t_critical: float | None = Query(default=None, gt=0, le=10),
     min_resolved_trades: int = Query(default=DEFAULT_MIN_RESOLVED_TRADES, ge=1),
     min_distinct_days: int = Query(default=DEFAULT_MIN_DISTINCT_DAYS, ge=1),
     db: Session = Depends(get_db),
