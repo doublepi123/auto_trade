@@ -2034,6 +2034,9 @@ class SignalEdgeFirstPassage(BaseModel):
     matched_versions: int = Field(ge=0)
     matched_trades: int = Field(ge=0)
     provenance_excluded_trades: int = Field(ge=0)
+    # Subset of provenance exclusions: parsed snapshots with a different or
+    # absent algorithm version, across all closed exit types in the window.
+    algorithm_mismatch_excluded_trades: int = Field(default=0, ge=0)
     missing_pnl_excluded: int = Field(ge=0)
     # Trades exiting on the TIME barrier carry no first-passage outcome and are
     # conditioned out of `resolved`. Disclosed here with the floor/ceiling the

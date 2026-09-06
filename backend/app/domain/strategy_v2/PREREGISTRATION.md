@@ -89,6 +89,24 @@ API、service 与 domain 的 `t_critical` 缺省均为 `None`，缺省才查表�
 - 机制保障：`backend/tests/test_strategy_v2_preregistration.py` 对冻结的 v5 参数集计算规范化 SHA-256，并与记录常量 `f6b76a03dea9ad4b2513bd6e171bc2070db18eee67bd895de0683edde19061db` 比对。**任何参数变更都会让 CI 失败**，强制一次刻意的书面决定：要么回退，要么先注册新假设、分配新 `algorithm_version` / `config_version`，再在同一提交里更新哈希与本文件。绝不允许为了消红而改哈希。
 - 哈希字段范围（显式枚举，详见测试模块 docstring）：`algorithm_version`、`CAUSAL_ENTRY_FILL_OFFSET_BARS`、入场门（zscore 窗口与阈值、ADX、realized-vol、`residual_sigma_min`、`arm_ttl_bars`）、bracket 与时段出场（`stop_loss_pct` / `profit_target_pct` 的美国种子值、`max_holding_minutes`、entry cutoff、flatten window、`max_entries_per_day`、`entry_cooldown_minutes`、`settlement_grace_seconds`、`virtual_quantity`）、成本模型（`slippage_bps`、`estimated_fee_rate_us/hk`、`DEFAULT_EDGE_SAFETY_BUFFER_BPS`、`min_net_reward_risk_ratio`）。显式排除：`enabled` 等运行开关（不改变信号语义）、`symbol`（身份）、`updated_at`（易变）、challenger 与 review 阈值常量（属于别的假设与评估政策，不属于被冻结的 v5 信号）。
 
+### 4.1 单标的证据来源的实现纠错（2026-09-06）
+
+既有 `signal-edge` 单标的路径在传入 `symbol` 时关闭了 `algorithm_version`
+过滤，导致已弃用算法版本的交易只要 stop/target 相同，就被并入当前 cohort；
+这违反本节的证据时钟约束。v4 与 v5 **确实共用 0.45 / 0.80 屏障**，因此
+屏障相等从来不足以证明算法来源相同，不能代替版本归属检查。
+
+现删除可关闭检查的布尔参数，所有路径均无条件要求不可变版本快照中的
+`algorithm_version` 等于当前 `_ALGORITHM_VERSION`；缺失或不同均不进入 cohort。
+`first_passage.algorithm_mismatch_excluded_trades` 披露查询窗口内因此排除的
+已平仓交易数（含时间出场），是既有 `provenance_excluded_trades` 的子集；
+无法解析的快照仍按既有来源不足规则排除，不伪称已识别算法版本。
+
+这是**移除污染，不是重置或重定证据基线**：不丢弃任何合法 v5 交易，不改变
+冻结参数或参数 SHA-256。跨标的默认路径此前已执行该检查，其既有统计读数不变；
+单标的读数缩小到真实当前版本证据。AND #4 继续失败关闭，冻结 v5 继续作为
+不可认证的负对照；不改晋级、弃置、日聚类临界值与 P0 边界。
+
 ## 5. 负对照条款（negative control）
 
 当前 v5 参数**原样继续运行，一行不动**。它就是负对照：如果未来某条流水线把 v5 认证为「有 edge」，**坏的是流水线，不是策略**。届时先怀疑评估代码、显著性口径与多重检验校正，再谈策略。

@@ -88,6 +88,7 @@ class FirstPassageResult:
     matched_versions: int = 0
     matched_trades: int = 0
     provenance_excluded_trades: int = 0
+    algorithm_mismatch_excluded_trades: int = 0
     missing_pnl_excluded: int = 0
     # The first-passage test conditions on price-barrier resolution, so trades
     # exiting on the TIME barrier leave the denominator. The statistic stays
@@ -111,6 +112,7 @@ def assess_first_passage(
     matched_versions: int = 0,
     matched_trades: int = 0,
     provenance_excluded_trades: int = 0,
+    algorithm_mismatch_excluded_trades: int = 0,
     missing_pnl_excluded: int = 0,
     time_exit_excluded: int = 0,
 ) -> FirstPassageResult:
@@ -122,6 +124,7 @@ def assess_first_passage(
         matched_versions,
         matched_trades,
         provenance_excluded_trades,
+        algorithm_mismatch_excluded_trades,
         missing_pnl_excluded,
         time_exit_excluded,
     )
@@ -142,6 +145,7 @@ def assess_first_passage(
         "matched_versions": matched_versions,
         "matched_trades": matched_trades,
         "provenance_excluded_trades": provenance_excluded_trades,
+        "algorithm_mismatch_excluded_trades": algorithm_mismatch_excluded_trades,
         "missing_pnl_excluded": missing_pnl_excluded,
         "time_exit_excluded": time_exit_excluded,
         "time_exit_fraction": (

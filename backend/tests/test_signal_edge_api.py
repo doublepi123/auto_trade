@@ -78,7 +78,8 @@ class TestSignalEdgeApi(_Base):
             ))
             db.add(StrategyV2ShadowVersion(
                 symbol="DF.US", config_version="v1", activated_at=now,
-                config_json=json.dumps({"stop_loss_pct": 0.45, "profit_target_pct": 0.80}),
+                config_json=json.dumps({"stop_loss_pct": 0.45, "profit_target_pct": 0.80,
+                                        "algorithm_version": "strategy-v2-rth-mr-v5-causal-entry"}),
             ))
             for index in range(28):
                 exit_at = now - timedelta(days=index + 1)
@@ -122,6 +123,7 @@ class TestSignalEdgeApi(_Base):
                 symbol="API.US",
                 config_version="v1",
                 config_json=json.dumps({
+                    "algorithm_version": "strategy-v2-rth-mr-v5-causal-entry",
                     "stop_loss_pct": 0.45,
                     "profit_target_pct": 0.80,
                 }),
@@ -282,6 +284,7 @@ class TestSignalEdgeApi(_Base):
                 symbol="COND.US",
                 config_version="v1",
                 config_json=json.dumps({
+                    "algorithm_version": "strategy-v2-rth-mr-v5-causal-entry",
                     "stop_loss_pct": 0.45,
                     "profit_target_pct": 0.80,
                 }),

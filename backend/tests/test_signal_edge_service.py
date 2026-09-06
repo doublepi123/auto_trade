@@ -60,7 +60,8 @@ class _Base:
             symbol=symbol,
             config_version="v1",
             config_json=json.dumps(
-                {"stop_loss_pct": stop, "profit_target_pct": target}
+                {"stop_loss_pct": stop, "profit_target_pct": target,
+                 "algorithm_version": "strategy-v2-rth-mr-v5-causal-entry"}
             ),
             activated_at=datetime.now(timezone.utc),
         ))
@@ -302,7 +303,8 @@ class TestSignalEdgeService(_Base):
             symbol="MIX.US",
             config_version="v2",
             config_json=json.dumps(
-                {"stop_loss_pct": 0.90, "profit_target_pct": 1.60}
+                {"stop_loss_pct": 0.90, "profit_target_pct": 1.60,
+                 "algorithm_version": "strategy-v2-rth-mr-v5-causal-entry"}
             ),
             activated_at=datetime.now(timezone.utc),
         ))

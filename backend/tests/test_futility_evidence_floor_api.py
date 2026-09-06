@@ -39,7 +39,8 @@ def test_http_query_cannot_induce_futile(
         ))
         db.add(StrategyV2ShadowVersion(
             symbol="FLOOR.US", config_version="v1", activated_at=now,
-            config_json=json.dumps({"stop_loss_pct": 0.45, "profit_target_pct": 0.80}),
+            config_json=json.dumps({"stop_loss_pct": 0.45, "profit_target_pct": 0.80,
+                                    "algorithm_version": "strategy-v2-rth-mr-v5-causal-entry"}),
         ))
         for index in range(54):
             day = index // 3

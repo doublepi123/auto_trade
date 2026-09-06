@@ -73,10 +73,9 @@ class SignalEdgeService:
         resolved_stop, resolved_target = self._barriers(
             normalized, stop_pct, target_pct
         )
-        matching_versions = self._matching_barrier_versions(
+        matching_versions, algorithm_mismatches = self._matching_barrier_versions(
             normalized,
             (resolved_stop, resolved_target),
-            current_algorithm_only=normalized is None,
         )
 
         cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=lookback_days)
@@ -103,6 +102,7 @@ class SignalEdgeService:
         barrier_mismatch_excluded = 0
         matched_trades = 0
         provenance_excluded_trades = 0
+        algorithm_mismatch_excluded_trades = 0
         missing_pnl_excluded = 0
         gross_observations: list[tuple[date, float]] = []
         net_observations: list[tuple[date, float]] = []
@@ -118,6 +118,8 @@ class SignalEdgeService:
         ) in self._db.execute(query).all():
             if (str(trade_symbol), str(config_version)) not in matching_versions:
                 provenance_excluded_trades += 1
+                if (str(trade_symbol), str(config_version)) in algorithm_mismatches:
+                    algorithm_mismatch_excluded_trades += 1
                 if exit_reason == EXIT_TARGET or exit_reason == EXIT_STOP:
                     barrier_mismatch_excluded += 1
                 continue
@@ -161,6 +163,7 @@ class SignalEdgeService:
             matched_versions=len(matching_versions),
             matched_trades=matched_trades,
             provenance_excluded_trades=provenance_excluded_trades,
+            algorithm_mismatch_excluded_trades=algorithm_mismatch_excluded_trades,
             missing_pnl_excluded=missing_pnl_excluded,
             time_exit_excluded=time_exit_excluded,
         )
@@ -179,9 +182,7 @@ class SignalEdgeService:
         self,
         symbol: str | None,
         barriers: tuple[float, float],
-        *,
-        current_algorithm_only: bool,
-    ) -> frozenset[tuple[str, str]]:
+    ) -> tuple[frozenset[tuple[str, str]], frozenset[tuple[str, str]]]:
         # Historical attribution must come from immutable version snapshots.
         # Falling back to mutable current config could attribute barriers to a
         # trade that never used them; missing snapshots stay excluded and reported.
@@ -195,15 +196,14 @@ class SignalEdgeService:
 
         stop_pct, target_pct = barriers
         matching: set[tuple[str, str]] = set()
+        algorithm_mismatches: set[tuple[str, str]] = set()
         for row_symbol, config_version, config_json in self._db.execute(query).all():
             try:
                 snapshot = _BarrierSnapshot.model_validate_json(config_json)
             except ValidationError:
                 continue
-            if (
-                current_algorithm_only
-                and snapshot.algorithm_version != _ALGORITHM_VERSION
-            ):
+            if snapshot.algorithm_version != _ALGORITHM_VERSION:
+                algorithm_mismatches.add((str(row_symbol), str(config_version)))
                 continue
             if math.isclose(
                 snapshot.stop_loss_pct,
@@ -217,7 +217,7 @@ class SignalEdgeService:
                 abs_tol=1e-12,
             ):
                 matching.add((str(row_symbol), str(config_version)))
-        return frozenset(matching)
+        return frozenset(matching), frozenset(algorithm_mismatches)
 
     def _barriers(
         self,
