@@ -40,6 +40,37 @@ Inline classes, `_Fake` prefix, named for the collaborator, hand-written and min
 Adding a `Settings` field is a four-part change: `config.py` + both compose files + `.env.example` + an assertion here.
 
 ## COMMANDS
+
+### Parallel Scheduling
+
+`pytest.ini` supplies `-n 4 --dist loadgroup`. `conftest.py` is the source of
+truth for module groups, audited test-level parallelism, and realtime exclusions.
+Keep `RELIABILITY_DB_GROUP` together. Only modules in `TEST_LEVEL_SAFE_MODULES`
+may distribute individual tests; expanding that set requires an isolation audit
+and repeated validation alongside other modules.
+
+For a split full-suite run, execute all four numbered shards (indices 1..4 with
+`AUTO_TRADE_TEST_SHARD_COUNT=4`) and the realtime lane. Keep the total local worker
+budget at 4 initially, rather than launching four 4-worker jobs. Each invocation
+needs a distinct `COVERAGE_FILE`, log, and captured exit code. Finish ordinary
+shards before the realtime lane on a shared machine. Follow the existing CI
+coverage-combine step and enforce 80% only on the complete combined result.
+
+The realtime lane is intentionally serial: these tests spawn compute processes
+and assert wall-clock deadlines. Run from `backend/`:
+
+```bash
+AUTO_TRADE_ENV=test AUTO_TRADE_TEST_REALTIME_ONLY=1 \
+  COVERAGE_FILE=.coverage.shard-realtime \
+  python3 -m pytest tests/ -o addopts= -p no:xdist -v --durations=20 \
+  --cov=app --cov-config=.coveragerc --cov-report=
+```
+
+Clear shard/realtime selection variables before an unsplit full-suite run.
+Use `-v --durations=20` to expose the current slow test. A busy single core can
+be a serial test or a spin loop; profile it before changing scheduling. Do not
+remove deadline assertions or isolation groups just to improve throughput.
+
 ```bash
 cd backend
 python3 -m pytest tests/ -v                 # pytest.ini adds --cov=app --cov-fail-under=80

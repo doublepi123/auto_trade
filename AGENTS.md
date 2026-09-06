@@ -119,6 +119,15 @@ Three god modules dominate: [`runner.py`](file:///home/lcy/code/auto_trade/backe
 
 ## Development Commands
 
+### Parallel Work and Validation
+
+- Run independent investigations, backend/frontend changes, and checks concurrently when their inputs are ready. If subagents are available, delegate bounded tasks with distinct file ownership and a concrete result; keep integration and final validation with one coordinator. Do useful independent work while delegated tasks run.
+- Before editing, assign one writer per file. Use separate worktrees for overlapping changes or pristine baseline comparisons; never reset or stash another agent's work. Tests must run against a stable snapshot, not files another agent is still editing.
+- Backend pytest already defaults to **4 workers with `--dist loadgroup`**. Preserve the groups in `backend/tests/conftest.py`; do not switch to `-n auto`, ungroup modules, or multiply four shards by four workers on this shared host. Start with a total budget of 4 pytest workers across concurrent local runs; increase only after measured runtime and reliability improve with headroom for production and test-spawned processes.
+- Run frontend checks and backend type checking alongside ordinary tests when resources allow. The `WALL_CLOCK_MODULES` realtime lane must remain serial and run without competing heavy validation jobs; low CPU utilization alone does not justify parallelizing it. See `backend/tests/AGENTS.md` for lane commands.
+- Prefer focused tests during iteration, then one complete validation of the final snapshot. For split full-suite runs, include every numbered shard AND the realtime lane, retain every exit code, and combine their isolated coverage files before applying the existing 80% gate. Use identical selection and scheduling for pristine baseline comparisons. Never treat a selected shard as a full-suite pass.
+- Long test runs should use `-v --durations=20` and a separate log per run. If progress stalls, inspect the current test, child processes, CPU and I/O before restarting or adding workers. Profile repeat offenders; do not blindly rerun an unchanged full suite or drop coverage from the final gate to make it faster.
+
 ```bash
 # Backend
 cd backend
