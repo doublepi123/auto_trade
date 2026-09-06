@@ -602,12 +602,30 @@ def quant_v6_session_bars_sha256(
         market=normalized_market,
         session_date=session_date,
     )
+    # Validate and canonicalize before caching: numerically equal Decimals can
+    # have different digit-limit validity. Cache only immutable canonical data.
+    bar_payloads = tuple(
+        tuple(QuantV6Bar.canonical_payload(item).items())
+        for item in normalized_bars
+    )
+    return _canonical_session_bars_sha256(
+        normalized_symbol, normalized_market, session_date.isoformat(), bar_payloads,
+    )
+
+
+@lru_cache(maxsize=512)
+def _canonical_session_bars_sha256(
+    symbol: str,
+    market: str,
+    session_date: str,
+    bar_payloads: tuple[tuple[tuple[str, object], ...], ...],
+) -> str:
     return quant_v6_payload_sha256({
         "bar_minutes": QUANT_V6_BAR_MINUTES,
-        "bars": [QuantV6Bar.canonical_payload(item) for item in normalized_bars],
-        "market": normalized_market,
-        "session_date": session_date.isoformat(),
-        "symbol": normalized_symbol,
+        "bars": [dict(items) for items in bar_payloads],
+        "market": market,
+        "session_date": session_date,
+        "symbol": symbol,
     })
 
 

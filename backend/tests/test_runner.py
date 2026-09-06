@@ -2677,8 +2677,8 @@ class TestAppRunner:
         def blocked_advance() -> None:
             if threading.current_thread() is threads.get("invalidation"):
                 invalidation_holds_guard.set()
-                if not release_invalidation.wait(2):
-                    raise AssertionError("test did not release runtime invalidation")
+                # The controller owns the deadline and always releases this in finally.
+                release_invalidation.wait()
             original_advance()
 
         monkeypatch.setattr(
@@ -2723,19 +2723,24 @@ class TestAppRunner:
 
         threads["invalidation"] = threading.Thread(target=invalidate_runtime)
         threads["invalidation"].start()
-        assert invalidation_holds_guard.wait(2)
-        threads["execution"] = threading.Thread(target=execute)
-        threads["execution"].start()
-        assert final_proof_attempted.wait(2)
-        assert broker.submissions == 0
-        release_invalidation.set()
-        threads["execution"].join(timeout=3)
-        threads["invalidation"].join(timeout=3)
+        try:
+            assert invalidation_holds_guard.wait(2)
+            threads["execution"] = threading.Thread(target=execute)
+            threads["execution"].start()
+            assert final_proof_attempted.wait(2)
+            assert broker.submissions == 0
+        finally:
+            release_invalidation.set()
+            for thread in threads.values():
+                if thread.ident is not None:
+                    thread.join(timeout=3)
 
         assert threads["execution"].is_alive() is False
         assert threads["invalidation"].is_alive() is False
-        assert "error" not in execution_result
-        assert "error" not in invalidation_result
+        for result in (execution_result, invalidation_result):
+            error = result.get("error")
+            if isinstance(error, BaseException):
+                raise error
         status = execution_result.get("status")
         assert isinstance(status, OrderStatus)
         assert status.status == "SKIPPED"

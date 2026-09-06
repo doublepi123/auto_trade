@@ -3045,6 +3045,9 @@ class AppRunner:
                 notify_risk_event=self.notifier.notify_risk_event,
                 reduce_only=decision.reduce_only,
                 execution_context=ledger_context,
+                is_funnel_primary=self._is_primary_symbol(
+                    decision.trigger_symbol or quote.symbol
+                ),
             )
             is_funnel_primary = self._is_primary_symbol(
                 decision.trigger_symbol or quote.symbol
@@ -3060,17 +3063,14 @@ class AppRunner:
                     restore_engine_state_preserve_trigger(engine_snapshot)
             elif order_status.status in {"REJECTED", "CANCELLED"}:
                 if is_funnel_primary:
-                    # Funnel stages 6+7: sizing provably passed and the order
-                    # reached the broker, which rejected it (no ack).
-                    self.decision_funnel.record_sized_quantity_positive()
+                    # Funnel stage 7: the broker rejected/cancelled the order.
                     self.decision_funnel.record_submit_attempt()
                 self._set_last_action_message(f"{result.action} ended with status {order_status.status}")
                 if engine_snapshot is not None:
                     restore_engine_snapshot(engine_snapshot)
             else:
                 if is_funnel_primary:
-                    # Funnel stages 6+7+8: sized, submitted, broker acked.
-                    self.decision_funnel.record_sized_quantity_positive()
+                    # Funnel stages 7+8: submitted and broker acked.
                     self.decision_funnel.record_submit_attempt()
                     self.decision_funnel.record_broker_ack()
                 order_id = order_status.broker_order_id or "-"

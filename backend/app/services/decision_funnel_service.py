@@ -12,16 +12,15 @@ The counters form a monotone funnel over the primary symbol's live path:
    POSITION | SESSION``); unknown categories are ignored, never invented
 5. ``triggers`` — an entry/exit trigger fired and survived the pre-trigger
    risk veto
-6. ``sized_quantity_positive`` — sizing provably returned a quantity > 0
-   (observed runner-side: the order reached broker submission; a precise
-   in-service sizing probe is a planned follow-up hook)
+6. ``sized_quantity_positive`` — entry or exit sizing returned a quantity > 0,
+   recorded once in the execution service before later fee/risk vetoes,
+   only for the runner's current primary symbol
 7. ``submit_attempts`` — an order submission was attempted against the broker
 8. ``broker_acks`` — the broker acknowledged the order
 9. ``persisted`` — the order was persisted locally (new order row committed)
 
-``pre_submit_risk_check_invocations`` is reserved: always present, expected
-to remain 0 until a later task introduces a mandatory pre-submit risk
-boundary and wires this as its live probe.
+``pre_submit_risk_check_invocations`` counts mandatory boundary invocations
+in the execution service (unlike stage 6, it is not primary-symbol gated).
 
 Interpretation contract (read the counters in order, first zero indicts):
 - ``primary_quotes_seen == 0`` → no quote reached the primary path at all.
@@ -35,10 +34,11 @@ Interpretation contract (read the counters in order, first zero indicts):
   withheld for want of fresh crossing evidence, not for want of a signal.
 - crossings occur but skips dominate → the indicted stage is the dominant
   skip category.
-- triggers fire but ``sized_quantity_positive == 0`` → sizing/capital (see
-  the dominant skip category, typically POSITION/FEE).
-- sizing positive but ``submit_attempts == 0`` or ``broker_acks == 0`` → the
-  broker path.
+- triggers fire but ``sized_quantity_positive == 0`` → execution stopped before
+  positive sizing: inspect pre-sizing skips; a zero quantity is POSITION.
+- sizing positive but ``submit_attempts == 0`` → inspect post-sizing FEE/RISK
+  or final precheck skips; sizing/capital already passed.
+- submit attempts occur but ``broker_acks == 0`` → the broker path.
 - acks occur but ``persisted == 0`` → the known persistence defect.
 
 Counters reset per trading session (exchange-local trading day, via the

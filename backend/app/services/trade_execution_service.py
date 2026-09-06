@@ -268,6 +268,8 @@ _FinalProtectiveExitCommitCheck = _FinalProtectiveExitCheck
 class _PreSubmitRiskCheckRecorder(Protocol):
     def record_pre_submit_risk_check(self) -> None: ...
 
+    def record_sized_quantity_positive(self) -> None: ...
+
 
 class _TerminalCallbackStore(Protocol):
     def claim(self, broker_order_id: str, terminal_status: str) -> bool: ...
@@ -804,6 +806,7 @@ class TradeExecutionService:
         notify_risk_event: _NotifyRiskEvent | None = None,
         reduce_only: bool = False,
         execution_context: Mapping[str, object] | None = None,
+        is_funnel_primary: bool = False,
         entry_policy_check: EntryPolicyCheck | None = None,
         allow_opening_warmup_entry: bool = False,
     ) -> OrderStatus | None:
@@ -841,6 +844,7 @@ class TradeExecutionService:
                     restore_engine_snapshot=restore_engine_snapshot,
                     notify_risk_event=notify_risk_event,
                     reduce_only=reduce_only,
+                    is_funnel_primary=is_funnel_primary,
                     entry_policy_check=entry_policy_check,
                     allow_opening_warmup_entry=(
                         allow_opening_warmup_entry
@@ -872,6 +876,7 @@ class TradeExecutionService:
         reduce_only: bool = False,
         entry_policy_check: EntryPolicyCheck | None = None,
         allow_opening_warmup_entry: bool = False,
+        is_funnel_primary: bool = False,
     ) -> OrderStatus | None:
         if reduce_only and action not in _POSITION_REDUCING_ACTIONS:
             return self._skip_order(
@@ -1025,6 +1030,7 @@ class TradeExecutionService:
                 notify_risk_event=notify_risk_event,
                 final_entry_policy_check=entry_policy_check,
                 market=market,
+                is_funnel_primary=is_funnel_primary,
             )
         if action == "SELL":
             return self._execute_sell(
@@ -1041,6 +1047,7 @@ class TradeExecutionService:
                 restore_engine_snapshot=restore_engine_snapshot,
                 notify_risk_event=notify_risk_event,
                 reduce_only=reduce_only,
+                is_funnel_primary=is_funnel_primary,
             )
         if action == "SELL_SHORT":
             return self._execute_sell_short(
@@ -1055,6 +1062,7 @@ class TradeExecutionService:
                 notify_risk_event=notify_risk_event,
                 final_entry_policy_check=entry_policy_check,
                 market=market,
+                is_funnel_primary=is_funnel_primary,
             )
         if action == "BUY_TO_COVER":
             return self._execute_buy_to_cover(
@@ -1071,6 +1079,7 @@ class TradeExecutionService:
                 restore_engine_snapshot=restore_engine_snapshot,
                 notify_risk_event=notify_risk_event,
                 reduce_only=reduce_only,
+                is_funnel_primary=is_funnel_primary,
             )
         logger.warning("unknown action: %s", action)
         return None
@@ -1863,6 +1872,11 @@ class TradeExecutionService:
             return Decimal("0")
         return min(position_quantity, available_quantity)
 
+    def _record_positive_sizing(self, is_funnel_primary: bool) -> None:
+        """Observe sizing without acquiring runner locks inside execution."""
+        if self.decision_funnel is not None and is_funnel_primary:
+            self.decision_funnel.record_sized_quantity_positive()
+
     def _execute_buy(
         self,
         symbol: str,
@@ -1880,6 +1894,7 @@ class TradeExecutionService:
         notify_risk_event: _NotifyRiskEvent | None = None,
         final_entry_policy_check: EntryPolicyCheck | None = None,
         market: str = "US",
+        is_funnel_primary: bool = False,
     ) -> OrderStatus | None:
         price = self._normalize_limit_price(symbol, "BUY", Decimal(str(quote.last_price)))
         if price <= 0:
@@ -1893,6 +1908,7 @@ class TradeExecutionService:
                 "entry quantity is zero after buying-power and position checks",
                 skip_category="POSITION",
             )
+        self._record_positive_sizing(is_funnel_primary)
         entry_guard = self._profit_guard_for_entry(
             symbol=symbol,
             entry_price=price,
@@ -1979,6 +1995,7 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
         reduce_only: bool = False,
+        is_funnel_primary: bool = False,
     ) -> OrderStatus | None:
         positions = broker.get_positions()
         long_pos = next((p for p in positions if p.symbol == symbol and p.side == "LONG"), None)
@@ -1990,6 +2007,7 @@ class TradeExecutionService:
             logger.warning("SELL: no available long quantity for %s", symbol)
             return self._skip_order(symbol, "SELL", f"no available long quantity for {symbol}", skip_category="POSITION")
 
+        self._record_positive_sizing(is_funnel_primary)
         price = self._normalize_limit_price(symbol, "SELL", Decimal(str(quote.last_price)))
         if price <= 0:
             logger.warning("SELL: price <= 0, price=%s", price)
@@ -2109,6 +2127,7 @@ class TradeExecutionService:
         notify_risk_event: _NotifyRiskEvent | None = None,
         final_entry_policy_check: EntryPolicyCheck | None = None,
         market: str = "US",
+        is_funnel_primary: bool = False,
     ) -> OrderStatus | None:
         price = self._normalize_limit_price(symbol, "SELL_SHORT", Decimal(str(quote.last_price)))
         if price <= 0:
@@ -2124,6 +2143,7 @@ class TradeExecutionService:
                 skip_category="POSITION",
             )
 
+        self._record_positive_sizing(is_funnel_primary)
         order_status = self._submit_limit_order(
             "SELL_SHORT",
             symbol,
@@ -2192,6 +2212,7 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
         reduce_only: bool = False,
+        is_funnel_primary: bool = False,
     ) -> OrderStatus | None:
         positions = broker.get_positions()
         pos = next((p for p in positions if p.symbol == symbol and p.side == "SHORT" and p.quantity > 0), None)
@@ -2203,6 +2224,7 @@ class TradeExecutionService:
             logger.warning("BUY_TO_COVER: no available short quantity for %s", symbol)
             return self._skip_order(symbol, "BUY_TO_COVER", f"no available short quantity for {symbol}", skip_category="POSITION")
 
+        self._record_positive_sizing(is_funnel_primary)
         price = self._normalize_limit_price(symbol, "BUY_TO_COVER", Decimal(str(quote.last_price)))
         if price <= 0:
             logger.warning("BUY_TO_COVER: price <= 0, price=%s", price)

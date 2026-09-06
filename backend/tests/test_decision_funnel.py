@@ -90,6 +90,7 @@ class TestDecisionFunnelPipeline:
 
         def _fake_execute(*, action, symbol, quote, **_kwargs):
             submissions.append(action)
+            runner.decision_funnel.record_sized_quantity_positive()
             runner._record_order(
                 "FUNNEL-ORDER-1",
                 symbol,
