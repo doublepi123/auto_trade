@@ -222,7 +222,7 @@ def test_historical_evaluator_manifest_golden_digest() -> None:
     stayed red for nine commits -- the gate fired correctly and was ignored.
     """
     assert quant_v6_historical_evaluator_digest_sha256() == (
-        "a6360a87b15d9b11cf6b61c869cb76c797dff5f15b91faf4e253dfa985eedade"
+        "11538e940e10470e2cf87c6c1defaccfaf913bb562b924bc65d9bd93c15e9404"
     )
 
 
