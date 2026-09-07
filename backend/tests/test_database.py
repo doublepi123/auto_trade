@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Iterator
 from datetime import date
 
 import pytest
@@ -17,6 +18,22 @@ from app.models import (
     UniverseSelectionCandidate,
     UniverseSelectionRun,
 )
+
+
+@pytest.fixture(autouse=True)
+def _restore_database_module() -> Iterator[None]:
+    """Keep reloads local, including class identities held by existing importers."""
+    original_state = database.__dict__.copy()
+    original_engine = database.engine
+    try:
+        yield
+    finally:
+        try:
+            if database.engine is not original_engine:
+                database.engine.dispose()
+        finally:
+            database.__dict__.clear()
+            database.__dict__.update(original_state)
 
 
 def test_init_db_adds_missing_order_execution_columns(tmp_path, monkeypatch) -> None:
