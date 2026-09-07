@@ -17,6 +17,20 @@ _ONE_HOUR_SECONDS: Final = 3_600.0
 
 
 @dataclass(frozen=True, slots=True)
+class IncidentEventTypes:
+    opened: str
+    reminder: str
+    recovered: str
+
+
+DEFAULT_INCIDENT_EVENT_TYPES: Final = IncidentEventTypes(
+    "TRACKED_ENTRY_RECOVERY_FAILED",
+    "TRACKED_ENTRY_RECOVERY_REMINDER",
+    "TRACKED_ENTRY_RECOVERY_RECOVERED",
+)
+
+
+@dataclass(frozen=True, slots=True)
 class ReconciliationFailure:
     source: str
     category: str
@@ -24,6 +38,7 @@ class ReconciliationFailure:
     message: str
     error_type: str
     diagnostics: PositionProbeDiagnostics | None = None
+    event_types: IncidentEventTypes = DEFAULT_INCIDENT_EVENT_TYPES
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,7 +95,7 @@ class ReconciliationIncidentService:
             )
             incident.recovered_at = None
             self._apply_failure_details(incident, failure)
-            self._record_alert_event(db, incident, event_type="TRACKED_ENTRY_RECOVERY_FAILED")
+            self._record_alert_event(db, incident, event_type=failure.event_types.opened)
             return ReconciliationIncidentResult(True, 1)
 
         incident.occurrence_count += 1
@@ -98,7 +113,7 @@ class ReconciliationIncidentService:
         self._record_alert_event(
             db,
             incident,
-            event_type="TRACKED_ENTRY_RECOVERY_REMINDER",
+            event_type=failure.event_types.reminder,
         )
         return ReconciliationIncidentResult(True, incident.occurrence_count)
 
@@ -109,6 +124,8 @@ class ReconciliationIncidentService:
         source: str,
         category: str,
         now: datetime | None = None,
+        event_types: IncidentEventTypes = DEFAULT_INCIDENT_EVENT_TYPES,
+        message_template: str = "broker position reconciliation recovered for {symbols} after {count} failed probes",
     ) -> tuple[ReconciliationRecovery, ...]:
         observed_at = now or datetime.now(timezone.utc)
         incidents = db.query(ReconciliationIncident).filter_by(
@@ -121,14 +138,12 @@ class ReconciliationIncidentService:
             incident.recovered_at = observed_at
             incident.last_seen_at = observed_at
             symbols = json.loads(incident.symbols_json)
-            message = (
-                "broker position reconciliation recovered for "
-                f"{', '.join(symbols)} after "
-                f"{incident.occurrence_count} failed probes"
+            message = message_template.format(
+                symbols=", ".join(symbols), count=incident.occurrence_count
             )
             record_trade_event(
                 db,
-                event_type="TRACKED_ENTRY_RECOVERY_RECOVERED",
+                event_type=event_types.recovered,
                 status="RECOVERED",
                 message=message,
                 payload={
@@ -145,6 +160,17 @@ class ReconciliationIncidentService:
                 ReconciliationRecovery(message, incident.occurrence_count)
             )
         return tuple(recoveries)
+
+    def open_symbols(self, db: Session, *, source: str, category: str) -> tuple[str, ...]:
+        incidents = db.query(ReconciliationIncident).filter_by(
+            source=source.strip().lower(),
+            failure_category=category.strip().upper(),
+            recovered_at=None,
+        ).all()
+        symbols: set[str] = set()
+        for incident in incidents:
+            symbols.update(json.loads(incident.symbols_json))
+        return tuple(sorted(symbols))
 
     def _next_alert_at(
         self,

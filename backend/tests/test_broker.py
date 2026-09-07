@@ -3025,3 +3025,89 @@ class TestOrderStatusResult:
         )
         assert result.executed_quantity == Decimal("10")
         assert result.executed_price == Decimal("150")
+
+
+class TestBoardLotStaticInfo:
+    @pytest.mark.parametrize("count", [0, 2, 500, 501, 1001])
+    def test_returns_lots_in_sdk_sized_chunks(self, count: int) -> None:
+        # Given
+        class _FakeStaticInfo:
+            def __init__(self, symbol: str) -> None:
+                self.symbol = symbol
+                self.lot_size = "500" if symbol.endswith(".HK") else "1"
+
+        class _FakeQuoteContext:
+            def __init__(self) -> None:
+                self.chunks: list[list[str]] = []
+
+            def static_info(self, symbols: list[str]) -> list[_FakeStaticInfo]:
+                self.chunks.append(list(symbols))
+                return [_FakeStaticInfo(symbol) for symbol in symbols]
+
+        context = _FakeQuoteContext()
+        gateway = BrokerGateway()
+        gateway._quote_ctx = context
+        symbols = [f"{index:04}.HK" for index in range(count)]
+        # When
+        result = gateway.get_lot_sizes(symbols)
+        # Then
+        assert result == dict.fromkeys(symbols, 500)
+        assert context.chunks == [symbols[start:start + 500] for start in range(0, count, 500)]
+
+    def test_uses_quote_retry_budget(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Given
+        class _FakeQuoteContext:
+            calls = 0
+
+            def static_info(self, symbols: list[str]) -> list[object]:
+                self.calls += 1
+                raise ConnectionError("transport unavailable")
+
+        context = _FakeQuoteContext()
+        gateway = BrokerGateway()
+        gateway._quote_ctx = context
+        monkeypatch.setattr(broker_module.settings, "broker_quote_retry_max", 2)
+        monkeypatch.setattr(broker_module.settings, "broker_retry_max", 5)
+        monkeypatch.setattr(broker_module.settings, "broker_retry_base_ms", 7)
+        delays: list[float] = []
+        monkeypatch.setattr(broker_module.time, "sleep", delays.append)
+        # When / Then
+        with pytest.raises(ConnectionError, match="transport unavailable"):
+            gateway.get_lot_sizes(["0700.HK"])
+        assert context.calls == 3
+        assert delays == [0.007, 0.014]
+
+    @pytest.mark.parametrize("lot", [0, -100])
+    def test_rejects_nonpositive_lots(self, lot: int) -> None:
+        # Given
+        class _FakeStaticInfo:
+            symbol = "0700.HK"
+            lot_size = lot
+
+        class _FakeQuoteContext:
+            def static_info(self, symbols: list[str]) -> list[_FakeStaticInfo]:
+                return [_FakeStaticInfo()]
+
+        gateway = BrokerGateway()
+        gateway._quote_ctx = _FakeQuoteContext()
+        # When / Then
+        with pytest.raises(RuntimeError, match="lot"):
+            gateway.get_lot_sizes(["0700.HK"])
+
+    def test_propagates_unknown_symbol_error(self) -> None:
+        # Given
+        class _FakeOpenApiException(Exception):
+            code = 301600
+
+        error = _FakeOpenApiException("unknown symbol")
+
+        class _FakeQuoteContext:
+            def static_info(self, symbols: list[str]) -> list[object]:
+                raise error
+
+        gateway = BrokerGateway()
+        gateway._quote_ctx = _FakeQuoteContext()
+        # When / Then
+        with pytest.raises(_FakeOpenApiException) as caught:
+            gateway.get_lot_sizes(["0700.HK", "UNKNOWN.HK"])
+        assert caught.value is error

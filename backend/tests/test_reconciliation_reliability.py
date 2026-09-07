@@ -267,3 +267,53 @@ def test_successful_reconciliation_emits_one_recovery_and_restores_cadence(
     assert runner._check_reconciliation_gate() is True
     assert runner.risk.check().approved is True
     assert broker.calls == 4, "healthy reconciliation cadence was not restored"
+
+
+def test_custom_incident_event_names_are_persisted() -> None:
+    # Given
+    from app.services import reconciliation_incident_service as incidents
+    _clear_reconciliation_state()
+    service = ReconciliationIncidentService(first_reminder_seconds=300)
+    names = incidents.IncidentEventTypes("LOT_OPENED", "LOT_REMINDER", "LOT_RECOVERED")
+    failure = ReconciliationFailure(
+        source="board_lot", category="RESIDUAL", symbols=("0700.HK",),
+        message="residual lot", error_type="RuntimeError", event_types=names)
+    now = datetime(2026, 9, 8, tzinfo=timezone.utc)
+    # When
+    with database.SessionLocal() as db:
+        service.record_failure(db, failure, now=now)
+        db.flush()
+        service.record_failure(db, failure, now=now + timedelta(seconds=300))
+        service.record_recovery(db, source="board_lot", category="RESIDUAL",
+            event_types=names, message_template="lots recovered: {symbols}; probes={count}",
+            now=now + timedelta(seconds=301))
+        db.flush()
+        events = db.query(TradeEvent).order_by(TradeEvent.id).all()
+        # Then
+        assert [event.event_type for event in events] == ["LOT_OPENED", "LOT_REMINDER", "LOT_RECOVERED"]
+        assert events[-1].message == "lots recovered: 0700.HK; probes=2"
+
+
+def test_open_symbols_unions_only_matching_unrecovered_incidents() -> None:
+    # Given
+    _clear_reconciliation_state()
+    service = ReconciliationIncidentService(first_reminder_seconds=300)
+    with database.SessionLocal() as db:
+        for source, category, symbols, recovered in [
+            ("board_lot", "RESIDUAL", ("0700.HK", "0005.HK"), False),
+            ("board_lot", "RESIDUAL", ("0700.HK", "9988.HK"), False),
+            ("board_lot", "RESIDUAL", ("0011.HK",), True),
+            ("other", "RESIDUAL", ("OTHER.HK",), False),
+            ("board_lot", "OTHER", ("OTHER2.HK",), False),
+        ]:
+            service.record_failure(db, ReconciliationFailure(source, category, symbols, "failed", "RuntimeError"))
+            db.flush()
+            if recovered:
+                row = db.query(ReconciliationIncident).filter_by(symbols_json='["0011.HK"]').one()
+                row.recovered_at = datetime(2026, 9, 8, tzinfo=timezone.utc)
+        db.flush()
+        # When
+        result = service.open_symbols(db, source=" Board_Lot ", category=" residual ")
+        # Then
+        assert result == ("0005.HK", "0700.HK", "9988.HK")
+        assert service.open_symbols(db, source="absent", category="RESIDUAL") == ()

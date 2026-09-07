@@ -1416,6 +1416,30 @@ class BrokerGateway:
             raise ValueError(f"no quote data for {symbol}")
         return quotes[0]
 
+    def get_lot_sizes(self, symbols: list[str]) -> dict[str, int]:
+        lots: dict[str, int] = {}
+        for start in range(0, len(symbols), 500):
+            chunk = symbols[start:start + 500]
+            lots.update(self._call_with_retry(
+                lambda: self._get_lot_sizes_inner(chunk),
+                op="static_info",
+                max_retries=settings.broker_quote_retry_max,
+                base_ms=settings.broker_retry_base_ms,
+            ))
+        return lots
+
+    def _get_lot_sizes_inner(self, symbols: list[str]) -> dict[str, int]:
+        with self._lock:
+            self._init_clients()
+            lots: dict[str, int] = {}
+            for item in self._quote_ctx.static_info(symbols):
+                symbol = str(getattr(item, "symbol"))
+                lot_size = int(getattr(item, "lot_size"))
+                if lot_size < 1:
+                    raise RuntimeError(f"invalid lot size for {symbol}: {lot_size}")
+                lots[symbol] = lot_size
+            return lots
+
     def get_quotes(
         self,
         symbols: list[str],
