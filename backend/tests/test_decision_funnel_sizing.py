@@ -177,3 +177,22 @@ def test_direct_short_sizing_counts_before_mandatory_veto(monkeypatch: pytest.Mo
     assert snapshot.skips_by_category["RISK"] == 1
     assert snapshot.sized_quantity_positive == 1
     assert broker.submissions == []
+
+
+def test_hk_sub_lot_records_positive_raw_sizing_then_position_skip(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core.board_lot import BoardLotResolution
+    # Given
+    runner, broker = _scenario(monkeypatch)
+    symbol = "00005.HK"
+    runner.engine.params.symbol = symbol
+    broker.quantity = Decimal("400")
+    monkeypatch.setattr(runner._trade_svc, "_board_lot_resolver", lambda s: BoardLotResolution(s, 500, "FRESH"))
+    # When
+    status = runner._trade_svc.execute("BUY", symbol, Quote(symbol, 100, 100, 100, ""), broker, runner.risk, runner.notifier, "HKD", market="HK", is_funnel_primary=True)
+    # Then
+    assert status is not None and status.status == "SKIPPED"
+    snapshot = runner.decision_funnel.snapshot()
+    assert snapshot.sized_quantity_positive == 1
+    assert snapshot.skips_by_category["POSITION"] == 1
+    assert snapshot.pre_submit_risk_check_invocations == 0
+    assert broker.submissions == []

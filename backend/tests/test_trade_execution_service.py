@@ -5032,3 +5032,285 @@ class TestFinalReductionPositionIssue:
         assert issue is not None
         assert str(requested) in issue
         assert str(available) in issue
+
+
+class TestHkBoardLotNormalization:
+    @pytest.fixture(autouse=True)
+    def scenario(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.core.board_lot import BoardLotResolution
+        from app.core.broker import BrokerGateway, OrderStatusResult
+
+        class _FakeBoardLotBroker(BrokerGateway):
+            def __init__(self) -> None:
+                self.positions: list[Position] = []
+                self.quantity = Decimal("1250")
+                self.status = "SUBMITTED"
+                self.submissions: list[OrderResult] = []
+
+            def get_positions(self) -> list[Position]:
+                return list(self.positions)
+
+            def estimate_margin_max_quantity(
+                self, symbol: str, side: str, price: Decimal,
+                currency: str | None = None,
+            ) -> Decimal:
+                return self.quantity
+
+            def submit_limit_order(
+                self, symbol: str, side: str, quantity: Decimal, price: Decimal,
+            ) -> OrderResult:
+                result = OrderResult(
+                    f"lot-{len(self.submissions)}", symbol, side, quantity, price,
+                    self.status,
+                )
+                self.submissions.append(result)
+                return result
+
+            def get_order_status(self, order_id: str) -> OrderStatusResult:
+                order = self.submissions[-1]
+                return OrderStatusResult(order_id, self.status, order.quantity, order.price)
+
+        self.symbol = "00005.HK"
+        self.resolution = BoardLotResolution(self.symbol, 500, "FRESH")
+        self.broker = _FakeBoardLotBroker()
+        self.risk = RiskController()
+        self.residuals: list[tuple[str, Decimal, int, Decimal]] = []
+        self.persisted: list[tuple[str, Decimal, Decimal]] = []
+        self.skips: list[str] = []
+        self.service = TradeExecutionService(
+            record_order=lambda *_args: None,
+            update_order_status=lambda *_args: None,
+            record_risk_event=lambda *_args: None,
+            record_order_skipped=lambda _s, _a, _r, payload: self.skips.append(str(payload["skip_category"])),
+            persist_entry=lambda s, q, c: self.persisted.append((s, q, c)),
+            board_lot_resolver=lambda _s: self.resolution,
+            record_board_lot_residual=lambda s, r, l, p: self.residuals.append((s, r, l, p)),
+            margin_safety_factor=1.0,
+            max_position_quantity=10000,
+            max_position_notional=10000000,
+            max_risk_per_trade=100000,
+            stop_loss_pct=1.0,
+            final_order_quote_check=lambda _b, _s, _a, p: FinalOrderQuoteCheckResult(p, bid=p, ask=p),
+        )
+        monkeypatch.setattr(trade_svc_module, "is_trading_hours", lambda _m: True)
+        monkeypatch.setattr(trade_svc_module, "is_opening_warmup", lambda *_args: False)
+        monkeypatch.setattr(trade_svc_module, "is_closing_window", lambda *_args: False)
+
+    def position(self, quantity: str = "1250", side: str = "LONG") -> None:
+        qty = Decimal(quantity)
+        self.broker.positions = [Position(self.symbol, side, qty, Decimal("100"), available_quantity=qty)]
+        self.service.load_tracked_entries({self.symbol: (qty, qty * 100, side, None)})
+
+    def drive(self, action: str, *, price: float = 110, stop: bool = False, minimum: int = 0) -> OrderStatus | None:
+        return self.service.execute(
+            action, self.symbol, Quote(self.symbol, price, price, price, ""),
+            self.broker, self.risk, ServerChanNotifier(""), "HKD", market="HK",
+            min_profit_amount=minimum, allow_loss_exit=stop,
+            reduce_only=action in {"SELL", "BUY_TO_COVER"},
+        )
+
+    def test_entry_floors_to_board_lot(self) -> None:
+        # Given: 1250 shares of raw buying power and a 500-share lot.
+        # When
+        status = self.drive("BUY")
+        # Then
+        assert status is not None and status.status == "SUBMITTED"
+        assert [o.quantity for o in self.broker.submissions] == [Decimal("1000")]
+
+    def test_entry_below_one_lot_is_position_skip(self) -> None:
+        # Given
+        self.broker.quantity = Decimal("400")
+        # When
+        status = self.drive("BUY")
+        # Then
+        assert status is not None and status.status == "SKIPPED"
+        assert self.skips == ["POSITION"]
+        assert self.broker.submissions == []
+
+    def test_exit_floors_and_reports_residual_without_halting(self) -> None:
+        # Given
+        self.position()
+        # When
+        status = self.drive("SELL")
+        # Then
+        assert status is not None and status.status == "SUBMITTED"
+        assert [o.quantity for o in self.broker.submissions] == [Decimal("1000")]
+        assert self.residuals == [(self.symbol, Decimal("250"), 500, Decimal("1250"))]
+        assert not self.risk.paused
+
+    @pytest.mark.parametrize("stop", [False, True])
+    def test_filled_partial_close_preserves_proportional_cost(self, stop: bool) -> None:
+        # Given: profit 10000 on 1000 shares clears 5000; 250 shares would not.
+        self.position()
+        self.broker.status = "FILLED"
+        # When: the losing stop must also clear despite the profit minimum.
+        status = self.drive("SELL", price=90 if stop else 110, stop=stop, minimum=5000)
+        # Then: a fully filled order is not a flat position.
+        assert status is not None and status.status == "FILLED"
+        assert [o.quantity for o in self.broker.submissions] == [Decimal("1000")]
+        assert self.persisted == [(self.symbol, Decimal("250"), Decimal("25000"))]
+        entry = self.service._entry_positions[self.symbol]
+        assert (entry.quantity, entry.cost) == (Decimal("250"), Decimal("25000"))
+
+    def test_exit_below_one_lot_reports_entire_residual(self) -> None:
+        # Given
+        self.position("400")
+        # When
+        status = self.drive("SELL", stop=True)
+        # Then
+        assert status is not None and status.status == "SKIPPED"
+        assert self.skips == ["POSITION"]
+        assert self.broker.submissions == []
+        assert self.residuals == [(self.symbol, Decimal("400"), 500, Decimal("400"))]
+
+    def test_unknown_entry_stops_before_boundary(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.core.board_lot import BoardLotResolution
+        # Given
+        self.resolution = BoardLotResolution.for_unresolved(self.symbol)
+        calls: list[str] = []
+        boundary = self.service.pre_submit_risk_check
+
+        def observe(*args, **kwargs):
+            calls.append("boundary")
+            return boundary(*args, **kwargs)
+
+        monkeypatch.setattr(self.service, "pre_submit_risk_check", observe)
+        # When
+        status = self.drive("BUY")
+        # Then
+        assert status is not None and status.status == "SKIPPED"
+        assert self.skips == ["RISK"]
+        assert calls == []
+        assert self.broker.submissions == []
+
+    def test_unknown_exit_submits_raw_quantity(self) -> None:
+        from app.core.board_lot import BoardLotResolution
+        # Given
+        self.position()
+        self.resolution = BoardLotResolution.for_unresolved(self.symbol)
+        # When
+        status = self.drive("SELL")
+        # Then
+        assert status is not None and status.status == "SUBMITTED"
+        assert [o.quantity for o in self.broker.submissions] == [Decimal("1250")]
+
+    @pytest.mark.parametrize("stale", [False, True])
+    def test_rejected_degraded_exit_waits_for_fresh_lot(self, stale: bool) -> None:
+        from app.core.board_lot import BoardLotResolution
+        # Given: the broker rejected a raw degraded exit in this session.
+        self.position()
+        self.resolution = BoardLotResolution(self.symbol, None, "STALE", 500) if stale else BoardLotResolution.for_unresolved(self.symbol)
+        self.broker.status = "REJECTED"
+        first = self.drive("SELL")
+        assert first is not None and first.status == "REJECTED"
+        # Existing rejection handling pauses; isolate lot retry inhibition.
+        self.risk.resume()
+        # When
+        second = self.drive("SELL")
+        # Then
+        assert second is not None and second.status == "SKIPPED"
+        assert "already rejected this session" in second.reason
+        assert self.skips == ["RISK"]
+        rejected_qty = Decimal("1000" if stale else "1250")
+        assert [o.quantity for o in self.broker.submissions] == [rejected_qty]
+        self.resolution = BoardLotResolution(self.symbol, 500, "FRESH")
+        self.broker.status = "SUBMITTED"
+        refreshed = self.drive("SELL")
+        assert refreshed is not None and refreshed.status == "SUBMITTED"
+        assert [o.quantity for o in self.broker.submissions] == [rejected_qty, Decimal("1000")]
+
+    def test_profit_guard_rejects_profit_only_raw_quantity_could_earn(self) -> None:
+        # Given: 1250 shares would earn 12500, but 1000 earns only 10000.
+        self.position()
+        # When
+        status = self.drive("SELL", minimum=11000)
+        # Then
+        assert status is not None and status.status == "SKIPPED"
+        assert self.skips == ["FEE"]
+        assert self.broker.submissions == []
+
+    @pytest.mark.parametrize("quantity", ["1250", "400"])
+    def test_stale_exit_uses_hint_without_blocking_sub_lot(self, quantity: str) -> None:
+        from app.core.board_lot import BoardLotResolution
+        # Given
+        self.position(quantity)
+        self.resolution = BoardLotResolution(self.symbol, None, "STALE", 500)
+        # When
+        status = self.drive("SELL")
+        # Then
+        assert status is not None and status.status == "SUBMITTED"
+        assert [o.quantity for o in self.broker.submissions] == [Decimal("1000" if quantity == "1250" else "400")]
+
+    def test_stale_entry_is_risk_skip(self) -> None:
+        from app.core.board_lot import BoardLotResolution
+        # Given
+        self.resolution = BoardLotResolution(self.symbol, None, "STALE", 500)
+        # When
+        status = self.drive("BUY")
+        # Then
+        assert status is not None and status.status == "SKIPPED"
+        assert self.skips == ["RISK"]
+        assert self.broker.submissions == []
+
+    @pytest.mark.parametrize("action", ["BUY", "SELL"])
+    def test_resolver_exception_is_treated_as_unknown(self, monkeypatch: pytest.MonkeyPatch, action: str) -> None:
+        from app.core.board_lot import BoardLotResolution
+        # Given
+        def broken(_symbol: str) -> BoardLotResolution:
+            raise RuntimeError("metadata unavailable")
+
+        monkeypatch.setattr(self.service, "_board_lot_resolver", broken)
+        if action == "SELL":
+            self.position()
+        # When
+        status = self.drive(action)
+        # Then
+        assert status is not None
+        assert status.status == ("SKIPPED" if action == "BUY" else "SUBMITTED")
+        assert [o.quantity for o in self.broker.submissions] == ([] if action == "BUY" else [Decimal("1250")])
+
+    @pytest.mark.parametrize("symbol", ["AAPL.US", "00005.HK"])
+    def test_default_construction_keeps_us_lot_one_and_hk_unknown(self, symbol: str) -> None:
+        # Given
+        self.symbol = symbol
+        self.service = TradeExecutionService(
+            record_order=lambda *_args: None,
+            update_order_status=lambda *_args: None,
+            record_risk_event=lambda *_args: None,
+            margin_safety_factor=1.0,
+            max_position_quantity=10000,
+            max_position_notional=10000000,
+            max_risk_per_trade=100000,
+            stop_loss_pct=1.0,
+            final_order_quote_check=lambda _b, _s, _a, p: FinalOrderQuoteCheckResult(p, bid=p, ask=p),
+        )
+        # When
+        status = self.drive("BUY")
+        # Then
+        assert status is not None
+        assert status.status == ("SUBMITTED" if symbol.endswith(".US") else "SKIPPED")
+        assert [o.quantity for o in self.broker.submissions] == ([Decimal("1250")] if symbol.endswith(".US") else [])
+
+    def test_buy_to_cover_uses_same_normalization(self) -> None:
+        # Given
+        self.position(side="SHORT")
+        # When
+        status = self.drive("BUY_TO_COVER", price=90)
+        # Then
+        assert status is not None and status.status == "SUBMITTED"
+        assert [o.quantity for o in self.broker.submissions] == [Decimal("1000")]
+        assert self.residuals == [(self.symbol, Decimal("250"), 500, Decimal("1250"))]
+
+    def test_residual_callback_failure_does_not_block_stop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Given
+        self.position()
+
+        def broken(_s: str, _r: Decimal, _l: int, _p: Decimal) -> None:
+            raise RuntimeError("residual sink unavailable")
+
+        monkeypatch.setattr(self.service, "_record_board_lot_residual", broken)
+        # When
+        status = self.drive("SELL", price=90, stop=True)
+        # Then
+        assert status is not None and status.status == "SUBMITTED"
+        assert [o.quantity for o in self.broker.submissions] == [Decimal("1000")]

@@ -6,12 +6,13 @@ import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace as dataclass_replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from threading import RLock
 from typing import TYPE_CHECKING, Callable, Final, Optional, Protocol, assert_never, cast
 
 from app.config import settings
+from app.core.board_lot import BoardLotResolution, quantize_to_board_lot
 from app.core.fees import (
     estimate_round_trip_fee,
     evaluate_long_round_trip_edge,
@@ -41,6 +42,7 @@ _REDUCTION_AVAILABILITY_LOG_WINDOW_SECONDS = 3600.0
 _REDUCTION_AVAILABILITY_LOG_THROTTLE = RepeatedLogThrottle(
     window_seconds=_REDUCTION_AVAILABILITY_LOG_WINDOW_SECONDS,
 )
+_BOARD_LOT_LOG_THROTTLE = RepeatedLogThrottle(window_seconds=3600.0)
 
 
 class OrderPersistenceError(RuntimeError):
@@ -247,6 +249,21 @@ class ApprovedOrder:
     protective_commit_required: bool = False
 
 
+_BoardLotResolver = Callable[[str], BoardLotResolution]
+_RecordBoardLotResidual = Callable[[str, Decimal, int, Decimal], None]
+
+
+@dataclass(frozen=True, slots=True)
+class _BoardLotNormalization:
+    quantity: Decimal
+    lot_size: int | None
+    lot_source: str
+    residual: Decimal
+    degraded: bool
+    issue: str | None
+    skip_category: str = "POSITION"
+
+
 _EntryPersistCallback = Callable[[str, Decimal, Decimal], None]
 _FillCallback = Callable[[str, str], None]
 _ReductionFillCallback = Callable[[str, str, Decimal], None]
@@ -307,6 +324,9 @@ class TradeExecutionService:
             _FinalProtectiveExitCommitCheck | None
         ) = None,
         terminal_callback_store: _TerminalCallbackStore | None = None,
+        *,
+        board_lot_resolver: _BoardLotResolver | None = None,
+        record_board_lot_residual: _RecordBoardLotResidual | None = None,
     ) -> None:
         self._record_order = record_order
         self._update_order_status = update_order_status
@@ -339,6 +359,9 @@ class TradeExecutionService:
             final_protective_exit_commit_check
         )
         self._terminal_callback_store = terminal_callback_store
+        self._board_lot_resolver = board_lot_resolver
+        self._record_board_lot_residual = record_board_lot_residual
+        self._degraded_lot_rejections: dict[str, tuple[Decimal, date]] = {}
         self._state_lock = RLock()
         self._submission_lock = RLock()
         self._pending_orders: dict[str, _PendingOrder] = {}
@@ -1877,6 +1900,87 @@ class TradeExecutionService:
         if self.decision_funnel is not None and is_funnel_primary:
             self.decision_funnel.record_sized_quantity_positive()
 
+    def _normalize_board_lot_quantity(
+        self, symbol: str, action: str, raw_quantity: Decimal,
+    ) -> _BoardLotNormalization:
+        """Require fresh lots for exposure, but preserve proven reductions."""
+        is_entry = action in _ENTRY_ACTIONS
+        day = trade_day_for("HK")
+        try:
+            resolution = (
+                BoardLotResolution.for_unresolved(symbol)
+                if self._board_lot_resolver is None
+                else self._board_lot_resolver(symbol)
+            )
+        except Exception:
+            if _BOARD_LOT_LOG_THROTTLE.should_log(f"resolve:{symbol}"):
+                logger.warning(
+                    "board lot resolution failed for %s; treating as unknown (suppressed=%d)",
+                    symbol, _BOARD_LOT_LOG_THROTTLE.take_suppressed_count(),
+                    exc_info=True,
+                )
+            resolution = BoardLotResolution(symbol, None, "UNKNOWN")
+
+        quantity = raw_quantity
+        lot_size = resolution.lot_size
+        degraded = False
+        issue: str | None = None
+        skip_category = "POSITION"
+        match resolution.source:
+            case "FRESH":
+                assert lot_size is not None
+                quantity = quantize_to_board_lot(raw_quantity, lot_size)
+                if quantity == 0:
+                    issue = (
+                        f"entry quantity {raw_quantity} is below one board lot of {lot_size} for {symbol}"
+                        if is_entry else
+                        f"exit quantity {raw_quantity} is below one board lot of {lot_size} for {symbol}; odd-lot liquidation required"
+                    )
+            case "STALE":
+                lot_size = resolution.stale_lot_size
+                if is_entry:
+                    quantity = Decimal("0")
+                    issue = f"board lot for {symbol} is not validated for session {day}; entry denied"
+                    skip_category = "RISK"
+                else:
+                    degraded = True
+                    if lot_size is not None:
+                        quantity = quantize_to_board_lot(raw_quantity, lot_size) or raw_quantity
+            case "UNKNOWN":
+                if is_entry:
+                    quantity = Decimal("0")
+                    issue = f"board lot size for {symbol} is unknown; entry denied"
+                    skip_category = "RISK"
+                else:
+                    degraded = True
+            case unreachable:
+                assert_never(unreachable)
+
+        if degraded and self._degraded_lot_rejections.get(symbol) == (quantity, day):
+            issue = f"degraded exit quantity {quantity} for {symbol} was already rejected this session; awaiting board-lot refresh"
+            quantity = Decimal("0")
+            skip_category = "RISK"
+        return _BoardLotNormalization(
+            quantity=quantity, lot_size=lot_size, lot_source=resolution.source,
+            residual=Decimal("0") if is_entry else raw_quantity - quantity,
+            degraded=degraded, issue=issue, skip_category=skip_category,
+        )
+
+    def _report_board_lot_residual(
+        self, symbol: str, norm: _BoardLotNormalization, position_quantity: Decimal,
+    ) -> None:
+        if norm.residual <= 0 or norm.lot_size is None or self._record_board_lot_residual is None:
+            return
+        try:
+            self._record_board_lot_residual(symbol, norm.residual, norm.lot_size, position_quantity)
+        except Exception:
+            if _BOARD_LOT_LOG_THROTTLE.should_log(f"residual:{symbol}"):
+                logger.warning(
+                    "board lot residual recording failed for %s (suppressed=%d)",
+                    symbol, _BOARD_LOT_LOG_THROTTLE.take_suppressed_count(),
+                    exc_info=True,
+                )
+
     def _execute_buy(
         self,
         symbol: str,
@@ -1900,7 +2004,7 @@ class TradeExecutionService:
         if price <= 0:
             logger.warning("BUY: price <= 0, price=%s", price)
             return None
-        qty = self._entry_quantity_from_margin_power(broker, symbol, "BUY", price, cash_currency)
+        qty = Decimal(self._entry_quantity_from_margin_power(broker, symbol, "BUY", price, cash_currency))
         if qty <= 0:
             return self._skip_order(
                 symbol,
@@ -1909,6 +2013,10 @@ class TradeExecutionService:
                 skip_category="POSITION",
             )
         self._record_positive_sizing(is_funnel_primary)
+        norm = self._normalize_board_lot_quantity(symbol, "BUY", qty)
+        if norm.issue is not None:
+            return self._skip_order(symbol, "BUY", norm.issue, skip_category=norm.skip_category)
+        qty = norm.quantity
         entry_guard = self._profit_guard_for_entry(
             symbol=symbol,
             entry_price=price,
@@ -2008,6 +2116,11 @@ class TradeExecutionService:
             return self._skip_order(symbol, "SELL", f"no available long quantity for {symbol}", skip_category="POSITION")
 
         self._record_positive_sizing(is_funnel_primary)
+        norm = self._normalize_board_lot_quantity(symbol, "SELL", qty)
+        self._report_board_lot_residual(symbol, norm, Decimal(str(long_pos.quantity)))
+        if norm.issue is not None:
+            return self._skip_order(symbol, "SELL", norm.issue, skip_category=norm.skip_category)
+        qty = norm.quantity
         price = self._normalize_limit_price(symbol, "SELL", Decimal(str(quote.last_price)))
         if price <= 0:
             logger.warning("SELL: price <= 0, price=%s", price)
@@ -2046,6 +2159,8 @@ class TradeExecutionService:
             exit_fee_rate=fee_rate,
             exit_entry_reference_quantity=entry_reference_quantity,
         )
+        if norm.degraded and order_status is not None and order_status.status == "REJECTED":
+            self._degraded_lot_rejections[symbol] = (qty, trade_day_for("HK"))
         if (
             order_status is None
             or order_status.status != "FILLED"
@@ -2134,7 +2249,7 @@ class TradeExecutionService:
             logger.warning("SELL_SHORT: price <= 0, price=%s", price)
             return None
 
-        qty = self._entry_quantity_from_margin_power(broker, symbol, "SELL", price, cash_currency)
+        qty = Decimal(self._entry_quantity_from_margin_power(broker, symbol, "SELL", price, cash_currency))
         if qty <= 0:
             return self._skip_order(
                 symbol,
@@ -2144,6 +2259,10 @@ class TradeExecutionService:
             )
 
         self._record_positive_sizing(is_funnel_primary)
+        norm = self._normalize_board_lot_quantity(symbol, "SELL_SHORT", qty)
+        if norm.issue is not None:
+            return self._skip_order(symbol, "SELL_SHORT", norm.issue, skip_category=norm.skip_category)
+        qty = norm.quantity
         order_status = self._submit_limit_order(
             "SELL_SHORT",
             symbol,
@@ -2225,6 +2344,11 @@ class TradeExecutionService:
             return self._skip_order(symbol, "BUY_TO_COVER", f"no available short quantity for {symbol}", skip_category="POSITION")
 
         self._record_positive_sizing(is_funnel_primary)
+        norm = self._normalize_board_lot_quantity(symbol, "BUY_TO_COVER", qty)
+        self._report_board_lot_residual(symbol, norm, Decimal(str(pos.quantity)))
+        if norm.issue is not None:
+            return self._skip_order(symbol, "BUY_TO_COVER", norm.issue, skip_category=norm.skip_category)
+        qty = norm.quantity
         price = self._normalize_limit_price(symbol, "BUY_TO_COVER", Decimal(str(quote.last_price)))
         if price <= 0:
             logger.warning("BUY_TO_COVER: price <= 0, price=%s", price)
@@ -2263,6 +2387,8 @@ class TradeExecutionService:
             exit_fee_rate=fee_rate,
             exit_entry_reference_quantity=entry_reference_quantity,
         )
+        if norm.degraded and order_status is not None and order_status.status == "REJECTED":
+            self._degraded_lot_rejections[symbol] = (qty, trade_day_for("HK"))
         if (
             order_status is None
             or order_status.status != "FILLED"

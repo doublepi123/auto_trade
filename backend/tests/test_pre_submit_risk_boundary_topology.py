@@ -289,3 +289,26 @@ def test_forged_approved_order_has_no_broker_submission_seam() -> None:
     assert submit_after_precheck is None
     assert direct_approved_submit is None
     assert broker.submissions == []
+
+
+def test_hk_lot_normalization_precedes_single_boundary(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core.board_lot import BoardLotResolution
+    # Given
+    service = _service()
+    symbol = "00005.HK"
+    broker = _TopologyBroker([Position(symbol, "LONG", Decimal("1250"), Decimal("100"), available_quantity=Decimal("1250"))])
+    monkeypatch.setattr(service, "_board_lot_resolver", lambda s: BoardLotResolution(s, 500, "FRESH"), raising=False)
+    quantities: list[Decimal] = []
+    boundary = service.pre_submit_risk_check
+
+    def observe(request, *args, **kwargs):
+        quantities.append(request.quantity)
+        return boundary(request, *args, **kwargs)
+
+    monkeypatch.setattr(service, "pre_submit_risk_check", observe)
+    # When
+    status = service.execute("SELL", symbol, Quote(symbol, 90, 90, 90, ""), broker, RiskController(), ServerChanNotifier(""), "HKD", allow_loss_exit=True, reduce_only=True)
+    # Then
+    assert status is not None and status.status == "SUBMITTED"
+    assert quantities == [Decimal("1000")]
+    assert broker.submissions == [(symbol, "SELL", Decimal("1000"), Decimal("90"))]
