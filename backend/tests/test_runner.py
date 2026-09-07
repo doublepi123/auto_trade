@@ -11250,3 +11250,214 @@ class TestRuntimeStatePersistence:
         assert self._writing_transactions(recorded) == 0
 
 
+class _FakeBoardLotBroker:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+        self.positions: list[Position] = []
+        self.submitted: list[OrderResult] = []
+        self.error: RuntimeError | None = None
+
+    def get_lot_sizes(self, symbols: list[str]) -> dict[str, int]:
+        self.calls.append(list(symbols))
+        if self.error is not None:
+            raise self.error
+        return dict.fromkeys(symbols, 100)
+
+    def get_positions(self) -> list[Position]:
+        return self.positions
+
+    def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+        order = OrderResult("wave3-exit", symbol, side, quantity, price, "SUBMITTED")
+        self.submitted.append(order)
+        return order
+
+    def get_order_status(self, order_id: str) -> OrderStatusResult:
+        return OrderStatusResult(order_id, "SUBMITTED", Decimal("0"), Decimal("0"))
+
+
+class TestBoardLotRunner:
+    @pytest.fixture
+    def lot_runner(self, monkeypatch: pytest.MonkeyPatch):
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import sessionmaker
+        from app.models import Base
+
+        engine = create_engine("sqlite://")
+        Base.metadata.create_all(engine)
+        sessions = sessionmaker(bind=engine)
+        runner = AppRunner()
+        @contextmanager
+        def session_scope():
+            with sessions() as db:
+                yield db
+        monkeypatch.setattr(runner, "_db_session", session_scope)
+        runner.engine.params = StrategyParams(symbol="0700.HK", market="HK")
+        runner.broker = _FakeBoardLotBroker()
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+        yield runner
+        engine.dispose()
+
+    def test_board_lot_refresh_makes_no_broker_call_for_us_only_symbols(self, lot_runner: AppRunner) -> None:
+        # Given a legacy US-only broker without the metadata API.
+        lot_runner.engine.params = StrategyParams(symbol="AAPL.US", market="US")
+        lot_runner.broker = SimpleNamespace()
+        # When the background refresh runs, then it needs no broker capability.
+        assert lot_runner._refresh_board_lots([], reason="test") is True
+        lot_runner._refresh_board_lots_if_due()
+        # Even a capable broker must receive no call for US-only symbols.
+        broker = _FakeBoardLotBroker()
+        lot_runner.broker = broker
+        lot_runner._refresh_board_lots_if_due()
+        assert broker.calls == []
+
+    def test_board_lot_residual_records_incident_without_pausing(self, lot_runner: AppRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.core.risk import TradingState
+        from app.models import ReconciliationIncident, TradeEvent
+
+        notices: list[tuple[str, str]] = []
+        monkeypatch.setattr(lot_runner.notifier, "notify_risk_event", lambda event, message, *, severity: notices.append((event, severity)))
+        # When a live sub-lot residual is reported.
+        lot_runner._record_board_lot_residual("0700.HK", Decimal("50"), 100, Decimal("150"))
+        # Then it is durable and critical, without closing the reduction path.
+        with lot_runner._db_session() as db:
+            incident = db.query(ReconciliationIncident).one()
+            assert incident.failure_category == "HK_BOARD_LOT_RESIDUAL"
+            assert incident.recovered_at is None
+            assert db.query(TradeEvent).filter_by(event_type="HK_BOARD_LOT_RESIDUAL").count() == 1
+        assert notices == [("HK_BOARD_LOT_RESIDUAL", "CRITICAL")]
+        assert lot_runner.risk.paused is False
+        assert lot_runner.risk.trading_state() is TradingState.ACTIVE
+
+    def test_board_lot_residual_inhibits_entries_but_not_reductions(self, lot_runner: AppRunner) -> None:
+        # Given an unresolved residual, independent of any risk pause.
+        lot_runner._board_lot_residual_symbols = {"0700.HK"}
+        # When entry policy is evaluated, then only entries are inhibited.
+        result = lot_runner._validate_live_entry_policy("0700.HK", "BUY", "HK")
+        assert isinstance(result, EntryPolicyCheckResult)
+        assert result.issue.startswith("HK_BOARD_LOT_RESIDUAL")
+        assert result.skip_category == "POSITION"
+        assert lot_runner._validate_live_entry_policy("0700.HK", "SELL", "HK") is None
+        assert lot_runner._validate_live_entry_policy("0700.HK", "BUY_TO_COVER", "HK") is None
+        assert lot_runner.risk.paused is False
+
+    def test_board_lot_residual_exit_still_submits_while_active(self, lot_runner: AppRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.core.risk import TradingState
+
+        broker = _FakeBoardLotBroker()
+        broker.positions = [Position("0700.HK", "LONG", Decimal("150"), Decimal("10"))]
+        lot_runner.broker = broker
+        lot_runner._refresh_board_lots(["0700.HK"], reason="test")
+        lot_runner._trade_svc._final_order_quote_check = lambda _broker, _symbol, _action, price: FinalOrderQuoteCheckResult(executable_price=price, bid=price, ask=price)
+        monkeypatch.setattr(trade_execution_service_module, "is_trading_hours", lambda _market: True)
+        monkeypatch.setattr(lot_runner.notifier, "notify_risk_event", lambda *args, **kwargs: True)
+        # When TES records the residual under its guard and submits the whole-lot exit.
+        with lot_runner._trade_svc.submission_guard():
+            result = lot_runner._trade_svc._execute_sell("0700.HK", Quote("0700.HK", 12.0, 12.0, 12.01, _fresh_timestamp()), broker, lot_runner.risk, lot_runner.notifier)
+        # Then exactly one reduction was accepted while the entry policy inhibits buys.
+        assert result is not None and result.status == "SUBMITTED"
+        assert [(order.side, order.quantity) for order in broker.submitted] == [("SELL", Decimal("100"))]
+        assert lot_runner._board_lot_residual_symbols == {"0700.HK"}
+        assert lot_runner.risk.trading_state() is TradingState.ACTIVE
+        assert lot_runner.risk.paused is False
+        issue = lot_runner._validate_live_entry_policy("0700.HK", "BUY", "HK")
+        assert isinstance(issue, EntryPolicyCheckResult) and issue.issue.startswith("HK_BOARD_LOT_RESIDUAL")
+
+    @pytest.mark.parametrize("fails", [False, True])
+    def test_board_lot_refresh_on_session_change(self, lot_runner: AppRunner, monkeypatch: pytest.MonkeyPatch, fails: bool) -> None:
+        from app.core.board_lot import BoardLotCache
+
+        today = date(2026, 9, 8)
+        cache = BoardLotCache(session_day_for=lambda _market: today)
+        cache.put("0700.HK", 200, session_day=today - timedelta(days=1), in_rth=True)
+        lot_runner._board_lot_cache = cache
+        lot_runner._board_lot_session_day = today - timedelta(days=1)
+        monkeypatch.setattr(runner_module, "trade_day_for", lambda _market: today)
+        monkeypatch.setattr(runner_module, "is_trading_hours", lambda _market: True)
+        broker = _FakeBoardLotBroker()
+        if fails:
+            broker.error = RuntimeError("metadata unavailable")
+        lot_runner.broker = broker
+        # When the next HK session starts.
+        lot_runner._refresh_board_lots_if_due()
+        # Then a single refresh replaces the old lot, or preserves only its stale hint.
+        assert broker.calls == [["0700.HK"]]
+        assert cache.resolve("0700.HK").source == ("STALE" if fails else "FRESH")
+        if not fails:
+            assert cache.resolve("0700.HK").lot_size == 100
+            lot_runner._refresh_board_lots_if_due()
+            assert len(broker.calls) == 1
+
+    def test_board_lot_refresh_failure_keeps_stale_hint_and_backs_off(self, lot_runner: AppRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.core.board_lot import BoardLotCache
+
+        today = date(2026, 9, 8)
+        cache = BoardLotCache(session_day_for=lambda _market: today)
+        cache.put("0700.HK", 100, session_day=today - timedelta(days=1), in_rth=True)
+        lot_runner._board_lot_cache = cache
+        lot_runner._trade_svc._board_lot_resolver = cache.resolve
+        broker = _FakeBoardLotBroker()
+        broker.error = RuntimeError("metadata unavailable")
+        lot_runner.broker = broker
+        monkeypatch.setattr(runner_module, "trade_day_for", lambda _market: today)
+        before = time.monotonic()
+        # When refresh fails, including a second due check within the backoff.
+        assert lot_runner._refresh_board_lots(["0700.HK"], reason="test") is False
+        lot_runner._refresh_board_lots_if_due()
+        # Then old records remain but cannot authorize exposure.
+        resolution = cache.resolve("0700.HK")
+        assert resolution.source == "STALE" and resolution.stale_lot_size == 100
+        assert lot_runner._board_lot_refresh_not_before >= before + 60
+        assert len(broker.calls) == 1
+        assert lot_runner._trade_svc._normalize_board_lot_quantity("0700.HK", "BUY", Decimal("100")).issue is not None
+
+    def test_board_lot_residual_clears_when_broker_flat(self, lot_runner: AppRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.models import ReconciliationIncident, TradeEvent
+
+        monkeypatch.setattr(lot_runner.notifier, "notify_risk_event", lambda *args, **kwargs: True)
+        lot_runner._record_board_lot_residual("0700.HK", Decimal("50"), 100, Decimal("50"))
+        lot_runner._running = True
+        # When a fresh broker snapshot proves the residual flat.
+        lot_runner._reconcile_runtime_positions()
+        # Then durable recovery and diagnostics agree.
+        assert lot_runner._board_lot_residual_symbols == set()
+        assert lot_runner.diagnostics()["board_lot"]["entries_inhibited"] is False
+        with lot_runner._db_session() as db:
+            assert db.query(ReconciliationIncident).one().recovered_at is not None
+            assert db.query(TradeEvent).filter_by(event_type="HK_BOARD_LOT_RESIDUAL_RECOVERED").count() == 1
+
+    def test_initialize_runner_reloads_open_board_lot_residuals(self, lot_runner: AppRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+        from app.services.reconciliation_incident_service import ReconciliationFailure
+
+        with lot_runner._db_session() as db:
+            lot_runner._reconciliation_incident_svc.record_failure(db, ReconciliationFailure("board_lot_normalization", "HK_BOARD_LOT_RESIDUAL", ("0700.HK",), "manual liquidation required", "HK_BOARD_LOT_RESIDUAL"))
+            db.commit()
+        monkeypatch.setattr(lot_runner, "_apply_credentials", lambda *args, **kwargs: None)
+        monkeypatch.setattr(lot_runner, "sync_today_orders_from_broker", lambda **kwargs: False)
+        monkeypatch.setattr(lot_runner, "_sync_risk_from_order_ledger", lambda: None)
+        # When a new runner initializes against the durable incident.
+        lot_runner._initialize_runner()
+        # Then the entry inhibition survives restart, independent of a pause.
+        assert lot_runner._board_lot_residual_symbols == {"0700.HK"}
+
+    def test_diagnostics_exposes_board_lot_block(self, lot_runner: AppRunner) -> None:
+        from app.schemas import DiagnosticsResponse
+
+        lot_runner._board_lot_residual_symbols = {"0700.HK"}
+        # When the actual response schema serializes diagnostics.
+        result = DiagnosticsResponse.model_validate(lot_runner.diagnostics()).model_dump()
+        # Then Pydantic preserves the new block instead of silently dropping it.
+        assert "board_lot" in result
+        assert result["board_lot"]["entries_inhibited"] is True
+        assert result["board_lot"]["residual_symbols"] == ["0700.HK"]
+
+    def test_board_lot_residual_db_failure_preserves_inhibition(self, lot_runner: AppRunner, monkeypatch: pytest.MonkeyPatch) -> None:
+        from sqlalchemy.exc import SQLAlchemyError
+
+        def fail_session():
+            raise SQLAlchemyError("database unavailable")
+
+        monkeypatch.setattr(lot_runner, "_db_session", fail_session)
+        # When persistence fails, then in-memory inhibition must still survive.
+        lot_runner._record_board_lot_residual("0700.HK", Decimal("50"), 100, Decimal("50"))
+        assert lot_runner._board_lot_residual_symbols == {"0700.HK"}
+        assert lot_runner.risk.paused is False

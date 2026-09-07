@@ -2444,7 +2444,22 @@ class DecisionFunnelDiagnostics(BaseModel):
     pre_submit_risk_check_invocations: int = 0
 
 
+class DiagnosticBoardLotSymbol(BaseModel):
+    symbol: str
+    lot_size: int
+    source: Literal["FRESH", "STALE", "UNKNOWN"]
+    validated_for_session: str
+
+
+class DiagnosticBoardLot(BaseModel):
+    hk_session_day: str | None = None
+    symbols: list[DiagnosticBoardLotSymbol] = Field(default_factory=list)
+    residual_symbols: list[str] = Field(default_factory=list)
+    entries_inhibited: bool = False
+
+
 class DiagnosticsResponse(BaseModel):
+    board_lot: DiagnosticBoardLot = Field(default_factory=DiagnosticBoardLot)
     risk_boundary_version: str
     runner_running: bool
     thread_alive: bool

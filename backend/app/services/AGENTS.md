@@ -22,6 +22,7 @@ Live execution core (~13) · gated opening execution (1) · shadow/challenger (6
 ## CONVENTIONS
 - **Construction**: plain class, `__init__(self, db: Session)`, instantiated per request / per tick. No DI container, no singletons. Optional collaborators are keyword-only (`*, candle_provider=..., transaction_fence=..., operation_checkpoint=...`).
 - **Exception**: `TradeExecutionService` takes **callables only** (no db, no broker), is built once in `AppRunner.__init__`, and owns `_submission_lock`. Never construct it per request.
+- HK quantities are normalized to board lots after sizing and before the pre-submit boundary, using an injected resolver and residual recorder; the sizing path never fetches metadata from the network.
 - **Infra singletons only**: `api/deps.py` AuditLogger, `get_notification_sink()`, `OrderTerminalCallbackService` (own `SessionLocal` + module `_CLAIM_LOCK`), `DurableJobLeaseService(session_factory=SessionLocal)`.
 - **Pure-function modules** (no class) for analytics: `compute_<thing>(...) -> <Thing>Result` returning frozen dataclasses (`trade_stats_service.py`, `equity_curve_service.py`, `event_list_service.py`).
 - **Naming**: `<domain>_<role>_service.py` + one `XxxService`. Non-`_service` suffixes are reserved for infra roles: `*_policy.py`, `*_provider.py`, `*_deadline.py`, `*_supervisor.py`, `*_backoff.py`, `*_inspector.py`, `snapshot_helper.py`, `data_aggregator.py`.

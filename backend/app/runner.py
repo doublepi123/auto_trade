@@ -13,7 +13,7 @@ from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace as dataclass_replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Deque, Generator, Optional, cast
 from sqlalchemy.orm import Session
@@ -22,10 +22,12 @@ from app.api.deps import init_audit_logger
 from app.api.ws import manager
 from app.config import settings
 from app.core.audit import AuditLogger
+from app.core.board_lot import BoardLotCache
 from app.core.broker import BrokerGateway, Position, Quote
 from app.core.engine import EngineSnapshot, EngineState, StrategyEngine, StrategyParams, TriggerResult
 from app.core.exit_policy import ExitPolicyConfig, ExitQuote, PositionExitContext, ReductionCause, ReductionDecision, evaluate_exit_policy
 from app.core.fees import one_side_fee_rate
+from app.core.log_throttle import RepeatedLogThrottle
 from app.core.market_calendar import is_closing_window, is_opening_warmup, is_trading_hours, trade_day_for
 from app.core.notifiers.multi_channel import MultiChannelNotifier
 from app.core.notifiers.serverchan import ServerChanNotifier
@@ -42,6 +44,7 @@ from app.services.order_terminal_callback_service import (
     OrderTerminalCallbackService,
 )
 from app.services.reconciliation_incident_service import (
+    IncidentEventTypes,
     ReconciliationFailure,
     ReconciliationIncidentService,
 )
@@ -77,6 +80,12 @@ from app.services.decision_funnel_service import (
 )
 
 logger = logging.getLogger("auto_trade.runner")
+
+_BOARD_LOT_EVENT_TYPES = IncidentEventTypes(
+    "HK_BOARD_LOT_RESIDUAL",
+    "HK_BOARD_LOT_RESIDUAL_REMINDER",
+    "HK_BOARD_LOT_RESIDUAL_RECOVERED",
+)
 
 _LLM_ORDER_ACTION_MAP = {
     "BUY_NOW": "BUY",
@@ -260,7 +269,16 @@ class AppRunner:
             sink=get_notification_sink().record,
             dedup_window_seconds=settings.notify_dedup_window_seconds,
         )
+        self._board_lot_cache = BoardLotCache()
+        self._board_lot_session_day: date | None = None
+        self._board_lot_validated_in_rth_day: date | None = None
+        self._board_lot_refresh_not_before: float = 0.0
+        self._board_lot_residual_symbols: set[str] = set()
+        self._broker_position_symbols: set[str] = set()
+        self._board_lot_log_throttle = RepeatedLogThrottle(window_seconds=300)
         self._trade_svc = TradeExecutionService(
+            board_lot_resolver=self._board_lot_cache.resolve,
+            record_board_lot_residual=self._record_board_lot_residual,
             record_order=self._record_order,
             update_order_status=self._update_order_status,
             record_risk_event=self._record_risk_event,
@@ -810,6 +828,15 @@ class AppRunner:
             config = self._state_svc.load(db, self.engine, self.risk)
             self._configure_live_safety(config)
             self._load_tracked_entries(db)
+            try:
+                residual_symbols = self._reconciliation_incident_svc.open_symbols(
+                    db, source="board_lot_normalization", category="HK_BOARD_LOT_RESIDUAL",
+                )
+                with self._state_lock:
+                    self._board_lot_residual_symbols.update(residual_symbols)
+            except AttributeError:
+                # Legacy test session doubles do not expose the incident query API.
+                logger.warning("board lot residual restore unavailable for session", exc_info=True)
             self._sync_symbol_runtimes(db)
             self._load_opening_execution_registry(db)
             self._restore_reduction(db)
@@ -921,6 +948,7 @@ class AppRunner:
             symbols = self._desired_quote_symbols_locked()
         if symbols and not self._quotes_subscribed:
             try:
+                self._refresh_board_lots(self._hk_symbols_of_interest(), reason="startup")
                 self._subscribe_quote_symbols(self.broker, symbols)
                 with self._protective_runtime_state_guard():
                     self._quotes_subscribed = True
@@ -1987,7 +2015,99 @@ class AppRunner:
         for symbol in symbols:
             broker.subscribe_quotes(symbol, self._on_quote)
 
+    def _hk_symbols_of_interest(self) -> list[str]:
+        tracked_symbols = self._trade_svc.snapshot_tracked_entries()
+        with self._state_lock:
+            symbols = (
+                set(self._desired_quote_symbols_locked())
+                | set(tracked_symbols)
+                | self._broker_position_symbols
+                | self._board_lot_residual_symbols
+            )
+        return sorted(symbol for symbol in symbols if symbol.endswith(".HK"))
+
+    def _refresh_board_lots(self, symbols: list[str], *, reason: str) -> bool:
+        symbols = sorted({symbol for symbol in symbols if symbol.endswith(".HK")})
+        get_lot_sizes = getattr(self.broker, "get_lot_sizes", None)
+        if not symbols or not callable(get_lot_sizes):
+            return True
+        if time.monotonic() < self._board_lot_refresh_not_before:
+            return False
+        today = trade_day_for("HK")
+        in_rth = is_trading_hours("HK")
+        try:
+            lots = self.broker.get_lot_sizes(symbols)
+            for symbol, lot_size in lots.items():
+                self._board_lot_cache.put(symbol, lot_size, session_day=today, in_rth=in_rth)
+        except Exception:
+            # Metadata failure must preserve exit hints, not halt reductions.
+            self._board_lot_refresh_not_before = time.monotonic() + 60
+            if self._board_lot_log_throttle.should_log("refresh"):
+                logger.warning(
+                    "board lot refresh failed: reason=%s symbols=%s suppressed=%d",
+                    reason, symbols, self._board_lot_log_throttle.take_suppressed_count(),
+                    exc_info=True,
+                )
+            return False
+        self._board_lot_session_day = today
+        if in_rth:
+            self._board_lot_validated_in_rth_day = today
+        # Missing metadata remains fail-closed without polling the SDK every loop.
+        self._board_lot_refresh_not_before = (
+            time.monotonic() + 60 if set(symbols) - lots.keys() else 0.0
+        )
+        logger.info("board lots refreshed: reason=%s session=%s symbols=%s", reason, today, sorted(lots))
+        return True
+
+    def _refresh_board_lots_if_due(self) -> None:
+        if time.monotonic() < self._board_lot_refresh_not_before:
+            return
+        symbols = self._hk_symbols_of_interest()
+        if not symbols:
+            return
+        today = trade_day_for("HK")
+        if (
+            today != self._board_lot_session_day
+            or (is_trading_hours("HK") and self._board_lot_validated_in_rth_day != today)
+            or self._board_lot_cache.missing_or_stale_hk(symbols)
+        ):
+            self._refresh_board_lots(symbols, reason="session_or_symbols_changed")
+
+    def _record_board_lot_residual(
+        self, symbol: str, residual_qty: Decimal, lot_size: int, position_qty: Decimal,
+    ) -> None:
+        with self._state_lock:
+            self._board_lot_residual_symbols.add(symbol)
+        message = (
+            f"HK_BOARD_LOT_RESIDUAL: {symbol} holds {residual_qty} shares below board lot {lot_size} "
+            f"(position {position_qty}); automated exit cannot fully liquidate; "
+            "odd-lot or manual liquidation required; new entries inhibited"
+        )
+        try:
+            with self._db_session() as db:
+                incident = self._reconciliation_incident_svc.record_failure(
+                    db,
+                    ReconciliationFailure(
+                        source="board_lot_normalization", category="HK_BOARD_LOT_RESIDUAL",
+                        symbols=(symbol,), message=message, error_type="HK_BOARD_LOT_RESIDUAL",
+                        event_types=_BOARD_LOT_EVENT_TYPES,
+                    ),
+                )
+                db.commit()
+            if incident.should_notify:
+                self.notifier.notify_risk_event("HK_BOARD_LOT_RESIDUAL", message, severity="CRITICAL")
+                self._set_last_action_message(message)
+                self._broadcast_status()
+        except Exception:
+            # This callback runs inside submission: persistence/notification failure
+            # cannot cancel a proven reduction; the in-memory entry block survives.
+            logger.exception("failed to record board lot residual for %s; entries remain inhibited", symbol)
+
     def _resubscribe_quote_symbols(self, broker: Any, symbols: list[str]) -> None:
+        # API-triggered registry refreshes can hold the submission guard. Only the
+        # runner thread refreshes metadata here; all other callers defer to its loop.
+        if threading.current_thread() is getattr(self, "_thread", None):
+            self._refresh_board_lots(self._hk_symbols_of_interest(), reason="resubscribe")
         try:
             broker.unsubscribe_quotes()
         except Exception:
@@ -2205,6 +2325,20 @@ class AppRunner:
                 )
             return {
                 "risk_boundary_version": RISK_BOUNDARY_VERSION,
+                "board_lot": {
+                    "hk_session_day": self._board_lot_session_day.isoformat() if self._board_lot_session_day else None,
+                    "symbols": [
+                        {
+                            "symbol": record["symbol"],
+                            "lot_size": record["lot_size"],
+                            "source": self._board_lot_cache.resolve(str(record["symbol"])).source,
+                            "validated_for_session": record["validated_for_session"],
+                        }
+                        for record in self._board_lot_cache.snapshot()
+                    ],
+                    "residual_symbols": sorted(self._board_lot_residual_symbols),
+                    "entries_inhibited": bool(self._board_lot_residual_symbols),
+                },
                 "runner_running": self._running and thread_alive,
                 "thread_alive": thread_alive,
                 "quotes_subscribed": self._quotes_subscribed,
@@ -4423,6 +4557,21 @@ class AppRunner:
         normalized_action = str(action or "").upper()
         if normalized_action not in _ENTRY_ACTIONS:
             return None
+        with self._state_lock:
+            residual_symbols = sorted(self._board_lot_residual_symbols)
+        if residual_symbols:
+            return EntryPolicyCheckResult(
+                issue=(
+                    f"HK_BOARD_LOT_RESIDUAL: unresolved sub-lot residual on {', '.join(residual_symbols)}; "
+                    "new entries inhibited until liquidated"
+                ),
+                skip_category="POSITION",
+                details={
+                    "entry_policy": "HK_BOARD_LOT_RESIDUAL",
+                    "policy_reason": "RESIDUAL_UNRESOLVED",
+                    "symbols": residual_symbols,
+                },
+            )
         if self._opening_execution_capital_slot_reserved():
             return EntryPolicyCheckResult(
                 issue="opening momentum execution owns the capital slot",
@@ -5914,6 +6063,7 @@ class AppRunner:
                 self._auto_resume_pause_if_due()
             except Exception:
                 logger.exception("error checking pause auto resume")
+            self._refresh_board_lots_if_due()
             try:
                 if self._reconcile_runtime_positions():
                     self._broadcast_status()
@@ -6221,6 +6371,8 @@ class AppRunner:
             logger.warning("position sync failed: %s", exc)
             return False
 
+        with self._state_lock:
+            self._broker_position_symbols = {position.symbol for position in positions}
         any_changed = False
         for symbol, engine in targets:
             with self._state_lock:
@@ -6424,7 +6576,30 @@ class AppRunner:
                         source="runtime_position_reconcile",
                         category="BROKER_POSITION_SNAPSHOT_FAILED",
                     )
+                    with self._state_lock:
+                        residual_symbols = set(self._board_lot_residual_symbols)
+                    residuals_flat = bool(residual_symbols) and not any(
+                        position.symbol in residual_symbols and position.quantity > 0
+                        for position in position_snapshot
+                    )
+                    if residuals_flat:
+                        self._reconciliation_incident_svc.record_recovery(
+                            db, source="board_lot_normalization", category="HK_BOARD_LOT_RESIDUAL",
+                            event_types=_BOARD_LOT_EVENT_TYPES,
+                            message_template="HK_BOARD_LOT_RESIDUAL recovered: broker reports {symbols} flat; entry inhibition cleared",
+                        )
                     db.commit()
+                    if residuals_flat:
+                        with self._state_lock:
+                            self._board_lot_residual_symbols.difference_update(residual_symbols)
+                        try:
+                            self.notifier.notify_risk_event(
+                                "HK_BOARD_LOT_RESIDUAL_RECOVERED",
+                                f"broker reports {', '.join(sorted(residual_symbols))} flat; board lot entry inhibition cleared",
+                                severity="INFO",
+                            )
+                        except Exception:
+                            logger.exception("failed to notify board lot residual recovery")
                     with self._state_lock:
                         self._reconciliation_fallback_alert_keys.clear()
                     self._reconciliation_backoff.record_success(now)
@@ -8124,6 +8299,8 @@ class AppRunner:
                     )
             return []
 
+        with self._state_lock:
+            self._broker_position_symbols = {position.symbol for position in positions}
         broker_positions: dict[str, list[tuple[str, Decimal, Decimal]]] = {}
         for pos in positions:
             side = str(pos.side).upper()

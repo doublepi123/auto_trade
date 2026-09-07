@@ -297,6 +297,7 @@ If gate 4 fails, roll back immediately — `git revert` the commit, rebuild, con
 - **Editing frozen v5 parameters** without a preregistration decision — `test_strategy_v2_preregistration.py` pins a SHA-256; updating the hash to silence the test is forbidden
 - **`VolumeShareSlippageModel` in plugin cost scenarios** — the dataset has no volume, so it fabricates zero slippage
 - Free-form periodic log lines — use `RepeatedLogThrottle` (suppressed counts are reported, not dropped)
+- Raising `HK_BOARD_LOT_RESIDUAL` (or any metadata-uncertainty condition) via `risk.pause()` — use entry-policy inhibition and prove exits still submit.
 
 ---
 
@@ -304,6 +305,7 @@ If gate 4 fails, roll back immediately — `git revert` the commit, rebuild, con
 
 - **Skip categories**: `FEE | REPRICING | COOLDOWN | RISK | PENDING | POSITION | SESSION` — UI via `skipCategoryLabel`
 - **Tracked entries**: Weighted cost basis in SQLite; loaded on runner start; drift → `TRACKED_ENTRY_DRIFT`
+- **HK board lots**: Quantization happens after sizing and before `pre_submit_risk_check`, using an in-memory cache: the sizing path holds `_submission_lock` and must never call the network. `q = L·⌊qty/L⌋`, never rounded up. Validity is HK-session-scoped: entry eligibility expires at a session boundary even if refresh fails; the old value survives only as a stale EXIT hint. Unknown/stale metadata blocks ENTRIES, but a proven REDUCTION still attempts once; a definitive rejection is never retried unchanged in the same session. Governing invariant: **metadata uncertainty may block new exposure but must not alone block a proven reduction; uncertainty about ownership, side, availability or outstanding orders still blocks**. A sub-lot remainder raises the durable `HK_BOARD_LOT_RESIDUAL` incident and inhibits entries **through the entry policy, never through `RiskController.pause()`**; it clears when the broker reports the symbol flat. The system has no `OrderType.ODD` support, so this design CANNOT guarantee complete automated liquidation of an HK position; a residual below one lot is live, un-exitable exposure requiring manual/odd-lot liquidation, and "< 1 lot" is NOT a negligible-risk threshold.
 - **Fee guard**: Non-loss exits require fee-adjusted profit ≥ `min_profit_amount`
 - **Market calendar**: Exchange-local day for PnL/risk reset; static NYSE/HKEX holidays 2024–2027
 - **`TradingState`** (`core/risk.py`): `ACTIVE | REDUCING | HALTED`, derived from `RiskController`, never persisted. `REDUCING` rejects position-increasing orders but must still pass reductions and stops; `HALTED` rejects everything.
