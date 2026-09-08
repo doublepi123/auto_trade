@@ -3395,6 +3395,16 @@ class AlertRuleCreate(BaseModel):
         projected value is ``0.0`` while price is inside the interval, so
         ``threshold`` must be a positive percentage and ``symbol`` is required.
         Read-only: it never changes the interval or places orders.
+      - ``trading_dormant``: notification-only; fires when the measured symbol
+        has not produced an *entry* order for at least ``threshold`` days.
+        ``interval_stale`` reports one cause (the band drifted); this reports
+        the outcome, so it still fires when the live path is silenced by a
+        regime gate, an entry-policy inhibition or a stuck risk state, and when
+        a primary switch installs a fresh band that brackets price while the
+        account still never trades. Exits are excluded: a system that can only
+        reduce is dormant. A blank ``symbol`` follows the current primary.
+        ``threshold`` must be a positive number of days. Read-only: it never
+        sizes, prices or submits an order.
 
     The authoritative account state is resolved from the latest
     ``StrategyConfig`` symbol, then that symbol's ``RuntimeState`` row; if no
@@ -3415,6 +3425,7 @@ class AlertRuleCreate(BaseModel):
         "consecutive_losses",
         "kill_switch_engaged",
         "interval_stale",
+        "trading_dormant",
         "margin_risk_level",
         "margin_call",
     ]
@@ -3446,6 +3457,13 @@ class AlertRuleCreate(BaseModel):
             if self.threshold <= 0:
                 raise ValueError(
                     "interval_stale threshold must be a positive deviation percentage"
+                )
+        if self.rule_type == "trading_dormant":
+            # The projected value is a non-negative day count, so a zero or
+            # negative threshold would fire on a symbol that just traded.
+            if self.threshold <= 0:
+                raise ValueError(
+                    "trading_dormant threshold must be a positive number of days"
                 )
         if self.rule_type == "margin_risk_level":
             if (
@@ -3484,6 +3502,11 @@ class AlertRuleCreate(BaseModel):
         # (no quote key, no config row), so require an explicit symbol.
         if self.rule_type == "interval_stale" and self.symbol.strip() != self.symbol:
             raise ValueError("interval_stale symbol must not be padded")
+        # trading_dormant resolves an order ledger, not a quote. A blank symbol
+        # legitimately means "the current primary", but a whitespace-only value
+        # would resolve to no symbol and silently never fire.
+        if self.rule_type == "trading_dormant" and self.symbol.strip() != self.symbol:
+            raise ValueError("trading_dormant symbol must not be padded")
         return self
 
 

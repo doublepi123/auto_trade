@@ -16,7 +16,13 @@ from typing import Any, Protocol
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from app.models import AlertFiring, AlertRule, RuntimeState, StrategyConfig
+from app.models import (
+    AlertFiring,
+    AlertRule,
+    OrderRecord,
+    RuntimeState,
+    StrategyConfig,
+)
 from app.schemas import (
     AlertEvaluateResult,
     AlertRuleCreate,
@@ -31,6 +37,13 @@ PRICE_RULES = {"price_above", "price_below"}
 # like a price rule but projected as a deviation percentage instead of a price.
 INTERVAL_RULES = {"interval_stale"}
 QUOTED_RULES = PRICE_RULES | INTERVAL_RULES
+# Read only the order ledger (plus the primary symbol when unpinned). These
+# must never depend on a live quote: trading is most likely stalled exactly
+# when the quote feed is unavailable, which is when the rule has to still fire.
+LEDGER_RULES = {"trading_dormant"}
+# Sides that open or increase exposure. An exit proves the system can still
+# reduce, not that it can still trade, so it never resets dormancy.
+_ENTRY_SIDES = ("BUY", "BUY_SHORT", "SELL_SHORT")
 # Account-wide-only rule types that read the authoritative account state
 # (latest StrategyConfig symbol -> that symbol's RuntimeState, falling back to
 # the legacy ``symbol == ""`` row). They never bind to a secondary symbol's
@@ -138,12 +151,12 @@ class AlertRuleService:
                 if not _eligible(rule, now):
                     skipped_cooldown += 1
                     continue
-                value = self._current_value(rule, quote_map, margin_infos)
+                value = self._current_value(rule, quote_map, margin_infos, now=now)
                 if value is None:
                     continue  # data unavailable (no quote / no state) — skip silently
                 resolved_symbol = (
                     self._interval_symbol(rule) or ""
-                    if rule.rule_type in INTERVAL_RULES
+                    if rule.rule_type in INTERVAL_RULES | LEDGER_RULES
                     else str(rule.symbol or "")
                 )
                 triggered, message = _check(rule, value, resolved_symbol)
@@ -304,11 +317,15 @@ class AlertRuleService:
         rule: AlertRule,
         quote_map: dict[str, float],
         margin_infos: list[Any] | None = None,
+        *,
+        now: datetime | None = None,
     ) -> float | None:
         if rule.rule_type in PRICE_RULES:
             return quote_map.get(rule.symbol)
         if rule.rule_type in INTERVAL_RULES:
             return self._interval_deviation_pct(rule, quote_map)
+        if rule.rule_type in LEDGER_RULES:
+            return self._dormant_days(rule, now=now)
         if rule.rule_type in BROKER_ACCOUNT_RULES:
             if not margin_infos:
                 return None
@@ -395,6 +412,64 @@ class AlertRuleService:
         if price < buy_low:
             return (buy_low - price) / buy_low * 100
         return 0.0
+
+    def _dormant_days(
+        self,
+        rule: AlertRule,
+        *,
+        now: datetime | None = None,
+    ) -> float | None:
+        """Days since the measured symbol last produced an *entry* order.
+
+        ``interval_stale`` detects one specific cause of a dead live path (the
+        band drifted away from price). It cannot see the others: a regime gate
+        that never opens, an entry policy that always inhibits, a risk state
+        stuck in ``REDUCING``, or a primary switch that installs a fresh band
+        bracketing price while the account still never trades. This measures
+        the outcome instead, so any of those surface as the same number.
+
+        Exits are excluded on purpose. A ``SELL`` proves the system can still
+        reduce, not that it can still open; counting it would mask exactly the
+        state this rule exists to report.
+
+        Returns ``None`` (skip silently) when no symbol can be resolved, so an
+        unpinned rule on a deployment without a primary never fires blindly.
+
+        When the measured symbol has never entered, the account-wide last entry
+        is used as the reference: a primary switch must not reset dormancy to
+        zero, because switching symbols is one of the ways the live path goes
+        quiet. ``StrategyConfig.updated_at`` is deliberately NOT used — it
+        carries ``onupdate``, so every LLM interval write refreshes it and it
+        would report a permanently healthy system. With no entry anywhere, the
+        ledger cannot date the silence and the rule stays silent.
+        """
+        symbol = self._interval_symbol(rule)
+        if not symbol:
+            return None
+        now = now or datetime.now(timezone.utc)
+        reference = self._db.scalar(
+            select(func.max(OrderRecord.created_at)).where(
+                OrderRecord.symbol == symbol,
+                OrderRecord.side.in_(_ENTRY_SIDES),
+            )
+        )
+        if reference is None:
+            # Never entered on this symbol: fall back to the account's last
+            # entry on any symbol, so a switch to a never-traded primary keeps
+            # reporting the real elapsed silence instead of restarting at 0.
+            reference = self._db.scalar(
+                select(func.max(OrderRecord.created_at)).where(
+                    OrderRecord.side.in_(_ENTRY_SIDES),
+                )
+            )
+        if reference is None:
+            return None  # no entry ever recorded — nothing to date the silence
+        if reference.tzinfo is None:
+            reference = reference.replace(tzinfo=timezone.utc)
+        elapsed = (now - reference).total_seconds()
+        if not math.isfinite(elapsed):
+            return None
+        return max(0.0, elapsed / 86400.0)
 
     def _daily_loss_state(self, rule: AlertRule) -> RuntimeState | None:
         """Resolve the ``RuntimeState`` row a daily_loss rule reads from.
@@ -496,6 +571,15 @@ def _check(rule: AlertRule, value: float, symbol: str | None = None) -> tuple[bo
         return triggered, (
             f"{display_symbol} 现价已偏离活动区间 {value:.2f}% ≥ 阈值 "
             f"{rule.threshold:.2f}%，区间可能已失效需人工复核"
+        )
+    if rule.rule_type == "trading_dormant":
+        # value is days since the last entry order. Notification-only: it
+        # reports that the live path has gone quiet, and deliberately does not
+        # say whether resuming is correct — that needs the edge evidence.
+        triggered = value >= rule.threshold
+        return triggered, (
+            f"{display_symbol} 已连续 {value:.1f} 天未开仓 ≥ 阈值 "
+            f"{rule.threshold:.1f} 天，实盘路径可能已静默需人工复核"
         )
     if rule.rule_type == "margin_risk_level":
         triggered = int(value) >= int(rule.threshold)

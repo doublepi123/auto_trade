@@ -17,7 +17,14 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.main import app
-from app.models import AlertFiring, AlertRule, Base, RuntimeState, StrategyConfig
+from app.models import (
+    AlertFiring,
+    AlertRule,
+    Base,
+    OrderRecord,
+    RuntimeState,
+    StrategyConfig,
+)
 from app.schemas import AlertRuleCreate
 from app.services.alert_rule_service import AlertRuleService
 
@@ -1190,6 +1197,220 @@ class TestIntervalStaleRule(_Base):
             except ValueError:
                 pass
 
+
+class TestTradingDormantRule(_Base):
+    """``trading_dormant`` — days since the primary symbol last placed an entry.
+
+    ``interval_stale`` only proves the *interval* drifted. It stays silent for
+    every other way the live path can go quiet (a regime gate that never opens,
+    an entry policy that always inhibits, a risk state stuck in REDUCING), and
+    it is symbol-scoped, so a primary switch to a symbol whose band happens to
+    bracket price reports "healthy" while the account still places no orders.
+
+    This rule measures the outcome instead of one cause: how many days since the
+    live path last produced an entry order. It fired nothing for 34 days on the
+    real deployment. Notification-only — it never sizes, prices or submits.
+    """
+
+    def setup_method(self) -> None:
+        super().setup_method()
+        db = self._db()
+        db.query(OrderRecord).delete()
+        db.query(StrategyConfig).delete()
+        db.commit()
+        db.close()
+
+    def _seed_primary(self, symbol: str = "TSLA.US") -> None:
+        db = self._db()
+        db.add(StrategyConfig(
+            symbol=symbol, market="US", buy_low=344.5, sell_high=351.5,
+        ))
+        db.commit()
+        db.close()
+
+    def _seed_entry(self, symbol: str, days_ago: float, *, side: str = "BUY") -> None:
+        db = self._db()
+        db.add(OrderRecord(
+            symbol=symbol,
+            side=side,
+            quantity=10.0,
+            price=100.0,
+            status="FILLED",
+            created_at=datetime.now(timezone.utc) - timedelta(days=days_ago),
+        ))
+        db.commit()
+        db.close()
+
+    def _rule(self, *, symbol: str = "", threshold: float = 3.0) -> int:
+        out = AlertRuleService(self._db()).create(AlertRuleCreate(
+            name="dormant",
+            symbol=symbol,
+            rule_type="trading_dormant",
+            threshold=threshold,
+            severity="WARNING",
+            enabled=True,
+            cooldown_seconds=0,
+        ))
+        return out.id
+
+    def _evaluate(self) -> tuple[int, FakeNotifier]:
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(
+            FakeRunner(FakeBroker({}), notifier)
+        )
+        return result.fired, notifier
+
+    def test_fires_when_primary_has_not_entered_for_longer_than_threshold(self) -> None:
+        # The live case: last entry 2026-08-05, evaluated 34 days later.
+        self._seed_primary()
+        self._seed_entry("TSLA.US", 34.0)
+        self._rule(threshold=3.0)
+        fired, notifier = self._evaluate()
+        assert fired == 1
+        assert "未开仓" in notifier.calls[0][1]
+
+    def test_silent_when_recent_entry_exists(self) -> None:
+        self._seed_primary()
+        self._seed_entry("TSLA.US", 0.5)
+        self._rule(threshold=3.0)
+        fired, notifier = self._evaluate()
+        assert fired == 0
+        assert notifier.calls == []
+
+    def test_exit_orders_do_not_count_as_entries(self) -> None:
+        # A SELL is a reduction. A system that can only exit is still dormant:
+        # counting it would mask exactly the failure this rule exists to catch.
+        self._seed_primary()
+        self._seed_entry("TSLA.US", 0.5, side="SELL")
+        self._seed_entry("TSLA.US", 30.0, side="BUY")
+        self._rule(threshold=3.0)
+        fired, _ = self._evaluate()
+        assert fired == 1
+
+    def test_other_symbols_entries_do_not_reset_primary_dormancy(self) -> None:
+        self._seed_primary("TSLA.US")
+        self._seed_entry("NVDA.US", 0.5)
+        self._seed_entry("TSLA.US", 30.0)
+        self._rule(threshold=3.0)
+        fired, _ = self._evaluate()
+        assert fired == 1
+
+    def test_switch_to_never_traded_primary_keeps_reporting_prior_silence(self) -> None:
+        # A primary switch must not reset dormancy to zero: switching symbols
+        # is itself one of the ways the live path goes quiet. The account-wide
+        # last entry dates the silence even though TSLA never traded.
+        self._seed_primary("TSLA.US")
+        self._seed_entry("NVDA.US", 34.0)
+        self._rule(threshold=3.0)
+        fired, notifier = self._evaluate()
+        assert fired == 1
+        assert "未开仓" in notifier.calls[0][1]
+
+    def test_silent_when_no_entry_was_ever_recorded(self) -> None:
+        # Nothing in the ledger can date the silence (fresh install), so the
+        # rule stays quiet rather than firing against the epoch.
+        self._seed_primary()
+        self._rule(threshold=3.0)
+        fired, _ = self._evaluate()
+        assert fired == 0
+
+    def test_strategy_config_writes_do_not_reset_dormancy(self) -> None:
+        # StrategyConfig.updated_at carries onupdate and is refreshed by every
+        # LLM interval write; using it would report a permanently healthy
+        # system. Touching the config must not silence the rule.
+        self._seed_primary()
+        self._seed_entry("TSLA.US", 34.0)
+        db = self._db()
+        cfg = db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
+        assert cfg is not None
+        cfg.buy_low = 340.0
+        db.commit()
+        db.close()
+        self._rule(threshold=3.0)
+        fired, _ = self._evaluate()
+        assert fired == 1
+
+    def test_silent_without_a_configured_primary(self) -> None:
+        self._rule(threshold=3.0)
+        fired, _ = self._evaluate()
+        assert fired == 0
+
+    def test_explicit_symbol_is_measured_instead_of_primary(self) -> None:
+        self._seed_primary("TSLA.US")
+        self._seed_entry("TSLA.US", 0.5)
+        self._seed_entry("NVDA.US", 30.0)
+        self._rule(symbol="NVDA.US", threshold=3.0)
+        fired, _ = self._evaluate()
+        assert fired == 1
+
+    def test_needs_no_broker_quote(self) -> None:
+        # Dormancy is a ledger question. It must still report when the quote
+        # feed is down — that is precisely when trading is most likely stalled.
+        self._seed_primary()
+        self._seed_entry("TSLA.US", 34.0)
+        self._rule(threshold=3.0)
+        notifier = FakeNotifier()
+        result = AlertRuleService(self._db()).evaluate(
+            FakeRunner(None, notifier)
+        )
+        assert result.fired == 1
+
+    def test_does_not_place_or_modify_orders(self) -> None:
+        self._seed_primary()
+        self._seed_entry("TSLA.US", 34.0)
+        self._rule(threshold=3.0)
+        self._evaluate()
+        db = self._db()
+        try:
+            assert db.query(OrderRecord).count() == 1
+            cfg = db.query(StrategyConfig).order_by(
+                StrategyConfig.id.desc()
+            ).first()
+            assert cfg is not None
+            assert cfg.buy_low == 344.5
+            assert cfg.sell_high == 351.5
+        finally:
+            db.close()
+
+    def test_records_firing_history_with_days_value(self) -> None:
+        self._seed_primary()
+        self._seed_entry("TSLA.US", 34.0)
+        rid = self._rule(threshold=3.0)
+        self._evaluate()
+        db = self._db()
+        try:
+            firing = db.query(AlertFiring).filter(
+                AlertFiring.rule_id == rid
+            ).one()
+            assert firing.rule_type == "trading_dormant"
+            assert firing.trigger_value >= 33.0
+        finally:
+            db.close()
+
+    def test_rejects_non_positive_threshold(self) -> None:
+        for bad in (0.0, -1.0):
+            try:
+                AlertRuleCreate(
+                    name="bad",
+                    symbol="",
+                    rule_type="trading_dormant",
+                    threshold=bad,
+                )
+                raise AssertionError("non-positive threshold must be rejected")
+            except ValueError:
+                pass
+
+    def test_rejects_whitespace_padded_symbol(self) -> None:
+        try:
+            AlertRuleCreate(
+                name="bad",
+                symbol="  ",
+                rule_type="trading_dormant",
+                threshold=3.0,
+            )
+            raise AssertionError("padded symbol must be rejected")
+        except ValueError:
+            pass
 
 
 class FakeMarginBroker:

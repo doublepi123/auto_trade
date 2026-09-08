@@ -993,6 +993,7 @@ export type AlertRuleType =
   | 'consecutive_losses'
   | 'kill_switch_engaged'
   | 'interval_stale'
+  | 'trading_dormant'
   | 'margin_risk_level'
   | 'margin_call'
 export type AlertSeverity = 'INFO' | 'WARNING' | 'CRITICAL'

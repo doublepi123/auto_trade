@@ -172,6 +172,7 @@
             <el-option label="连续亏损 ≥（账户级）" value="consecutive_losses" data-testid="alert-type-consecutive-losses" />
             <el-option label="熔断开关触发（账户级）" value="kill_switch_engaged" data-testid="alert-type-kill-switch" />
             <el-option label="区间失效 ≥" value="interval_stale" data-testid="alert-type-interval-stale" />
+            <el-option label="静默未开仓 ≥（天）" value="trading_dormant" data-testid="alert-type-trading-dormant" />
             <el-option label="保证金风控等级 ≥（账户级）" value="margin_risk_level" data-testid="alert-type-margin-risk-level" />
             <el-option label="追缴保证金 ≥（账户级）" value="margin_call" data-testid="alert-type-margin-call" />
           </el-select>
@@ -179,14 +180,14 @@
         <el-form-item label="标的">
           <el-input
             v-model="dialog.symbol"
-            :placeholder="isAccountWideType ? '账户级规则，无需标的' : (dialog.rule_type === 'interval_stale' ? '留空＝跟随当前主标的' : 'AAPL.US')"
+            :placeholder="isAccountWideType ? '账户级规则，无需标的' : (followsPrimaryType ? '留空＝跟随当前主标的' : 'AAPL.US')"
             :disabled="isAccountWideType"
             data-testid="alert-symbol"
           />
           <div v-if="isAccountWideType" class="field-hint" data-testid="alert-account-wide-hint">
             账户级规则读取账户整体风控状态，标的固定留空。
           </div>
-          <div v-else-if="dialog.rule_type === 'interval_stale'" class="field-hint" data-testid="alert-interval-primary-hint">
+          <div v-else-if="followsPrimaryType" class="field-hint" data-testid="alert-interval-primary-hint">
             留空则跟随当前主交易标的；主标的切换后规则自动改盯新标的。
           </div>
         </el-form-item>
@@ -206,6 +207,12 @@
           <template v-else-if="dialog.rule_type === 'margin_call'">
             <el-input-number v-model="dialog.threshold" :precision="2" :step="100" data-testid="alert-threshold" />
             <div class="field-hint">券商追缴保证金金额达到阈值时触发，须为正数。</div>
+          </template>
+          <template v-else-if="dialog.rule_type === 'trading_dormant'">
+            <el-input-number v-model="dialog.threshold" :precision="1" :step="1" :min="0.1" data-testid="alert-threshold" />
+            <div class="field-hint" data-testid="alert-dormant-hint">
+              距上次「开仓」订单的天数达到阈值时触发；平仓不重置。仅提醒，不会改区间或下单。
+            </div>
           </template>
           <template v-else>
             <el-input-number v-model="dialog.threshold" :precision="2" :step="1" data-testid="alert-threshold" />
@@ -436,6 +443,11 @@ const dialog = reactive({
 })
 
 const isAccountWideType = computed(() => isAccountWideRuleType(dialog.rule_type))
+// Rule types whose blank symbol means "whatever is primary right now", so the
+// rule keeps reporting across a primary switch instead of going quiet.
+const followsPrimaryType = computed(
+  () => dialog.rule_type === 'interval_stale' || dialog.rule_type === 'trading_dormant',
+)
 
 // Adjust form defaults only — never persists. Saving stays behind the
 // explicit 保存 button regardless of rule type. Fired by the type select's
@@ -455,6 +467,8 @@ function handleRuleTypeChange(next: AlertRuleType) {
     dialog.threshold = 1
   } else if (next === 'interval_stale') {
     dialog.threshold = 5
+  } else if (next === 'trading_dormant') {
+    dialog.threshold = 3
   } else if (next === 'daily_loss') {
     dialog.threshold = -500
   } else {

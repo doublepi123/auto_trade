@@ -146,6 +146,8 @@ export function alertRuleTypeLabel(ruleType?: string | null): string {
       return '熔断开关触发'
     case 'interval_stale':
       return '区间失效 ≥'
+    case 'trading_dormant':
+      return '静默未开仓 ≥'
     case 'margin_risk_level':
       return '保证金风控等级 ≥'
     case 'margin_call':
