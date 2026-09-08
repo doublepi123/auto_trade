@@ -11461,3 +11461,106 @@ class TestBoardLotRunner:
         lot_runner._record_board_lot_residual("0700.HK", Decimal("50"), 100, Decimal("50"))
         assert lot_runner._board_lot_residual_symbols == {"0700.HK"}
         assert lot_runner.risk.paused is False
+
+
+class TestQualityGateActionMessage:
+    @staticmethod
+    def _runner() -> AppRunner:
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US", market="US", buy_low=100.0, sell_high=110.0,
+        )
+        return runner
+
+    @pytest.mark.parametrize("message", [
+        "BUY FILLED: order-123",
+        "BUY skipped: insufficient fee-adjusted profit",
+        "Trading paused: daily loss limit",
+        "Trading resumed",
+        "HK_BOARD_LOT_RESIDUAL: manual liquidation required",
+        "Operator decision mentions quote rejected by live quality gate",
+    ])
+    def test_quality_gate_preserves_prior_action_message(self, message: str) -> None:
+        # Given a real decision has already supplied operator-facing status.
+        runner = self._runner()
+        runner._set_last_action_message(message)
+        # When one primary quote fails the live quality gate.
+        runner._evaluate_quote_trigger(Quote("AAPL.US", 99.0, 50.0, 150.0, _fresh_timestamp()))
+        # Then the decision remains visible, regardless of its wording.
+        assert runner.last_action_message == message
+
+    def test_quality_gate_sets_fresh_runner_action_message(self) -> None:
+        # Given no prior decision content.
+        runner = self._runner()
+        assert runner.last_action_message == ""
+        # When the first quote is rejected.
+        runner._evaluate_quote_trigger(Quote("AAPL.US", 99.0, 50.0, 150.0, _fresh_timestamp()))
+        # Then the rejection is the truthful fallback status.
+        assert runner.last_action_message == "AAPL.US quote rejected by live quality gate"
+
+    def test_quality_gate_preserves_action_after_generic_fallback(self) -> None:
+        # Given a generic rejection followed by a meaningful decision.
+        runner = self._runner()
+        quote = Quote("AAPL.US", 99.0, 50.0, 150.0, _fresh_timestamp())
+        runner._evaluate_quote_trigger(quote)
+        runner._set_last_action_message("BUY skipped: waiting for fresh crossing")
+        # When another rejected tick arrives.
+        runner._evaluate_quote_trigger(quote)
+        # Then an old fallback cannot replace the newer decision.
+        assert runner.last_action_message == "BUY skipped: waiting for fresh crossing"
+
+    @pytest.mark.parametrize("is_push", [True, False])
+    def test_quality_gate_counters_and_engine_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch, is_push: bool,
+    ) -> None:
+        from dataclasses import replace
+
+        # Given a meaningful decision and an engine that must never see this tick.
+        runner = self._runner()
+        runner._set_last_action_message("BUY FILLED: order-123")
+        before = runner.decision_funnel.snapshot()
+        engine_before = runner.engine.snapshot()
+
+        def unexpected_update(_price: float) -> None:
+            pytest.fail("rejected quote reached StrategyEngine.update_price")
+
+        monkeypatch.setattr(runner.engine, "update_price", unexpected_update)
+        # When every quality predicate fails, on either push or REST refresh.
+        decision = runner._evaluate_quote_trigger(
+            Quote("AAPL.US", -1.0, 50.0, 150.0, "2000-01-01T00:00:00Z"),
+            is_push=is_push,
+        )
+        # Then the entire funnel differs only by the original rejection increments.
+        assert runner.decision_funnel.snapshot() == replace(
+            before,
+            primary_quotes_seen=1,
+            quality_rejections=1,
+            quality_rejections_by_reason={
+                "price_positive": 1,
+                "spread_reasonable": 1,
+                "last_bbo_consistent": 1,
+                "source_timestamp_fresh": 1,
+            },
+        )
+        assert decision.early_return is True
+        assert decision.result is None
+        assert decision.processing_started is False
+        assert runner.engine.snapshot() == engine_before
+
+    @pytest.mark.parametrize("message", ["", "BUY FILLED: order-123"])
+    def test_quality_gate_non_primary_quote_leaves_status_and_funnel_unchanged(
+        self, message: str,
+    ) -> None:
+        # Given a primary runner and an unrelated symbol with an invalid quote.
+        runner = self._runner()
+        runner._set_last_action_message(message)
+        before = runner.decision_funnel.snapshot()
+        # When the unrelated quote arrives.
+        decision = runner._evaluate_quote_trigger(
+            Quote("MSFT.US", -1.0, 50.0, 150.0, "2000-01-01T00:00:00Z"),
+        )
+        # Then the existing non-primary early return leaves primary status alone.
+        assert decision.early_return is True
+        assert runner.last_action_message == message
+        assert runner.decision_funnel.snapshot() == before

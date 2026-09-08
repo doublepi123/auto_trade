@@ -363,6 +363,7 @@ class AppRunner:
         # pauses, or performs I/O. Constant-time, non-blocking mutators.
         self.quote_stream_health: QuoteStreamHealthTracker = QuoteStreamHealthTracker()
         self._last_action_message = ""
+        self._quote_rejection_message = ""
         self._last_guarded_ledger_replay: tuple[object, ...] | None = None
         self._defer_incomplete_pnl_latch = False
         self._post_fill_pnl_pause_reason = ""
@@ -2901,7 +2902,7 @@ class AppRunner:
                         )
                         if not quote_quality[predicate]
                     ])
-                self._last_action_message = (
+                self._quote_rejection_message = (
                     f"{quote.symbol} quote rejected by live quality gate"
                 )
                 decision.early_return = True
@@ -4394,7 +4395,8 @@ class AppRunner:
     @property
     def last_action_message(self) -> str:
         with self._state_lock:
-            return self._last_action_message
+            # Quote rejection is fallback context, never a replacement for a decision.
+            return self._last_action_message or self._quote_rejection_message
 
     def _reset_quote_tracking(self, *, clear_history: bool) -> None:
         with self._state_lock:
