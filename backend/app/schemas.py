@@ -4701,6 +4701,65 @@ class RangeFitnessResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class IntervalWidthRow(BaseModel):
+    """One probed half-width: how often it is touched AND what it netted.
+
+    Reach and net return always travel together. Reach alone makes narrowing
+    the band look attractive, because a tighter band fills more often — on a
+    signal with no edge that produces losses sooner, not profit.
+    """
+
+    half_width_pct: float = Field(gt=0, allow_inf_nan=False)
+    placements: int = Field(ge=0)
+    trades: int = Field(ge=0)
+    distinct_days: int = Field(ge=0)
+    reach_rate_pct: float = Field(ge=0, le=100, allow_inf_nan=False)
+    win_rate_pct: float = Field(ge=0, le=100, allow_inf_nan=False)
+    net_mean_bps: float = Field(allow_inf_nan=False)
+    net_ci_lower_bps: float = Field(allow_inf_nan=False)
+    clustered_t: float = Field(allow_inf_nan=False)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class IntervalWidthFitnessResponse(BaseModel):
+    """Read-only: is the configured interval width ever touched, and does it pay?
+
+    A range strategy earns nothing either because the band is stranded where
+    price no longer goes, or because it is so wide price never reaches its
+    edges. The decision funnel shows identical zeros for both. Recentering
+    fixes only the first; this diagnoses the second.
+
+    ``best_width`` is populated ONLY when a width's day-clustered net CI lower
+    bound clears zero. ``NEGATIVE_EDGE`` means reachable but unprofitable —
+    narrowing would trade more often, not more profitably. ``UNREACHABLE`` and
+    ``INSUFFICIENT_DATA`` are kept distinct: an untouched band and an
+    unobserved one produce the same zero for very different reasons.
+
+    Never writes a row, changes the interval, or places an order.
+    """
+
+    generated_at: datetime
+    symbol: str
+    lookback_days: int = Field(ge=1, le=365)
+    cost_bps: float = Field(ge=0, allow_inf_nan=False)
+    distinct_days: int = Field(ge=0)
+    bars: int = Field(ge=0)
+    min_trades: int = Field(ge=1)
+    min_days: int = Field(ge=1)
+    verdict: Literal[
+        "INSUFFICIENT_DATA",
+        "UNREACHABLE",
+        "NEGATIVE_EDGE",
+        "POSITIVE_EDGE",
+    ]
+    best_width: Optional[float] = None
+    detail: str = ""
+    widths: list[IntervalWidthRow] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class UniversePromotionReadinessResponse(BaseModel):
     universe_run_id: int = Field(ge=1)
     as_of_date: date

@@ -20,6 +20,8 @@ from app.models import (
 )
 from app.runner import get_runner
 from app.schemas import (
+    IntervalWidthFitnessResponse,
+    IntervalWidthRow,
     RangeFitnessItem,
     RangeFitnessResponse,
     UniverseCatalogItem,
@@ -35,6 +37,9 @@ from app.services.durable_job_lease_service import (
     DurableJobLeaseService,
     LeaseBackendError,
     LeaseLostError,
+)
+from app.services.interval_width_fitness_service import (
+    IntervalWidthFitnessService,
 )
 from app.services.range_fitness_service import RangeFitnessService
 from app.services.universe_promotion_service import UniversePromotionService
@@ -276,6 +281,59 @@ def get_range_fitness(
         range_suitable_pct=range_suitable_pct,
         reach_lookback_days=max(lookback_days, reach_lookback_days),
         items=[RangeFitnessItem(**asdict(row)) for row in rows],
+    )
+
+
+@router.get(
+    "/interval-width-fitness",
+    response_model=IntervalWidthFitnessResponse,
+)
+def get_interval_width_fitness(
+    symbol: str = Query(..., min_length=1, description="Symbol, e.g. TSLA.US"),
+    lookback_days: int = Query(default=30, ge=1, le=365),
+    cost_bps: float = Query(default=14.0, ge=0, le=1000),
+    min_trades: int = Query(default=20, ge=1, le=100000),
+    min_days: int = Query(default=10, ge=1, le=365),
+    db: Session = Depends(get_db),
+) -> IntervalWidthFitnessResponse:
+    """Is the configured interval width ever touched — and does it pay?
+
+    A range strategy earns nothing either because the band is stranded where
+    price no longer trades, or because it is wide enough that price never
+    reaches its edges. The decision funnel reports identical zeros for both,
+    so recentering (which fixes only the first) can leave the second in place.
+
+    This replays recorded shadow closes and reports, per half-width, both the
+    reach rate and the day-clustered net return after costs. A width is
+    recommended ONLY when its net CI lower bound clears zero: ranking by reach
+    alone is what makes narrowing the band look attractive, and on a signal
+    without edge a tighter band simply loses money faster.
+
+    Read-only: never writes a row, changes the interval, or places an order.
+    """
+    try:
+        report = IntervalWidthFitnessService(db).assess(
+            symbol=symbol,
+            lookback_days=lookback_days,
+            cost_bps=cost_bps,
+            min_trades=min_trades,
+            min_days=min_days,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return IntervalWidthFitnessResponse(
+        generated_at=datetime.now(timezone.utc),
+        symbol=report.symbol,
+        lookback_days=report.lookback_days,
+        cost_bps=report.cost_bps,
+        distinct_days=report.distinct_days,
+        bars=report.bars,
+        min_trades=report.min_trades,
+        min_days=report.min_days,
+        verdict=report.verdict,  # type: ignore[arg-type]
+        best_width=report.best_width,
+        detail=report.detail,
+        widths=[IntervalWidthRow(**asdict(row)) for row in report.widths],
     )
 
 
