@@ -51,14 +51,16 @@ class _Clock:
 
 
 class _Quote:
-    def __init__(self, symbol: str, last_price: float, at: datetime | None) -> None:
+    def __init__(self, symbol: str, last_price: float, at: Any) -> None:
         self.symbol = symbol
         self.last_price = last_price
+        # Deliberately typed loose: the Longbridge SDK returns this as a naive
+        # UTC string, not a datetime.
         self.timestamp = at
 
 
 class _Broker:
-    def __init__(self, price: float | None, price_at: datetime | None) -> None:
+    def __init__(self, price: float | None, price_at: Any) -> None:
         self.price = price
         self.price_at = price_at
 
@@ -75,7 +77,7 @@ class _Runner:
         self,
         *,
         price: float | None = 366.0,
-        price_at: datetime | None = None,
+        price_at: Any = None,
         block: Exception | None = None,
         reload_error: Exception | None = None,
     ) -> None:
@@ -293,6 +295,49 @@ class TestIntervalRecenter(_Base):
         now = datetime.now(timezone.utc)
         result = self._run(_Runner(price=366.0, price_at=None), now=now)
         assert result.outcome == OUTCOME_STALE_PRICE
+
+    def test_accepts_a_string_broker_timestamp(self) -> None:
+        # The Longbridge SDK hands back Quote.timestamp as a naive UTC STRING
+        # ("2026-09-09 14:37:57"), not a datetime. Requiring a datetime made
+        # every live quote look undatable, so the job fail-closed on a
+        # perfectly fresh price and the band was never recentered.
+        self._seed()
+        now = datetime(2026, 9, 9, 14, 38, 20, tzinfo=timezone.utc)
+        runner = _Runner(price=366.0, price_at="2026-09-09 14:37:57")
+        result = self._run(runner, now=now)
+        assert result.outcome == OUTCOME_RECENTERED
+        cfg = self._config()
+        assert cfg.buy_low < 366.0 < cfg.sell_high
+
+    def test_stale_string_timestamp_still_fails_closed(self) -> None:
+        self._seed()
+        now = datetime(2026, 9, 9, 15, 38, 20, tzinfo=timezone.utc)
+        runner = _Runner(price=366.0, price_at="2026-09-09 14:37:57")
+        result = self._run(runner, now=now)
+        assert result.outcome == OUTCOME_STALE_PRICE
+
+    def test_iso_string_timestamp_with_offset_is_accepted(self) -> None:
+        self._seed()
+        now = datetime(2026, 9, 9, 14, 38, 20, tzinfo=timezone.utc)
+        runner = _Runner(price=366.0, price_at="2026-09-09T14:37:57+00:00")
+        result = self._run(runner, now=now)
+        assert result.outcome == OUTCOME_RECENTERED
+
+    def test_unparseable_string_timestamp_fails_closed(self) -> None:
+        self._seed()
+        now = datetime.now(timezone.utc)
+        runner = _Runner(price=366.0, price_at="not-a-timestamp")
+        result = self._run(runner, now=now)
+        assert result.outcome == OUTCOME_STALE_PRICE
+
+    def test_epoch_seconds_timestamp_is_accepted(self) -> None:
+        # Some SDK paths surface an epoch instead of a formatted string.
+        self._seed()
+        at = datetime(2026, 9, 9, 14, 37, 57, tzinfo=timezone.utc)
+        now = datetime(2026, 9, 9, 14, 38, 20, tzinfo=timezone.utc)
+        runner = _Runner(price=366.0, price_at=at.timestamp())
+        result = self._run(runner, now=now)
+        assert result.outcome == OUTCOME_RECENTERED
 
     def test_missing_quote_never_recenters(self) -> None:
         self._seed()

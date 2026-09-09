@@ -97,6 +97,38 @@ def _as_utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
 
 
+def _coerce_quote_time(value: Any) -> datetime | None:
+    """Read a broker quote timestamp, whatever shape the SDK hands back.
+
+    The Longbridge SDK returns ``Quote.timestamp`` as a naive UTC STRING
+    ("2026-09-09 14:37:57"), not a datetime. Accepting only datetimes made
+    every live quote look undatable, so the freshness check fail-closed on a
+    perfectly fresh price and the band was never recentered — the job reported
+    healthy ticks while doing nothing, which is worse than an outright error.
+
+    Naive values are read as UTC, matching how the SDK emits them. An
+    unparseable value returns ``None`` so the caller still fails closed rather
+    than inventing an age.
+    """
+    if isinstance(value, datetime):
+        return _as_utc(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(float(value), tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return _as_utc(parsed)
+    return None
+
+
 def _reference_is_fresh(age_seconds: float | None) -> bool:
     """Fresh means measurable and inside the bound on BOTH sides.
 
@@ -288,8 +320,7 @@ class IntervalRecenterService:
                 price = float(getattr(quote, "last_price", 0) or 0)
             except (TypeError, ValueError):
                 return None, None
-            at = getattr(quote, "timestamp", None)
-            return price, at if isinstance(at, datetime) else None
+            return price, _coerce_quote_time(getattr(quote, "timestamp", None))
         return None, None
 
     def _recenters_today(
