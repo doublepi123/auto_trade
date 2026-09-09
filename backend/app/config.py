@@ -759,6 +759,49 @@ class Settings(BaseSettings):
         allow_inf_nan=False,
         validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_MAX_ATR_PCT",
     )
+    # Recenter the live band on the primary symbol's own fresh price when price
+    # has drifted outside it. DEFAULT OFF. A band is set once when the primary
+    # switches and never tracks price afterwards, so a trend leaves it stranded
+    # and the long-only entry stops triggering (observed: 34 days, 40k+ quote
+    # evaluations, zero threshold crossings). This only restores the ability to
+    # trade the CONFIGURED strategy; it asserts nothing about that strategy
+    # having edge, and it never submits an order itself.
+    interval_recenter_enabled: bool = Field(
+        default=False,
+        validation_alias="AUTO_TRADE_INTERVAL_RECENTER_ENABLED",
+    )
+    interval_recenter_interval_minutes: int = Field(
+        default=30,
+        ge=5,
+        le=1440,
+        validation_alias="AUTO_TRADE_INTERVAL_RECENTER_INTERVAL_MINUTES",
+    )
+    # Only act once price sits this far outside the band. Recentering on every
+    # small excursion would walk the band along with price and convert a range
+    # strategy into a momentum chaser, so the trigger is deliberately blunt.
+    interval_recenter_min_drift_pct: float = Field(
+        default=1.5,
+        gt=0,
+        le=50,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_INTERVAL_RECENTER_MIN_DRIFT_PCT",
+    )
+    # Reference price age bound. A stale quote recenters the band onto a price
+    # the market has left, reproducing the stranded band it is meant to fix.
+    interval_recenter_max_price_age_seconds: int = Field(
+        default=300,
+        ge=1,
+        le=86400,
+        validation_alias="AUTO_TRADE_INTERVAL_RECENTER_MAX_PRICE_AGE_SECONDS",
+    )
+    # Hard ceiling on recenters per exchange-local trading day. Bounds how far
+    # the band can be walked in one session even if drift keeps re-triggering.
+    interval_recenter_max_per_day: int = Field(
+        default=4,
+        ge=1,
+        le=48,
+        validation_alias="AUTO_TRADE_INTERVAL_RECENTER_MAX_PER_DAY",
+    )
     auto_primary_switch_enabled: bool = Field(
         default=False,
         validation_alias="AUTO_TRADE_AUTO_PRIMARY_SWITCH_ENABLED",

@@ -207,6 +207,7 @@ _CRON_STRATEGY_V2_SHADOW = "strategy_v2_shadow"
 _CRON_OPENING_MOMENTUM_SHADOW = "opening_momentum_shadow"
 _CRON_UNIVERSE_SELECTION = "universe_selection"
 _CRON_AUTO_PRIMARY_SWITCH = "auto_primary_switch"
+_CRON_INTERVAL_RECENTER = "interval_recenter"
 _CRON_WATCHLIST_QUANT = "watchlist_quant"
 _CRON_WATCHLIST_QUANT_V6_EVALUATION = "watchlist_quant_v6_evaluation"
 _CRON_WS_CLEANUP = "ws_cleanup"
@@ -268,6 +269,13 @@ def _register_cron_health_jobs() -> None:
                 settings.auto_primary_switch_interval_minutes * 60
             ),
             enabled_provider=lambda: bool(settings.auto_primary_switch_enabled),
+        )
+        service.register(
+            _CRON_INTERVAL_RECENTER,
+            expected_interval_seconds=float(
+                settings.interval_recenter_interval_minutes * 60
+            ),
+            enabled_provider=lambda: bool(settings.interval_recenter_enabled),
         )
         service.register(
             _CRON_WATCHLIST_QUANT,
@@ -2160,6 +2168,85 @@ def _auto_primary_switch_tick_sync() -> object | None:
     return None
 
 
+_INTERVAL_RECENTER_LEASE_KEY = "interval_recenter"
+
+
+def _interval_recenter_tick_sync() -> object | None:
+    """Recenter a stranded live band, under a durable lease.
+
+    Leased for the same reason the primary switch is: this mutates live
+    strategy state, so two processes evaluating concurrently could recenter
+    twice off one drift reading and consume the daily cap in a single tick.
+    """
+    if not settings.interval_recenter_enabled:
+        return None
+    from app.runner import get_runner
+    from app.services.durable_job_lease_service import DurableJobLeaseService
+    from app.services.interval_recenter_service import (
+        IntervalRecenterService,
+        OUTCOME_BLOCKED,
+        OUTCOME_RECENTERED,
+    )
+
+    lease_service = DurableJobLeaseService(
+        session_factory=SessionLocal,
+        default_ttl_seconds=settings.job_lease_ttl_seconds,
+    )
+    lease = lease_service.try_acquire(_INTERVAL_RECENTER_LEASE_KEY)
+    if lease is None:
+        return _JOB_LEASE_BUSY_DEFERRED
+
+    with lease_service.keepalive(
+        lease,
+        interval_seconds=settings.job_lease_heartbeat_seconds,
+    ):
+        db = SessionLocal()
+        try:
+            result = IntervalRecenterService(db).evaluate(get_runner())
+        finally:
+            db.close()
+    if result.outcome == OUTCOME_RECENTERED:
+        logger.warning(
+            "interval recentered for %s: [%s, %s] -> [%s, %s] at %s",
+            result.symbol,
+            result.previous_buy_low,
+            result.previous_sell_high,
+            result.new_buy_low,
+            result.new_sell_high,
+            result.reference_price,
+        )
+    elif result.outcome == OUTCOME_BLOCKED:
+        logger.warning(
+            "interval recenter blocked for %s: %s", result.symbol, result.detail
+        )
+    else:
+        logger.debug("interval recenter outcome: %s", result.outcome)
+    return None
+
+
+async def _interval_recenter_cron() -> None:
+    if not settings.interval_recenter_enabled:
+        return
+    await asyncio.sleep(60)
+    while True:
+        deferred = False
+        try:
+            outcome = await asyncio.to_thread(_interval_recenter_tick_sync)
+            deferred = outcome is _JOB_LEASE_BUSY_DEFERRED
+            _cron_record_success(_CRON_INTERVAL_RECENTER)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("interval recenter cron failed")
+            _cron_record_failure(_CRON_INTERVAL_RECENTER, sys.exc_info()[1])  # type: ignore[arg-type]
+        delay_seconds = (
+            _JOB_LEASE_RETRY_SECONDS
+            if deferred
+            else settings.interval_recenter_interval_minutes * 60
+        )
+        await asyncio.sleep(delay_seconds)
+
+
 async def _auto_primary_switch_cron() -> None:
     if not settings.auto_primary_switch_enabled:
         return
@@ -2262,6 +2349,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(_opening_momentum_shadow_cron()),
         asyncio.create_task(_universe_selection_cron()),
         asyncio.create_task(_auto_primary_switch_cron()),
+        asyncio.create_task(_interval_recenter_cron()),
         asyncio.create_task(_watchlist_quant_cron()),
         asyncio.create_task(_watchlist_quant_v6_evaluation_cron()),
     )
