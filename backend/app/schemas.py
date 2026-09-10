@@ -4809,6 +4809,47 @@ class EntryWindowOverlapResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class EntryWindowPoolSymbolRow(BaseModel):
+    symbol: str
+    verdict: Literal["INSUFFICIENT_DATA", "NO_OVERLAP", "OVERLAP_PRESENT"]
+    sessions_total: int = Field(ge=0)
+    sessions_with_overlap: int = Field(ge=0)
+    overlap_session_share_pct: float = Field(ge=0, le=100, allow_inf_nan=False)
+    total_overlap_minutes: int = Field(ge=0)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class EntryWindowPoolDayRow(BaseModel):
+    session_date: date
+    symbols_with_window: int = Field(ge=0)
+    symbols_observed: int = Field(ge=0)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class EntryWindowPoolResponse(BaseModel):
+    """Read-only pool view of entry-window overlap.
+
+    Ranks every shadow-enabled symbol by the share of sessions on which a
+    tradeable window (price at the band's lower edge AND gate open, after
+    warmup) existed, and counts per day how many symbols had one. The
+    single-symbol endpoint answers "did the primary have a window"; this
+    answers "did anything", which a single-primary live path cannot see.
+
+    Never writes a row, changes the interval, or places an order.
+    """
+
+    generated_at: datetime
+    lookback_days: int = Field(ge=1, le=365)
+    symbols_total: int = Field(ge=0)
+    symbols_with_any_window: int = Field(ge=0)
+    symbols: list[EntryWindowPoolSymbolRow] = Field(default_factory=list)
+    days: list[EntryWindowPoolDayRow] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class UniversePromotionReadinessResponse(BaseModel):
     universe_run_id: int = Field(ge=1)
     as_of_date: date

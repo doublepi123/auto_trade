@@ -68,9 +68,99 @@ class EntryWindowOverlapReport:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class PoolSymbolRow:
+    symbol: str
+    verdict: str
+    sessions_total: int
+    sessions_with_overlap: int
+    overlap_session_share_pct: float
+    total_overlap_minutes: int
+
+
+@dataclass(frozen=True)
+class PoolDayRow:
+    session_date: date
+    symbols_with_window: int
+    symbols_observed: int
+
+
+@dataclass(frozen=True)
+class EntryWindowPoolReport:
+    lookback_days: int
+    symbols_total: int
+    symbols_with_any_window: int
+    symbols: tuple[PoolSymbolRow, ...]
+    days: tuple[PoolDayRow, ...]
+
+
 class EntryWindowOverlapService:
     def __init__(self, db: Session) -> None:
         self._db = db
+
+    def assess_pool(
+        self,
+        *,
+        symbols: list[str],
+        lookback_days: int = 30,
+        warmup_minutes: int | None = None,
+        half_width_pct: float | None = None,
+        min_drift_pct: float | None = None,
+        now: datetime | None = None,
+    ) -> EntryWindowPoolReport:
+        """Rank a pool by how often each symbol had a window, and count per day.
+
+        The single-symbol view answers "did TSLA have a window"; this answers
+        "did ANYTHING have a window today", which is the question the
+        single-primary architecture cannot see. Symbols are ranked by share
+        of sessions with a window; per-day rows count symbols with one.
+        """
+        cleaned = sorted({(s or "").strip().upper() for s in symbols if (s or "").strip()})
+        if not cleaned:
+            raise ValueError("symbols must not be empty")
+        rows: list[PoolSymbolRow] = []
+        per_day_window: defaultdict[date, int] = defaultdict(int)
+        per_day_seen: defaultdict[date, int] = defaultdict(int)
+        for symbol in cleaned:
+            report = self.assess(
+                symbol=symbol,
+                lookback_days=lookback_days,
+                warmup_minutes=warmup_minutes,
+                half_width_pct=half_width_pct,
+                min_drift_pct=min_drift_pct,
+                min_sessions=1,
+                now=now,
+            )
+            rows.append(PoolSymbolRow(
+                symbol=symbol,
+                verdict=report.verdict,
+                sessions_total=report.sessions_total,
+                sessions_with_overlap=report.sessions_with_overlap,
+                overlap_session_share_pct=report.overlap_session_share_pct,
+                total_overlap_minutes=report.total_overlap_minutes,
+            ))
+            for session in report.sessions:
+                per_day_seen[session.session_date] += 1
+                if session.overlap_minutes > 0:
+                    per_day_window[session.session_date] += 1
+        rows.sort(
+            key=lambda r: (-r.overlap_session_share_pct, -r.total_overlap_minutes, r.symbol)
+        )
+        days = tuple(
+            PoolDayRow(
+                session_date=d,
+                symbols_with_window=per_day_window.get(d, 0),
+                symbols_observed=per_day_seen[d],
+            )
+            for d in sorted(per_day_seen)
+        )
+        return EntryWindowPoolReport(
+            lookback_days=lookback_days,
+            symbols_total=len(rows),
+            symbols_with_any_window=sum(1 for r in rows if r.sessions_with_overlap > 0),
+            symbols=tuple(rows),
+            days=days,
+        )
 
     def assess(
         self,

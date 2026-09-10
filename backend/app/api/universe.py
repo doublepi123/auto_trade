@@ -21,6 +21,9 @@ from app.models import (
 from app.runner import get_runner
 from app.schemas import (
     EntryWindowOverlapResponse,
+    EntryWindowPoolDayRow,
+    EntryWindowPoolResponse,
+    EntryWindowPoolSymbolRow,
     EntryWindowSessionRow,
     IntervalWidthFitnessResponse,
     IntervalWidthRow,
@@ -339,6 +342,50 @@ def get_interval_width_fitness(
         best_width=report.best_width,
         detail=report.detail,
         widths=[IntervalWidthRow(**asdict(row)) for row in report.widths],
+    )
+
+
+@router.get(
+    "/entry-window-overlap/pool",
+    response_model=EntryWindowPoolResponse,
+)
+def get_entry_window_overlap_pool(
+    lookback_days: int = Query(default=30, ge=1, le=365),
+    warmup_minutes: int | None = Query(default=None, ge=0, le=180),
+    half_width_pct: float | None = Query(default=None, gt=0, le=50),
+    min_drift_pct: float | None = Query(default=None, gt=0, le=50),
+    db: Session = Depends(get_db),
+) -> EntryWindowPoolResponse:
+    """Which shadow-enabled symbols had a tradeable window, and how many per day.
+
+    Read-only: never writes a row, changes the interval, or places an order.
+    """
+    symbols = [
+        str(row.symbol)
+        for row in db.query(StrategyV2ShadowConfig)
+        .filter(StrategyV2ShadowConfig.enabled.is_(True))
+        .all()
+        if row.symbol
+    ]
+    if not symbols:
+        raise HTTPException(status_code=404, detail="no shadow-enabled symbols")
+    try:
+        report = EntryWindowOverlapService(db).assess_pool(
+            symbols=symbols,
+            lookback_days=lookback_days,
+            warmup_minutes=warmup_minutes,
+            half_width_pct=half_width_pct,
+            min_drift_pct=min_drift_pct,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return EntryWindowPoolResponse(
+        generated_at=datetime.now(timezone.utc),
+        lookback_days=report.lookback_days,
+        symbols_total=report.symbols_total,
+        symbols_with_any_window=report.symbols_with_any_window,
+        symbols=[EntryWindowPoolSymbolRow(**asdict(r)) for r in report.symbols],  # type: ignore[arg-type]
+        days=[EntryWindowPoolDayRow(**asdict(r)) for r in report.days],
     )
 
 

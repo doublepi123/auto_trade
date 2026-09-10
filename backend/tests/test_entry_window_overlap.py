@@ -200,6 +200,44 @@ class TestEntryWindowOverlap(_Base):
         with pytest.raises(ValueError):
             self._assess(symbol="TSLA.US", lookback_days=0)
 
+    def test_pool_summary_ranks_symbols_by_windows_and_counts_per_day(self) -> None:
+        # Three symbols, twelve sessions. A has a window on 6 of them, B on 2,
+        # C never. Per-day count must reflect how many symbols had a window
+        # that day, which is what an operator scanning for "anything tradeable
+        # today" needs and which the single-symbol view cannot show.
+        for d in range(1, 13):
+            day = f"2026-09-{d:02d}"
+            self._seed_day(day, _flat(100.0, False, 95) + _flat(98.0, d % 2 == 0, 110), symbol="AAA.US")
+            self._seed_day(day, _flat(100.0, False, 95) + _flat(98.0, d in (3, 7), 110), symbol="BBB.US")
+            self._seed_day(day, _flat(100.0, False, 95) + _flat(101.0, True, 110), symbol="CCC.US")
+        db = self._db()
+        try:
+            pool = EntryWindowOverlapService(db).assess_pool(
+                symbols=["CCC.US", "AAA.US", "BBB.US"], lookback_days=30,
+            )
+        finally:
+            db.close()
+        ranked = [r.symbol for r in pool.symbols]
+        assert ranked == ["AAA.US", "BBB.US", "CCC.US"]
+        assert pool.symbols[0].sessions_with_overlap == 6
+        assert pool.symbols[1].sessions_with_overlap == 2
+        assert pool.symbols[2].sessions_with_overlap == 0
+        by_day = {row.session_date.isoformat(): row.symbols_with_window for row in pool.days}
+        assert by_day["2026-09-02"] == 1   # AAA only
+        assert by_day["2026-09-03"] == 1   # BBB only
+        assert by_day["2026-09-07"] == 1   # BBB only (7 is odd)
+        assert by_day["2026-09-01"] == 0
+        assert pool.symbols_total == 3
+        assert pool.symbols_with_any_window == 2
+
+    def test_pool_summary_rejects_an_empty_symbol_list(self) -> None:
+        db = self._db()
+        try:
+            with pytest.raises(ValueError):
+                EntryWindowOverlapService(db).assess_pool(symbols=[], lookback_days=30)
+        finally:
+            db.close()
+
     def test_is_read_only(self) -> None:
         for d in range(1, 13):
             self._seed_day(f"2026-09-{d:02d}", _flat(100.0, True, 200))
