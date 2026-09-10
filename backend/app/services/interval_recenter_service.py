@@ -74,6 +74,13 @@ EVENT_INTERVAL_RECENTERED = "INTERVAL_RECENTERED"
 EVENT_INTERVAL_RECENTER_BLOCKED = "INTERVAL_RECENTER_BLOCKED"
 EVENT_INTERVAL_RECENTER_ROLLED_BACK = "INTERVAL_RECENTER_ROLLED_BACK"
 
+# The SDK stamps quotes at whole-second resolution while the host clock has
+# microseconds, so a quote read at hh:mm:27.9 can carry the stamp hh:mm:28 and
+# look 0.1s "in the future" purely from truncation. Two seconds absorbs that
+# plus ordinary NTP drift; anything larger is still treated as clock corruption
+# and fails closed.
+_CLOCK_SKEW_TOLERANCE_SECONDS = 2.0
+
 
 @dataclass(frozen=True)
 class IntervalRecenterResult:
@@ -138,7 +145,11 @@ def _reference_is_fresh(age_seconds: float | None) -> bool:
     """
     if age_seconds is None:
         return False
-    return 0 <= age_seconds <= settings.interval_recenter_max_price_age_seconds
+    return (
+        -_CLOCK_SKEW_TOLERANCE_SECONDS
+        <= age_seconds
+        <= settings.interval_recenter_max_price_age_seconds
+    )
 
 
 def _drift_pct(price: float, buy_low: float, sell_high: float) -> float:
@@ -199,7 +210,17 @@ class IntervalRecenterService:
                 symbol=symbol,
                 detail="no usable reference price",
             )
-        age = None if price_at is None else (anchor - _as_utc(price_at)).total_seconds()
+        # Age is measured from the clock AFTER the fetch returned, not from the
+        # anchor read at the top of evaluate(). get_quotes is a network round
+        # trip that was observed taking ~10s on the SDK's first call after a
+        # reconnect; measured against the earlier anchor, the broker's
+        # timestamp landed in the future and a fresh quote was rejected.
+        observed_at = _as_utc(self._clock())
+        age = (
+            None
+            if price_at is None
+            else (observed_at - _as_utc(price_at)).total_seconds()
+        )
         if not _reference_is_fresh(age):
             return IntervalRecenterResult(
                 OUTCOME_STALE_PRICE,

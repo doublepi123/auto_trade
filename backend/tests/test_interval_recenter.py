@@ -282,6 +282,56 @@ class TestIntervalRecenter(_Base):
         cfg = self._config()
         assert cfg.buy_low == 344.5447
 
+    def test_a_slow_quote_fetch_does_not_make_a_fresh_price_look_future_dated(
+        self,
+    ) -> None:
+        """Freshness must be judged against the clock AFTER the fetch returns.
+
+        The anchor was read at the top of evaluate(), then get_quotes made a
+        network round trip. When that round trip was slow — observed at ~10s
+        on the SDK's first call after a reconnect — the broker's second-
+        resolution timestamp landed AFTER the anchor and the perfectly fresh
+        quote was rejected as future-dated. The service then did nothing while
+        reporting a healthy tick, which is the failure mode this feature was
+        built to eliminate.
+        """
+        self._seed(buy_low=362.0, sell_high=370.0)
+        clock = _Clock(datetime(2026, 9, 10, 16, 31, 18, tzinfo=timezone.utc))
+        # The broker answers 10s of wall-clock later, stamped with the time it
+        # actually answered.
+        runner = _Runner(price=366.0, price_at="2026-09-10 16:31:28")
+        original = runner.broker.get_quotes
+
+        def slow_get_quotes(symbols: list[str]) -> list[Any]:
+            clock.advance(10.0)
+            return original(symbols)
+
+        runner.broker.get_quotes = slow_get_quotes  # type: ignore[method-assign]
+        db = self._db()
+        try:
+            result = IntervalRecenterService(db, clock=clock).evaluate(runner)
+        finally:
+            db.close()
+        assert result.outcome == OUTCOME_WITHIN_BAND
+        assert result.drift_pct is not None
+
+    def test_sub_second_clock_skew_is_tolerated(self) -> None:
+        """The SDK stamps whole seconds; the host clock has microseconds.
+
+        A quote stamped 16:31:28 read at 16:31:27.9 is 0.1s "in the future"
+        purely from truncation. That is not clock corruption and must not
+        fail closed.
+        """
+        self._seed(buy_low=362.0, sell_high=370.0)
+        now = datetime(2026, 9, 10, 16, 31, 27, 900_000, tzinfo=timezone.utc)
+        runner = _Runner(price=366.0, price_at="2026-09-10 16:31:28")
+        db = self._db()
+        try:
+            result = IntervalRecenterService(db, clock=_Clock(now)).evaluate(runner)
+        finally:
+            db.close()
+        assert result.outcome == OUTCOME_WITHIN_BAND
+
     def test_future_dated_price_never_recenters(self) -> None:
         self._seed()
         now = datetime.now(timezone.utc)
