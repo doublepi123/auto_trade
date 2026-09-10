@@ -20,6 +20,8 @@ from app.models import (
 )
 from app.runner import get_runner
 from app.schemas import (
+    EntryWindowOverlapResponse,
+    EntryWindowSessionRow,
     IntervalWidthFitnessResponse,
     IntervalWidthRow,
     RangeFitnessItem,
@@ -37,6 +39,9 @@ from app.services.durable_job_lease_service import (
     DurableJobLeaseService,
     LeaseBackendError,
     LeaseLostError,
+)
+from app.services.entry_window_overlap_service import (
+    EntryWindowOverlapService,
 )
 from app.services.interval_width_fitness_service import (
     IntervalWidthFitnessService,
@@ -334,6 +339,61 @@ def get_interval_width_fitness(
         best_width=report.best_width,
         detail=report.detail,
         widths=[IntervalWidthRow(**asdict(row)) for row in report.widths],
+    )
+
+
+@router.get(
+    "/entry-window-overlap",
+    response_model=EntryWindowOverlapResponse,
+)
+def get_entry_window_overlap(
+    symbol: str = Query(..., min_length=1, description="Symbol, e.g. TSLA.US"),
+    lookback_days: int = Query(default=30, ge=1, le=365),
+    warmup_minutes: int | None = Query(default=None, ge=0, le=180),
+    half_width_pct: float | None = Query(default=None, gt=0, le=50),
+    min_drift_pct: float | None = Query(default=None, gt=0, le=50),
+    min_sessions: int = Query(default=10, ge=1, le=365),
+    db: Session = Depends(get_db),
+) -> EntryWindowOverlapResponse:
+    """Did a tradeable entry window exist, session by session?
+
+    A live entry needs price at or below the band's lower edge AND the regime
+    gate open in the same minute. Reach rate and gate pass rate each ignore
+    the other and so overstate opportunity; on the live deployment trend days
+    reached the band with the gate shut and range days opened the gate with
+    price inside the band. This replays both conditions minute by minute
+    using the live recentering rule and opening warmup. Omitted parameters
+    default to the deployed settings.
+
+    Read-only: never writes a row, changes the interval, or places an order.
+    """
+    try:
+        report = EntryWindowOverlapService(db).assess(
+            symbol=symbol,
+            lookback_days=lookback_days,
+            warmup_minutes=warmup_minutes,
+            half_width_pct=half_width_pct,
+            min_drift_pct=min_drift_pct,
+            min_sessions=min_sessions,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return EntryWindowOverlapResponse(
+        generated_at=datetime.now(timezone.utc),
+        symbol=report.symbol,
+        lookback_days=report.lookback_days,
+        warmup_minutes=report.warmup_minutes,
+        half_width_pct=report.half_width_pct,
+        min_drift_pct=report.min_drift_pct,
+        sessions_total=report.sessions_total,
+        sessions_with_overlap=report.sessions_with_overlap,
+        overlap_session_share_pct=report.overlap_session_share_pct,
+        total_overlap_minutes=report.total_overlap_minutes,
+        total_below_band_minutes=report.total_below_band_minutes,
+        total_gate_open_minutes=report.total_gate_open_minutes,
+        verdict=report.verdict,  # type: ignore[arg-type]
+        detail=report.detail,
+        sessions=[EntryWindowSessionRow(**asdict(row)) for row in report.sessions],
     )
 
 

@@ -4766,6 +4766,49 @@ class IntervalWidthFitnessResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class EntryWindowSessionRow(BaseModel):
+    session_date: date
+    bars: int = Field(ge=0)
+    below_band_minutes: int = Field(ge=0)
+    gate_open_minutes: int = Field(ge=0)
+    overlap_minutes: int = Field(ge=0)
+    recenters: int = Field(ge=0)
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class EntryWindowOverlapResponse(BaseModel):
+    """Read-only: did a tradeable entry window exist on each session?
+
+    A live entry needs price at or below the band's lower edge AND the regime
+    gate open, in the same minute. Reach rate and gate pass rate each ignore
+    the other condition and so each overstates opportunity; on the live
+    deployment they were anti-correlated. ``overlap_minutes`` counts only the
+    minutes where both held, after the opening warmup, with the band
+    recentered by the same rule the live job uses.
+
+    Never writes a row, changes the interval, or places an order.
+    """
+
+    generated_at: datetime
+    symbol: str
+    lookback_days: int = Field(ge=1, le=365)
+    warmup_minutes: int = Field(ge=0)
+    half_width_pct: float = Field(gt=0, allow_inf_nan=False)
+    min_drift_pct: float = Field(gt=0, allow_inf_nan=False)
+    sessions_total: int = Field(ge=0)
+    sessions_with_overlap: int = Field(ge=0)
+    overlap_session_share_pct: float = Field(ge=0, le=100, allow_inf_nan=False)
+    total_overlap_minutes: int = Field(ge=0)
+    total_below_band_minutes: int = Field(ge=0)
+    total_gate_open_minutes: int = Field(ge=0)
+    verdict: Literal["INSUFFICIENT_DATA", "NO_OVERLAP", "OVERLAP_PRESENT"]
+    detail: str = ""
+    sessions: list[EntryWindowSessionRow] = Field(default_factory=list)
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class UniversePromotionReadinessResponse(BaseModel):
     universe_run_id: int = Field(ge=1)
     as_of_date: date
