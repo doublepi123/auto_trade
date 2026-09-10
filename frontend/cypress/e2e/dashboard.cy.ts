@@ -35,7 +35,7 @@ describe('Dashboard', () => {
         error: null,
       },
     }).as('getAccountHkd')
-    cy.visitApp('/')
+    cy.visit('/')
     cy.wait('@getAccountHkd')
     cy.get('[data-testid="account-total-assets"]').should('contain', 'HK$')
     cy.get('[data-testid="account-total-assets"]').should('not.contain', '$685,562.51')
@@ -53,10 +53,10 @@ describe('Dashboard', () => {
         error: null,
       },
     }).as('getAccountBlank')
-    cy.visitApp('/')
+    cy.visit('/')
     cy.wait('@getAccountBlank')
     cy.get('[data-testid="account-total-assets"]').should('not.contain', '$')
-    cy.get('[data-testid="account-total-assets"]').should('contain', '1,234.50')
+    cy.get('[data-testid="account-total-assets"]').should('contain', '1234.50')
   })
 
   it('displays cash balance card', () => {
