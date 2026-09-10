@@ -332,6 +332,146 @@ class TestSettings:
         assert s.llm_max_interval_bound_deviation_pct == 5
         assert s.llm_max_order_price_deviation_pct == 1
 
+    def test_paper_experiment_raises_only_the_notional_ceiling(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A confirmed paper account may hold more notional, nothing else.
+
+        $25,000 is where the notional ceiling stops binding and the unchanged
+        $250 risk budget starts to: 1% of $25,000 is exactly $250. Raising
+        notional past that point would require raising the risk budget too,
+        which is a different decision and is not granted here.
+        """
+        monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_POSITION_NOTIONAL",
+            "25000",
+        )
+
+        s = Settings()
+
+        assert s.hard_max_position_notional == 25000
+        # Everything else keeps the funded-account ceiling.
+        assert s.hard_max_risk_per_trade == 250
+        assert s.hard_stop_loss_pct == 1
+        assert s.hard_max_position_quantity == 100
+        assert s.allow_short_entries is False
+        assert s.hard_allow_position_addons is False
+        assert s.llm_shadow_mode is True
+        assert s.full_buying_power_usage_enabled is False
+
+    def test_paper_notional_request_is_a_ceiling_not_a_floor(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Requesting less than the funded default must still lower the cap.
+
+        The exception widens what is permitted; it must never force exposure
+        up, or an operator could not dial risk back down while it is active.
+        """
+        monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
+        monkeypatch.setenv("AUTO_TRADE_PAPER_MAX_POSITION_NOTIONAL", "1000")
+
+        s = Settings()
+
+        assert s.hard_max_position_notional == 1000
+
+    def test_paper_notional_cannot_exceed_the_authorised_bound(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The paper exception is itself bounded.
+
+        Without an upper bound the flag would be an unlimited-exposure switch,
+        which is the property the P0 clamps exist to deny.
+        """
+        monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_POSITION_NOTIONAL",
+            "1000000",
+        )
+
+        s = Settings()
+
+        assert s.hard_max_position_notional == 25000
+
+    def test_paper_notional_is_ignored_without_the_confirmation_flag(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fail closed: the amount alone must not relax anything.
+
+        A funded deployment that inherits only the amount variable — from a
+        copied .env, say — keeps the funded ceiling.
+        """
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_POSITION_NOTIONAL",
+            "25000",
+        )
+
+        s = Settings()
+
+        assert s.hard_max_position_notional == 5000
+
+    def test_paper_confirmation_alone_changes_nothing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The flag is permission, not an amount.
+
+        Confirming a paper account must not silently move exposure; the
+        operator still has to state the number they want.
+        """
+        monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
+
+        s = Settings()
+
+        assert s.hard_max_position_notional == 5000
+
+    def test_paper_experiment_cannot_relax_any_other_p0_invariant(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The exception is scoped to notional and grants nothing else.
+
+        Shorts, add-ons, live LLM ordering, full buying power, the stop
+        ceiling and the session guards stay exactly as they are for a funded
+        account even while the paper exception is active.
+        """
+        monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_POSITION_NOTIONAL",
+            "25000",
+        )
+        for name, value in {
+            "AUTO_TRADE_ALLOW_SHORT_ENTRIES": "true",
+            "AUTO_TRADE_HARD_ALLOW_POSITION_ADDONS": "true",
+            "AUTO_TRADE_LLM_SHADOW_MODE": "false",
+            "AUTO_TRADE_FULL_BUYING_POWER_USAGE_ENABLED": "true",
+            "AUTO_TRADE_HARD_MAX_RISK_PER_TRADE": "100000",
+            "AUTO_TRADE_HARD_STOP_LOSS_PCT": "10",
+            "AUTO_TRADE_HARD_MAX_POSITION_QUANTITY": "10000",
+            "AUTO_TRADE_HARD_MAX_HOLDING_MINUTES": "1440",
+            "AUTO_TRADE_HARD_ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE": "1",
+            "AUTO_TRADE_HARD_FLATTEN_MINUTES_BEFORE_CLOSE": "1",
+        }.items():
+            monkeypatch.setenv(name, value)
+
+        s = Settings()
+
+        assert s.hard_max_position_notional == 25000
+        assert s.allow_short_entries is False
+        assert s.hard_allow_position_addons is False
+        assert s.llm_shadow_mode is True
+        assert s.full_buying_power_usage_enabled is False
+        assert s.hard_max_risk_per_trade == 250
+        assert s.hard_stop_loss_pct == 1
+        assert s.hard_max_position_quantity == 100
+        assert s.hard_max_holding_minutes == 60
+        assert s.hard_entry_cutoff_minutes_before_close == 45
+        assert s.hard_flatten_minutes_before_close == 15
+
     def test_full_buying_power_usage_opt_in_is_ignored(
         self,
         monkeypatch: pytest.MonkeyPatch,

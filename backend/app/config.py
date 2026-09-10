@@ -10,6 +10,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
 
+# Position-notional ceiling for a funded account. P0: no configuration path
+# may exceed it.
+FUNDED_MAX_POSITION_NOTIONAL = 5000.0
+# Upper bound on the ceiling a CONFIRMED PAPER account may request. Chosen as
+# the point where the notional ceiling stops binding and the unchanged $250
+# risk budget starts to, since 1% (the stop-loss ceiling) of $25,000 is $250.
+# Beyond this, sizing would need a larger risk budget, which this exception
+# does not grant.
+PAPER_MAX_POSITION_NOTIONAL_BOUND = 25000.0
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -802,6 +812,29 @@ class Settings(BaseSettings):
         le=48,
         validation_alias="AUTO_TRADE_INTERVAL_RECENTER_MAX_PER_DAY",
     )
+    # Operator attestation that the connected brokerage account is a paper /
+    # demo account. DEFAULT FALSE, and it grants nothing on its own — it only
+    # makes ``paper_max_position_notional`` eligible to be honoured. Kept as a
+    # separate flag from the amount so a funded deployment that inherits a
+    # copied .env cannot pick up a relaxed ceiling from the amount alone.
+    #
+    # This is an attestation, not proof: nothing here verifies with the broker
+    # that the account is unfunded. Treat a funded account carrying this flag
+    # as a misconfiguration, not as an authorised exception.
+    paper_account_confirmed: bool = Field(
+        default=False,
+        validation_alias="AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED",
+    )
+    # Notional ceiling to use INSTEAD of the funded-account $5,000 while the
+    # paper attestation holds. Bounded by PAPER_MAX_POSITION_NOTIONAL_BOUND:
+    # an unbounded value would turn the flag into an unlimited-exposure switch,
+    # which is exactly the property the P0 clamps exist to deny.
+    paper_max_position_notional: float = Field(
+        default=0.0,
+        ge=0,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_PAPER_MAX_POSITION_NOTIONAL",
+    )
     auto_primary_switch_enabled: bool = Field(
         default=False,
         validation_alias="AUTO_TRADE_AUTO_PRIMARY_SWITCH_ENABLED",
@@ -1008,7 +1041,38 @@ class Settings(BaseSettings):
         self.opening_momentum_execution_enabled = False
         self.full_buying_power_usage_enabled = False
         self.hard_max_position_quantity = min(self.hard_max_position_quantity, 100)
-        self.hard_max_position_notional = min(self.hard_max_position_notional, 5000.0)
+        # Notional is the one ceiling a confirmed paper account may raise, and
+        # only up to PAPER_MAX_POSITION_NOTIONAL_BOUND. That bound is where the
+        # notional ceiling stops binding and the UNCHANGED $250 risk budget
+        # starts to: 1% of $25,000 is exactly $250. Going past it would require
+        # raising the risk budget as well, which is a separate decision and is
+        # deliberately not granted here.
+        #
+        # ``min`` is kept on the requested value so the exception can only ever
+        # widen what is permitted, never force exposure upward: an operator
+        # must still be able to dial the cap below $5,000 while it is active.
+        if self.paper_account_confirmed and self.paper_max_position_notional > 0:
+            # The requested amount REPLACES the funded ceiling rather than
+            # capping it. Capping alone would be inert: the funded default is
+            # itself 5,000, so ``min(default, raised_ceiling)`` never moves.
+            # The request is still bounded, and a request below the funded
+            # ceiling is honoured as-is so the cap can always be dialled down.
+            self.hard_max_position_notional = min(
+                self.paper_max_position_notional,
+                PAPER_MAX_POSITION_NOTIONAL_BOUND,
+            )
+            logger.warning(
+                "paper-account exception active: position notional ceiling is "
+                "%.2f instead of %.2f; this must never be set on a funded "
+                "account",
+                self.hard_max_position_notional,
+                FUNDED_MAX_POSITION_NOTIONAL,
+            )
+        else:
+            self.hard_max_position_notional = min(
+                self.hard_max_position_notional,
+                FUNDED_MAX_POSITION_NOTIONAL,
+            )
         self.hard_max_risk_per_trade = min(self.hard_max_risk_per_trade, 250.0)
         self.hard_stop_loss_pct = min(self.hard_stop_loss_pct, 1.0)
         self.hard_max_holding_minutes = min(self.hard_max_holding_minutes, 60)
