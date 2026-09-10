@@ -162,6 +162,59 @@ class TestAccountMarginObservability:
         assert data["margin_infos"] == []
 
 
+class TestAccountCurrencyDisclosure:
+    """``total_assets`` without its currency is not a number, it is a guess.
+
+    The production account's net assets are denominated in HKD, but the API
+    returned a bare figure and the dashboard rendered a hardcoded ``$``. The
+    displayed "$685,562.51" was really HKD 685,562.51 — about USD 88k. Every
+    ratio computed against it (capital deployment, idle-cash yield) was wrong
+    by the FX rate.
+    """
+
+    def test_account_endpoint_reports_the_currency_of_total_assets(self):
+        runner = get_runner()
+        mock_broker = MagicMock()
+        mock_broker.get_account.return_value = AccountInfo(
+            total_assets=Decimal("685562.51"),
+            cash_balances=[
+                CashBalance(
+                    currency="USD",
+                    available_cash=Decimal("-16616.98"),
+                    frozen_cash=Decimal("269"),
+                ),
+                CashBalance(
+                    currency="HKD",
+                    available_cash=Decimal("800000"),
+                    frozen_cash=Decimal("0"),
+                ),
+            ],
+            net_assets=[NetAsset(currency="HKD", amount=Decimal("685562.51"))],
+            currency="HKD",
+        )
+        mock_broker.get_positions.return_value = []
+        mock_broker.get_quotes.return_value = []
+        runner.broker = mock_broker
+
+        resp = client.get("/api/account")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_assets"] == 685562.51
+        assert data["currency"] == "HKD"
+
+    def test_unavailable_account_reports_a_blank_currency(self):
+        runner = get_runner()
+        mock_broker = MagicMock()
+        mock_broker.get_account.side_effect = RuntimeError("broker down")
+        runner.broker = mock_broker
+
+        resp = client.get("/api/account")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["available"] is False
+        assert data["currency"] == ""
+
+
 class TestGetAccountEndpointSuccess:
     def test_account_endpoint_returns_correct_structure(self):
         runner = get_runner()

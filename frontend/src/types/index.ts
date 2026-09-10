@@ -391,6 +391,7 @@ export interface MarginInfo {
 
 export interface AccountInfo {
   total_assets: number
+  currency: string
   cash_balances: CashBalance[]
   positions: Position[]
   margin_infos: MarginInfo[]

@@ -8,6 +8,21 @@
  * (e.g. `signedCurrency` can prepend a `+` / `-`). When `value` is null/undefined we
  * return `-` to avoid throwing inside a template binding.
  */
+/**
+ * Symbol for an ISO currency code. A blank code returns `''` rather than a
+ * guessed symbol: blank means the backend could not name the currency, so any
+ * symbol shown there would be an assertion the data does not support.
+ */
+export function currencySymbol(currency?: string | null): string {
+  const code = (currency ?? '').trim().toUpperCase()
+  if (code === 'USD') return '$'
+  if (code === 'HKD') return 'HK$'
+  if (code === 'CNY' || code === 'CNH') return 'CN¥'
+  if (code === 'JPY') return '¥'
+  if (!code) return ''
+  return `${code} `
+}
+
 export function formatCurrency(value: number | null | undefined, market?: string | null): string {
   if (value == null) return '-'
   const prefix = market && market.toUpperCase() === 'HK' ? 'HK$' : '$'

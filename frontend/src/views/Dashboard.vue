@@ -786,17 +786,20 @@
       <div class="detail-panel account-panel" v-loading="accountLoading">
         <div class="section-title">
           <h4>总资产</h4>
-          <strong :class="account.available ? 'metric-positive' : 'metric-negative'">${{ formatNumber(account.total_assets) }}</strong>
+          <strong
+            :class="account.available ? 'metric-positive' : 'metric-negative'"
+            data-testid="account-total-assets"
+          >{{ currencySymbol(account.currency) }}{{ formatNumber(account.total_assets) }}</strong>
           <el-tag v-if="accountRefreshing && !accountLoading" size="small" type="info">刷新中</el-tag>
         </div>
         <h4 class="subsection-title">现金余额</h4>
         <el-table :data="account.cash_balances" size="small" v-if="account.cash_balances.length > 0" class="responsive-table">
           <el-table-column prop="currency" label="币种" min-width="80" />
           <el-table-column prop="available_cash" label="可用" min-width="120">
-            <template #default="{ row }">${{ formatNumber(row.available_cash) }}</template>
+            <template #default="{ row }">{{ currencySymbol(row.currency) }}{{ formatNumber(row.available_cash) }}</template>
           </el-table-column>
           <el-table-column prop="frozen_cash" label="冻结" min-width="120">
-            <template #default="{ row }">${{ formatNumber(row.frozen_cash) }}</template>
+            <template #default="{ row }">{{ currencySymbol(row.currency) }}{{ formatNumber(row.frozen_cash) }}</template>
           </el-table-column>
         </el-table>
         <p v-else-if="!account.available" class="empty-note">数据不可用</p>
@@ -815,17 +818,17 @@
             </el-table-column>
             <el-table-column prop="margin_call" label="追缴保证金" min-width="120">
               <template #default="{ row }">
-                <span :class="row.margin_call > 0 ? 'metric-negative' : ''">${{ formatNumber(row.margin_call) }}</span>
+                <span :class="row.margin_call > 0 ? 'metric-negative' : ''">{{ currencySymbol(row.currency) }}{{ formatNumber(row.margin_call) }}</span>
               </template>
             </el-table-column>
             <el-table-column prop="maintenance_margin" label="维持保证金" min-width="120">
-              <template #default="{ row }">${{ formatNumber(row.maintenance_margin) }}</template>
+              <template #default="{ row }">{{ currencySymbol(row.currency) }}{{ formatNumber(row.maintenance_margin) }}</template>
             </el-table-column>
             <el-table-column prop="remaining_finance_amount" label="剩余融资额度" min-width="130">
-              <template #default="{ row }">${{ formatNumber(row.remaining_finance_amount) }}</template>
+              <template #default="{ row }">{{ currencySymbol(row.currency) }}{{ formatNumber(row.remaining_finance_amount) }}</template>
             </el-table-column>
             <el-table-column prop="buy_power" label="购买力" min-width="120">
-              <template #default="{ row }">${{ formatNumber(row.buy_power) }}</template>
+              <template #default="{ row }">{{ currencySymbol(row.currency) }}{{ formatNumber(row.buy_power) }}</template>
             </el-table-column>
           </el-table>
         </template>
@@ -927,7 +930,7 @@ import { engineStateLabel, auditActionLabel, marginRiskLevelLabel, marketLabel, 
 import { EVENT_TYPE } from '../utils/constants'
 import { downloadCsv } from '../utils/csv'
 import { relativeAgeLabel } from '../utils/time'
-import { formatBytes, formatCurrency, formatNumber, signedCurrency, signedPercent } from '../utils/format'
+import { currencySymbol, formatBytes, formatCurrency, formatNumber, signedCurrency, signedPercent } from '../utils/format'
 import { resolveErrorMessage } from '../utils/error'
 
 type CypressWindow = Window & { Cypress?: unknown }

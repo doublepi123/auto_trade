@@ -2667,6 +2667,93 @@ class TestGetAccount:
         assert len(result.cash_balances) == 2
         assert len(result.net_assets) == 2
 
+    def test_get_account_reports_the_currency_total_assets_is_denominated_in(
+        self, monkeypatch
+    ) -> None:
+        """``total_assets`` is a bare number; without its currency it is a lie.
+
+        The live account is denominated in HKD, yet the dashboard rendered a
+        hardcoded ``$``. ``primary_currency`` is already computed here to pick
+        which net-asset figure becomes ``total_assets`` — it was simply thrown
+        away instead of returned, so every consumer had to guess.
+        """
+        FakeModule = self._make_fake_module()
+
+        class CashInfo:
+            def __init__(self, currency, available_cash, frozen_cash):
+                self.currency = currency
+                self.available_cash = available_cash
+                self.frozen_cash = frozen_cash
+
+        class BalanceItem:
+            def __init__(self, currency, net_assets, cash_infos):
+                self.currency = currency
+                self.net_assets = net_assets
+                self.cash_infos = cash_infos
+
+        class TradeContext:
+            def __init__(self, config):
+                pass
+
+            def account_balance(self):
+                # Shape of the real production account: one HKD net-asset row
+                # carrying both a USD margin debit and the HKD cash.
+                return [
+                    BalanceItem(
+                        "HKD",
+                        "685562.51",
+                        [
+                            CashInfo("USD", "-16616.98", "269.00"),
+                            CashInfo("HKD", "800000.00", "0.00"),
+                        ],
+                    ),
+                ]
+
+        gw = BrokerGateway()
+        gw._trade_ctx = TradeContext(None)
+        gw._quote_ctx = object()
+        result = gw.get_account()
+        assert result.total_assets == Decimal("685562.51")
+        assert result.currency == "HKD"
+
+    def test_get_account_currency_is_blank_when_no_primary_currency_exists(
+        self, monkeypatch
+    ) -> None:
+        """No USD/HKD row means ``total_assets`` is a naive cross-currency sum.
+
+        Naming a currency for that sum would assert something false, so the
+        field stays blank and the consumer must render it without a symbol.
+        """
+        FakeModule = self._make_fake_module()
+
+        class CashInfo:
+            def __init__(self, currency, available_cash, frozen_cash):
+                self.currency = currency
+                self.available_cash = available_cash
+                self.frozen_cash = frozen_cash
+
+        class BalanceItem:
+            def __init__(self, currency, net_assets, cash_infos):
+                self.currency = currency
+                self.net_assets = net_assets
+                self.cash_infos = cash_infos
+
+        class TradeContext:
+            def __init__(self, config):
+                pass
+
+            def account_balance(self):
+                return [
+                    BalanceItem("CNH", "7200", [CashInfo("CNH", "1000", "200")]),
+                    BalanceItem("JPY", "500000", [CashInfo("JPY", "100", "0")]),
+                ]
+
+        gw = BrokerGateway()
+        gw._trade_ctx = TradeContext(None)
+        gw._quote_ctx = object()
+        result = gw.get_account()
+        assert result.currency == ""
+
     def test_get_account_no_primary_currency(self, monkeypatch) -> None:
         FakeModule = self._make_fake_module()
 

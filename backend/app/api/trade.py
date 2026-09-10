@@ -767,6 +767,7 @@ def _fetch_account_response() -> AccountResponse:
     try:
         account = broker.get_account()
         total_assets = float(account.total_assets)
+        account_currency = str(getattr(account, "currency", "") or "")
         cash_balances = [
             CashBalanceSchema(
                 currency=cb.currency,
@@ -792,6 +793,7 @@ def _fetch_account_response() -> AccountResponse:
         logging.getLogger("auto_trade.trade").exception("failed to get account balance")
         available = False
         total_assets = 0.0
+        account_currency = ""
         cash_balances = []
         margin_infos = []
 
@@ -827,6 +829,7 @@ def _fetch_account_response() -> AccountResponse:
 
     return AccountResponse(
         total_assets=total_assets,
+        currency=account_currency,
         cash_balances=cash_balances,
         positions=positions,
         margin_infos=margin_infos,
@@ -837,7 +840,8 @@ def _fetch_account_response() -> AccountResponse:
 
 def _unavailable_account_response() -> AccountResponse:
     return AccountResponse(
-        total_assets=0.0, cash_balances=[], positions=[], margin_infos=[],
+        total_assets=0.0, currency="", cash_balances=[], positions=[],
+        margin_infos=[],
         available=False, error="Account data unavailable",
     )
 

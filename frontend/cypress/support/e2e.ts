@@ -1096,6 +1096,7 @@ Cypress.Commands.add('stubApi', () => {
   cy.intercept('GET', '/api/account', {
     body: {
       total_assets: 0,
+      currency: 'USD',
       cash_balances: [],
       positions: [],
       margin_infos: [],

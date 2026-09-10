@@ -4,6 +4,7 @@ import type { AccountInfo } from '../types'
 
 const defaultAccount: AccountInfo = {
   total_assets: 0,
+  currency: '',
   cash_balances: [],
   positions: [],
   margin_infos: [],

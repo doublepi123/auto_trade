@@ -20,6 +20,45 @@ describe('Dashboard', () => {
     cy.contains('总资产').should('be.visible')
   })
 
+  it('labels total assets with the currency the broker reported, not dollars', () => {
+    cy.intercept('GET', '/api/account', {
+      body: {
+        total_assets: 685562.51,
+        currency: 'HKD',
+        cash_balances: [
+          { currency: 'HKD', available_cash: 800000, frozen_cash: 0 },
+          { currency: 'USD', available_cash: -16616.98, frozen_cash: 269 },
+        ],
+        positions: [],
+        margin_infos: [],
+        available: true,
+        error: null,
+      },
+    }).as('getAccountHkd')
+    cy.visitApp('/')
+    cy.wait('@getAccountHkd')
+    cy.get('[data-testid="account-total-assets"]').should('contain', 'HK$')
+    cy.get('[data-testid="account-total-assets"]').should('not.contain', '$685,562.51')
+  })
+
+  it('labels a blank currency without inventing a symbol', () => {
+    cy.intercept('GET', '/api/account', {
+      body: {
+        total_assets: 1234.5,
+        currency: '',
+        cash_balances: [],
+        positions: [],
+        margin_infos: [],
+        available: true,
+        error: null,
+      },
+    }).as('getAccountBlank')
+    cy.visitApp('/')
+    cy.wait('@getAccountBlank')
+    cy.get('[data-testid="account-total-assets"]').should('not.contain', '$')
+    cy.get('[data-testid="account-total-assets"]').should('contain', '1,234.50')
+  })
+
   it('displays cash balance card', () => {
     cy.contains('现金余额').should('be.visible')
   })

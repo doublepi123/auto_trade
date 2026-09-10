@@ -241,6 +241,12 @@ class AccountInfo:
     cash_balances: list[CashBalance]
     net_assets: list[NetAsset]
     margin_infos: list[MarginInfo] = field(default_factory=list)
+    # Which currency ``total_assets`` is denominated in. Blank when no USD/HKD
+    # net-asset row exists, because ``total_assets`` is then a naive
+    # cross-currency sum and naming a currency for it would assert something
+    # false. Without this the figure is unlabelled and every consumer guesses:
+    # the dashboard rendered an HKD balance behind a hardcoded "$".
+    currency: str = ""
 
 
 def _get_value(item: Any, key: str, default: Any = None) -> Any:
@@ -2077,6 +2083,15 @@ class BrokerGateway:
                     cash_balances=cash_balances,
                     net_assets=net_assets,
                     margin_infos=margin_infos,
+                    # Report the currency that was already chosen above rather
+                    # than discarding it. A single non-primary row is still
+                    # unambiguous, so label it; several rows are a naive sum and
+                    # stay blank.
+                    currency=(
+                        primary_currency
+                        if primary_currency
+                        else (net_assets[0].currency if len(net_assets) == 1 else "")
+                    ),
                 )
         return self._call_with_retry(
             _fetch,

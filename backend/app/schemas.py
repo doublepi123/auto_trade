@@ -2838,6 +2838,12 @@ class MarginInfoSchema(BaseModel):
 
 class AccountResponse(BaseModel):
     total_assets: float
+    # Currency ``total_assets`` is denominated in. Blank when the broker
+    # reported no USD/HKD net-asset row, in which case the figure is a naive
+    # cross-currency sum and MUST NOT be rendered with a currency symbol.
+    # Consumers previously had to assume, and the dashboard assumed dollars for
+    # an HKD balance.
+    currency: str = ""
     cash_balances: list[CashBalanceSchema]
     positions: list[PositionSchema]
     margin_infos: list[MarginInfoSchema] = []
