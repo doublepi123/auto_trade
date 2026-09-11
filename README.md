@@ -627,6 +627,7 @@ auto_trade/
 | `POST` | `/api/universe/refresh` | 触发幂等刷新（受配置与权限约束） |
 | `GET` | `/api/universe/promotion-readiness` | 入选标的前向证据汇总；仅供人工复核，不自动晋级 |
 | `GET` | `/api/universe/range-fitness` | 按标的汇总 Strategy v2 影子证据中的 `ADX_REGIME_BLOCKED` 占比，判断该标的当前是否仍适合区间策略（`RANGE_SUITABLE` / `MIXED` / `TREND_UNSUITABLE` / `INSUFFICIENT_DATA`）；`?lookback_days=&min_samples=&trend_unsuitable_pct=&range_suitable_pct=`。只读聚合，不切换主标的、不改区间、不下单 |
+| `GET` | `/api/universe/primary-candidacy` | 只读回答「该选哪个主标的，以及数据是否足以回答」。把三个必须分开的问题分列：`edge_pick`（证据是否**支持**选它；不支持时为 null）、`gates_only_pick`（若没有池级闸门与功效要求，cron **本会**选谁——是事实陈述，带 `not_an_edge_claim` 与被扣留的理由）、`tradeability_pick`（哪个**最便宜交易**，只看点差/成交额/价格，不需要任何显著性）。另含 `power` 块：按实测每笔离散度给出「每标的需要 N 笔 / 实际最多持有 M 笔」，让「排名是不是噪声」成为可读数字而非判断。`?delta_bps=&alpha=&power=&include_entry_windows=`。只读，不切换主标的、不改区间、不下单 |
 
 ### 开盘动量影子
 

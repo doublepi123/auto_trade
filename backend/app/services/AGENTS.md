@@ -12,7 +12,7 @@
 | **Changes the live symbol** | `auto_primary_switch_service.py` | Only path that does; must pass `runner.assert_primary_switch_safe` |
 | **Gates live entries (read-only decision)** | `live_entry_policy_service.py`, `interval_application_service.py`, `llm_order_policy.py` | Fail-closed; `ALLOW / REJECT / SHADOW`; P0 pins LLM to SHADOW |
 | **Live bookkeeping / risk state** | `trade_event_service`, `order_terminal_callback_service`, `reconciliation_incident_service`, `daily_pnl_service`, `runtime_state_service`, `credentials_service`, `decision_funnel_service` | Affect live risk state, never submit |
-| **Record-only research** | everything else | shadows/challengers, `universe_*`, `watchlist_*`, `watchlist_quant_v6_*`, ~50 analytics services |
+| **Record-only research** | everything else (incl. `primary_candidacy_service.py`: read-only symbol-candidacy report; shares the switch's gates via `classify_candidate_row`, never calls the runner) | shadows/challengers, `universe_*`, `watchlist_*`, `watchlist_quant_v6_*`, ~50 analytics services |
 
 Shadow/challenger docstrings say so explicitly (`live_exit_challenger_service.py`: "without submitting orders"). Keep that line when editing.
 
