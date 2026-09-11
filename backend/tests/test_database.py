@@ -1960,3 +1960,62 @@ def test_sqlite_wal_and_busy_timeout_enabled(tmp_path, monkeypatch) -> None:
     assert int(recursive_triggers) == 1, (
         f"recursive_triggers was {recursive_triggers}"
     )
+
+
+def test_sqlite_busy_timeout_outlasts_research_write_bursts(
+    tmp_path, monkeypatch
+) -> None:
+    """Live-path writers must survive a research-layer write burst.
+
+    Observed 2026-09-11 20:30 UTC: a quant-v6 publication burst held the
+    SQLite writer lock for tens of seconds while busy_timeout was 5s, so
+    runtime_state persistence, storage maintenance stages and the durable
+    lease heartbeat all failed with "database is locked"; the same failure
+    class previously lapsed order persistence into ORDER_RECONCILIATION_
+    UNCERTAIN pauses (2026-09-03). A writer holding the lock longer than the
+    old 5s timeout must no longer break concurrent live-path writers.
+    """
+    import threading
+    import time
+
+    from sqlalchemy import event
+
+    db_file = tmp_path / "busy.db"
+    engine = create_engine(f"sqlite:///{db_file}")
+    # Exercise the production connect listener itself: whatever busy_timeout
+    # database.py installs is what this engine's connections get.
+    event.listen(engine, "connect", database._set_sqlite_pragmas)
+
+    with engine.connect() as conn:
+        conn.execute(text("CREATE TABLE probe (id INTEGER PRIMARY KEY)"))
+        conn.commit()
+
+    holder = sqlite3.connect(str(db_file), check_same_thread=False)
+    holder.execute("PRAGMA busy_timeout=1")
+    errors: list[BaseException] = []
+
+    def _hold_write_lock() -> None:
+        holder.execute("BEGIN IMMEDIATE")
+        holder.execute("INSERT INTO probe (id) VALUES (1)")
+        # Longer than the historical 5000ms busy_timeout, well inside the
+        # headroom a research artifact publication was observed to need.
+        time.sleep(7)
+        holder.commit()
+
+    thread = threading.Thread(target=_hold_write_lock)
+    thread.start()
+    time.sleep(0.5)  # the holder owns the write lock before we write
+    try:
+        with engine.connect() as conn:
+            conn.execute(text("INSERT INTO probe (id) VALUES (2)"))
+            conn.commit()
+    except BaseException as exc:  # noqa: BLE001 - asserted below
+        errors.append(exc)
+    finally:
+        thread.join(timeout=30)
+        holder.close()
+
+    assert not errors, f"writer failed under a held lock: {errors!r}"
+    with engine.connect() as conn:
+        count = conn.execute(text("SELECT COUNT(*) FROM probe")).scalar()
+    assert count == 2

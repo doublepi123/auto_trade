@@ -523,8 +523,14 @@ if settings.database_url.startswith("sqlite"):
         - journal_mode=WAL: allows concurrent readers + a single writer
         - synchronous=NORMAL: WAL mode default; durable enough for our workload
           (we are not a financial exchange; one fsync per checkpoint is fine)
-        - busy_timeout=5000: wait up to 5s for the writer lock instead of raising
-          "database is locked" immediately
+        - busy_timeout=60000: wait out research-layer write bursts instead of
+          raising "database is locked". quant-v6 artifact publication holds
+          the single SQLite writer lock for tens of seconds; at 5s the
+          runtime_state persist, storage maintenance and lease heartbeats all
+          failed, and the same failure class previously lapsed order
+          persistence into ORDER_RECONCILIATION_UNCERTAIN pauses. Live-path
+          writes are tiny, so queuing behind a burst is strictly better than
+          failing. WAL still lets readers proceed concurrently.
         - foreign_keys=ON: SQLite ships with FK enforcement disabled by default
         - recursive_triggers=ON: conflict-replace deletes must hit immutable-table
           DELETE triggers instead of bypassing append-only protection
@@ -533,7 +539,7 @@ if settings.database_url.startswith("sqlite"):
         try:
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA synchronous=NORMAL")
-            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA busy_timeout=60000")
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute("PRAGMA recursive_triggers=ON")
         finally:
