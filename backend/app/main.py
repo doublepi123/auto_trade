@@ -2131,6 +2131,8 @@ def _auto_primary_switch_tick_sync() -> object | None:
     from app.runner import get_runner
     from app.services.auto_primary_switch_service import (
         AutoPrimarySwitchService,
+        OUTCOME_NO_ELIGIBLE_CANDIDATE,
+        OUTCOME_SIGNAL_EDGE_UNPROVEN,
         OUTCOME_SWITCHED,
     )
     from app.services.durable_job_lease_service import DurableJobLeaseService
@@ -2163,11 +2165,31 @@ def _auto_primary_switch_tick_sync() -> object | None:
             "automatic primary switch signal-edge gate unassessable: %s",
             result.detail,
         )
+    elif result.outcome in (OUTCOME_SIGNAL_EDGE_UNPROVEN, OUTCOME_NO_ELIGIBLE_CANDIDATE):
+        if _auto_primary_switch_blocked_throttle.should_log(result.outcome):
+            suppressed = _auto_primary_switch_blocked_throttle.take_suppressed_count()
+            if suppressed:
+                logger.warning(
+                    "automatic primary switch blocked (%s): %s (%d suppressed since last report)",
+                    result.outcome,
+                    result.detail,
+                    suppressed,
+                )
+            else:
+                logger.warning(
+                    "automatic primary switch blocked (%s): %s",
+                    result.outcome,
+                    result.detail,
+                )
     else:
         logger.debug("automatic primary switch outcome: %s", result.outcome)
     return None
 
 
+_AUTO_PRIMARY_SWITCH_BLOCKED_LOG_WINDOW_SECONDS = 21600.0  # 6 hours
+_auto_primary_switch_blocked_throttle = RepeatedLogThrottle(
+    window_seconds=_AUTO_PRIMARY_SWITCH_BLOCKED_LOG_WINDOW_SECONDS,
+)
 _INTERVAL_RECENTER_LEASE_KEY = "interval_recenter"
 
 

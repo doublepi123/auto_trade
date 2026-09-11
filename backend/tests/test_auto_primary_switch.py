@@ -1557,3 +1557,181 @@ class TestCandidateGateClassification:
         assert "classify_candidate_row(" in body
         # The inline checks it replaces must be gone from the loop.
         assert "if not self._reach_rate_ok(row):" not in body
+
+
+class TestBlockedSwitchVisibility:
+    """Visibility of blocked automatic primary switches to operators.
+
+    When the automatic switch wanted to run but was blocked due to
+    SIGNAL_EDGE_UNPROVEN or NO_ELIGIBLE_CANDIDATE, it must warn at WARNING level
+    so operators can see the blockage, throttled to prevent log flooding.
+    """
+
+    @staticmethod
+    def _harness(
+        monkeypatch: pytest.MonkeyPatch,
+        outcome: str,
+        detail: str,
+        signal_edge_unassessable: bool = False,
+    ):
+        from app import main as main_module
+        from app import runner as runner_module
+        from app.services import auto_primary_switch_service
+        from app.services import durable_job_lease_service
+
+        class FakeSession:
+            def close(self) -> None:
+                return None
+
+        class FakeGuard:
+            def __enter__(self) -> "FakeGuard":
+                return self
+
+            def __exit__(self, *_args: object) -> bool:
+                return False
+
+        class FakeLeaseService:
+            def __init__(self, **_kwargs: object) -> None:
+                return None
+
+            @staticmethod
+            def try_acquire(_lease_key: str) -> object:
+                return object()
+
+            @staticmethod
+            def keepalive(_lease: object, **_kwargs: object) -> FakeGuard:
+                return FakeGuard()
+
+        class FakeSwitchService:
+            def __init__(self, _db: object) -> None:
+                return None
+
+            @staticmethod
+            def evaluate(_runner: object) -> SimpleNamespace:
+                return SimpleNamespace(
+                    outcome=outcome,
+                    incumbent="NVDA.US",
+                    candidate="",
+                    detail=detail,
+                    signal_edge_unassessable=signal_edge_unassessable,
+                )
+
+        monkeypatch.setattr(main_module.settings, "auto_primary_switch_enabled", True)
+        monkeypatch.setattr(main_module, "SessionLocal", FakeSession)
+        monkeypatch.setattr(runner_module, "get_runner", lambda: object())
+        monkeypatch.setattr(
+            durable_job_lease_service,
+            "DurableJobLeaseService",
+            FakeLeaseService,
+        )
+        monkeypatch.setattr(
+            auto_primary_switch_service,
+            "AutoPrimarySwitchService",
+            FakeSwitchService,
+        )
+        return main_module
+
+    def test_signal_edge_unproven_is_warned_with_detail(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        detail = "shadow signal edge FAIL: cluster t=-0.82"
+        main_module = self._harness(
+            monkeypatch,
+            outcome="SIGNAL_EDGE_UNPROVEN",
+            detail=detail,
+            signal_edge_unassessable=False,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="auto_trade.main"):
+            assert main_module._auto_primary_switch_tick_sync() is None
+
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+        ]
+        assert len(warnings) == 1
+        assert "SIGNAL_EDGE_UNPROVEN" in warnings[0]
+        assert detail in warnings[0]
+
+    def test_repeat_within_window_is_suppressed_and_counted(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        detail = "shadow signal edge FAIL: cluster t=-0.82"
+        main_module = self._harness(
+            monkeypatch,
+            outcome="SIGNAL_EDGE_UNPROVEN",
+            detail=detail,
+            signal_edge_unassessable=False,
+        )
+
+        # Reset throttle state before test
+        throttle = getattr(main_module, "_auto_primary_switch_blocked_throttle", None)
+        if throttle is not None:
+            throttle._last_emitted_at.clear()
+            throttle.take_suppressed_count()
+
+        with caplog.at_level(logging.WARNING, logger="auto_trade.main"):
+            assert main_module._auto_primary_switch_tick_sync() is None
+            assert main_module._auto_primary_switch_tick_sync() is None
+
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+        ]
+        assert len(warnings) == 1
+        assert "SIGNAL_EDGE_UNPROVEN" in warnings[0]
+
+        throttle = getattr(main_module, "_auto_primary_switch_blocked_throttle")
+        assert throttle.suppressed_count == 1
+
+    def test_no_eligible_candidate_is_warned(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        detail = "no selected universe candidates satisfied fitness thresholds"
+        main_module = self._harness(
+            monkeypatch,
+            outcome="NO_ELIGIBLE_CANDIDATE",
+            detail=detail,
+            signal_edge_unassessable=False,
+        )
+
+        throttle = getattr(main_module, "_auto_primary_switch_blocked_throttle", None)
+        if throttle is not None:
+            throttle._last_emitted_at.clear()
+            throttle.take_suppressed_count()
+
+        with caplog.at_level(logging.WARNING, logger="auto_trade.main"):
+            assert main_module._auto_primary_switch_tick_sync() is None
+
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+        ]
+        assert len(warnings) == 1
+        assert "NO_ELIGIBLE_CANDIDATE" in warnings[0]
+        assert detail in warnings[0]
+
+    def test_incumbent_acceptable_stays_quiet(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        detail = "incumbent trend 15.0% <= 60.0%"
+        main_module = self._harness(
+            monkeypatch,
+            outcome="INCUMBENT_ACCEPTABLE",
+            detail=detail,
+            signal_edge_unassessable=False,
+        )
+
+        with caplog.at_level(logging.WARNING, logger="auto_trade.main"):
+            assert main_module._auto_primary_switch_tick_sync() is None
+
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+        ]
+        assert len(warnings) == 0
+
