@@ -322,6 +322,67 @@ class TestAppRunner:
             }
         )
 
+    def test_live_entry_crossing_settle_survives_quote_buffer_cap(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Hot symbols evict: at ~4.4 quotes/s the 500-entry deque holds under
+        two minutes, so a 180s settle window could never be covered. The cap
+        must scale with the configured settle window."""
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_settle_seconds",
+            180,
+        )
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=100.0,
+            sell_high=110.0,
+        )
+        runner._symbol_runtimes = {
+            "NVDA.US": runner._build_symbol_runtime(
+                "NVDA.US",
+                "US",
+                primary=True,
+            )
+        }
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_required",
+            True,
+        )
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_max_age_seconds",
+            30,
+        )
+        now = datetime.now(timezone.utc)
+        # 700 trusted quotes over the last 160s (~4.4/s) — beyond the old
+        # 500-entry cap, so the oldest retained quote covers only ~114s.
+        for i in range(700):
+            self._inject_trusted_quote(
+                runner,
+                99.5,
+                now - timedelta(seconds=160 - i * (160 / 699)),
+            )
+
+        assert runner._validate_live_entry_crossing("NVDA.US", "BUY") is None
+
+    def test_live_entry_crossing_settle_disabled_keeps_default_buffer_cap(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_settle_seconds",
+            0,
+        )
+        runner = AppRunner()
+
+        assert runner._recent_quotes_cap == 500
+
     def test_live_entry_crossing_settle_proves_crossing_missed_while_blind(
         self,
         monkeypatch: pytest.MonkeyPatch,

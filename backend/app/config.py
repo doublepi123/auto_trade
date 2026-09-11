@@ -392,8 +392,9 @@ class Settings(BaseSettings):
             "crossing tick itself was never observed (e.g. it happened while "
             "the quote stream was blind), continuous trusted quotes holding "
             "on the entry side of the threshold for this many seconds prove "
-            "the crossing instead. 0 disables the fallback. Must stay below "
-            "the 300s recent-quote buffer window."
+            "the crossing instead. 0 disables the fallback. The recent-quote "
+            "buffer cap scales with this window (40 quotes/s of headroom); "
+            "the value must stay below the 300s buffer prune window."
         ),
     )
     allow_short_entries: bool = Field(

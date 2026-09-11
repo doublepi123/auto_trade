@@ -356,7 +356,18 @@ class AppRunner:
         self._unresolved_live_order_ids: list[str] = []
         self._unrepresentable_live_order_issues: list[str] = []
         self._recent_quote_window_seconds = 300.0
-        self._recent_quotes_cap = 500
+        # The crossing-settle proof reads back ``settle_seconds`` of trusted
+        # quotes from these deques, so the cap must cover the full window at
+        # burst quote rates: a hot primary prints several quotes per second
+        # and the old fixed 500-entry cap held under two minutes of history,
+        # which made any settle window above ~150s permanently uncoverable.
+        # 40 quotes/second of headroom covers observed bursts with margin;
+        # with the settle fallback disabled (0) the cap stays at the
+        # historical 500 and the memory footprint is unchanged.
+        self._recent_quotes_cap = max(
+            500,
+            int(settings.live_entry_crossing_settle_seconds) * 40,
+        )
         self._recent_quotes: Deque[dict[str, Any]] = deque(maxlen=self._recent_quotes_cap)
         # Observer-only quote stream health metrics. Mutated from the existing
         # quote/disconnect/resubscribe paths; never subscribes, reconnects,
