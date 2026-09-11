@@ -4707,6 +4707,128 @@ class RangeFitnessResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class PrimaryCandidacyGateParameters(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    lookback_days: int = Field(ge=1, le=30)
+    min_samples: int = Field(ge=1, le=100000)
+    incumbent_trend_pct: float = Field(ge=0, le=100)
+    candidate_trend_pct: float = Field(ge=0, le=100)
+    reach_lookback_days: int = Field(ge=1, le=90)
+    min_reach_rate_pct: float = Field(ge=0, le=100)
+    min_closed_trades: int = Field(ge=1, le=1000)
+    max_price_age_seconds: int = Field(ge=60, le=86400)
+
+
+class PrimaryCandidacyPoolGate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    status: Literal["PASS", "BLOCKED", "UNASSESSABLE"]
+    detail: str
+    enforced_by_switch: bool
+
+
+class PrimaryCandidacyReachOperatingPoint(BaseModel):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+    n: int
+    k_min: int
+    alpha_at_loser: float
+    power_at_winner: float
+    basis: Literal["IN_SAMPLE_247_TRADES"] = "IN_SAMPLE_247_TRADES"
+
+
+class PrimaryCandidacyPower(BaseModel):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+    sigma_bps: float | None
+    sigma_observations: int
+    delta_bps: float
+    alpha: float
+    power: float
+    required_one_sample: int | None
+    required_two_sample: int | None
+    max_trades_held: int
+    max_trades_symbol: str
+    shortfall_factor: float | None
+    verdict: Literal["POWERED", "UNPOWERED", "UNMEASURABLE"]
+    reach_gate_operating_point: PrimaryCandidacyReachOperatingPoint
+    clustering_adjusted: Literal[False] = False
+
+
+class PrimaryCandidacyCandidate(RangeFitnessItem):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+    gate_reasons: list[str]
+    passes_all_symbol_gates: bool
+    reference_age_seconds: float | None
+    trades_held: int
+    mean_net_bps: float | None
+    distinct_days: int
+    power_share_pct: float | None
+
+
+class PrimaryCandidacyEdgePick(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    symbol: str
+    trend_blocked_pct: float
+    closed_trades: int
+    reach_rate_pct: float | None
+    selection_rule: Literal["LOWEST_TREND_SHARE_AMONG_GATE_PASSERS"] = "LOWEST_TREND_SHARE_AMONG_GATE_PASSERS"
+
+
+class PrimaryCandidacyGatesOnlyPick(PrimaryCandidacyEdgePick):
+    model_config = ConfigDict(extra="forbid")
+    passing_count: int = Field(ge=1)
+    not_an_edge_claim: Literal[True] = True
+    withheld_from_edge_pick_because: list[Literal[
+        "POOL_SIGNAL_EDGE_BLOCKED", "POOL_SIGNAL_EDGE_UNASSESSABLE",
+        "UNPOWERED", "POWER_UNMEASURABLE",
+    ]]
+    trades_held: int
+    required_trades_one_sample: int | None
+    power_share_pct: float | None
+
+
+class PrimaryCandidacyTradeabilityPick(BaseModel):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+    symbol: str
+    market: str
+    relative_spread_bps: float | None
+    avg_dollar_volume: float | None
+    price: float | None
+    metrics_as_of: date
+    basis: Literal["TRADEABILITY_ONLY"] = "TRADEABILITY_ONLY"
+    not_an_edge_claim: Literal[True] = True
+    board_lot_uncertain: bool
+
+
+class PrimaryCandidacyTradeabilityRow(PrimaryCandidacyTradeabilityPick):
+    model_config = ConfigDict(extra="forbid", from_attributes=True)
+    rank: int | None
+    eligible: bool
+    reasons: list[str]
+    atr_pct_14d: float | None
+    opportunity_to_cost_ratio: float | None
+
+
+class PrimaryCandidacyResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    generated_at: datetime
+    incumbent: str
+    incumbent_status: Literal["EVIDENCE_THIN", "ACCEPTABLE", "TREND_UNSUITABLE"]
+    switch_enabled: bool
+    gate_parameters: PrimaryCandidacyGateParameters
+    pool_gate: PrimaryCandidacyPoolGate
+    power: PrimaryCandidacyPower
+    candidates: list[PrimaryCandidacyCandidate]
+    tradeability: list[PrimaryCandidacyTradeabilityRow]
+    verdict: Literal["NO_SELECTION_RUN", "SELECTION_SUPPORTED", "SELECTION_NOT_SUPPORTED_BY_EVIDENCE"]
+    edge_pick: PrimaryCandidacyEdgePick | None
+    edge_pick_withheld_reason: str | None
+    gates_only_pick: PrimaryCandidacyGatesOnlyPick | None
+    tradeability_pick: PrimaryCandidacyTradeabilityPick | None
+    entry_windows: EntryWindowPoolResponse | None = None
+    automatic_promotion_allowed: Literal[False] = False
+    order_submission_allowed: Literal[False] = False
+    safety_gate_evaluated: Literal[False] = False
+
+
 class IntervalWidthRow(BaseModel):
     """One probed half-width: how often it is touched AND what it netted.
 

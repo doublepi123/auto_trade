@@ -584,3 +584,53 @@ def test_range_fitness_endpoint_rejects_inverted_bands() -> None:
         client.close()
         db.close()
         engine.dispose()
+
+
+@pytest.fixture
+def candidacy_client():
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.drop_all(engine)
+    Base.metadata.create_all(engine)
+    api = FastAPI()
+    api.include_router(universe_api.router)
+    with Session(engine) as db:
+        def override_db():
+            yield db
+        api.dependency_overrides[get_db] = override_db
+        with TestClient(api) as client:
+            yield client, db
+    engine.dispose()
+
+
+def test_primary_candidacy_endpoint_contract(candidacy_client):
+    client, _db = candidacy_client
+    resp = client.get("/api/universe/primary-candidacy")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert {"generated_at", "incumbent", "incumbent_status", "switch_enabled", "gate_parameters", "pool_gate", "power", "candidates", "tradeability", "verdict", "edge_pick", "edge_pick_withheld_reason", "gates_only_pick", "tradeability_pick"} <= body.keys()
+    assert body["automatic_promotion_allowed"] is False
+    assert body["order_submission_allowed"] is False
+    assert body["safety_gate_evaluated"] is False
+
+
+def test_primary_candidacy_endpoint_rejects_nonpositive_delta(candidacy_client):
+    client, _db = candidacy_client
+    resp = client.get("/api/universe/primary-candidacy", params={"delta_bps": 0})
+    assert resp.status_code == 422
+
+
+def test_primary_candidacy_pick_fields_contract(candidacy_client):
+    from pydantic import ValidationError
+    from tests.test_primary_candidacy_service import _seed, NOW
+
+    client, db = candidacy_client
+    _seed(db)
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("app.services.primary_candidacy_service.datetime", type("_FakeDatetime", (), {"now": staticmethod(lambda _tz: NOW)}))
+        resp = client.get("/api/universe/primary-candidacy", params={"min_samples": 60, "candidate_trend_pct": 30, "min_closed_trades": 5, "min_reach_rate_pct": 60})
+    assert resp.status_code == 200
+    pick = resp.json()["gates_only_pick"]
+    assert pick["not_an_edge_claim"] is True
+    from app.schemas import PrimaryCandidacyGatesOnlyPick
+    with pytest.raises(ValidationError):
+        PrimaryCandidacyGatesOnlyPick.model_validate({**pick, "not_an_edge_claim": False})

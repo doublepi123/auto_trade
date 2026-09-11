@@ -29,6 +29,7 @@ from app.schemas import (
     IntervalWidthRow,
     RangeFitnessItem,
     RangeFitnessResponse,
+    PrimaryCandidacyResponse,
     UniverseCatalogItem,
     UniverseObservationHealthResponse,
     UniversePromotionReadinessResponse,
@@ -50,6 +51,7 @@ from app.services.interval_width_fitness_service import (
     IntervalWidthFitnessService,
 )
 from app.services.range_fitness_service import RangeFitnessService
+from app.services.primary_candidacy_service import PrimaryCandidacyService
 from app.services.universe_promotion_service import UniversePromotionService
 from app.services.rotation_forward_scorecard_service import (
     RotationForwardScorecardService,
@@ -290,6 +292,37 @@ def get_range_fitness(
         reach_lookback_days=max(lookback_days, reach_lookback_days),
         items=[RangeFitnessItem(**asdict(row)) for row in rows],
     )
+
+
+@router.get("/primary-candidacy", response_model=PrimaryCandidacyResponse)
+def get_primary_candidacy(
+    delta_bps: float = Query(20.0, gt=0, le=1000),
+    alpha: float = Query(0.05, gt=0, lt=1),
+    power: float = Query(0.8, gt=0, lt=1),
+    include_entry_windows: bool = Query(False),
+    lookback_days: int | None = Query(None, ge=1, le=30),
+    min_samples: int | None = Query(None, ge=1, le=100000),
+    incumbent_trend_pct: float | None = Query(None, ge=0, le=100),
+    candidate_trend_pct: float | None = Query(None, ge=0, le=100),
+    reach_lookback_days: int | None = Query(None, ge=1, le=90),
+    min_reach_rate_pct: float | None = Query(None, ge=0, le=100),
+    min_closed_trades: int | None = Query(None, ge=1, le=1000),
+    max_price_age_seconds: int | None = Query(None, ge=60, le=86400),
+    db: Session = Depends(get_db),
+) -> PrimaryCandidacyResponse:
+    """Separate an evidence-supported choice from gates-only and cost rankings.
+
+    Read-only: never writes a row, changes the interval, or places an order.
+    """
+    try:
+        return PrimaryCandidacyService(db).assess(delta_bps=delta_bps, alpha=alpha,
+            power=power, include_entry_windows=include_entry_windows,
+            lookback_days=lookback_days, min_samples=min_samples,
+            incumbent_trend_pct=incumbent_trend_pct, candidate_trend_pct=candidate_trend_pct,
+            reach_lookback_days=reach_lookback_days, min_reach_rate_pct=min_reach_rate_pct,
+            min_closed_trades=min_closed_trades, max_price_age_seconds=max_price_age_seconds)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get(
