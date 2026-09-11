@@ -3237,12 +3237,12 @@ export interface PrimaryCandidacyTradeabilityPick {
 }
 
 export interface PrimaryCandidacyTradeabilityRow {
-  rank: number
+  rank: number | null
   symbol: string
   market: string
-  relative_spread_bps: number
-  avg_dollar_volume: number
-  price: number
+  relative_spread_bps: number | null
+  avg_dollar_volume: number | null
+  price: number | null
   metrics_as_of: string
   eligible: boolean
   reasons: string[]

@@ -174,8 +174,10 @@ function assertTradeabilityRow(value: unknown, index: number): void {
   assertString(value.symbol, `${field}.symbol`)
   assertString(value.market, `${field}.market`)
   assertString(value.metrics_as_of, `${field}.metrics_as_of`)
+  // Nullable by contract: an ineligible row has no rank, and is often
+  // ineligible precisely because one of these metrics is missing.
   for (const key of ['rank', 'relative_spread_bps', 'avg_dollar_volume', 'price']) {
-    assertFiniteNumber(value[key], `${field}.${key}`)
+    assertNullableFiniteNumber(value[key], `${field}.${key}`)
   }
   assertBoolean(value.eligible, `${field}.eligible`)
   assertBoolean(value.board_lot_uncertain, `${field}.board_lot_uncertain`)

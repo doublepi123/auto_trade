@@ -52,4 +52,5 @@ describe('Primary candidacy', () => {
       .its('request.url')
       .should('contain', 'include_entry_windows=true')
   })
+
 })
