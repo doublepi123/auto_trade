@@ -73,3 +73,4 @@ Thumbs.db
 # Local agent/iteration scratch artifacts
 state/
 .omo/
+backend/.coverage.candidate
