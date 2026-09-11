@@ -3136,3 +3136,142 @@ export interface ReconciliationEvidenceSurface {
   gate: ReconciliationStatus
   broker_snapshot: ReconciliationBrokerSnapshot
 }
+
+export type PrimaryCandidacyVerdict =
+  | 'NO_SELECTION_RUN'
+  | 'SELECTION_SUPPORTED'
+  | 'SELECTION_NOT_SUPPORTED_BY_EVIDENCE'
+
+export type PrimaryCandidacyIncumbentStatus =
+  | 'EVIDENCE_THIN'
+  | 'ACCEPTABLE'
+  | 'TREND_UNSUITABLE'
+
+export type PrimaryCandidacyPoolGateStatus = 'PASS' | 'BLOCKED' | 'UNASSESSABLE'
+
+export type PrimaryCandidacyPowerVerdict = 'POWERED' | 'UNPOWERED' | 'UNMEASURABLE'
+
+export interface PrimaryCandidacyGateParameters {
+  lookback_days: number
+  min_samples: number
+  incumbent_trend_pct: number
+  candidate_trend_pct: number
+  reach_lookback_days: number
+  min_reach_rate_pct: number
+  min_closed_trades: number
+  max_price_age_seconds: number
+}
+
+export interface PrimaryCandidacyPoolGate {
+  status: PrimaryCandidacyPoolGateStatus
+  detail: string
+  enforced_by_switch: boolean
+}
+
+export interface PrimaryCandidacyReachOperatingPoint {
+  n: number
+  k_min: number
+  alpha_at_loser: number
+  power_at_winner: number
+  basis: string
+}
+
+export interface PrimaryCandidacyPower {
+  verdict: PrimaryCandidacyPowerVerdict
+  sigma_bps: number | null
+  sigma_observations: number
+  delta_bps: number
+  alpha: number
+  power: number
+  required_one_sample: number | null
+  required_two_sample: number | null
+  max_trades_held: number
+  max_trades_symbol: string
+  shortfall_factor: number | null
+  reach_gate_operating_point: PrimaryCandidacyReachOperatingPoint
+}
+
+export interface PrimaryCandidacyCandidate {
+  symbol: string
+  passes_all_symbol_gates: boolean
+  gate_reasons: string[]
+  trend_blocked_pct: number
+  closed_trades: number
+  reach_rate_pct: number | null
+  trades_held: number
+  power_share_pct: number | null
+}
+
+export interface PrimaryCandidacyEdgePick {
+  symbol: string
+  trend_blocked_pct: number
+  closed_trades: number
+  reach_rate_pct: number
+  selection_rule: string
+}
+
+export interface PrimaryCandidacyGatesOnlyPick {
+  symbol: string
+  trend_blocked_pct: number
+  closed_trades: number
+  reach_rate_pct: number
+  passing_count: number
+  selection_rule: string
+  not_an_edge_claim: true
+  withheld_from_edge_pick_because: string[]
+  trades_held: number
+  required_trades_one_sample: number
+  power_share_pct: number
+}
+
+export interface PrimaryCandidacyTradeabilityPick {
+  symbol: string
+  market: string
+  relative_spread_bps: number
+  avg_dollar_volume: number
+  price: number
+  metrics_as_of: string
+  basis: 'TRADEABILITY_ONLY'
+  not_an_edge_claim: true
+  board_lot_uncertain: boolean
+}
+
+export interface PrimaryCandidacyTradeabilityRow {
+  rank: number
+  symbol: string
+  market: string
+  relative_spread_bps: number
+  avg_dollar_volume: number
+  price: number
+  metrics_as_of: string
+  eligible: boolean
+  reasons: string[]
+  board_lot_uncertain: boolean
+}
+
+export interface PrimaryCandidacyResponse {
+  generated_at: string
+  incumbent: string
+  incumbent_status: PrimaryCandidacyIncumbentStatus
+  switch_enabled: boolean
+  verdict: PrimaryCandidacyVerdict
+  gate_parameters: PrimaryCandidacyGateParameters
+  pool_gate: PrimaryCandidacyPoolGate
+  power: PrimaryCandidacyPower
+  candidates: PrimaryCandidacyCandidate[]
+  edge_pick: PrimaryCandidacyEdgePick | null
+  edge_pick_withheld_reason: string | null
+  gates_only_pick: PrimaryCandidacyGatesOnlyPick | null
+  tradeability_pick: PrimaryCandidacyTradeabilityPick | null
+  tradeability: PrimaryCandidacyTradeabilityRow[]
+  automatic_promotion_allowed: false
+  order_submission_allowed: false
+  safety_gate_evaluated: boolean
+}
+
+export interface PrimaryCandidacyQuery {
+  delta_bps?: number
+  alpha?: number
+  power?: number
+  include_entry_windows?: boolean
+}

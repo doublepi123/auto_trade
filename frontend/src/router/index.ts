@@ -65,6 +65,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/first-trade', component: () => import('../views/FirstTrade.vue') },
   { path: '/loss-containment', component: () => import('../views/LossContainment.vue') },
   { path: '/daily-consistency', component: () => import('../views/DailyConsistency.vue') },
+  { path: '/primary-candidacy', component: () => import('../views/PrimaryCandidacy.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' },
 ]
 

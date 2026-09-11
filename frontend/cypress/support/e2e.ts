@@ -498,6 +498,160 @@ const rotationForwardScorecardTrackStub = {
   warnings: ['BACKFILLED_COHORTS_EXCLUDED'],
 }
 
+const primaryCandidacyStub = {
+  generated_at: '2026-09-11T02:14:00Z',
+  incumbent: 'TSLA.US',
+  incumbent_status: 'ACCEPTABLE',
+  switch_enabled: false,
+  verdict: 'SELECTION_NOT_SUPPORTED_BY_EVIDENCE',
+  gate_parameters: {
+    lookback_days: 3,
+    min_samples: 60,
+    incumbent_trend_pct: 60,
+    candidate_trend_pct: 30,
+    reach_lookback_days: 30,
+    min_reach_rate_pct: 60,
+    min_closed_trades: 5,
+    max_price_age_seconds: 1800,
+  },
+  pool_gate: {
+    status: 'BLOCKED',
+    detail:
+      'shadow signal edge FAIL: first-passage rate 29.7% does not beat the random-walk baseline 36.0%',
+    enforced_by_switch: true,
+  },
+  power: {
+    verdict: 'UNPOWERED',
+    sigma_bps: 45.39,
+    sigma_observations: 212,
+    delta_bps: 20,
+    alpha: 0.05,
+    power: 0.8,
+    required_one_sample: 32,
+    required_two_sample: 63,
+    max_trades_held: 8,
+    max_trades_symbol: 'TER.US',
+    shortfall_factor: 4,
+    reach_gate_operating_point: {
+      n: 5,
+      k_min: 3,
+      alpha_at_loser: 0.058,
+      power_at_winner: 0.973,
+      basis: 'REACH_RATE_BINOMIAL',
+    },
+  },
+  candidates: [
+    {
+      symbol: 'TSLA.US',
+      passes_all_symbol_gates: false,
+      gate_reasons: ['IS_INCUMBENT'],
+      trend_blocked_pct: 41.2,
+      closed_trades: 4,
+      reach_rate_pct: 25,
+      trades_held: 4,
+      power_share_pct: 12.5,
+    },
+    {
+      symbol: 'META.US',
+      passes_all_symbol_gates: true,
+      gate_reasons: [],
+      trend_blocked_pct: 18.4,
+      closed_trades: 6,
+      reach_rate_pct: 66.7,
+      trades_held: 6,
+      power_share_pct: 18.8,
+    },
+    {
+      symbol: 'TER.US',
+      passes_all_symbol_gates: false,
+      gate_reasons: ['REACH_BELOW_RATE_FLOOR'],
+      trend_blocked_pct: 22.1,
+      closed_trades: 8,
+      reach_rate_pct: 37.5,
+      trades_held: 8,
+      power_share_pct: 25,
+    },
+    {
+      symbol: 'AMD.US',
+      passes_all_symbol_gates: false,
+      gate_reasons: ['REACH_BELOW_TRADE_FLOOR', 'REFERENCE_STALE'],
+      trend_blocked_pct: 55.9,
+      closed_trades: 2,
+      reach_rate_pct: null,
+      trades_held: 2,
+      power_share_pct: null,
+    },
+  ],
+  edge_pick: null,
+  edge_pick_withheld_reason:
+    'Selection is not supported: POOL_SIGNAL_EDGE_BLOCKED, UNPOWERED.',
+  gates_only_pick: {
+    symbol: 'META.US',
+    trend_blocked_pct: 18.4,
+    closed_trades: 6,
+    reach_rate_pct: 66.7,
+    passing_count: 1,
+    selection_rule: 'HIGHEST_REACH_RATE_AMONG_GATE_PASSERS',
+    not_an_edge_claim: true,
+    withheld_from_edge_pick_because: ['POOL_SIGNAL_EDGE_BLOCKED', 'UNPOWERED'],
+    trades_held: 6,
+    required_trades_one_sample: 32,
+    power_share_pct: 18.8,
+  },
+  tradeability_pick: {
+    symbol: 'NVDA.US',
+    market: 'US',
+    relative_spread_bps: 0.5,
+    avg_dollar_volume: 28306140441.88,
+    price: 182.64,
+    metrics_as_of: '2026-09-10',
+    basis: 'TRADEABILITY_ONLY',
+    not_an_edge_claim: true,
+    board_lot_uncertain: false,
+  },
+  tradeability: [
+    {
+      rank: 1,
+      symbol: 'NVDA.US',
+      market: 'US',
+      relative_spread_bps: 0.5,
+      avg_dollar_volume: 28306140441.88,
+      price: 182.64,
+      metrics_as_of: '2026-09-10',
+      eligible: true,
+      reasons: [],
+      board_lot_uncertain: false,
+    },
+    {
+      rank: 2,
+      symbol: 'META.US',
+      market: 'US',
+      relative_spread_bps: 1.2,
+      avg_dollar_volume: 9124553210.4,
+      price: 742.11,
+      metrics_as_of: '2026-09-10',
+      eligible: true,
+      reasons: [],
+      board_lot_uncertain: false,
+    },
+    {
+      rank: 3,
+      symbol: 'TER.US',
+      market: 'US',
+      relative_spread_bps: 4.8,
+      avg_dollar_volume: 612884300.15,
+      price: 168.02,
+      metrics_as_of: '2026-09-10',
+      eligible: false,
+      reasons: ['SPREAD_ABOVE_CEILING'],
+      board_lot_uncertain: false,
+    },
+  ],
+  automatic_promotion_allowed: false,
+  order_submission_allowed: false,
+  safety_gate_evaluated: false,
+}
+
 function initialStatus(): StatusStub {
   return {
     engine_state: 'flat',
@@ -5361,6 +5515,12 @@ Cypress.Commands.add('stubApi', () => {
   cy.intercept('GET', '/api/strategy-experiments/*/runs*', {
     body: { items: [], total: 0, page: 1, page_size: 20 },
   }).as('listStrategyExperimentRuns')
+
+  // Registered last on purpose: it must win over the broader `/api/universe/*`
+  // intercepts above, because later `cy.intercept` registrations take priority.
+  cy.intercept('GET', '/api/universe/primary-candidacy*', {
+    body: primaryCandidacyStub,
+  }).as('getPrimaryCandidacy')
 })
 
 Cypress.Commands.add('visitApp', (path = '/') => {

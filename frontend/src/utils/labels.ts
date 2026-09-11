@@ -157,6 +157,100 @@ export function alertRuleTypeLabel(ruleType?: string | null): string {
   }
 }
 
+export function candidacyVerdictLabel(verdict?: string | null): string {
+  switch (verdict) {
+    case 'NO_SELECTION_RUN':
+      return '无候选池运行'
+    case 'SELECTION_SUPPORTED':
+      return '证据支持切换'
+    case 'SELECTION_NOT_SUPPORTED_BY_EVIDENCE':
+      return '证据不支持切换'
+    default:
+      return '未知判定'
+  }
+}
+
+export function candidacyIncumbentStatusLabel(status?: string | null): string {
+  switch (status) {
+    case 'EVIDENCE_THIN':
+      return '证据不足'
+    case 'ACCEPTABLE':
+      return '仍可接受'
+    case 'TREND_UNSUITABLE':
+      return '趋势不适配'
+    default:
+      return '未知状态'
+  }
+}
+
+export function poolGateStatusLabel(status?: string | null): string {
+  switch (status) {
+    case 'PASS':
+      return '已通过'
+    case 'BLOCKED':
+      return '已阻断'
+    case 'UNASSESSABLE':
+      return '无法评估'
+    default:
+      return '未知状态'
+  }
+}
+
+export function powerVerdictLabel(verdict?: string | null): string {
+  switch (verdict) {
+    case 'POWERED':
+      return '样本量充足'
+    case 'UNPOWERED':
+      return '样本量不足'
+    case 'UNMEASURABLE':
+      return '无法测量'
+    default:
+      return '未知功效'
+  }
+}
+
+export function candidateGateReasonLabel(reason?: string | null): string {
+  switch (reason) {
+    case 'IS_INCUMBENT':
+      return '在任标的'
+    case 'NOT_IN_POOL':
+      return '不在候选池'
+    case 'RANGE_VERDICT_NOT_SUITABLE':
+      return '区间判定不适配'
+    case 'TREND_ABOVE_CEILING':
+      return '趋势占比超上限'
+    case 'NO_REFERENCE_PRICE':
+      return '无参考价'
+    case 'REFERENCE_STALE':
+      return '参考价过期'
+    case 'REACH_EVIDENCE_ABSENT':
+      return '无 reach 证据'
+    case 'REACH_BELOW_TRADE_FLOOR':
+      return '闭合交易数不足'
+    case 'REACH_BELOW_RATE_FLOOR':
+      return 'reach 率低于下限'
+    default:
+      return reason || '未知门闸'
+  }
+}
+
+export function candidacyWithheldReasonLabel(reason?: string | null): string {
+  switch (reason) {
+    case 'POOL_SIGNAL_EDGE_BLOCKED':
+      return '池级信号 edge 未通过'
+    case 'UNPOWERED':
+      return '样本量不足'
+    case 'NO_GATE_PASSER':
+      return '无标的通过闸门'
+    case 'NO_SELECTION_RUN':
+      return '无候选池运行'
+    case 'SWITCH_DISABLED':
+      return '自动切换未开启'
+    default:
+      return reason || '未知原因'
+  }
+}
+
 export function marginRiskLevelLabel(level?: number | null): string {
   switch (level) {
     case 0:

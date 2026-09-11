@@ -22,6 +22,7 @@
         <router-link to="/lab" class="app-menu-link" :class="{ active: route.path === '/lab' }">优化工作台</router-link>
         <router-link to="/signal-consensus" class="app-menu-link" :class="{ active: route.path === '/signal-consensus' }">信号共识</router-link>
         <router-link to="/universe-explainer" class="app-menu-link" :class="{ active: route.path === '/universe-explainer' }">Universe解释</router-link>
+        <router-link to="/primary-candidacy" class="app-menu-link" :class="{ active: route.path === '/primary-candidacy' }">主标的候选</router-link>
         <router-link to="/risk-timeline" class="app-menu-link" :class="{ active: route.path === '/risk-timeline' }">风控时间线</router-link>
         <router-link to="/platform-catalog" class="app-menu-link" :class="{ active: route.path === '/platform-catalog' }">模块目录</router-link>
         <router-link to="/attribution" class="app-menu-link" :class="{ active: route.path === '/attribution' }">绩效归因</router-link>
