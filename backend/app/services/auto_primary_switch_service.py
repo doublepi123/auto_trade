@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from sqlalchemy import event as sa_event, select
 from sqlalchemy.orm import Session
@@ -65,6 +65,78 @@ EVENT_PRIMARY_SWITCHED = "PRIMARY_SWITCHED"
 EVENT_PRIMARY_SWITCH_ROLLED_BACK = "PRIMARY_SWITCH_ROLLED_BACK"
 EVENT_PRIMARY_SWITCH_BLOCKED = "PRIMARY_SWITCH_BLOCKED"
 AUDIT_PRIMARY_SWITCH = "AUTO_PRIMARY_SWITCH"
+
+
+GATE_IS_INCUMBENT = "IS_INCUMBENT"
+GATE_NOT_IN_POOL = "NOT_IN_POOL"
+GATE_RANGE_VERDICT = "RANGE_VERDICT_NOT_SUITABLE"
+GATE_TREND_ABOVE_CEILING = "TREND_ABOVE_CEILING"
+GATE_NO_REFERENCE_PRICE = "NO_REFERENCE_PRICE"
+GATE_REFERENCE_STALE = "REFERENCE_STALE"
+GATE_REACH_ABSENT = "REACH_EVIDENCE_ABSENT"
+GATE_REACH_BELOW_TRADE_FLOOR = "REACH_BELOW_TRADE_FLOOR"
+GATE_REACH_BELOW_RATE_FLOOR = "REACH_BELOW_RATE_FLOOR"
+
+
+@dataclass(frozen=True)
+class CandidateGateVerdict:
+    """Why one candidate was accepted or rejected, in loop order.
+
+    ``evaluate()`` rejects candidates with a bare ``continue``, so an operator
+    asking "why was nothing chosen" has no answer. Collecting every failing
+    gate — rather than stopping at the first — lets a read-only report state
+    the full reason per symbol while the live switch keeps using this same
+    code, so the report cannot drift from what the cron actually does.
+    """
+
+    symbol: str
+    reasons: tuple[str, ...]
+    reference_age_seconds: float | None = None
+
+    @property
+    def passes(self) -> bool:
+        return not self.reasons
+
+
+def classify_candidate_row(
+    row: RangeFitnessRow,
+    *,
+    incumbent: str,
+    eligible: Mapping[str, str],
+    anchor: datetime,
+) -> CandidateGateVerdict:
+    """Evaluate every candidate gate for one row, preserving loop order."""
+    reasons: list[str] = []
+    if row.symbol == incumbent:
+        reasons.append(GATE_IS_INCUMBENT)
+    if row.symbol not in eligible:
+        reasons.append(GATE_NOT_IN_POOL)
+    if row.verdict != VERDICT_RANGE_SUITABLE:
+        reasons.append(GATE_RANGE_VERDICT)
+    if row.trend_blocked_pct > settings.auto_primary_switch_candidate_trend_pct:
+        reasons.append(GATE_TREND_ABOVE_CEILING)
+    # Without a reference price the new symbol would inherit the old symbol's
+    # interval, which sits nowhere near its price and would never trigger.
+    if row.last_close_price is None or row.last_close_price <= 0:
+        reasons.append(GATE_NO_REFERENCE_PRICE)
+    # A close from an earlier session prices a band the live market can no
+    # longer reach. Fails closed: an unmeasurable age is not a proven-fresh one.
+    reference_age = _reference_age_seconds(row.last_bar_at, anchor)
+    if not _reference_is_fresh(reference_age):
+        reasons.append(GATE_REFERENCE_STALE)
+    # Reach-rate gate. A low ADX trend share only says price is not trending;
+    # it does not say the swings clear the round-trip cost.
+    if row.reach_rate_pct is None:
+        reasons.append(GATE_REACH_ABSENT)
+    elif row.closed_trades < settings.auto_primary_switch_min_closed_trades:
+        reasons.append(GATE_REACH_BELOW_TRADE_FLOOR)
+    elif row.reach_rate_pct < settings.auto_primary_switch_min_reach_rate_pct:
+        reasons.append(GATE_REACH_BELOW_RATE_FLOOR)
+    return CandidateGateVerdict(
+        symbol=row.symbol,
+        reasons=tuple(reasons),
+        reference_age_seconds=reference_age,
+    )
 
 
 @dataclass(frozen=True)
@@ -199,45 +271,30 @@ class AutoPrimarySwitchService:
         eligible = self._eligible_candidates()
         best = None
         for row in rows:
-            if row.symbol == incumbent or row.symbol not in eligible:
-                continue
-            if row.verdict != VERDICT_RANGE_SUITABLE:
-                continue
-            if row.trend_blocked_pct > settings.auto_primary_switch_candidate_trend_pct:
-                continue
-            # Without a reference price the new symbol would inherit the old
-            # symbol's interval, which sits nowhere near its price and would
-            # never trigger — a switch into an immediately dead interval.
-            if row.last_close_price is None or row.last_close_price <= 0:
-                continue
-            # A close from an earlier session prices a band the live market can
-            # no longer reach. Any bar inside the multi-day fitness window used
-            # to qualify, so a stale close once centred a live band 1.5% below
-            # the market and took zero fills for 28 days. Fails closed: a close
-            # whose age cannot be measured is not a proven-fresh one.
-            reference_age = _reference_age_seconds(row.last_bar_at, anchor)
-            if not _reference_is_fresh(reference_age):
-                logger.warning(
-                    "automatic primary switch rejected %s: reference close at "
-                    "%s is %s, outside the 0-%ss freshness window",
-                    row.symbol,
-                    row.last_bar_at,
-                    (
-                        "unknown age"
-                        if reference_age is None
-                        else f"{reference_age:.0f}s old"
-                    ),
-                    settings.auto_primary_switch_max_price_age_seconds,
-                )
-                continue
-            # Reach-rate gate. A low ADX trend share only says price is not
-            # trending; it does not say the swings are big enough to clear the
-            # round-trip cost. Measured over 247 closed shadow trades, reach-rate
-            # separated winners from losers with no exceptions (85% vs 22%) while
-            # trend share ranked them barely better than chance -- its top-ranked
-            # symbol was a net loser. Require BOTH so a quiet-but-too-tight
-            # symbol can never be promoted on trend share alone.
-            if not self._reach_rate_ok(row):
+            verdict = classify_candidate_row(
+                row,
+                incumbent=incumbent,
+                eligible=eligible,
+                anchor=anchor,
+            )
+            if verdict.reasons:
+                # Only the freshness rejection has ever been visible to an
+                # operator; keep that exact message and keep it exclusive to
+                # rows whose ONLY complaint is the stale close, so a row that
+                # is simply out of pool does not start emitting it.
+                if verdict.reasons == (GATE_REFERENCE_STALE,):
+                    logger.warning(
+                        "automatic primary switch rejected %s: reference close "
+                        "at %s is %s, outside the 0-%ss freshness window",
+                        row.symbol,
+                        row.last_bar_at,
+                        (
+                            "unknown age"
+                            if verdict.reference_age_seconds is None
+                            else f"{verdict.reference_age_seconds:.0f}s old"
+                        ),
+                        settings.auto_primary_switch_max_price_age_seconds,
+                    )
                 continue
             if best is None or row.trend_blocked_pct < best.trend_blocked_pct:
                 best = row

@@ -1442,3 +1442,118 @@ def test_auto_primary_switch_tick_warns_when_signal_edge_is_unassessable(
     assert warnings == [
         "automatic primary switch signal-edge gate unassessable: " + detail
     ]
+
+
+class TestCandidateGateClassification:
+    """The candidate loop's gates, exposed so a report cannot drift from them.
+
+    ``evaluate()`` rejects candidates with a bare ``continue``: only the stale
+    reference branch logs anything, so an operator asking "why was nothing
+    chosen" has no answer. Extracting the per-row checks into one classifier
+    lets the read-only candidacy report state a reason per symbol while the
+    live switch keeps using the exact same code — the report cannot quietly
+    diverge from what the cron actually does.
+    """
+
+    def _row(self, **kw: Any) -> Any:
+        from app.services.range_fitness_service import (
+            RangeFitnessRow,
+            VERDICT_RANGE_SUITABLE,
+        )
+
+        base: dict[str, Any] = dict(
+            symbol="META.US",
+            is_primary=False,
+            samples=1000,
+            trend_blocked=100,
+            trend_blocked_pct=10.0,
+            gate_passed=100,
+            gate_passed_pct=10.0,
+            avg_adx_5m=15.0,
+            verdict=VERDICT_RANGE_SUITABLE,
+            last_close_price=650.0,
+            last_bar_at=datetime.now(timezone.utc),
+            reach_rate_pct=83.3,
+            closed_trades=6,
+        )
+        base.update(kw)
+        return RangeFitnessRow(**base)
+
+    def test_a_fully_qualified_row_passes_with_no_reasons(self) -> None:
+        from app.services.auto_primary_switch_service import (
+            classify_candidate_row,
+        )
+
+        verdict = classify_candidate_row(
+            self._row(),
+            incumbent="TSLA.US",
+            eligible={"META.US": "US"},
+            anchor=datetime.now(timezone.utc),
+        )
+        assert verdict.reasons == ()
+        assert verdict.passes is True
+        assert verdict.symbol == "META.US"
+
+    @pytest.mark.parametrize(
+        ("kw", "expected"),
+        [
+            ({"symbol": "TSLA.US"}, "IS_INCUMBENT"),
+            ({"symbol": "NOPE.US"}, "NOT_IN_POOL"),
+            ({"verdict": "MIXED"}, "RANGE_VERDICT_NOT_SUITABLE"),
+            ({"trend_blocked_pct": 55.0}, "TREND_ABOVE_CEILING"),
+            ({"last_close_price": None}, "NO_REFERENCE_PRICE"),
+            ({"last_close_price": 0.0}, "NO_REFERENCE_PRICE"),
+            ({"last_bar_at": None}, "REFERENCE_STALE"),
+            ({"reach_rate_pct": None}, "REACH_EVIDENCE_ABSENT"),
+            ({"closed_trades": 2}, "REACH_BELOW_TRADE_FLOOR"),
+            ({"reach_rate_pct": 10.0}, "REACH_BELOW_RATE_FLOOR"),
+        ],
+    )
+    def test_each_gate_yields_its_reason_code(
+        self, kw: dict[str, Any], expected: str
+    ) -> None:
+        from app.services.auto_primary_switch_service import (
+            classify_candidate_row,
+        )
+
+        verdict = classify_candidate_row(
+            self._row(**kw),
+            incumbent="TSLA.US",
+            eligible={"META.US": "US", "TSLA.US": "US"},
+            anchor=datetime.now(timezone.utc),
+        )
+        assert expected in verdict.reasons
+        assert verdict.passes is False
+
+    def test_reasons_preserve_loop_order_when_multiple_fail(self) -> None:
+        from app.services.auto_primary_switch_service import (
+            classify_candidate_row,
+        )
+
+        verdict = classify_candidate_row(
+            self._row(trend_blocked_pct=55.0, reach_rate_pct=None),
+            incumbent="TSLA.US",
+            eligible={"META.US": "US"},
+            anchor=datetime.now(timezone.utc),
+        )
+        assert verdict.reasons == (
+            "TREND_ABOVE_CEILING",
+            "REACH_EVIDENCE_ABSENT",
+        )
+
+    def test_evaluate_calls_the_module_level_classifier(self) -> None:
+        """The live switch must route candidates through the shared classifier.
+
+        Pinned by source inspection rather than a spy: the loop body is the
+        thing under test, and asserting on it directly means a future inline
+        re-implementation fails here instead of silently letting the report
+        and the cron disagree.
+        """
+        import inspect
+
+        from app.services import auto_primary_switch_service as mod
+
+        body = inspect.getsource(mod.AutoPrimarySwitchService.evaluate)
+        assert "classify_candidate_row(" in body
+        # The inline checks it replaces must be gone from the loop.
+        assert "if not self._reach_rate_ok(row):" not in body
