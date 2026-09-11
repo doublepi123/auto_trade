@@ -380,6 +380,22 @@ class Settings(BaseSettings):
             "AUTO_TRADE_LIVE_ENTRY_CROSSING_MAX_AGE_SECONDS"
         ),
     )
+    live_entry_crossing_settle_seconds: int = Field(
+        default=0,
+        ge=0,
+        le=290,
+        validation_alias=(
+            "AUTO_TRADE_LIVE_ENTRY_CROSSING_SETTLE_SECONDS"
+        ),
+        description=(
+            "Settle fallback for the fresh-crossing entry gate. When the "
+            "crossing tick itself was never observed (e.g. it happened while "
+            "the quote stream was blind), continuous trusted quotes holding "
+            "on the entry side of the threshold for this many seconds prove "
+            "the crossing instead. 0 disables the fallback. Must stay below "
+            "the 300s recent-quote buffer window."
+        ),
+    )
     allow_short_entries: bool = Field(
         default=False,
         validation_alias="AUTO_TRADE_ALLOW_SHORT_ENTRIES",

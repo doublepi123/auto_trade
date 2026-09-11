@@ -304,6 +304,155 @@ class TestAppRunner:
             is None
         )
 
+    @staticmethod
+    def _inject_trusted_quote(
+        runner: AppRunner,
+        price: float,
+        observed_at: datetime,
+    ) -> None:
+        runner._symbol_runtimes["NVDA.US"].recent_quotes.append(
+            {
+                "symbol": "NVDA.US",
+                "last_price": price,
+                "bid": price - 0.01,
+                "ask": price + 0.01,
+                "timestamp": observed_at.isoformat(),
+                "observed_at": observed_at,
+                "trusted": True,
+            }
+        )
+
+    def test_live_entry_crossing_settle_proves_crossing_missed_while_blind(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Stream blindness during the breach must not deadlock the entry.
+
+        Reproduces the live incident: the quote stream rejected every quote
+        for days while price fell through buy_low; once fresh quotes resumed,
+        price sat below the threshold with no observable 30s crossing, so the
+        gate blocked forever. Continuous trusted entry-side evidence spanning
+        the settle window proves the crossing instead.
+        """
+        runner = self._runner_with_primary_quote_runtime()
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_required",
+            True,
+        )
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_max_age_seconds",
+            30,
+        )
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_settle_seconds",
+            120,
+        )
+        now = datetime.now(timezone.utc)
+        self._inject_trusted_quote(runner, 99.5, now - timedelta(seconds=150))
+        self._inject_trusted_quote(runner, 99.6, now - timedelta(seconds=90))
+        self._remember_test_quote(runner, 99.8)
+        self._remember_test_quote(runner, 99.7)
+
+        assert runner._validate_live_entry_crossing("NVDA.US", "BUY") is None
+
+    def test_live_entry_crossing_settle_blocked_by_reclaim_inside_window(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A reclaim above the threshold inside the settle window invalidates
+        the proof: the market demonstrably did not hold the entry side."""
+        runner = self._runner_with_primary_quote_runtime()
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_required",
+            True,
+        )
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_max_age_seconds",
+            30,
+        )
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_settle_seconds",
+            120,
+        )
+        now = datetime.now(timezone.utc)
+        self._inject_trusted_quote(runner, 99.5, now - timedelta(seconds=150))
+        self._inject_trusted_quote(runner, 100.4, now - timedelta(seconds=90))
+        self._remember_test_quote(runner, 99.8)
+        self._remember_test_quote(runner, 99.7)
+
+        result = runner._validate_live_entry_crossing("NVDA.US", "BUY")
+
+        assert result is not None
+        assert result.details["policy_reason"] == "CROSSING_NOT_OBSERVED"
+
+    def test_live_entry_crossing_settle_requires_full_window_coverage(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Evidence younger than the settle window proves nothing about the
+        window's start: the stream only just resumed, so fail closed."""
+        runner = self._runner_with_primary_quote_runtime()
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_required",
+            True,
+        )
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_max_age_seconds",
+            30,
+        )
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_settle_seconds",
+            120,
+        )
+        now = datetime.now(timezone.utc)
+        self._inject_trusted_quote(runner, 99.6, now - timedelta(seconds=60))
+        self._remember_test_quote(runner, 99.8)
+        self._remember_test_quote(runner, 99.7)
+
+        result = runner._validate_live_entry_crossing("NVDA.US", "BUY")
+
+        assert result is not None
+        assert result.details["policy_reason"] == "CROSSING_NOT_OBSERVED"
+
+    def test_live_entry_crossing_settle_disabled_by_default_keeps_blocking(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner = self._runner_with_primary_quote_runtime()
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_required",
+            True,
+        )
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_max_age_seconds",
+            30,
+        )
+        monkeypatch.setattr(
+            runner_module.settings,
+            "live_entry_crossing_settle_seconds",
+            0,
+        )
+        now = datetime.now(timezone.utc)
+        self._inject_trusted_quote(runner, 99.5, now - timedelta(seconds=150))
+        self._remember_test_quote(runner, 99.8)
+        self._remember_test_quote(runner, 99.7)
+
+        result = runner._validate_live_entry_crossing("NVDA.US", "BUY")
+
+        assert result is not None
+        assert result.details["policy_reason"] == "CROSSING_NOT_OBSERVED"
+
     def test_repeated_reconciliation_hazard_revokes_protective_exits(
         self,
         monkeypatch,

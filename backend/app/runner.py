@@ -4792,6 +4792,14 @@ class AppRunner:
         )
         if crossed:
             return None
+        if self._entry_crossing_settled(
+            candidates,
+            requested_symbol,
+            normalized_action,
+            threshold,
+            max_age_seconds=max_age_seconds,
+        ):
+            return None
         return self._entry_crossing_block(
             requested_symbol,
             normalized_action,
@@ -4801,6 +4809,86 @@ class AppRunner:
             current_price=current_price,
             fresh_quote_count=len(trusted_quotes),
             max_age_seconds=max_age_seconds,
+        )
+
+    def _entry_crossing_settled(
+        self,
+        candidates: list[dict[str, Any]],
+        requested_symbol: str,
+        normalized_action: str,
+        threshold: float,
+        *,
+        max_age_seconds: int,
+    ) -> bool:
+        """Settle fallback for the fresh-crossing gate.
+
+        The 30s crossing check deadlocks whenever the breach itself was
+        unobservable: quote-stream blindness (every quote quality-rejected for
+        days), a process restart, or opening warmup while price fell through
+        the threshold. Once fresh quotes resume, price sits on the entry side
+        with no crossing left to observe, and the gate blocks forever.
+
+        When ``live_entry_crossing_settle_seconds`` > 0, continuous trusted
+        quotes holding on the entry side for that whole window prove the
+        crossing instead. The stale-print abuse the gate exists to stop stays
+        stopped: an interval recenter centres the band on the current price,
+        so pre-recenter quotes sit off the entry side and the proof can only
+        complete with post-change evidence. A trusted quote on the far side
+        inside the window is a reclaim and invalidates the proof outright;
+        untrusted quotes are neutral (a blindness gap neither proves nor
+        disproves), but the evidence must still reach back to the window
+        start (within one freshness window of quote spacing) so a stream
+        that just resumed cannot settle instantly.
+        """
+        settle_seconds = int(settings.live_entry_crossing_settle_seconds)
+        if settle_seconds <= 0:
+            return False
+        now = datetime.now(timezone.utc)
+        settle_cutoff = now - timedelta(seconds=settle_seconds)
+        settled_count = 0
+        oldest_observed_at: datetime | None = None
+        for item in reversed(candidates):
+            if str(item.get("symbol") or "").strip().upper() != requested_symbol:
+                continue
+            observed_at = item.get("observed_at")
+            if not isinstance(observed_at, datetime):
+                continue
+            normalized_observed_at = (
+                observed_at.replace(tzinfo=timezone.utc)
+                if observed_at.tzinfo is None
+                else observed_at.astimezone(timezone.utc)
+            )
+            if normalized_observed_at < settle_cutoff:
+                break
+            trusted_at_observation = item.get("trusted")
+            if trusted_at_observation is False:
+                continue
+            if trusted_at_observation is not True:
+                quality = self._evaluate_quote_quality(item)
+                if not all(
+                    bool(quality[name])
+                    for name in (
+                        "price_positive",
+                        "spread_reasonable",
+                        "last_bbo_consistent",
+                        "source_timestamp_fresh",
+                    )
+                ):
+                    continue
+            price = float(item.get("last_price") or 0)
+            on_entry_side = (
+                price <= threshold
+                if normalized_action == "BUY"
+                else price >= threshold
+            )
+            if not on_entry_side:
+                return False
+            settled_count += 1
+            oldest_observed_at = normalized_observed_at
+        if settled_count < 2 or oldest_observed_at is None:
+            return False
+        return oldest_observed_at <= settle_cutoff + timedelta(
+            seconds=max_age_seconds
         )
 
     @staticmethod
