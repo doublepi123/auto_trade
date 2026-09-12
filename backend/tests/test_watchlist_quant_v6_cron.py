@@ -46,6 +46,13 @@ def _outside_opening_research_quiet_window(
 
 
 @pytest.fixture(autouse=True)
+def _outside_live_market_rth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(main_module, "_live_market_in_rth", lambda: False)
+
+
+@pytest.fixture(autouse=True)
 def _successful_durable_job_lease(
     monkeypatch: pytest.MonkeyPatch,
 ) -> SimpleNamespace:
@@ -210,6 +217,112 @@ def test_quant_v6_rechecks_quiet_window_after_sync_lock(
         blocking=False
     )
     main_module._watchlist_quant_v6_evaluation_sync_lock.release()
+
+
+def test_quant_v6_rth_defers_before_plan_or_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    _successful_durable_job_lease: SimpleNamespace,
+) -> None:
+    """2026-09-11 20:30 UTC: a quant-v6 publication burst held the SQLite
+    writer lock for tens of seconds and failed runtime-state persistence,
+    all storage-maintenance stages and the lease heartbeat. The job evaluates
+    T-1 daily bars and has no intra-day requirement, so it must never run
+    while a live-traded market is in RTH."""
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(main_module, "_live_market_in_rth", lambda: True)
+    monkeypatch.setattr(
+        watchlist_quant_v6_evaluation_service,
+        "build_latest_quant_v6_registration_plan",
+        lambda **_kwargs: pytest.fail("RTH tick built a plan"),
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_historical_provider,
+        "QuantV6HistoricalBarProvider",
+        lambda **_kwargs: pytest.fail("RTH tick created a provider"),
+    )
+
+    assert (
+        main_module._watchlist_quant_v6_evaluation_tick_sync()
+        is main_module._MARKET_RTH_DEFERRED
+    )
+    assert _successful_durable_job_lease.services == []
+
+
+def test_quant_v6_rechecks_rth_after_sync_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    decisions = iter((False, True))
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module,
+        "_live_market_in_rth",
+        lambda: next(decisions),
+    )
+    monkeypatch.setattr(
+        watchlist_quant_v6_evaluation_service,
+        "build_latest_quant_v6_registration_plan",
+        lambda **_kwargs: pytest.fail("post-lock RTH tick built a plan"),
+    )
+
+    deadline = QuantV6EvaluationDeadline(30)
+    assert (
+        main_module._watchlist_quant_v6_evaluation_tick_sync(deadline)
+        is main_module._MARKET_RTH_DEFERRED
+    )
+    assert main_module._watchlist_quant_v6_evaluation_sync_lock.acquire(
+        blocking=False
+    )
+    main_module._watchlist_quant_v6_evaluation_sync_lock.release()
+
+
+@pytest.mark.asyncio
+async def test_quant_v6_cron_rechecks_after_rth_defer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    outcomes = iter((main_module._MARKET_RTH_DEFERRED, object()))
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+        if len(sleeps) == 3:
+            raise asyncio.CancelledError
+
+    async def next_outcome() -> object:
+        return next(outcomes)
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        main_module.settings,
+        "watchlist_quant_v6_evaluation_interval_minutes",
+        1_440,
+    )
+    monkeypatch.setattr(main_module.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(
+        main_module,
+        "_run_watchlist_quant_v6_evaluation_tick",
+        next_outcome,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await main_module._watchlist_quant_v6_evaluation_cron()
+
+    assert sleeps == [
+        main_module._WATCHLIST_QUANT_V6_INITIAL_DELAY_SECONDS,
+        main_module._OPENING_RESEARCH_DEFER_RETRY_SECONDS,
+        1_440 * 60,
+    ]
 
 
 def test_quant_v6_busy_lease_defers_before_plan_provider_or_business_session(

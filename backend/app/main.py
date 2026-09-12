@@ -176,6 +176,11 @@ _OPENING_MOMENTUM_POLL_SECONDS = 15
 _OPENING_MOMENTUM_PRIORITY_POLL_SECONDS = 5
 _OPENING_RESEARCH_DEFER_RETRY_SECONDS = 60
 _OPENING_RESEARCH_DEFERRED = object()
+# quant-v6 historical evaluation writes multi-second atomic publication
+# bundles; while any live-traded market is in regular hours those writes can
+# stall live-path writers (runtime state, order persistence), so the tick
+# defers entirely out of RTH and rechecks on the fast retry cadence.
+_MARKET_RTH_DEFERRED = object()
 _T = TypeVar("_T")
 _JOB_LEASE_RETRY_SECONDS = 60
 _JOB_LEASE_BUSY_DEFERRED = object()
@@ -350,6 +355,17 @@ def _opening_execution_priority_window(
     )
 
     return opening_execution_reservation_window(now)
+
+
+def _live_market_in_rth() -> bool:
+    """True while a live-traded market is in regular trading hours.
+
+    Covers both markets this deployment can trade; the shared SQLite writer
+    lock makes research writes during either session a live-path hazard.
+    """
+    from app.core.market_calendar import is_trading_hours
+
+    return is_trading_hours("US") or is_trading_hours("HK")
 
 
 def _opening_research_quiet_window(
@@ -1675,6 +1691,11 @@ def _watchlist_quant_v6_evaluation_tick_sync(
             "quant-v6 evaluation deferred during opening research quiet window"
         )
         return _OPENING_RESEARCH_DEFERRED
+    if _live_market_in_rth():
+        logger.debug(
+            "quant-v6 evaluation deferred while a live market is in RTH"
+        )
+        return _MARKET_RTH_DEFERRED
     from app.services.watchlist_quant_v6_deadline import (
         QuantV6EvaluationDeadline,
         QuantV6EvaluationStoppedError,
@@ -1715,6 +1736,11 @@ def _watchlist_quant_v6_evaluation_tick_sync(
                 "quant-v6 evaluation deferred during opening research quiet window"
             )
             return _OPENING_RESEARCH_DEFERRED
+        if _live_market_in_rth():
+            logger.debug(
+                "quant-v6 evaluation deferred while a live market is in RTH"
+            )
+            return _MARKET_RTH_DEFERRED
         lease_service = DurableJobLeaseService(
             session_factory=SessionLocal,
             default_ttl_seconds=settings.job_lease_ttl_seconds,
@@ -1925,6 +1951,7 @@ async def _watchlist_quant_v6_evaluation_cron() -> None:
                 deferred = (
                     outcome is _OPENING_RESEARCH_DEFERRED
                     or outcome is _JOB_LEASE_BUSY_DEFERRED
+                    or outcome is _MARKET_RTH_DEFERRED
                 )
                 _cron_record_success(_CRON_WATCHLIST_QUANT_V6_EVALUATION)
             except asyncio.CancelledError:
