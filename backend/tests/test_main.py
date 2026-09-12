@@ -579,22 +579,33 @@ async def test_universe_selection_join_resists_repeated_cancel(
     assert finished.is_set()
 
 
-def test_universe_selection_busy_lease_returns_defer_and_closes_session(
+def test_universe_selection_busy_lease_defers_before_opening_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Lease-busy must not even open the business session. The lease is
+    acquired first so its short-lived connection never nests under the
+    business session's — the reentrancy class that once deadlocked the
+    connection pool and kept logging hourly re-entrant warnings."""
     from app.api import universe as universe_api
+    from app.services import durable_job_lease_service as lease_module
 
-    closed = False
+    opened = False
 
     class FakeSession:
-        def close(self) -> None:
-            nonlocal closed
-            closed = True
+        def __init__(self) -> None:
+            nonlocal opened
+            opened = True
 
-    class BusyService:
+        def close(self) -> None:
+            pass
+
+    class BusyLeaseService:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
         @staticmethod
-        def refresh() -> None:
-            raise UniverseSelectionLeaseBusyError("already running")
+        def try_acquire(_key: object) -> None:
+            return None
 
     monkeypatch.setattr(
         main_module.settings,
@@ -603,16 +614,110 @@ def test_universe_selection_busy_lease_returns_defer_and_closes_session(
     )
     monkeypatch.setattr(main_module, "SessionLocal", FakeSession)
     monkeypatch.setattr(
+        lease_module,
+        "DurableJobLeaseService",
+        BusyLeaseService,
+    )
+    monkeypatch.setattr(
         universe_api,
         "build_universe_selection_service",
-        lambda _db: BusyService(),
+        lambda _db: pytest.fail("business service built without the lease"),
     )
 
     assert (
         main_module._universe_selection_tick_sync()
         is main_module._JOB_LEASE_BUSY_DEFERRED
     )
-    assert closed is True
+    assert opened is False
+
+
+def test_universe_selection_acquires_lease_before_business_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ordering pin for the reentrancy fix: lease acquire and keepalive wrap
+    the business session, and the guard is handed to refresh()."""
+    from app.api import universe as universe_api
+    from app.services import durable_job_lease_service as lease_module
+
+    events: list[str] = []
+    guard = SimpleNamespace(checkpoint=lambda: None)
+
+    class FakeKeepalive:
+        def __enter__(self) -> SimpleNamespace:
+            events.append("keepalive_enter")
+            return guard
+
+        def __exit__(self, *_exc: object) -> bool:
+            events.append("keepalive_exit")
+            return False
+
+    class FakeLeaseService:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        @staticmethod
+        def try_acquire(_key: object) -> object:
+            events.append("acquire")
+            return object()
+
+        @staticmethod
+        def keepalive(_handle: object) -> FakeKeepalive:
+            return FakeKeepalive()
+
+    class FakeSession:
+        def __init__(self) -> None:
+            events.append("session_open")
+
+        def rollback(self) -> None:
+            pass
+
+        def close(self) -> None:
+            events.append("session_close")
+
+    response = SimpleNamespace(
+        run=SimpleNamespace(
+            id=7,
+            as_of_date="2026-09-12",
+            status="RUNNING",
+            coverage_ratio=0.0,
+            selected_count=0,
+        ),
+        applied=False,
+        exploration_symbols=(),
+    )
+
+    def fake_refresh(*, lease_guard: object = None) -> SimpleNamespace:
+        assert lease_guard is guard
+        events.append("refresh")
+        return response
+
+    monkeypatch.setattr(
+        main_module.settings,
+        "universe_selection_enabled",
+        True,
+    )
+    monkeypatch.setattr(main_module, "SessionLocal", FakeSession)
+    monkeypatch.setattr(
+        lease_module,
+        "DurableJobLeaseService",
+        FakeLeaseService,
+    )
+    monkeypatch.setattr(
+        universe_api,
+        "build_universe_selection_service",
+        lambda _db: SimpleNamespace(refresh=fake_refresh),
+    )
+
+    main_module._universe_selection_tick_sync()
+
+    assert events == [
+        "acquire",
+        "keepalive_enter",
+        "session_open",
+        "refresh",
+        "session_close",
+        "keepalive_exit",
+    ]
 
 
 async def test_watchlist_quant_waits_for_worker_during_cancel(
@@ -749,7 +854,27 @@ def test_universe_tick_reloads_before_optional_quant_failure(
     monkeypatch,
 ) -> None:
     from app.api import universe as universe_api
+    from app.services import durable_job_lease_service as lease_module
     from app.services import watchlist_quant_service
+
+    class FakeKeepalive:
+        def __enter__(self) -> SimpleNamespace:
+            return SimpleNamespace(checkpoint=lambda: None)
+
+        def __exit__(self, *_exc: object) -> bool:
+            return False
+
+    class FakeLeaseService:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        @staticmethod
+        def try_acquire(_key: object) -> object:
+            return object()
+
+        @staticmethod
+        def keepalive(_handle: object) -> FakeKeepalive:
+            return FakeKeepalive()
 
     class FakeQuery:
         def all(self) -> list[SimpleNamespace]:
@@ -798,9 +923,14 @@ def test_universe_tick_reloads_before_optional_quant_failure(
     monkeypatch.setattr(main_module, "SessionLocal", lambda: db)
     monkeypatch.setattr(main_module, "get_runner", lambda: runner)
     monkeypatch.setattr(
+        lease_module,
+        "DurableJobLeaseService",
+        FakeLeaseService,
+    )
+    monkeypatch.setattr(
         universe_api,
         "build_universe_selection_service",
-        lambda _db: SimpleNamespace(refresh=lambda: response),
+        lambda _db: SimpleNamespace(refresh=lambda **_kwargs: response),
     )
 
     def fail_score(

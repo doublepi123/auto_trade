@@ -1284,8 +1284,19 @@ class UniverseSelectionService:
         self,
         *,
         apply_to_watchlist: bool | None = None,
+        lease_guard: LeaseKeepalive | None = None,
     ) -> UniverseRefreshResult:
         with _REFRESH_LOCK:
+            if lease_guard is not None:
+                # Caller (the cron tick) already holds the durable lease;
+                # acquiring it here would nest a second connection checkout
+                # under the caller's business session.
+                result = self._refresh_locked(
+                    apply_to_watchlist=apply_to_watchlist,
+                    lease_guard=lease_guard,
+                )
+                lease_guard.checkpoint()
+                return result
             if self.lease_service is None:
                 return self._refresh_locked(
                     apply_to_watchlist=apply_to_watchlist,

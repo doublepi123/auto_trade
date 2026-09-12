@@ -1999,8 +1999,11 @@ def _universe_selection_tick_sync() -> object | None:
         )
         return _OPENING_RESEARCH_DEFERRED
     from app.api.universe import build_universe_selection_service
+    from app.services.durable_job_lease_service import (
+        DurableJobLeaseService,
+    )
     from app.services.universe_selection_service import (
-        UniverseSelectionLeaseBusyError,
+        _UNIVERSE_SELECTION_LEASE_KEY,
     )
     from app.services.watchlist_quant_service import (
         QuantScoringOutsideRTHError,
@@ -2008,67 +2011,79 @@ def _universe_selection_tick_sync() -> object | None:
         build_quant_observation_plan,
     )
 
-    db = SessionLocal()
-    try:
-        try:
-            response = build_universe_selection_service(db).refresh()
-        except UniverseSelectionLeaseBusyError:
-            logger.debug(
-                "universe selection deferred because another process owns "
-                "the durable job lease"
-            )
-            return _JOB_LEASE_BUSY_DEFERRED
-        logger.info(
-            "universe selection run=%d as_of=%s status=%s coverage=%.3f "
-            "selected=%d exploration=%d applied=%s",
-            response.run.id,
-            response.run.as_of_date,
-            response.run.status,
-            response.run.coverage_ratio,
-            response.run.selected_count,
-            len(response.exploration_symbols),
-            response.applied,
+    # Acquire the durable lease before opening the business session: the
+    # previous order (business session first, lease acquisition inside
+    # refresh) nested a second connection checkout under the first — the
+    # reentrancy class that once deadlocked the connection pool and kept
+    # logging hourly re-entrant-session warnings.
+    lease_service = DurableJobLeaseService(
+        session_factory=SessionLocal,
+        default_ttl_seconds=settings.job_lease_ttl_seconds,
+    )
+    lease = lease_service.try_acquire(_UNIVERSE_SELECTION_LEASE_KEY)
+    if lease is None:
+        logger.debug(
+            "universe selection deferred because another process owns "
+            "the durable job lease"
         )
-        if response.applied:
-            # Reconciliation commits before the in-memory runtime reload. Keep
-            # this idempotent so a transient reload failure is retried even
-            # when the next refresh has no watchlist delta.
-            get_runner().reload_strategy()
-        if response.run.status == "COMPLETE":
-            observation_plan = build_quant_observation_plan(db)
-            if observation_plan.items:
-                try:
-                    with _watchlist_quant_sync_lock:
-                        WatchlistQuantService(
-                            db,
-                            get_runner().broker,
-                        ).score_due_items(
-                            observation_plan.items,
-                            refresh_interval_minutes=(
-                                settings.watchlist_quant_interval_minutes
-                            ),
-                            ttl_minutes=(
-                                settings.watchlist_quant_score_ttl_minutes
-                            ),
-                            max_items=(
-                                settings.watchlist_quant_batch_size
-                            ),
-                            priority_symbols=(
-                                observation_plan.priority_symbols
-                            ),
+        return _JOB_LEASE_BUSY_DEFERRED
+    with lease_service.keepalive(lease) as lease_guard:
+        db = SessionLocal()
+        try:
+            response = build_universe_selection_service(db).refresh(
+                lease_guard=lease_guard,
+            )
+            logger.info(
+                "universe selection run=%d as_of=%s status=%s coverage=%.3f "
+                "selected=%d exploration=%d applied=%s",
+                response.run.id,
+                response.run.as_of_date,
+                response.run.status,
+                response.run.coverage_ratio,
+                response.run.selected_count,
+                len(response.exploration_symbols),
+                response.applied,
+            )
+            if response.applied:
+                # Reconciliation commits before the in-memory runtime reload. Keep
+                # this idempotent so a transient reload failure is retried even
+                # when the next refresh has no watchlist delta.
+                get_runner().reload_strategy()
+            if response.run.status == "COMPLETE":
+                observation_plan = build_quant_observation_plan(db)
+                if observation_plan.items:
+                    try:
+                        with _watchlist_quant_sync_lock:
+                            WatchlistQuantService(
+                                db,
+                                get_runner().broker,
+                            ).score_due_items(
+                                observation_plan.items,
+                                refresh_interval_minutes=(
+                                    settings.watchlist_quant_interval_minutes
+                                ),
+                                ttl_minutes=(
+                                    settings.watchlist_quant_score_ttl_minutes
+                                ),
+                                max_items=(
+                                    settings.watchlist_quant_batch_size
+                                ),
+                                priority_symbols=(
+                                    observation_plan.priority_symbols
+                                ),
+                            )
+                    except QuantScoringOutsideRTHError as exc:
+                        logger.info(
+                            "post-selection watchlist quant scoring skipped: %s",
+                            exc,
                         )
-                except QuantScoringOutsideRTHError as exc:
-                    logger.info(
-                        "post-selection watchlist quant scoring skipped: %s",
-                        exc,
-                    )
-                except Exception:
-                    db.rollback()
-                    logger.exception(
-                        "post-selection watchlist quant scoring failed"
-                    )
-    finally:
-        db.close()
+                    except Exception:
+                        db.rollback()
+                        logger.exception(
+                            "post-selection watchlist quant scoring failed"
+                        )
+        finally:
+            db.close()
 
 
 async def _run_universe_selection_tick() -> object | None:
