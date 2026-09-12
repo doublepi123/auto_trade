@@ -6450,6 +6450,101 @@ class TestAppRunner:
         assert runner.broker.unsubscribed is False
         assert runner.broker.subscribed is False
 
+    def test_resubscribe_quotes_fires_on_trusted_quote_starvation(
+        self, monkeypatch
+    ) -> None:
+        """2026-09-08..10 incident: the push stream kept delivering quotes
+        that all failed the quality gate (stale timestamp, degenerate BBO),
+        so the silence watchdog never fired — pushes were arriving — and the
+        feed stayed garbage for three trading days while REST polling kept
+        last_price moving. A live stream with zero trusted pushes past the
+        threshold must be treated as broken and resubscribed."""
+        class Broker:
+            def __init__(self) -> None:
+                self.unsubscribed = False
+                self.subscribed_to: str | None = None
+
+            def unsubscribe_quotes(self) -> None:
+                self.unsubscribed = True
+
+            def subscribe_quotes(self, symbol, callback) -> None:
+                self.subscribed_to = symbol
+
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", market="US", buy_low=100.0, sell_high=110.0)
+        runner._quotes_subscribed = True
+        runner.broker = Broker()
+
+        monkeypatch.setattr(runner_module, "is_trading_hours", lambda _market: True, raising=False)
+        monkeypatch.setattr(runner_module.time, "monotonic", lambda: 1000.0)
+        runner._last_push_quote_at = 990.0  # push 10s ago: stream alive
+        runner._last_trusted_push_quote_at = 800.0  # trusted 200s ago: storm
+
+        result = runner._resubscribe_quotes_if_silent()
+
+        assert result is True
+        assert runner.broker.unsubscribed is True
+        assert runner.broker.subscribed_to == "AAPL.US"
+        assert runner._last_push_quote_at == 1000.0
+        assert runner._last_trusted_push_quote_at == 1000.0
+
+    def test_resubscribe_quotes_noops_when_trusted_quote_recent(
+        self, monkeypatch
+    ) -> None:
+        class Broker:
+            def __init__(self) -> None:
+                self.unsubscribed = False
+
+            def unsubscribe_quotes(self) -> None:
+                self.unsubscribed = True
+
+            def subscribe_quotes(self, *_args) -> None:
+                pass
+
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", market="US", buy_low=100.0, sell_high=110.0)
+        runner._quotes_subscribed = True
+        runner.broker = Broker()
+
+        monkeypatch.setattr(runner_module, "is_trading_hours", lambda _market: True, raising=False)
+        monkeypatch.setattr(runner_module.time, "monotonic", lambda: 1000.0)
+        runner._last_push_quote_at = 990.0
+        runner._last_trusted_push_quote_at = 985.0  # trusted 15s ago: healthy
+
+        assert runner._resubscribe_quotes_if_silent() is False
+        assert runner.broker.unsubscribed is False
+
+    def test_resubscribe_quotes_storm_detection_requires_armed_marker(
+        self, monkeypatch
+    ) -> None:
+        """Before the first subscription grace the marker is 0: never fire on
+        storm evidence alone (the silence path owns the dead-stream case)."""
+        class Broker:
+            def __init__(self) -> None:
+                self.unsubscribed = False
+
+            def unsubscribe_quotes(self) -> None:
+                self.unsubscribed = True
+
+            def subscribe_quotes(self, *_args) -> None:
+                pass
+
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="AAPL.US", market="US", buy_low=100.0, sell_high=110.0)
+        runner._quotes_subscribed = True
+        runner.broker = Broker()
+
+        monkeypatch.setattr(runner_module, "is_trading_hours", lambda _market: True, raising=False)
+        monkeypatch.setattr(runner_module.time, "monotonic", lambda: 1000.0)
+        runner._last_push_quote_at = 990.0  # stream alive
+        runner._last_trusted_push_quote_at = 0.0  # never armed
+
+        assert runner._resubscribe_quotes_if_silent() is False
+        assert runner.broker.unsubscribed is False
+
     def test_broadcast_status_no_connections(self) -> None:
         runner = AppRunner()
         runner._broadcast_status()

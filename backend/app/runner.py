@@ -332,6 +332,14 @@ class AppRunner:
         self._defer_broker_close = False
         self._last_quote_at = 0.0
         self._last_push_quote_at = 0.0
+        # Monotonic timestamp of the last trusted PRIMARY push quote. A push
+        # stream that keeps delivering quotes which all fail the quality gate
+        # (observed 2026-09-08..10: stale timestamps + degenerate BBO for
+        # three trading days) never trips the silence watchdog because pushes
+        # keep arriving; this marker lets the watchdog treat a live-but-garbage
+        # stream as broken too. Armed at every successful (re)subscription so
+        # a fresh stream gets one threshold of grace.
+        self._last_trusted_push_quote_at = 0.0
         # Per-pending reconcile tracking. Set just before each pending is
         # reconciled so the restore_engine_snapshot closure can resolve the
         # correct per-symbol engine. Best-effort — see TODO in _run_loop.
@@ -970,6 +978,7 @@ class AppRunner:
                 with self._protective_runtime_state_guard():
                     self._quotes_subscribed = True
                     self._last_push_quote_at = time.monotonic()
+                    self._last_trusted_push_quote_at = time.monotonic()
                     self._advance_protective_runtime_generation_locked()
                 # Observer-only: record the successful initial subscription;
                 # resets the window so old quote age cannot report healthy.
@@ -1079,6 +1088,7 @@ class AppRunner:
                     # quote from the previous stream survive that boundary.
                     self._last_quote_at = 0.0
                     self._last_push_quote_at = time.monotonic()
+                    self._last_trusted_push_quote_at = time.monotonic()
                     self._advance_protective_runtime_generation_locked()
                 # Observer-only: a symbol-set refresh starts a fresh window.
                 self._observe_quote_subscription(True)
@@ -2196,6 +2206,7 @@ class AppRunner:
             self._quotes_subscribed = True
             self._disconnect_retry_count = 0
             self._last_push_quote_at = time.monotonic()
+            self._last_trusted_push_quote_at = time.monotonic()
             self._advance_protective_runtime_generation_locked()
         # Observer-only: a successful resubscribe resets the window.
         self._observe_quote_subscription(True)
@@ -2870,6 +2881,7 @@ class AppRunner:
                     and push_quality["last_bbo_consistent"]
                     and push_quality["source_timestamp_fresh"]
                 ):
+                    self._last_trusted_push_quote_at = time.monotonic()
                     self.quote_stream_health.record_quote(quote.timestamp)
                     # Funnel stage 1: a usable, fresh quote for the primary.
                     self.decision_funnel.record_fresh_primary_quote()
@@ -4418,6 +4430,7 @@ class AppRunner:
         with self._state_lock:
             self._last_quote_at = 0.0
             self._last_push_quote_at = 0.0
+            self._last_trusted_push_quote_at = 0.0
             self._last_active_quote_refresh_at = 0.0
             if clear_history:
                 self._recent_quotes = deque(maxlen=self._recent_quotes_cap)
@@ -5057,8 +5070,22 @@ class AppRunner:
                 return False
             if self._last_push_quote_at <= 0:
                 return False
-            silence = time.monotonic() - self._last_push_quote_at
-            if silence < self._quote_resubscribe_threshold_seconds:
+            now_monotonic = time.monotonic()
+            silence = now_monotonic - self._last_push_quote_at
+            # Rejection-storm detection: pushes keep arriving (silence below
+            # threshold) but no trusted primary push for a full threshold —
+            # the stream is live yet delivering only gate-rejected garbage
+            # (2026-09-08..10: three trading days of stale-timestamp,
+            # degenerate-BBO pushes that never tripped the silence watchdog).
+            starvation: float | None = None
+            if (
+                silence < self._quote_resubscribe_threshold_seconds
+                and self._last_trusted_push_quote_at > 0
+            ):
+                trusted_gap = now_monotonic - self._last_trusted_push_quote_at
+                if trusted_gap >= self._quote_resubscribe_threshold_seconds:
+                    starvation = trusted_gap
+            if silence < self._quote_resubscribe_threshold_seconds and starvation is None:
                 return False
             # Multi-market guard: only resubscribe symbols whose market is
             # currently in trading hours. The previous implementation
@@ -5092,13 +5119,15 @@ class AppRunner:
         with self._protective_runtime_state_guard():
             self._quotes_subscribed = True
             self._last_push_quote_at = time.monotonic()
+            self._last_trusted_push_quote_at = time.monotonic()
             self._advance_protective_runtime_generation_locked()
         # Observer-only: successful silent-watchdog resubscribe resets the window.
         self._observe_quote_subscription(True)
         logger.warning(
-            "resubscribed quotes for %s after %.0fs silence",
+            "resubscribed quotes for %s after %.0fs %s",
             ", ".join(in_session_symbols),
-            silence,
+            starvation if starvation is not None else silence,
+            "without a trusted primary push" if starvation is not None else "silence",
         )
         return True
 
