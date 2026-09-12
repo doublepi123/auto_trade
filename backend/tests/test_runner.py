@@ -446,6 +446,65 @@ class TestAppRunner:
         assert intent.cause == "PROFIT_LOCK"
         assert newly_latched is True
 
+    def test_quote_trigger_settles_entry_after_blindness_window(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """End-to-end through the live quote path: the 2026-09-08..10
+        blindness incident (price below band, crossing unobservable) must
+        resolve into a real BUY trigger once trusted quotes cover the settle
+        window — not merely inside _validate_live_entry_crossing."""
+        runner = self._runner_with_primary_quote_runtime()
+        runner._running = True
+        monkeypatch.setattr(runner_module.settings, "live_entry_crossing_required", True)
+        monkeypatch.setattr(runner_module.settings, "live_entry_crossing_max_age_seconds", 30)
+        monkeypatch.setattr(runner_module.settings, "live_entry_crossing_settle_seconds", 120)
+        now = datetime.now(timezone.utc)
+        self._inject_trusted_quote(runner, 99.5, now - timedelta(seconds=150))
+        self._inject_trusted_quote(runner, 99.6, now - timedelta(seconds=90))
+
+        first = runner._evaluate_quote_trigger(
+            Quote("NVDA.US", 99.8, 99.79, 99.81, _fresh_timestamp())
+        )
+        assert first.result is None
+        assert "two fresh executable quotes" in runner.last_action_message
+
+        settled = runner._evaluate_quote_trigger(
+            Quote("NVDA.US", 99.7, 99.69, 99.71, _fresh_timestamp())
+        )
+
+        assert settled.result is not None
+        assert settled.result.action == "BUY"
+        assert runner.engine.state == EngineState.LONG
+        funnel = runner.decision_funnel.snapshot()
+        assert funnel.evaluations == 2
+        assert funnel.threshold_crossings == 2
+        assert funnel.triggers == 1
+
+    def test_quote_trigger_blocks_when_evidence_predates_band_change(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Same quote path, but the history predates the band: the trigger
+        must stay blocked and the engine FLAT."""
+        runner = self._runner_with_primary_quote_runtime()
+        runner._running = True
+        monkeypatch.setattr(runner_module.settings, "live_entry_crossing_required", True)
+        monkeypatch.setattr(runner_module.settings, "live_entry_crossing_max_age_seconds", 30)
+        monkeypatch.setattr(runner_module.settings, "live_entry_crossing_settle_seconds", 120)
+        now = datetime.now(timezone.utc)
+        self._inject_trusted_quote(runner, 99.5, now - timedelta(seconds=150))
+        self._inject_trusted_quote(runner, 99.6, now - timedelta(seconds=90))
+        runner._band_effective_at = {"NVDA.US": now}
+
+        blocked = runner._evaluate_quote_trigger(
+            Quote("NVDA.US", 99.8, 99.79, 99.81, _fresh_timestamp())
+        )
+
+        assert blocked.result is None
+        assert runner.engine.state == EngineState.FLAT
+        assert "waiting" in runner.last_action_message
+
     def test_profit_lock_disabled_by_default_produces_no_intent(self) -> None:
         runner = self._runner_with_tracked_long()
         snapshot = self._daily_loss_snapshot()
