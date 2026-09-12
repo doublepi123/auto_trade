@@ -212,6 +212,47 @@ class TestBrokerGateway:
 
         assert called["from_env"] is True
 
+    def test_init_clients_retries_trade_context_after_transient_failure(
+        self, monkeypatch
+    ) -> None:
+        """2026-09-12 17:12 UTC incident: QuoteContext was created but
+        TradeContext raised transiently at startup; because _quote_ctx was
+        non-None, no later call ever re-attempted the trade context, leaving
+        the deployment unable to sync orders (ORDER_RECONCILIATION_UNCERTAIN
+        pause, unready health) until a manual restart."""
+        attempts = {"trade": 0}
+
+        class FakeConfig:
+            @staticmethod
+            def from_env():
+                return "fake-config"
+
+        class FakeModule:
+            Config = FakeConfig
+
+            class QuoteContext:
+                def __init__(self, config):
+                    pass
+
+            class TradeContext:
+                def __init__(self, config):
+                    attempts["trade"] += 1
+                    if attempts["trade"] == 1:
+                        raise RuntimeError("transient broker startup failure")
+
+        monkeypatch.setattr(broker_module, "_import_openapi", lambda: FakeModule)
+
+        gw = BrokerGateway()
+        with pytest.raises(RuntimeError):
+            gw._init_clients()
+        assert gw._quote_ctx is not None
+        assert gw._trade_ctx is None
+
+        gw._init_clients()
+
+        assert gw._trade_ctx is not None
+        assert attempts["trade"] == 2
+
     def test_quote_callbacks_registration(self) -> None:
         gw = BrokerGateway()
         received: list[Quote] = []
@@ -3134,6 +3175,7 @@ class TestBoardLotStaticInfo:
         context = _FakeQuoteContext()
         gateway = BrokerGateway()
         gateway._quote_ctx = context
+        gateway._trade_ctx = object()  # quote-only fake; _init_clients retries any missing ctx
         symbols = [f"{index:04}.HK" for index in range(count)]
         # When
         result = gateway.get_lot_sizes(symbols)
@@ -3153,6 +3195,8 @@ class TestBoardLotStaticInfo:
         context = _FakeQuoteContext()
         gateway = BrokerGateway()
         gateway._quote_ctx = context
+        gateway._trade_ctx = object()  # quote-only fake; _init_clients retries any missing ctx
+        gateway._trade_ctx = object()  # quote-only fake; _init_clients retries any missing ctx
         monkeypatch.setattr(broker_module.settings, "broker_quote_retry_max", 2)
         monkeypatch.setattr(broker_module.settings, "broker_retry_max", 5)
         monkeypatch.setattr(broker_module.settings, "broker_retry_base_ms", 7)
@@ -3177,6 +3221,7 @@ class TestBoardLotStaticInfo:
 
         gateway = BrokerGateway()
         gateway._quote_ctx = _FakeQuoteContext()
+        gateway._trade_ctx = object()  # quote-only fake; _init_clients retries any missing ctx
         # When / Then
         with pytest.raises(RuntimeError, match="lot"):
             gateway.get_lot_sizes(["0700.HK"])
@@ -3194,6 +3239,7 @@ class TestBoardLotStaticInfo:
 
         gateway = BrokerGateway()
         gateway._quote_ctx = _FakeQuoteContext()
+        gateway._trade_ctx = object()  # quote-only fake; _init_clients retries any missing ctx
         # When / Then
         with pytest.raises(_FakeOpenApiException) as caught:
             gateway.get_lot_sizes(["0700.HK", "UNKNOWN.HK"])

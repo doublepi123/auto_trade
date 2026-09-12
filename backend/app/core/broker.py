@@ -1207,11 +1207,21 @@ class BrokerGateway:
 
     def _init_clients(self) -> None:
         with self._lock:
+            if self._quote_ctx is not None and self._trade_ctx is not None:
+                return
+            module = _import_openapi()
+            config = module.Config.from_env()
+            # Initialize each context independently: a transient TradeContext
+            # failure after QuoteContext succeeded must not leave the gateway
+            # permanently tradeless (2026-09-12: order sync dead until manual
+            # restart because the non-None quote ctx blocked re-init).
+            created_quote = False
             if self._quote_ctx is None:
-                module = _import_openapi()
-                config = module.Config.from_env()
                 self._quote_ctx = module.QuoteContext(config)
+                created_quote = True
+            if self._trade_ctx is None:
                 self._trade_ctx = module.TradeContext(config)
+            if created_quote:
                 self._register_native_disconnect_if_available()
 
     def get_candlesticks(self, symbol: str, period: str, count: int) -> list[BrokerCandle]:
