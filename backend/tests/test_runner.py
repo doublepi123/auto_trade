@@ -6545,6 +6545,141 @@ class TestAppRunner:
         assert runner._resubscribe_quotes_if_silent() is False
         assert runner.broker.unsubscribed is False
 
+    def test_all_subscription_success_paths_arm_both_quote_markers(self) -> None:
+        """Structural pin: strategy-reload and credential-reload resubscribe
+        used to set only the push marker, leaving the trusted-starvation
+        watchdog permanently disarmed after those paths. Every subscription
+        success must arm both markers through one shared helper."""
+        import inspect
+
+        source = inspect.getsource(runner_module.AppRunner)
+        # Direct marker writes are legal only in the shared helper and in the
+        # two quote-arrival sites (push received / trusted primary received).
+        assert source.count("self._last_push_quote_at = time.monotonic()") == 2
+        assert source.count("self._last_trusted_push_quote_at = time.monotonic()") == 2
+        # All six subscription-success paths go through the helper.
+        assert source.count("._mark_quote_stream_subscribed_locked()") == 6
+
+    def test_live_entry_crossing_settle_ignores_quotes_predating_band_change(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Recenter moves the band onto prices the stream quoted BEFORE the
+        new band existed; those quotes must not prove the new band settled."""
+        runner = self._runner_with_primary_quote_runtime()
+        monkeypatch.setattr(runner_module.settings, "live_entry_crossing_required", True)
+        monkeypatch.setattr(runner_module.settings, "live_entry_crossing_max_age_seconds", 30)
+        monkeypatch.setattr(runner_module.settings, "live_entry_crossing_settle_seconds", 120)
+        now = datetime.now(timezone.utc)
+        self._inject_trusted_quote(runner, 99.5, now - timedelta(seconds=150))
+        self._inject_trusted_quote(runner, 99.6, now - timedelta(seconds=90))
+        # The band (100/110) only took effect after that history existed.
+        runner._band_effective_at = {"NVDA.US": now}
+        self._remember_test_quote(runner, 99.8)
+        self._remember_test_quote(runner, 99.7)
+
+        result = runner._validate_live_entry_crossing("NVDA.US", "BUY")
+
+        assert result is not None
+        assert result.details["policy_reason"] == "CROSSING_NOT_OBSERVED"
+
+    def test_live_entry_crossing_settle_binds_post_change_evidence(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Quotes observed after the band took effect prove settle normally."""
+        runner = self._runner_with_primary_quote_runtime()
+        monkeypatch.setattr(runner_module.settings, "live_entry_crossing_required", True)
+        monkeypatch.setattr(runner_module.settings, "live_entry_crossing_max_age_seconds", 30)
+        monkeypatch.setattr(runner_module.settings, "live_entry_crossing_settle_seconds", 120)
+        now = datetime.now(timezone.utc)
+        # Band took effect 200s ago; all evidence is post-change.
+        runner._band_effective_at = {"NVDA.US": now - timedelta(seconds=200)}
+        self._inject_trusted_quote(runner, 99.5, now - timedelta(seconds=150))
+        self._inject_trusted_quote(runner, 99.6, now - timedelta(seconds=90))
+        self._remember_test_quote(runner, 99.8)
+        self._remember_test_quote(runner, 99.7)
+
+        assert runner._validate_live_entry_crossing("NVDA.US", "BUY") is None
+
+    def test_live_entry_crossing_ignores_pre_band_change_fresh_crossing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Even the 30s fresh-crossing path must not consume a transition
+        recorded before the band took effect."""
+        runner = self._runner_with_primary_quote_runtime()
+        monkeypatch.setattr(runner_module.settings, "live_entry_crossing_required", True)
+        monkeypatch.setattr(runner_module.settings, "live_entry_crossing_max_age_seconds", 30)
+        self._remember_test_quote(runner, 100.2)
+        self._remember_test_quote(runner, 99.9)
+        runner._band_effective_at = {"NVDA.US": datetime.now(timezone.utc)}
+
+        result = runner._validate_live_entry_crossing("NVDA.US", "BUY")
+
+        assert result is not None
+        assert result.details["policy_reason"] == "INSUFFICIENT_FRESH_QUOTES"
+
+    def test_latched_profit_lock_escalates_to_price_stop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A latched PROFIT_LOCK retries while the position lives; if price
+        then falls through the hard stop, the intent must escalate — both for
+        correct cause reporting and for the post-stop pause in
+        _complete_reduction, which only fires for PRICE_STOP/TIME_STOP."""
+        monkeypatch.setattr(runner_module.settings, "profit_lock_activation_pct", 0.4)
+        monkeypatch.setattr(runner_module.settings, "profit_lock_lock_pct", 0.2)
+        runner = self._runner_with_tracked_long()
+        snapshot = self._daily_loss_snapshot()
+
+        runner._reduction_intent_for_quote_locked(
+            Quote("NVDA.US", 100.45, 100.44, 100.46, _fresh_timestamp()),
+            runner.engine, "US", daily_loss_snapshot=snapshot,
+        )
+        latched, _, _ = runner._reduction_intent_for_quote_locked(
+            Quote("NVDA.US", 100.19, 100.19, 100.21, _fresh_timestamp()),
+            runner.engine, "US", daily_loss_snapshot=snapshot,
+        )
+        assert latched is not None and latched.cause == "PROFIT_LOCK"
+        runner._reduction_intents["NVDA.US"] = latched
+
+        escalated, newly_latched, _ = runner._reduction_intent_for_quote_locked(
+            Quote("NVDA.US", 98.5, 98.5, 98.6, _fresh_timestamp()),
+            runner.engine, "US", daily_loss_snapshot=snapshot,
+        )
+        assert escalated is not None
+        assert escalated.cause == "PRICE_STOP"
+        assert newly_latched is True
+
+    def test_latched_profit_lock_not_downgraded_on_recovery(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A latched intent whose condition vanished (price recovered) keeps
+        retrying — escalation is one-way, toward higher-priority causes."""
+        monkeypatch.setattr(runner_module.settings, "profit_lock_activation_pct", 0.4)
+        monkeypatch.setattr(runner_module.settings, "profit_lock_lock_pct", 0.2)
+        runner = self._runner_with_tracked_long()
+        snapshot = self._daily_loss_snapshot()
+
+        runner._reduction_intent_for_quote_locked(
+            Quote("NVDA.US", 100.45, 100.44, 100.46, _fresh_timestamp()),
+            runner.engine, "US", daily_loss_snapshot=snapshot,
+        )
+        latched, _, _ = runner._reduction_intent_for_quote_locked(
+            Quote("NVDA.US", 100.19, 100.19, 100.21, _fresh_timestamp()),
+            runner.engine, "US", daily_loss_snapshot=snapshot,
+        )
+        runner._reduction_intents["NVDA.US"] = latched
+
+        kept, newly_latched, _ = runner._reduction_intent_for_quote_locked(
+            Quote("NVDA.US", 100.60, 100.59, 100.61, _fresh_timestamp()),
+            runner.engine, "US", daily_loss_snapshot=snapshot,
+        )
+        assert kept is not None
+        assert kept.cause == "PROFIT_LOCK"
+
     def test_broadcast_status_no_connections(self) -> None:
         runner = AppRunner()
         runner._broadcast_status()

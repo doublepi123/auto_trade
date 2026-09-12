@@ -203,6 +203,17 @@ class _ReductionIntent:
     started_at: datetime
 
 
+# Latched-exit escalation order, mirroring evaluate_exit_policy's evaluation
+# order: smaller wins. A latched intent upgrades only toward higher priority.
+_REDUCTION_CAUSE_PRIORITY: dict[str, int] = {
+    "DAILY_LOSS": 0,
+    "PRICE_STOP": 1,
+    "PROFIT_LOCK": 2,
+    "EOD_FLATTEN": 3,
+    "TIME_STOP": 4,
+}
+
+
 @dataclass(frozen=True)
 class _OpeningExecutionPolicy:
     execution_id: int
@@ -395,6 +406,11 @@ class AppRunner:
         # lock stays unarmed until fresh quotes rebuild the evidence, while
         # the hard stop / flatten / time stop still protect the position.
         self._position_peak_executable: dict[str, float] = {}
+        # When the current (buy_low, sell_high) band took effect per symbol.
+        # Crossing/settle entry evidence from before this mark is invalid: it
+        # was quoted against a different band (e.g. a recenter moved the band
+        # onto prices the stream quoted before the band existed).
+        self._band_effective_at: dict[str, datetime] = {}
         self._opening_execution_policies: dict[
             str, _OpeningExecutionPolicy
         ] = {}
@@ -977,8 +993,7 @@ class AppRunner:
                 self._subscribe_quote_symbols(self.broker, symbols)
                 with self._protective_runtime_state_guard():
                     self._quotes_subscribed = True
-                    self._last_push_quote_at = time.monotonic()
-                    self._last_trusted_push_quote_at = time.monotonic()
+                    self._mark_quote_stream_subscribed_locked()
                     self._advance_protective_runtime_generation_locked()
                 # Observer-only: record the successful initial subscription;
                 # resets the window so old quote age cannot report healthy.
@@ -1087,8 +1102,7 @@ class AppRunner:
                     # runtime window. Do not let an authorization or trusted
                     # quote from the previous stream survive that boundary.
                     self._last_quote_at = 0.0
-                    self._last_push_quote_at = time.monotonic()
-                    self._last_trusted_push_quote_at = time.monotonic()
+                    self._mark_quote_stream_subscribed_locked()
                     self._advance_protective_runtime_generation_locked()
                 # Observer-only: a symbol-set refresh starts a fresh window.
                 self._observe_quote_subscription(True)
@@ -2205,8 +2219,7 @@ class AppRunner:
         with self._protective_runtime_state_guard():
             self._quotes_subscribed = True
             self._disconnect_retry_count = 0
-            self._last_push_quote_at = time.monotonic()
-            self._last_trusted_push_quote_at = time.monotonic()
+            self._mark_quote_stream_subscribed_locked()
             self._advance_protective_runtime_generation_locked()
         # Observer-only: a successful resubscribe resets the window.
         self._observe_quote_subscription(True)
@@ -2793,11 +2806,22 @@ class AppRunner:
                 # no trigger can appear between the broker proof and swap.
                 self.assert_primary_switch_safe(new_params.symbol, new_params.market)
             previous_quote_symbols = set(self._desired_quote_symbols_locked())
+            previous_band = (
+                self.engine.params.symbol,
+                self.engine.params.buy_low,
+                self.engine.params.sell_high,
+            )
             if candidate_engine is not None:
                 self.engine = candidate_engine
                 self._primary_generation += 1
             else:
                 self.engine.params = new_params
+            if (
+                self.engine.params.symbol,
+                self.engine.params.buy_low,
+                self.engine.params.sell_high,
+            ) != previous_band:
+                self._note_band_effective(self.engine.params.symbol)
             self.risk.config = new_risk_config
             self._trading_session_mode = new_session_mode
             self._configure_live_safety(config)
@@ -2831,7 +2855,7 @@ class AppRunner:
                     self._subscribe_quote_symbols(self.broker, resubscribe_symbols)
                     with self._protective_runtime_state_guard():
                         self._quotes_subscribed = True
-                        self._last_push_quote_at = time.monotonic()
+                        self._mark_quote_stream_subscribed_locked()
                         self._advance_protective_runtime_generation_locked()
                     # Observer-only: record the successful resubscribe.
                     self._observe_quote_subscription(True)
@@ -4426,6 +4450,22 @@ class AppRunner:
             # Quote rejection is fallback context, never a replacement for a decision.
             return self._last_action_message or self._quote_rejection_message
 
+    def _mark_quote_stream_subscribed_locked(self) -> None:
+        """Arm both quote-stream markers after a successful (re)subscription.
+
+        The trusted marker doubles as the rejection-storm watchdog's grace
+        window: a fresh stream gets one threshold to deliver a trusted quote.
+        Callers hold the runtime-state guard.
+        """
+        self._last_push_quote_at = time.monotonic()
+        self._last_trusted_push_quote_at = time.monotonic()
+
+    def _note_band_effective(self, symbol: str) -> None:
+        """Mark when the symbol's current (buy_low, sell_high) took effect."""
+        sym = str(symbol or "").strip().upper()
+        if sym:
+            self._band_effective_at[sym] = datetime.now(timezone.utc)
+
     def _reset_quote_tracking(self, *, clear_history: bool) -> None:
         with self._state_lock:
             self._last_quote_at = 0.0
@@ -4745,6 +4785,23 @@ class AppRunner:
                 if normalized_action == "BUY"
                 else params.sell_high
             )
+            band_effective_at = self._band_effective_at.get(requested_symbol)
+        if band_effective_at is not None:
+            # Evidence quoted before the current band took effect is evidence
+            # against a different band; it can neither prove a fresh crossing
+            # nor settle one (a recenter moves the band onto prices quoted
+            # before the band existed).
+            candidates = [
+                item
+                for item in candidates
+                if isinstance(item.get("observed_at"), datetime)
+                and (
+                    item["observed_at"].replace(tzinfo=timezone.utc)
+                    if item["observed_at"].tzinfo is None
+                    else item["observed_at"].astimezone(timezone.utc)
+                )
+                >= band_effective_at
+            ]
         if not math.isfinite(threshold) or threshold <= 0:
             return self._entry_crossing_block(
                 requested_symbol,
@@ -5118,8 +5175,7 @@ class AppRunner:
             return False
         with self._protective_runtime_state_guard():
             self._quotes_subscribed = True
-            self._last_push_quote_at = time.monotonic()
-            self._last_trusted_push_quote_at = time.monotonic()
+            self._mark_quote_stream_subscribed_locked()
             self._advance_protective_runtime_generation_locked()
         # Observer-only: successful silent-watchdog resubscribe resets the window.
         self._observe_quote_subscription(True)
@@ -7027,30 +7083,6 @@ class AppRunner:
             if engine.state != EngineState.SHORT:
                 return existing, False, False
 
-        if existing is not None:
-            if tracked is not None:
-                engine.sync_state(
-                    has_long_position=tracked.side == "LONG",
-                    has_short_position=tracked.side == "SHORT",
-                )
-                expected_action = "SELL" if tracked.side == "LONG" else "BUY_TO_COVER"
-            else:
-                expected_action = (
-                    "BUY_TO_COVER" if engine.state == EngineState.SHORT else "SELL"
-                )
-            if existing.action != expected_action:
-                corrected = _ReductionIntent(
-                    action=expected_action,
-                    cause=existing.cause,
-                    reason=(
-                        f"{existing.reason}; action reconciled to broker side"
-                    ),
-                    trigger_price=existing.trigger_price,
-                    started_at=existing.started_at,
-                )
-                return corrected, True, False
-            return existing, False, False
-
         if tracked is not None:
             side = tracked.side
             quantity = float(tracked.quantity)
@@ -7132,6 +7164,55 @@ class AppRunner:
             max_daily_loss=daily_loss_snapshot.max_daily_loss,
             peak_executable_price=peak_executable_price,
         )
+        if existing is not None:
+            if tracked is not None:
+                engine.sync_state(
+                    has_long_position=tracked.side == "LONG",
+                    has_short_position=tracked.side == "SHORT",
+                )
+                expected_action = "SELL" if tracked.side == "LONG" else "BUY_TO_COVER"
+            else:
+                expected_action = (
+                    "BUY_TO_COVER" if engine.state == EngineState.SHORT else "SELL"
+                )
+            # A latched intent retries until it fills, but its cause is not
+            # frozen: re-evaluating on every quote lets a strictly higher
+            # priority exit (e.g. PRICE_STOP after a latched PROFIT_LOCK)
+            # take over, so _complete_reduction's post-stop pause and the
+            # recorded cause reflect the exit that actually applies.
+            # Escalation is one-way: a vanished condition (price recovered)
+            # never downgrades or clears a latched exit.
+            if (
+                decision is not None
+                and _REDUCTION_CAUSE_PRIORITY[decision.cause.value]
+                < _REDUCTION_CAUSE_PRIORITY.get(
+                    existing.cause,
+                    len(_REDUCTION_CAUSE_PRIORITY),
+                )
+            ):
+                escalated = _ReductionIntent(
+                    action=decision.action,
+                    cause=decision.cause.value,
+                    reason=(
+                        f"{decision.reason}; escalated from latched "
+                        f"{existing.cause}"
+                    ),
+                    trigger_price=decision.trigger_price,
+                    started_at=existing.started_at,
+                )
+                return escalated, True, False
+            if existing.action != expected_action:
+                corrected = _ReductionIntent(
+                    action=expected_action,
+                    cause=existing.cause,
+                    reason=(
+                        f"{existing.reason}; action reconciled to broker side"
+                    ),
+                    trigger_price=existing.trigger_price,
+                    started_at=existing.started_at,
+                )
+                return corrected, True, False
+            return existing, False, False
         if decision is None:
             return None, False, False
         intent = self._intent_from_reduction_decision(decision)
@@ -7613,7 +7694,7 @@ class AppRunner:
                 self._quotes_subscribed = True
                 self._advance_protective_runtime_generation_locked()
                 self._reset_quote_tracking(clear_history=True)
-                self._last_push_quote_at = time.monotonic()
+                self._mark_quote_stream_subscribed_locked()
                 # Observer-only: successful credential-reload resubscribe.
                 self._observe_quote_subscription(True)
             else:
@@ -9359,6 +9440,10 @@ class AppRunner:
                     if symbol != primary_symbol:
                         runtime_params = runtime.engine.params
                         primary_params = self.engine.params
+                        previous_runtime_band = (
+                            runtime_params.buy_low,
+                            runtime_params.sell_high,
+                        )
                         runtime_params.buy_low = primary_params.buy_low
                         runtime_params.sell_high = primary_params.sell_high
                         runtime_params.short_selling = primary_params.short_selling
@@ -9373,6 +9458,11 @@ class AppRunner:
                         runtime_params.max_holding_minutes = primary_params.max_holding_minutes
                         runtime_params.entry_cutoff_minutes_before_close = primary_params.entry_cutoff_minutes_before_close
                         runtime_params.flatten_minutes_before_close = primary_params.flatten_minutes_before_close
+                        if (
+                            runtime_params.buy_low,
+                            runtime_params.sell_high,
+                        ) != previous_runtime_band:
+                            self._note_band_effective(symbol)
                     if symbol == primary_symbol:
                         runtime.engine = self.engine
                 if symbol != primary_symbol:
