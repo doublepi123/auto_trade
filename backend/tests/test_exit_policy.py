@@ -93,3 +93,104 @@ def test_missing_opened_at_disables_only_time_stop() -> None:
 
 def test_invalid_quote_cannot_trigger_exit() -> None:
     assert _evaluate(quote=ExitQuote(last=0, bid=0, ask=0), combined_pnl=-1000) is None
+
+
+def _evaluate_with_profit_lock(
+    *,
+    position: PositionExitContext | None = None,
+    quote: ExitQuote,
+    peak: float | None,
+    activation_pct: float = 0.4,
+    lock_pct: float = 0.2,
+    combined_pnl: float = 0,
+):
+    return evaluate_exit_policy(
+        config=ExitPolicyConfig(
+            stop_loss_pct=1,
+            max_holding_minutes=60,
+            profit_lock_activation_pct=activation_pct,
+            profit_lock_lock_pct=lock_pct,
+        ),
+        position=position or _position(),
+        quote=quote,
+        now=NOW,
+        in_flatten_window=False,
+        combined_daily_pnl=combined_pnl,
+        max_daily_loss=500,
+        peak_executable_price=peak,
+    )
+
+
+def test_profit_lock_triggers_after_activation_and_pullback_to_lock() -> None:
+    """Measured pattern: losers reached +0.44%/+0.69% MFE, then took the full
+    -1% stop or timed out at a loss. Once the peak executable price clears the
+    activation excursion, a pullback to breakeven-plus-lock must exit."""
+    decision = _evaluate_with_profit_lock(
+        quote=ExitQuote(last=100.19, bid=100.19, ask=100.21),
+        peak=100.41,  # +0.41% >= activation 0.4%
+    )
+    assert decision is not None
+    assert decision.action == "SELL"
+    assert decision.cause == ReductionCause.PROFIT_LOCK
+    assert decision.trigger_price == 100.19
+    assert decision.threshold_price == 100.2  # 100 entry * (1 + 0.2%)
+
+
+def test_profit_lock_inactive_before_activation() -> None:
+    decision = _evaluate_with_profit_lock(
+        quote=ExitQuote(last=100.19, bid=100.19, ask=100.21),
+        peak=100.39,  # below activation 0.4%
+    )
+    assert decision is None
+
+
+def test_profit_lock_does_not_fire_above_lock_price() -> None:
+    decision = _evaluate_with_profit_lock(
+        quote=ExitQuote(last=100.25, bid=100.25, ask=100.27),
+        peak=100.41,
+    )
+    assert decision is None
+
+
+def test_profit_lock_requires_peak_evidence() -> None:
+    """After a restart the peak is unknown; without it the lock must stay
+    inactive (the hard stop, flatten and time stop still protect the
+    position)."""
+    decision = _evaluate_with_profit_lock(
+        quote=ExitQuote(last=100.19, bid=100.19, ask=100.21),
+        peak=None,
+    )
+    assert decision is None
+
+
+def test_profit_lock_disabled_when_unconfigured() -> None:
+    decision = _evaluate_with_profit_lock(
+        quote=ExitQuote(last=100.19, bid=100.19, ask=100.21),
+        peak=100.41,
+        activation_pct=0.0,
+        lock_pct=0.0,
+    )
+    assert decision is None
+
+
+def test_daily_loss_has_priority_over_profit_lock() -> None:
+    decision = _evaluate_with_profit_lock(
+        quote=ExitQuote(last=100.19, bid=100.19, ask=100.21),
+        peak=100.41,
+        combined_pnl=-500,
+    )
+    assert decision is not None
+    assert decision.cause == ReductionCause.DAILY_LOSS
+
+
+def test_short_profit_lock_symmetric() -> None:
+    decision = _evaluate_with_profit_lock(
+        position=_position(side="SHORT"),
+        quote=ExitQuote(last=99.81, bid=99.79, ask=99.81),
+        peak=99.59,  # -0.41% favourable excursion for a short
+    )
+    assert decision is not None
+    assert decision.action == "BUY_TO_COVER"
+    assert decision.cause == ReductionCause.PROFIT_LOCK
+    assert decision.threshold_price == 99.8  # 100 entry * (1 - 0.2%)
+

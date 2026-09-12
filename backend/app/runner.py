@@ -382,6 +382,11 @@ class AppRunner:
         self._last_llm_action_at: dict[tuple[str, str], float] = {}
         self._llm_order_execution_enabled = False
         self._reduction_intents: dict[str, _ReductionIntent] = {}
+        # Process-local peak executable price per open position, for the
+        # profit-lock exit. Intentionally not durable: after a restart the
+        # lock stays unarmed until fresh quotes rebuild the evidence, while
+        # the hard stop / flatten / time stop still protect the position.
+        self._position_peak_executable: dict[str, float] = {}
         self._opening_execution_policies: dict[
             str, _OpeningExecutionPolicy
         ] = {}
@@ -6984,6 +6989,7 @@ class AppRunner:
         existing = self._reduction_intents.get(quote.symbol)
         tracked = self._trade_svc.tracked_position(quote.symbol)
         if tracked is None:
+            self._position_peak_executable.pop(quote.symbol, None)
             if existing is not None and engine.state == EngineState.FLAT:
                 # Durable REDUCING state may only be cleared after a successful
                 # broker position snapshot or a confirmed fill. Local FLAT is
@@ -7039,6 +7045,15 @@ class AppRunner:
         else:
             unrealized_pnl = (avg_price - executable_price) * quantity
         opening_policy = self._opening_execution_policies.get(quote.symbol)
+        # The profit lock applies to range-strategy positions only; opening
+        # momentum executions carry their own stop/target semantics.
+        peak_executable_price: float | None = None
+        if tracked is not None and opening_policy is None:
+            peak_executable_price = self._track_position_peak(
+                quote.symbol,
+                side,
+                executable_price,
+            )
         stop_loss_pct = (
             opening_policy.stop_loss_pct
             if opening_policy is not None and opening_policy.stop_loss_pct > 0
@@ -7054,6 +7069,16 @@ class AppRunner:
             config=ExitPolicyConfig(
                 stop_loss_pct=stop_loss_pct,
                 max_holding_minutes=max_holding_minutes,
+                profit_lock_activation_pct=(
+                    settings.profit_lock_activation_pct
+                    if opening_policy is None
+                    else 0.0
+                ),
+                profit_lock_lock_pct=(
+                    settings.profit_lock_lock_pct
+                    if opening_policy is None
+                    else 0.0
+                ),
             ),
             position=PositionExitContext(
                 symbol=quote.symbol,
@@ -7076,11 +7101,35 @@ class AppRunner:
                 daily_loss_snapshot.realized_pnl + unrealized_pnl
             ),
             max_daily_loss=daily_loss_snapshot.max_daily_loss,
+            peak_executable_price=peak_executable_price,
         )
         if decision is None:
             return None, False, False
         intent = self._intent_from_reduction_decision(decision)
         return intent, True, False
+
+    def _track_position_peak(
+        self,
+        symbol: str,
+        side: str,
+        executable_price: float,
+    ) -> float | None:
+        """Update and return the process-local peak favourable executable
+        price for an open position (max for LONG, min for SHORT). Caller holds
+        ``_state_lock``. Non-positive/non-finite quotes neither advance nor
+        erase the evidence."""
+        if not math.isfinite(executable_price) or executable_price <= 0:
+            return self._position_peak_executable.get(symbol)
+        peak = self._position_peak_executable.get(symbol)
+        if peak is None:
+            self._position_peak_executable[symbol] = executable_price
+            return executable_price
+        if (side == "LONG" and executable_price > peak) or (
+            side == "SHORT" and executable_price < peak
+        ):
+            self._position_peak_executable[symbol] = executable_price
+            return executable_price
+        return peak
 
     @staticmethod
     def _intent_from_reduction_decision(decision: ReductionDecision) -> _ReductionIntent:

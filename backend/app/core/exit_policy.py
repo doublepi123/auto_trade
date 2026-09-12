@@ -11,12 +11,15 @@ class ReductionCause(str, Enum):
     PRICE_STOP = "PRICE_STOP"
     EOD_FLATTEN = "EOD_FLATTEN"
     TIME_STOP = "TIME_STOP"
+    PROFIT_LOCK = "PROFIT_LOCK"
 
 
 @dataclass(frozen=True)
 class ExitPolicyConfig:
     stop_loss_pct: float
     max_holding_minutes: int
+    profit_lock_activation_pct: float = 0.0
+    profit_lock_lock_pct: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,7 @@ def evaluate_exit_policy(
     in_flatten_window: bool,
     combined_daily_pnl: float,
     max_daily_loss: float,
+    peak_executable_price: float | None = None,
 ) -> ReductionDecision | None:
     """Return the highest-priority deterministic reduction for a position."""
     side = position.side.upper()
@@ -100,6 +104,17 @@ def evaluate_exit_policy(
                 threshold_price=stop_price,
             )
 
+    profit_lock = _profit_lock_decision(
+        config=config,
+        position=position,
+        side=side,
+        action=action,
+        executable_price=executable_price,
+        peak_executable_price=peak_executable_price,
+    )
+    if profit_lock is not None:
+        return profit_lock
+
     if in_flatten_window:
         return ReductionDecision(
             action=action,
@@ -125,6 +140,68 @@ def evaluate_exit_policy(
             threshold_price=None,
         )
     return None
+
+
+def _profit_lock_decision(
+    *,
+    config: ExitPolicyConfig,
+    position: PositionExitContext,
+    side: str,
+    action: str,
+    executable_price: float,
+    peak_executable_price: float | None,
+) -> ReductionDecision | None:
+    """Lock a small profit once a winning trade gives it all back.
+
+    Measured on the live ledger: losing exits averaged +0.44% (TIME_STOP) and
+    +0.69% (PRICE_STOP) peak favourable excursion before closing at the full
+    loss — the strategy had no give-back protection, so every pop that
+    reversed paid the whole stop. Once the peak executable price clears the
+    activation excursion, a pullback to breakeven-plus-lock exits instead.
+
+    Sits after PRICE_STOP (the hard stop always wins) and before EOD_FLATTEN /
+    TIME_STOP. Disabled unless both pcts are positive and a peak observation
+    exists; the peak is process-local, so after a restart the lock stays
+    inactive until fresh evidence accumulates — the other three exits still
+    protect the position.
+    """
+    activation_pct = config.profit_lock_activation_pct
+    lock_pct = config.profit_lock_lock_pct
+    if (
+        activation_pct <= 0
+        or lock_pct <= 0
+        or position.avg_entry_price <= 0
+        or peak_executable_price is None
+        or not math.isfinite(peak_executable_price)
+        or peak_executable_price <= 0
+    ):
+        return None
+    activation_fraction = activation_pct / 100
+    lock_fraction = lock_pct / 100
+    if side == "LONG":
+        activation_price = position.avg_entry_price * (1 + activation_fraction)
+        lock_price = position.avg_entry_price * (1 + lock_fraction)
+        armed = peak_executable_price >= activation_price
+        lock_hit = executable_price <= lock_price
+    else:
+        activation_price = position.avg_entry_price * (1 - activation_fraction)
+        lock_price = position.avg_entry_price * (1 - lock_fraction)
+        armed = peak_executable_price <= activation_price
+        lock_hit = executable_price >= lock_price
+    if not armed or not lock_hit:
+        return None
+    return ReductionDecision(
+        action=action,
+        cause=ReductionCause.PROFIT_LOCK,
+        reason=(
+            f"{side.lower()} profit lock: peak={peak_executable_price:.4f} "
+            f"cleared activation {activation_price:.4f}, "
+            f"executable={executable_price:.4f} fell back to lock "
+            f"{lock_price:.4f}"
+        ),
+        trigger_price=executable_price,
+        threshold_price=lock_price,
+    )
 
 
 def _executable_price(side: str, quote: ExitQuote) -> float:

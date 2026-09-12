@@ -335,6 +335,31 @@ class Settings(BaseSettings):
     )
     llm_experiment_name: str = Field(default="", validation_alias="AUTO_TRADE_LLM_EXPERIMENT_NAME")
     min_exit_profit_pct: float = Field(default=0.2, ge=0, le=20, allow_inf_nan=False)
+    profit_lock_activation_pct: float = Field(
+        default=0.0,
+        ge=0,
+        le=20,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_PROFIT_LOCK_ACTIVATION_PCT",
+        description=(
+            "Peak favourable excursion (percent over entry, executable price) "
+            "that arms the profit-lock exit. 0 disables it. Live ledger showed "
+            "losing exits averaged +0.44%/+0.69% MFE before closing at the "
+            "full loss, so 0.4 matches the measured reach threshold."
+        ),
+    )
+    profit_lock_lock_pct: float = Field(
+        default=0.0,
+        ge=0,
+        le=20,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_PROFIT_LOCK_LOCK_PCT",
+        description=(
+            "Once armed, exit when the executable price falls back to entry "
+            "plus this percent (entry minus for shorts). Must exceed the "
+            "estimated round-trip fee rate or the lock books a net loss."
+        ),
+    )
     entry_round_trip_slippage_bps: float = Field(
         default=4.0,
         ge=0,

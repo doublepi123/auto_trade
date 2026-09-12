@@ -383,6 +383,116 @@ class TestAppRunner:
 
         assert runner._recent_quotes_cap == 500
 
+    @staticmethod
+    def _daily_loss_snapshot() -> Any:
+        from app.core.risk import DailyLossSnapshot
+
+        return DailyLossSnapshot(
+            realized_pnl=0.0,
+            max_daily_loss=5000.0,
+            trade_day=datetime.now(timezone.utc).date(),
+            paused=False,
+            kill_switch=False,
+        )
+
+    def _runner_with_tracked_long(self) -> AppRunner:
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=100.0,
+            sell_high=110.0,
+            stop_loss_pct=1.0,
+            max_holding_minutes=60,
+        )
+        opened = datetime.now(timezone.utc) - timedelta(minutes=5)
+        runner._trade_svc.load_tracked_entries(
+            {"NVDA.US": (Decimal("10"), Decimal("1000"), "LONG", opened)}
+        )
+        return runner
+
+    def test_profit_lock_reduction_intent_after_peak_and_pullback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Live-ledger pattern: peak +0.44% then a full -1% stop. With the
+        profit lock armed the pullback to breakeven-plus-lock must produce a
+        SELL reduction intent instead of riding into PRICE_STOP."""
+        monkeypatch.setattr(
+            runner_module.settings, "profit_lock_activation_pct", 0.4
+        )
+        monkeypatch.setattr(
+            runner_module.settings, "profit_lock_lock_pct", 0.2
+        )
+        runner = self._runner_with_tracked_long()
+        snapshot = self._daily_loss_snapshot()
+
+        peak_intent, _, _ = runner._reduction_intent_for_quote_locked(
+            Quote("NVDA.US", 100.45, 100.44, 100.46, _fresh_timestamp()),
+            runner.engine,
+            "US",
+            daily_loss_snapshot=snapshot,
+        )
+        assert peak_intent is None
+
+        intent, newly_latched, _ = runner._reduction_intent_for_quote_locked(
+            Quote("NVDA.US", 100.19, 100.19, 100.21, _fresh_timestamp()),
+            runner.engine,
+            "US",
+            daily_loss_snapshot=snapshot,
+        )
+        assert intent is not None
+        assert intent.action == "SELL"
+        assert intent.cause == "PROFIT_LOCK"
+        assert newly_latched is True
+
+    def test_profit_lock_disabled_by_default_produces_no_intent(self) -> None:
+        runner = self._runner_with_tracked_long()
+        snapshot = self._daily_loss_snapshot()
+
+        runner._reduction_intent_for_quote_locked(
+            Quote("NVDA.US", 100.45, 100.44, 100.46, _fresh_timestamp()),
+            runner.engine,
+            "US",
+            daily_loss_snapshot=snapshot,
+        )
+        intent, _, _ = runner._reduction_intent_for_quote_locked(
+            Quote("NVDA.US", 100.19, 100.19, 100.21, _fresh_timestamp()),
+            runner.engine,
+            "US",
+            daily_loss_snapshot=snapshot,
+        )
+        assert intent is None
+
+    def test_profit_lock_peak_not_tracked_without_position(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            runner_module.settings, "profit_lock_activation_pct", 0.4
+        )
+        monkeypatch.setattr(
+            runner_module.settings, "profit_lock_lock_pct", 0.2
+        )
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=100.0,
+            sell_high=110.0,
+            stop_loss_pct=1.0,
+            max_holding_minutes=60,
+        )
+
+        intent, _, _ = runner._reduction_intent_for_quote_locked(
+            Quote("NVDA.US", 100.45, 100.44, 100.46, _fresh_timestamp()),
+            runner.engine,
+            "US",
+            daily_loss_snapshot=self._daily_loss_snapshot(),
+        )
+        assert intent is None
+        assert runner._position_peak_executable == {}
+
     def test_live_entry_crossing_settle_proves_crossing_missed_while_blind(
         self,
         monkeypatch: pytest.MonkeyPatch,
