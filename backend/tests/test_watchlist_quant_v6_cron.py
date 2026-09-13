@@ -980,7 +980,11 @@ def test_quant_v6_tick_only_mutates_immutable_evidence_tables(
         def close(self) -> None:
             self.closed = True
 
-    evaluation_deadline = QuantV6EvaluationDeadline(60)
+    # Generous wall-clock budget: the property under test is table-mutation
+    # isolation, not deadline behaviour. At 60s this test flaked with
+    # deadline-exceeded on loaded hosts (17s solo, >60s under full-suite
+    # load) without any isolation violation. 300s still kills a hung tick.
+    evaluation_deadline = QuantV6EvaluationDeadline(300)
     provider = EmptyHistoricalProvider(
         evaluation_deadline=evaluation_deadline,
     )
