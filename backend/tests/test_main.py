@@ -3087,3 +3087,80 @@ def test_storage_maintenance_runs_later_stages_when_one_stage_raises(
     assert "snapshot-prune" in events, (
         "runtime_state_snapshot pruning must still run; it is 71% of production DB pages"
     )
+
+
+async def test_alert_rules_cron_evaluates_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sync DB work on the event-loop thread interleaves with other crons'
+    sessions and trips the reentrancy guard (hourly warnings in production).
+    The evaluation must hop to a worker thread."""
+    from app.services import alert_rule_service as alert_rule_service_module
+
+    seen_threads: list[str] = []
+
+    class _FakeAlertService:
+        def __init__(self, _db: object) -> None:
+            pass
+
+        def evaluate(self, _runner: object) -> None:
+            seen_threads.append(threading.current_thread().name)
+
+    class _FakeSession:
+        def close(self) -> None:
+            pass
+
+    sleep_calls = {"n": 0}
+
+    async def stop_after_first_tick(_delay: float) -> None:
+        sleep_calls["n"] += 1
+        if sleep_calls["n"] >= 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(main_module.asyncio, "sleep", stop_after_first_tick)
+    monkeypatch.setattr(main_module, "SessionLocal", _FakeSession)
+    monkeypatch.setattr(
+        alert_rule_service_module, "AlertRuleService", _FakeAlertService
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await main_module._alert_rules_cron()
+
+    assert seen_threads and seen_threads[0] != "MainThread"
+
+
+async def test_report_schedule_cron_evaluates_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import report_schedule_service as report_schedule_module
+
+    seen_threads: list[str] = []
+
+    class _FakeReportService:
+        def __init__(self, _db: object) -> None:
+            pass
+
+        def maybe_send(self, _runner: object) -> None:
+            seen_threads.append(threading.current_thread().name)
+
+    class _FakeSession:
+        def close(self) -> None:
+            pass
+
+    sleep_calls = {"n": 0}
+
+    async def stop_after_first_tick(_delay: float) -> None:
+        sleep_calls["n"] += 1
+        if sleep_calls["n"] >= 2:
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(main_module.asyncio, "sleep", stop_after_first_tick)
+    monkeypatch.setattr(main_module, "SessionLocal", _FakeSession)
+    monkeypatch.setattr(
+        report_schedule_module, "ReportScheduleService", _FakeReportService
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await main_module._report_schedule_cron()
+
+    assert seen_threads and seen_threads[0] != "MainThread"

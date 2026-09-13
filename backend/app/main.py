@@ -1055,11 +1055,15 @@ async def _report_schedule_cron() -> None:
         async with _report_schedule_lock:
             try:
                 runner = get_runner()
-                db = SessionLocal()
-                try:
-                    ReportScheduleService(db).maybe_send(runner)
-                finally:
-                    db.close()
+
+                def _maybe_send_report() -> None:
+                    db = SessionLocal()
+                    try:
+                        ReportScheduleService(db).maybe_send(runner)
+                    finally:
+                        db.close()
+
+                await asyncio.to_thread(_maybe_send_report)
                 _cron_record_success(_CRON_REPORT_SCHEDULE)
             except Exception:
                 logger.exception("report schedule cron failed")
@@ -1079,11 +1083,18 @@ async def _alert_rules_cron() -> None:
         async with _alert_rules_lock:
             try:
                 runner = get_runner()
-                db = SessionLocal()
-                try:
-                    AlertRuleService(db).evaluate(runner)
-                finally:
-                    db.close()
+
+                def _evaluate_alert_rules() -> None:
+                    db = SessionLocal()
+                    try:
+                        AlertRuleService(db).evaluate(runner)
+                    finally:
+                        db.close()
+
+                # Sync DB work must not run on the event-loop thread: it
+                # interleaves with other crons' sessions and trips the
+                # reentrancy guard (hourly warnings in production).
+                await asyncio.to_thread(_evaluate_alert_rules)
                 _cron_record_success(_CRON_ALERT_RULES)
             except Exception:
                 logger.exception("alert rules cron failed")
