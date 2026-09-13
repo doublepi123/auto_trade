@@ -2048,7 +2048,9 @@ def _universe_selection_tick_sync() -> object | None:
                 # Reconciliation commits before the in-memory runtime reload. Keep
                 # this idempotent so a transient reload failure is retried even
                 # when the next refresh has no watchlist delta.
-                get_runner().reload_strategy()
+                # Pass the tick's session: opening a second one here is the
+                # re-entrancy _db_session_or exists to prevent.
+                get_runner().reload_strategy(db)
             if response.run.status == "COMPLETE":
                 observation_plan = build_quant_observation_plan(db)
                 if observation_plan.items:

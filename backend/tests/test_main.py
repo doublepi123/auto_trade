@@ -896,9 +896,11 @@ def test_universe_tick_reloads_before_optional_quant_failure(
     class FakeRunner:
         broker = object()
         reloads = 0
+        reload_db: object = None
 
         def reload_strategy(self, db: object = None) -> None:
             self.reloads += 1
+            self.reload_db = db
 
     response = SimpleNamespace(
         run=SimpleNamespace(
@@ -966,6 +968,7 @@ def test_universe_tick_reloads_before_optional_quant_failure(
     main_module._universe_selection_tick_sync()
 
     assert runner.reloads == 1
+    assert runner.reload_db is db  # borrowed session, no nested checkout
     assert db.rolled_back == 1
     assert db.closed is True
 
