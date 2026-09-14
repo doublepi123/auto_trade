@@ -450,7 +450,9 @@ class IntervalRecenterService:
         reload_strategy = getattr(runner, "reload_strategy", None)
         try:
             if callable(reload_strategy):
-                reload_strategy()
+                # Borrow this service's session: opening a second connection
+                # here nests a checkout under the one _commit already holds.
+                reload_strategy(self._db)
         except Exception as exc:
             logger.exception(
                 "interval recenter could not be completed for %s; rolling back",
@@ -471,7 +473,7 @@ class IntervalRecenterService:
             })
             try:
                 if callable(reload_strategy):
-                    reload_strategy()
+                    reload_strategy(self._db)
             except Exception:
                 logger.critical(
                     "interval recenter rollback reload failed", exc_info=True

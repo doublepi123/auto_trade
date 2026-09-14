@@ -195,6 +195,28 @@ class TestIntervalRecenter(_Base):
         cfg = self._config()
         assert cfg.buy_low < 366.0 < cfg.sell_high
 
+    def test_reload_borrows_the_service_session(self) -> None:
+        """_commit holds the service session; reload_strategy() without it
+        nested a second checkout and tripped the reentrancy guard in
+        production (2026-09-14 13:39 UTC, first post-warmup recenter)."""
+        self._seed()
+        now = datetime.now(timezone.utc)
+        runner = _Runner(price=366.0, price_at=now)
+        db = self._db()
+        seen: list[object] = []
+        original = runner.reload_strategy
+
+        def spy(db_arg: object = None) -> None:
+            seen.append(db_arg)
+            original(db_arg)
+
+        runner.reload_strategy = spy  # type: ignore[assignment]
+        try:
+            IntervalRecenterService(db, clock=_Clock(now)).evaluate(runner)
+        finally:
+            db.close()
+        assert seen and seen[0] is db
+
     def test_reloads_the_runner_so_the_live_engine_sees_the_new_band(self) -> None:
         # A committed row the in-memory engine never reloads changes nothing.
         self._seed()
