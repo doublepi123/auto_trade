@@ -1085,10 +1085,21 @@ class Settings(BaseSettings):
         self.hard_max_position_quantity = min(self.hard_max_position_quantity, 100)
         # Notional is the one ceiling a confirmed paper account may raise, and
         # only up to PAPER_MAX_POSITION_NOTIONAL_BOUND. That bound is where the
-        # notional ceiling stops binding and the UNCHANGED $250 risk budget
-        # starts to: 1% of $25,000 is exactly $250. Going past it would require
-        # raising the risk budget as well, which is a separate decision and is
-        # deliberately not granted here.
+        # two caps coincide AT THE STOP-LOSS CEILING: 1% of $25,000 is exactly
+        # the UNCHANGED $250 risk budget, so at a 1% stop neither cap binds
+        # before the other.
+        #
+        # This coincidence is NOT a proof that more notional always needs more
+        # risk budget. The risk cap binds notional at
+        # ``max_risk / (stop_pct/100)``, which GROWS as the stop tightens: the
+        # same $250 already permits $50,000 at a 0.5% stop, where the notional
+        # ceiling — not the risk budget — is what binds. Raising the bound past
+        # $25,000 is withheld because it is a separate exposure decision, not
+        # because the arithmetic forces it. See
+        # ``test_notional_headroom_above_the_paper_bound_depends_on_the_stop``.
+        #
+        # Nor does the coincidence mean $250 is the worst case: fees, slippage,
+        # halts and failed exits can all push a realised loss past the budget.
         #
         # ``min`` is kept on the requested value so the exception can only ever
         # widen what is permitted, never force exposure upward: an operator

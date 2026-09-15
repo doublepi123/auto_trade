@@ -338,10 +338,12 @@ class TestSettings:
     ) -> None:
         """A confirmed paper account may hold more notional, nothing else.
 
-        $25,000 is where the notional ceiling stops binding and the unchanged
-        $250 risk budget starts to: 1% of $25,000 is exactly $250. Raising
-        notional past that point would require raising the risk budget too,
-        which is a different decision and is not granted here.
+        $25,000 is where the two caps coincide at the stop-loss ceiling: 1% of
+        $25,000 is exactly the unchanged $250 risk budget. Raising notional
+        past that point is withheld because it is a separate exposure
+        decision — NOT because the arithmetic forces a bigger risk budget. At a
+        tighter stop the same $250 permits more notional; see
+        ``test_notional_headroom_above_the_paper_bound_depends_on_the_stop``.
         """
         monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
         monkeypatch.setenv(
@@ -376,6 +378,50 @@ class TestSettings:
         s = Settings()
 
         assert s.hard_max_position_notional == 1000
+
+    def test_notional_headroom_above_the_paper_bound_depends_on_the_stop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The 25,000 bound is NOT proof that more notional needs more risk.
+
+        `config.py` and `test_paper_experiment_raises_only_the_notional_ceiling`
+        both justify the 25,000 bound by saying that going past it "would
+        require raising the risk budget as well". That holds only when the stop
+        sits exactly at the 1% ceiling, where `250 / 1% == 25,000` makes the two
+        caps bind at the same point. It is not a general statement: the risk cap
+        binds notional at `max_risk / (stop_pct/100)`, which GROWS as the stop
+        tightens, so at a 0.5% stop the SAME 250 budget already permits 50,000
+        of notional and the notional ceiling — not the risk budget — is what
+        binds.
+
+        This test pins the arithmetic so the rationale cannot drift back into an
+        unconditional claim. It deliberately does NOT assert that any cap should
+        be raised: the clamps stay exactly where they are.
+        """
+        monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
+        monkeypatch.setenv("AUTO_TRADE_PAPER_MAX_POSITION_NOTIONAL", "25000")
+
+        s = Settings()
+
+        # The two caps coincide only at the 1% stop ceiling.
+        assert s.hard_stop_loss_pct == 1
+        assert s.hard_max_risk_per_trade == 250
+        notional_allowed_at_ceiling_stop = s.hard_max_risk_per_trade / (
+            s.hard_stop_loss_pct / 100
+        )
+        assert notional_allowed_at_ceiling_stop == 25000
+        assert notional_allowed_at_ceiling_stop == s.hard_max_position_notional
+
+        # Tighten the stop and the unchanged risk budget permits strictly MORE
+        # notional, so the risk budget is no longer the binding constraint.
+        for tighter_stop_pct, expected_allowed in ((0.5, 50000.0), (0.25, 100000.0)):
+            allowed = s.hard_max_risk_per_trade / (tighter_stop_pct / 100)
+            assert allowed == expected_allowed
+            assert allowed > s.hard_max_position_notional, (
+                "at a tighter stop the notional ceiling binds before the risk "
+                "budget does, so 'more notional requires more risk' is false"
+            )
 
     def test_paper_notional_cannot_exceed_the_authorised_bound(
         self,
