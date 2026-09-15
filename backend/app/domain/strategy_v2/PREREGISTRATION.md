@@ -259,3 +259,72 @@ verdict 下限转换为 `evidence_sufficient` 布尔值传给 `assess_futility`�
 - 本节**不修改**第 3 节的四条晋级门，也**不修改** `signal_edge` 的任何统计口径、阈值或判定标签。弃置是一个**治理决定**，其输入是既有统计量的读数。
 - 本节以预注册成本、日离散度与分析证据下限常量驱动只读计算，但不引入运行期开关，也不是自动化的 kill switch。自动晋级永久禁止（第 7 节），自动弃置同样不存在；弃置仍必须完成第 9.5.4 条的书面决定。
 - `INSUFFICIENT_DATA` 的地位不变（第 4 节）：9.3 的第 3 条明确禁止把证据不足读成弃置理由。
+
+## 9.7 弃置决定（第 9.5.4 条要求的书面记录）
+
+> **决定：弃置 Strategy v2 前向影子入场假设。**
+> **日期：2026-09-15。** 决定人：仓库所有者（经诊断会话确认）。记录人：coding agent。
+> 本决定依据第 9.2 节的 KILL 条件，输入为 `GET /api/strategy-shadow/signal-edge` 于
+> `2026-09-15T04:22:25Z` 的机器读数（`lookback_days=90`, `stop_pct=0.45`, `target_pct=0.8`）。
+> 手算不作数——§9.3 已有一次手算被 `assess_futility` 推翻的先例，本节只记录机器读数。
+
+### 9.7.1 触发的判据（第 9.2 节 KILL 条件，三项同时成立）
+
+| KILL 条件要素 | 读数 | 是否成立 |
+|---|---|---|
+| gross 上界 < 往返成本地板 | 上界 `4.274934` bps < 地板 `10.0` bps（`upper_bound_below_cost_floor=true`） | 成立 |
+| 样本已具备检出所需幅度的功效 | `powered_for_required_effect=true`；`mde_bps=8.656794` < `required_effect_bps=10.354375` | 成立 |
+| 证据下限已达成 | `evidence_floor_met=true`；已结算 bracket `144 ≥ 30`，独立交易日 `33 ≥ 20` | 成立 |
+
+`futility.status = FUTILE`，理由字段：`cost-clearing gross edge is excluded; abandonment requires human ratification`。本记录即该 ratification。
+
+### 9.7.2 第 9.5.4 条要求的三个数（决定作出时的读数）
+
+- **D（幅度）**：`gross_mean_bps = -0.354375`；`net_mean_bps = -10.354197`；
+  gross 单侧上界（`mean + 2.0·SE`）`= 4.274934` bps。实测往返成本 `measured_cost_bps = 9.999823`。
+- **CI（日聚类净收益，per-trade 单位）**：`[-0.150666, -0.056418]`，
+  `clustered_t = -4.4756`，`df = 32`，`t_critical = 2.036933`，`inflation_factor = 3.1237`。
+  gross 同口径 CI `[-0.050692, +0.043604]`，`clustered_t = -0.1531`，不显著。
+- **MDE**：`mde_bps = 8.656794`（`sigma_day_measured_bps = 13.296677`，α = 0.05，power = 0.8）；
+  所需效应 `required_effect_bps = 10.354375`。**MDE < 所需效应**，即功效充足而未见效应。
+
+佐证（first-passage，同一 barrier cohort）：target-first `42`、stop-first `102`、已结算 `144`，
+实测 `29.17%` **低于**该版本自身的 driftless 基线 `36.00%`，`edge = -6.83pp`，`p = 0.9654`，
+`beats_baseline = false`；`time_exit_excluded = 178`（`55.3%`）。
+cohort：`matched_versions=76`、`matched_trades=322`、`provenance_excluded_trades=16`、
+`algorithm_mismatch_excluded_trades=16`、`barrier_mismatch_excluded=8`、`missing_pnl_excluded=0`。
+
+### 9.7.3 本决定证明了什么、没证明什么（不得夸大，遵循第 9.1 节）
+
+- **已证明**：「大到能覆盖成本的 edge」不存在。这是关于**幅度**的结论。
+- **未证明**：该信号的**符号**为负。`gross` 的 day-clustered 检验不显著（`t = -0.15`），
+  首达检验 `p = 0.9654` 亦不构成「已证明为负」。第 9.1 节的禁止事项继续适用：
+  **不得**将本决定表述为「已证明该信号是亏的」。
+- `net` 的 CI 全负是**扣费后**的结论，成本本就确定为负贡献，不能据此反推信号符号。
+
+### 9.7.4 本决定的后果（严格执行第 9.5 节五条）
+
+1. **收集继续，一行不动。** v5 按原参数继续运行与落库；`test_strategy_v2_preregistration.py`
+   钉定的参数哈希**不变**，本决定未触碰任何参数。
+2. **重分类为负对照。** 本假设与第 5 节冻结 v5 合流承担负对照职责：
+   未来任何流水线若将其认证为「有 edge」，**坏的是流水线**。
+3. **停止消耗工程。** 不再对本假设做参数探索、出场重调、门槛微调或专项分析。
+   只读端点照常提供数据；新增分析须按第 6 节注册**新**假设。
+4. **写下来。** 即本节。
+5. **不得反悔式复活。** 复活须走第 6 节新预注册，分配新的
+   `algorithm_version` / `config_version`，证据时钟归零。
+
+### 9.7.5 运行期状态（本决定不改变任何开关）
+
+弃置是治理决定，不是 kill switch（第 9.6 节）。以下实盘保护**保持启用**，
+因为入场假设未获证明，关闭它们会让未经证明的信号直达实盘：
+
+- `AUTO_TRADE_LIVE_REGIME_GATE_ENABLED=true`
+- `AUTO_TRADE_AUTO_PRIMARY_SWITCH_REQUIRE_SIGNAL_EDGE=true`（fail-closed）
+
+同日的只读读数印证了这两道闸门正在按设计工作：
+`GET /api/universe/primary-candidacy` 返回 `verdict=SELECTION_NOT_SUPPORTED_BY_EVIDENCE`、
+`edge_pick=null`、`pool_gate.status=BLOCKED`、`automatic_promotion_allowed=false`，
+`power.verdict=UNPOWERED`（`required_two_sample=52` 笔/标的，实测 `max_trades_held=7`）。
+因此**换主标的不是本问题的解**：`signal_edge` 跨全部标的评估（入场规则共享），
+在其判定为 `FAIL` 时更换标的只是转移噪声，第 9.4 节的 regime 条款同理适用。
