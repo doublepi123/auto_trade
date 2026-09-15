@@ -30,6 +30,7 @@ from app.core.fees import one_side_fee_rate
 from app.core.log_throttle import RepeatedLogThrottle
 from app.core.market_calendar import is_closing_window, is_opening_warmup, is_trading_hours, trade_day_for
 from app.core.notifiers.multi_channel import MultiChannelNotifier
+from app.core.notifiers.retry_queue import NotificationRetryQueue
 from app.core.notifiers.serverchan import ServerChanNotifier
 from app.core.position_probe_diagnostics import PositionProbeDiagnostics
 from app.core.risk import DailyLossSnapshot, RiskConfig, RiskController, TradingState
@@ -275,8 +276,12 @@ class AppRunner:
             trade_day_provider=self._market_trade_day,
         )
         self._decision_funnel_last_summary_log_at = 0.0
+        self._notification_retry_queue = NotificationRetryQueue(
+            lambda title, content, severity: self.notifier.send_once(title, content, severity)
+        )
         self.notifier = MultiChannelNotifier(
             [(ServerChanNotifier(""), "INFO")],
+            retry_queue=self._notification_retry_queue,
             sink=get_notification_sink().record,
             dedup_window_seconds=settings.notify_dedup_window_seconds,
         )
@@ -2502,6 +2507,7 @@ class AppRunner:
             ]
 
     def stop(self) -> None:
+        self._notification_retry_queue.stop()
         with self._start_lock:
             defer_broker_close = False
             with self._protective_runtime_state_guard():
@@ -2544,6 +2550,7 @@ class AppRunner:
             )
             new_notifier = MultiChannelNotifier.from_credential_config(
                 effective_credentials,
+                retry_queue=self._notification_retry_queue,
                 sink=get_notification_sink().record,
                 dedup_window_seconds=settings.notify_dedup_window_seconds,
             )
@@ -3115,6 +3122,24 @@ class AppRunner:
                     decision.trigger_market = active_market
                     self._trigger_in_flight = True
                     decision.processing_started = True
+                elif (
+                    is_primary_symbol
+                    and decision.result is not None
+                    and decision.engine_snapshot is not None
+                    and decision.engine_snapshot.state == EngineState.FLAT
+                    and not decision.engine_snapshot.long_entry_rearm_required
+                    and active_engine.params.symbol
+                    and 0 < active_engine.params.buy_low < active_engine.params.sell_high
+                    and (
+                        quote.last_price <= active_engine.params.buy_low
+                        or (
+                            active_engine.params.short_selling
+                            and quote.last_price >= active_engine.params.sell_high
+                        )
+                    )
+                    and active_engine.in_cooldown
+                ):
+                    self.decision_funnel.record_skip("COOLDOWN")
         return decision
 
     def _execute_triggered_order(
@@ -7608,6 +7633,7 @@ class AppRunner:
             )
             new_notifier = MultiChannelNotifier.from_credential_config(
                 effective_credentials,
+                retry_queue=self._notification_retry_queue,
                 sink=get_notification_sink().record,
                 dedup_window_seconds=settings.notify_dedup_window_seconds,
             )

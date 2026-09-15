@@ -97,7 +97,13 @@ class MultiChannelNotifier:
                 self._dedup_success_at[fingerprint] = time.monotonic()
             return success_any
 
-    def _dispatch(self, title: str, content: str, severity: str) -> bool:
+    def send_once(self, title: str, content: str, severity: str) -> bool:
+        """Dispatch a retry without creating another retry queue entry."""
+        return self._dispatch(title, content, severity, enqueue_retry=False)
+
+    def _dispatch(
+        self, title: str, content: str, severity: str, *, enqueue_retry: bool = True,
+    ) -> bool:
         target_rank = _SEVERITY_RANK.get(severity, 0)
         success_any = False
         last_error = ""
@@ -117,7 +123,7 @@ class MultiChannelNotifier:
                 logger.debug("notification sink raised", exc_info=True)
         if not success_any:
             logger.warning("all notifier channels failed: title=%s severity=%s", title, severity)
-            if self._retry_queue is not None:
+            if enqueue_retry and self._retry_queue is not None:
                 self._retry_queue.enqueue(title, content, severity, error=last_error)
         return success_any
 

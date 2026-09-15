@@ -179,6 +179,12 @@ class StrategyEngine:
         self.last_trigger_at = datetime.now(timezone.utc)
         self._last_trigger_monotonic = time.monotonic()
 
+    @property
+    def in_cooldown(self) -> bool:
+        """Observe the post-trigger timer without changing engine state."""
+        with self._lock:
+            return self._in_cooldown()
+
     def _in_cooldown(self) -> bool:
         """Return True when the engine is still inside its post-trigger cooldown window.
 

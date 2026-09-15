@@ -11,7 +11,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
+from types import SimpleNamespace
 
 os.environ["AUTO_TRADE_DATABASE_URL"] = (
     f"sqlite:///{tempfile.gettempdir()}/auto_trade_test_decision_funnel_{os.getpid()}.db"
@@ -22,7 +23,8 @@ import pytest
 from app import database
 from app import runner as runner_module
 from app.core.broker import Quote
-from app.core.engine import StrategyParams
+from app.core import engine as engine_module
+from app.core.engine import EngineState, StrategyParams
 from app.models import DecisionFunnelSessionSummary
 from app.runner import AppRunner
 from app.schemas import DiagnosticsResponse
@@ -175,6 +177,132 @@ class TestDecisionFunnelPipeline:
         assert execute_calls == []
 
 
+class TestDecisionFunnelCooldown:
+    @pytest.fixture
+    def cooldown_runner(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> tuple[AppRunner, list[datetime], list[str]]:
+        current = [datetime(2026, 9, 14, 14, 0, tzinfo=timezone.utc)]
+        started_at = current[0]
+
+        class _FakeDatetime(datetime):
+            @classmethod
+            def now(cls, tz: tzinfo | None = None) -> datetime:
+                return cls.fromtimestamp(current[0].timestamp(), tz)
+
+        monkeypatch.setattr(runner_module, "datetime", _FakeDatetime)
+        monkeypatch.setattr(engine_module, "datetime", _FakeDatetime)
+        monkeypatch.setattr(
+            engine_module, "time", SimpleNamespace(
+                monotonic=lambda: 1000.0 + (current[0] - started_at).total_seconds()
+            ),
+        )
+        monkeypatch.setattr(runner_module.settings, "engine_cooldown_seconds", 60)
+        monkeypatch.setattr(runner_module.settings, "live_entry_crossing_required", True)
+        monkeypatch.setattr(runner_module.settings, "live_entry_crossing_max_age_seconds", 30)
+        runner = _runner()
+        executions: list[str] = []
+
+        def _fake_execute(*, action: str, **_kwargs: object) -> OrderStatus:
+            executions.append(action)
+            runner.decision_funnel.record_skip("SESSION")
+            return OrderStatus("", "SKIPPED", reason="session blocked")
+
+        monkeypatch.setattr(runner._trade_svc, "execute", _fake_execute)
+        runner._on_quote(Quote("NVDA.US", 105.0, 104.99, 105.01, current[0].isoformat()))
+        runner._on_quote(Quote("NVDA.US", 99.5, 99.49, 99.51, current[0].isoformat()))
+        assert executions == ["BUY"]
+        assert runner.engine.snapshot().state == EngineState.FLAT
+        assert runner.engine.snapshot().last_trigger_at == started_at
+        assert not runner.engine.long_entry_rearm_required
+        assert runner.decision_funnel.snapshot().skips_by_category["SESSION"] == 1
+        return runner, current, executions
+
+    def test_cooldown_suppressed_crossing_is_counted_without_retriggering(
+        self, cooldown_runner: tuple[AppRunner, list[datetime], list[str]],
+    ) -> None:
+        # Given: the real SKIPPED restore path retained the first trigger.
+        runner, current, executions = cooldown_runner
+        preserved = runner.engine.snapshot()
+        trigger_monotonic = runner.engine._last_trigger_monotonic
+        current[0] += timedelta(seconds=10)
+        before = runner.decision_funnel.snapshot()
+
+        # When: another threshold quote arrives within crossing freshness.
+        runner._on_quote(Quote("NVDA.US", 99.5, 99.49, 99.51, current[0].isoformat()))
+
+        # Then: only the crossing and cooldown attribution advance.
+        after = runner.decision_funnel.snapshot()
+        assert after.threshold_crossings - before.threshold_crossings == 1
+        assert (
+            after.skips_by_category["COOLDOWN"] - before.skips_by_category["COOLDOWN"] == 1
+        ), "cooldown-suppressed crossing must increment COOLDOWN"
+        assert after.triggers == before.triggers
+        assert after.submit_attempts == before.submit_attempts
+        assert after.entry_crossing_blocks == before.entry_crossing_blocks
+        assert runner.engine.snapshot() == preserved
+        assert runner.engine._last_trigger_monotonic == trigger_monotonic
+        assert runner.engine.in_cooldown
+        assert executions == ["BUY"]
+
+    def test_fresh_crossing_triggers_after_cooldown_expires(
+        self, cooldown_runner: tuple[AppRunner, list[datetime], list[str]],
+    ) -> None:
+        # Given: cooldown expired and a fresh outside-threshold quote arrived.
+        runner, current, executions = cooldown_runner
+        current[0] += timedelta(seconds=61)
+        assert not runner.engine.in_cooldown
+        runner._on_quote(Quote("NVDA.US", 105.0, 104.99, 105.01, current[0].isoformat()))
+        before = runner.decision_funnel.snapshot()
+
+        # When: a fresh valid downcross reaches the engine.
+        runner._on_quote(Quote("NVDA.US", 99.5, 99.49, 99.51, current[0].isoformat()))
+
+        # Then: entry evaluation and execution resume normally.
+        after = runner.decision_funnel.snapshot()
+        assert after.evaluations - before.evaluations == 1
+        assert after.threshold_crossings - before.threshold_crossings == 1
+        assert after.triggers - before.triggers == 1
+        assert after.skips_by_category["COOLDOWN"] == before.skips_by_category["COOLDOWN"]
+        assert after.entry_crossing_blocks == before.entry_crossing_blocks
+        assert runner.engine.snapshot().last_trigger_at == current[0]
+        assert executions == ["BUY", "BUY"]
+
+    @pytest.mark.parametrize("case", ["rearm", "reclaim", "floor", "midrange", "invalid_band"])
+    def test_other_untriggered_quotes_are_not_counted_as_cooldown(
+        self, cooldown_runner: tuple[AppRunner, list[datetime], list[str]], case: str,
+    ) -> None:
+        # Given: a non-cooldown reason for withholding an entry.
+        runner, current, executions = cooldown_runner
+        current[0] += timedelta(seconds=10)
+        price = 99.5
+        if case in {"rearm", "reclaim"}:
+            runner.engine.restore_long_entry_rearm(True)
+        if case in {"reclaim", "midrange"}:
+            price = 105.0
+        if case == "floor":
+            current[0] += timedelta(seconds=51)
+            runner.engine.params.stop_loss_pct = 1.0
+            runner._on_quote(Quote("NVDA.US", 105.0, 104.99, 105.01, current[0].isoformat()))
+            price = 98.0
+        if case == "invalid_band":
+            runner.engine.params.sell_high = 90.0
+        before = runner.decision_funnel.snapshot()
+
+        # When: the engine receives the non-triggering quote.
+        runner._on_quote(Quote("NVDA.US", price, price - 0.01, price + 0.01, current[0].isoformat()))
+
+        # Then: timer presence alone never produces cooldown attribution.
+        after = runner.decision_funnel.snapshot()
+        assert after.skips_by_category["COOLDOWN"] == before.skips_by_category["COOLDOWN"]
+        assert after.triggers == before.triggers
+        assert executions == ["BUY"]
+        if case == "floor":
+            assert runner.engine.long_entry_rearm_required
+        if case == "reclaim":
+            assert not runner.engine.long_entry_rearm_required
+
+
 class TestDecisionFunnelSessionPersistence:
     def setup_method(self) -> None:
         db = database.SessionLocal()
@@ -251,6 +379,30 @@ class TestDecisionFunnelSessionPersistence:
             assert json.loads(row.skips_json)["REGIME"] == 1
         finally:
             db.close()
+
+    def test_cooldown_skip_round_trips_and_old_summary_remains_readable(self) -> None:
+        # Given: one historical summary without COOLDOWN and one new session.
+        tracker = DecisionFunnelTracker(trade_day_provider=lambda: date(2026, 9, 14))
+        tracker.record_skip("COOLDOWN")
+        with database.SessionLocal() as db:
+            db.add(DecisionFunnelSessionSummary(
+                session_date=date(2026, 9, 11), symbol="NVDA.US", market="US",
+                skips_json='{"SESSION": 2}',
+            ))
+            db.commit()
+
+            # When: the normal writer persists the new session and both are read.
+            persist_session_summary(db, tracker.snapshot(), symbol="NVDA.US", market="US")
+            db.commit()
+            rows = db.query(DecisionFunnelSessionSummary).order_by(
+                DecisionFunnelSessionSummary.session_date
+            ).all()
+
+            # Then: the new counter serializes; the old payload needs no migration.
+            assert len(rows) == 2
+            assert json.loads(rows[1].skips_json)["COOLDOWN"] == 1
+            assert json.loads(rows[0].skips_json) == {"SESSION": 2}
+            assert rows[0].skips_json == '{"SESSION": 2}'
 
 
 class TestDecisionFunnelSuppressionVisibility:

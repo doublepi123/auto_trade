@@ -206,7 +206,7 @@ pytest 9, `asyncio_mode=auto`, no `unittest.TestCase`; conftest sets env only; i
 | `backend/app/core/engine.py` | Range state machine |
 | `backend/app/core/risk.py` | Daily loss / consecutive loss / kill switch |
 | `backend/app/services/trade_execution_service.py` | Whole live order path; `pre_submit_risk_check()` boundary |
-| `backend/app/services/decision_funnel_service.py` | 9-stage funnel counters → `GET /api/strategy/diagnostics` |
+| `backend/app/services/decision_funnel_service.py` | 9-stage funnel counters → `GET /api/diagnostics` |
 | `backend/app/services/reconciliation_incident_service.py` | Deduped reconcile incidents + capped backoff alerts |
 | `backend/app/services/research_artifact_retention_service.py` | Prunes artifact bytes; provenance/checksum rows kept forever |
 | `backend/app/core/log_throttle.py` | `RepeatedLogThrottle` + `HealthcheckAccessFilter` |
@@ -309,7 +309,7 @@ If gate 4 fails, roll back immediately — `git revert` the commit, rebuild, con
 - **Fee guard**: Non-loss exits require fee-adjusted profit ≥ `min_profit_amount`
 - **Market calendar**: Exchange-local day for PnL/risk reset; static NYSE/HKEX holidays 2024–2027
 - **`TradingState`** (`core/risk.py`): `ACTIVE | REDUCING | HALTED`, derived from `RiskController`, never persisted. `REDUCING` rejects position-increasing orders but must still pass reductions and stops; `HALTED` rejects everything.
-- **Decision funnel**: 9 stages (quote → evaluation → crossing → trigger → sized → submit attempt → broker ack → persisted, plus pre-submit check and skip classes) exposed at `GET /api/strategy/diagnostics` alongside `order_reconciliation_state`; session rows land in `decision_funnel_session_summaries`.
+- **Decision funnel**: 9 stages (quote → evaluation → crossing → trigger → sized → submit attempt → broker ack → persisted, plus pre-submit check and skip classes) exposed at `GET /api/diagnostics` alongside `order_reconciliation_state`; session rows land in `decision_funnel_session_summaries`.
 - **Universe / quant / shadows**: Default off; evidence-only; promotion-readiness is human review only
 - **Automatic primary switching**: Opt-in (`AUTO_TRADE_AUTO_PRIMARY_SWITCH_ENABLED`, default off) and the one path that *does* change the live symbol. Deliberately relaxes the otherwise-standing "never auto-switch" rule. A candidate must clear the ADX trend-share ceiling, the reach-rate floor, AND (`..._REQUIRE_SIGNAL_EDGE`, default **true**, fail-closed) a proven signal edge; come from the latest `COMPLETE` selection run marked `selected`; pass `assert_primary_switch_safe`; and get its interval reset around its own last close
 - **Reach-rate**: Share of closed shadow trades whose peak favourable excursion cleared 0.4%. Trend share alone says price is not trending, not that swings clear the ~0.14% round-trip cost; measured over 247 trades reach-rate separated winners from losers without exception (85% vs 22%) while trend share ranked barely better than chance. Uses a longer lookback than the bar window because closed trades accumulate ~100x slower
