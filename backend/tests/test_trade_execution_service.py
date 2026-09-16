@@ -5127,6 +5127,42 @@ class TestHkBoardLotNormalization:
         assert self.skips == ["POSITION"]
         assert self.broker.submissions == []
 
+    def test_quantity_cap_below_one_lot_is_named_as_a_config_conflict(self) -> None:
+        """A cap smaller than the lot must not read as "cannot afford one lot".
+
+        ``hard_max_position_quantity`` is clamped to 100 shares in config.py,
+        while most HK board lots are larger (500, 1000, 2000). Sizing therefore
+        yields at most 100, board-lot flooring takes that to zero, and EVERY
+        entry on such a symbol is refused no matter how much capital is free.
+
+        Both causes currently produce the identical "below one board lot"
+        message, so a structural configuration conflict is indistinguishable
+        from an ordinary capital shortfall. This asserts the two are told
+        apart. It does NOT assert the entry should succeed: the exposure caps
+        are unchanged and the order must still be skipped.
+        """
+        # Given: plenty of buying power, but the quantity cap is under one lot.
+        self.broker.quantity = Decimal("100000")
+        self.service.max_position_quantity = Decimal("100")
+
+        # When
+        status = self.drive("BUY")
+
+        # Then: still refused, and no order reaches the broker.
+        assert status is not None and status.status == "SKIPPED"
+        assert self.broker.submissions == []
+
+        # ...but the reason must name the cap-versus-lot conflict, so an
+        # operator can tell this apart from simply lacking the capital.
+        reason = status.reason
+        assert "board lot" in reason
+        assert "500" in reason, "the lot size must be reported"
+        assert "100" in reason, "the binding quantity cap must be reported"
+        assert "cap" in reason.lower(), (
+            "a cap below one lot is a configuration conflict, not a capital "
+            f"shortfall; got: {reason!r}"
+        )
+
     def test_exit_floors_and_reports_residual_without_halting(self) -> None:
         # Given
         self.position()

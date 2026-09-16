@@ -1931,11 +1931,22 @@ class TradeExecutionService:
                 assert lot_size is not None
                 quantity = quantize_to_board_lot(raw_quantity, lot_size)
                 if quantity == 0:
-                    issue = (
-                        f"entry quantity {raw_quantity} is below one board lot of {lot_size} for {symbol}"
-                        if is_entry else
-                        f"exit quantity {raw_quantity} is below one board lot of {lot_size} for {symbol}; odd-lot liquidation required"
-                    )
+                    if is_entry:
+                        # A cap under one lot makes the symbol un-enterable at
+                        # any buying power, so it must not read as a shortfall.
+                        cap = self.max_position_quantity
+                        capped_by_config = cap is not None and cap < lot_size
+                        issue = (
+                            f"position quantity cap {cap} is below one board lot "
+                            f"of {lot_size} for {symbol}; entries are impossible "
+                            f"until the cap covers a full lot"
+                            if capped_by_config else
+                            f"entry quantity {raw_quantity} is below one board lot of {lot_size} for {symbol}"
+                        )
+                    else:
+                        issue = (
+                            f"exit quantity {raw_quantity} is below one board lot of {lot_size} for {symbol}; odd-lot liquidation required"
+                        )
             case "STALE":
                 lot_size = resolution.stale_lot_size
                 if is_entry:
