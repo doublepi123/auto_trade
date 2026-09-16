@@ -209,6 +209,83 @@ class TestDailyPnlService:
         assert result.realized_pnl == approx(98.95)
         db.close()
 
+    def test_backfilled_actual_fee_supersedes_the_stale_persisted_total(
+        self,
+    ) -> None:
+        """A persisted total frozen from estimates must yield to a real charge.
+
+        Longbridge reports a zero charge while a fill is still settling, so
+        ``pnl_fee`` gets frozen from the fee schedule and stamped MIXED. Once
+        the broker settles and ``actual_fee`` is backfilled with the real
+        amount, ``_effective_authoritative_fee`` still returns the stale
+        ``pnl_fee`` — it only special-cases ``actual_fee == 0``. Live evidence:
+        order 19 holds pnl_fee=230.89 against a real round trip of 13.95 +
+        19.39 = 33.34, a 6.9x overstatement that survives the backfill.
+        """
+        self._cleanup()
+        trade_day = date(2026, 7, 24)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="settled-buy",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                actual_fee=0.4,
+                estimated_fee=5.0,
+                fee_source="ACTUAL",
+                status="FILLED",
+                filled_at=self._dt(trade_day, 10),
+            ),
+            OrderRecord(
+                broker_order_id="settled-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=110,
+                executed_quantity=10,
+                executed_price=110,
+                # The broker settled: this is the real charge, not a placeholder.
+                actual_fee=0.6,
+                estimated_fee=5.5,
+                fee_source="ACTUAL",
+                # Frozen from estimates while the fill was still unsettled.
+                pnl_fee=10.5,
+                pnl_fee_source="MIXED",
+                pnl_fee_rate=0.0005,
+                # Authoritative outcome: this is the branch that reuses pnl_fee.
+                pnl_source="TRACKED_ENTRY",
+                gross_pnl=100.0,
+                net_pnl=89.5,
+                cost_basis_price=100.0,
+                cost_basis_quantity=10,
+                position_quantity_before=10,
+                exit_cause="TIME_STOP",
+                status="FILLED",
+                filled_at=self._dt(trade_day, 11),
+            ),
+        ])
+        db.commit()
+        try:
+            service = DailyPnlService(db)
+
+            trip = service.pair_round_trips(include_excursions=False)[0]
+
+            assert trip.gross_pnl == approx(100.0)
+            assert trip.est_fees == approx(1.0), (
+                "both sides settled at 0.4 + 0.6, so the round trip cost 1.0; "
+                f"the stale persisted total must not be reused, got {trip.est_fees}"
+            )
+            # net_pnl stays the persisted authoritative outcome by design; this
+            # test pins the reported fee, not a recomputation of the P&L.
+            assert trip.net_pnl == approx(89.5)
+            assert trip.fee_source == "ACTUAL"
+        finally:
+            db.close()
+
     def test_repairs_authoritative_zero_exit_fee_idempotently(self) -> None:
         self._cleanup()
         trade_day = date(2026, 7, 24)

@@ -846,7 +846,8 @@ class DailyPnlService:
         if authoritative:
             basis_price = exit_fill.cost_basis_price or _ZERO
             pnl_fee, pnl_fee_source = DailyPnlService._effective_authoritative_fee(
-                exit_fill
+                exit_fill,
+                allocated_entry_fees if entry_fees_all_actual else None,
             )
             assert authoritative_outcome is not None
             gross_pnl, net_pnl = authoritative_outcome
@@ -1630,7 +1631,10 @@ class DailyPnlService:
         )
 
     @staticmethod
-    def _effective_authoritative_fee(fill: _Fill) -> tuple[Decimal, str]:
+    def _effective_authoritative_fee(
+        fill: _Fill,
+        settled_entry_fees: Decimal | None = None,
+    ) -> tuple[Decimal, str]:
         """Return a conservative total fee for a persisted authoritative exit.
 
         Current tracked-entry accounting stores the estimated entry fee in
@@ -1641,6 +1645,17 @@ class DailyPnlService:
         and downgrade the effective source to ``ESTIMATED``.
         """
         pnl_fee = fill.pnl_fee or _ZERO
+        if (
+            fill.pnl_fee_source == "MIXED"
+            and fill.reported_fee_source == "ACTUAL"
+            and fill.actual_fee is not None
+            and fill.actual_fee > _ZERO
+            and settled_entry_fees is not None
+        ):
+            # The persisted total was frozen from estimates while the charge
+            # was still settling; once both sides report a settled charge the
+            # real round trip supersedes it.
+            return settled_entry_fees + fill.actual_fee, "ACTUAL"
         if (
             fill.pnl_fee_source == "MIXED"
             and fill.actual_fee == _ZERO
