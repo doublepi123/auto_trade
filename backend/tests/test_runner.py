@@ -3430,6 +3430,109 @@ class TestAppRunner:
 
         assert runner.sync_today_orders_from_broker(force=True) == 2
 
+    def test_placeholder_zero_fee_is_re_enriched_once_the_broker_settles(self) -> None:
+        """A zero charge before settlement must not become the final answer.
+
+        Longbridge reports ``charge_detail.total_amount = 0`` while the fill is
+        still unsettled, and that zero is stamped ``fee_source='ACTUAL'``. The
+        enrichment query then filters on ``actual_fee IS NULL``, so a row that
+        already holds 0.0 never qualifies again and keeps the placeholder
+        forever — even though the broker later reports the real charge. Live
+        evidence: order 1284567360451145728 holds 0.0 in the DB while
+        ``get_order_status`` returns Decimal('2.21') today.
+
+        ``DailyPnlService._select_fill_fee`` already treats a zero-with-ACTUAL
+        as UNKNOWN, which shows the placeholder is a known broker behaviour;
+        this pins the ledger itself so the stored value can still be corrected.
+        """
+        import os
+        import tempfile
+        from collections.abc import Iterator
+        from contextlib import contextmanager
+
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session, sessionmaker
+
+        from app.models import Base, OrderRecord
+
+        runner = AppRunner()
+        order_id = "settling-order"
+
+        class _Detail:
+            status = "FILLED"
+            executed_quantity = Decimal("69")
+            executed_price = Decimal("357.78")
+            actual_fee = Decimal("2.21")
+            fee_currency = "USD"
+            broker_submitted_at = None
+            broker_updated_at = None
+
+        updates: list[tuple[str, dict[str, object]]] = []
+
+        def _capture(
+            oid: str,
+            _status: str,
+            _updated: object,
+            _qty: float,
+            _px: float,
+            metadata: dict[str, object],
+        ) -> None:
+            updates.append((oid, dict(metadata)))
+
+        runner._update_order_status = _capture
+
+        # A REAL session, so the IS NULL predicate is genuinely evaluated: a
+        # hand-rolled fake that ignores the filter would hide the defect.
+        engine = create_engine(
+            f"sqlite:///{tempfile.gettempdir()}/fee_zero_{os.getpid()}.db"
+        )
+        Base.metadata.create_all(engine, tables=[OrderRecord.__table__])
+        session_factory = sessionmaker(bind=engine)
+        with session_factory() as seed:
+            seed.query(OrderRecord).delete()
+            settled = OrderRecord()
+            settled.broker_order_id = order_id
+            settled.symbol = "TSLA.US"
+            settled.side = "BUY"
+            settled.quantity = 69.0
+            settled.price = 357.79
+            settled.status = "FILLED"
+            settled.actual_fee = 0.0
+            settled.fee_source = "ACTUAL"
+            settled.estimated_fee = 12.34
+            seed.add(settled)
+            seed.commit()
+
+        @contextmanager
+        def _session() -> Iterator[Session]:
+            db = session_factory()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        runner._db_session = _session
+
+        class _BrokerOrder:
+            status = "FILLED"
+            broker_order_id = order_id
+
+        class _Broker:
+            def get_order_status(self, _oid: str) -> _Detail:
+                return _Detail()
+
+        runner.broker = _Broker()
+
+        runner._enrich_broker_order_costs([_BrokerOrder()])
+
+        assert updates, (
+            "an order holding a placeholder zero fee must be re-enriched once "
+            "the broker settles; it is currently excluded because the query "
+            "filters on actual_fee IS NULL and 0.0 is not NULL"
+        )
+        assert updates[0][1]["actual_fee"] == Decimal("2.21")
+        assert updates[0][1]["fee_source"] == "ACTUAL"
+
     def test_final_order_quote_gate_blocks_stale_quote_before_submit(self) -> None:
         class Broker:
             def __init__(self) -> None:

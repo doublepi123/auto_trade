@@ -16,6 +16,7 @@ from dataclasses import asdict, dataclass, replace as dataclass_replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Deque, Generator, Optional, cast
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.api.deps import init_audit_logger
@@ -5407,7 +5408,13 @@ class AppRunner:
                 str(order.broker_order_id)
                 for order in db.query(OrderRecord).filter(
                     OrderRecord.broker_order_id.in_(filled_ids),
-                    OrderRecord.actual_fee.is_(None),
+                    # A zero is the broker's placeholder while the fill is
+                    # still settling, not a proven free execution, so it must
+                    # stay eligible until a positive charge replaces it.
+                    or_(
+                        OrderRecord.actual_fee.is_(None),
+                        OrderRecord.actual_fee <= 0,
+                    ),
                 ).all()
             }
         now = time.monotonic()
