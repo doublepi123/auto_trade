@@ -2458,8 +2458,21 @@ class DiagnosticBoardLot(BaseModel):
     entries_inhibited: bool = False
 
 
+class DiagnosticFinancing(BaseModel):
+    cash_by_currency: dict[str, float] = Field(default_factory=dict)
+    financed_currencies: list[str] = Field(default_factory=list)
+    total_assets: float = 0.0
+    account_currency: str = ""
+    risk_level: int = 0
+    margin_call: float = 0.0
+    init_margin: float = 0.0
+    maintenance_margin: float = 0.0
+    buy_power: float = 0.0
+
+
 class DiagnosticsResponse(BaseModel):
     board_lot: DiagnosticBoardLot = Field(default_factory=DiagnosticBoardLot)
+    financing: DiagnosticFinancing = Field(default_factory=DiagnosticFinancing)
     risk_boundary_version: str
     runner_running: bool
     thread_alive: bool

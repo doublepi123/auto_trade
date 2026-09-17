@@ -3430,6 +3430,74 @@ class TestAppRunner:
 
         assert runner.sync_today_orders_from_broker(force=True) == 2
 
+    def test_diagnostics_exposes_financing_and_currency_exposure(self) -> None:
+        """A margin-funded position must be visible without calling the broker.
+
+        US equities are bought with cash_currency='USD' while the account is
+        denominated in HKD, so every US entry widens a USD debit collateralised
+        by HKD. The live account currently shows USD -41,565 against HKD
+        800,000 with 61,068 of initial margin committed, and `/api/diagnostics`
+        reports none of it — there is no cash, margin or currency field at all.
+
+        The operator chose to permit margin financing, so this exposes the cost
+        rather than blocking entries. Diagnostics must stay a pure in-memory
+        snapshot, so it reads a periodically refreshed cache and never issues a
+        network call of its own.
+        """
+        runner = AppRunner()
+
+        class _Broker:
+            calls = 0
+
+            def get_account_info(self) -> object:
+                type(self).calls += 1
+                return SimpleNamespace(
+                    total_assets=Decimal("685417.74"),
+                    currency="HKD",
+                    cash_balances=[
+                        SimpleNamespace(
+                            currency="USD",
+                            available_cash=Decimal("-41565.26"),
+                            frozen_cash=Decimal("271.20"),
+                        ),
+                        SimpleNamespace(
+                            currency="HKD",
+                            available_cash=Decimal("800000"),
+                            frozen_cash=Decimal("0"),
+                        ),
+                    ],
+                    margin_infos=[
+                        SimpleNamespace(
+                            currency="HKD",
+                            risk_level=0,
+                            margin_call=Decimal("0"),
+                            init_margin=Decimal("61068.10"),
+                            maintenance_margin=Decimal("57578.50"),
+                            max_finance_amount=Decimal("3200000"),
+                            remaining_finance_amount=Decimal("3709039.02"),
+                            buy_power=Decimal("624334.24"),
+                        )
+                    ],
+                )
+
+        runner.broker = _Broker()
+        runner._refresh_account_exposure_if_due()
+
+        financing = runner.diagnostics()["financing"]
+
+        # The negative leg is the financed one and must be named as such.
+        assert financing["financed_currencies"] == ["USD"]
+        assert financing["cash_by_currency"]["USD"] == pytest.approx(-41565.26)
+        assert financing["cash_by_currency"]["HKD"] == pytest.approx(800000.0)
+        assert financing["init_margin"] == pytest.approx(61068.10)
+        assert financing["margin_call"] == pytest.approx(0.0)
+        assert financing["risk_level"] == 0
+
+        # Reading diagnostics again must not hit the broker.
+        before = _Broker.calls
+        runner.diagnostics()
+        assert _Broker.calls == before
+
     def test_placeholder_zero_fee_is_re_enriched_once_the_broker_settles(self) -> None:
         """A zero charge before settlement must not become the final answer.
 

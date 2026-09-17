@@ -290,6 +290,8 @@ class AppRunner:
         self._board_lot_session_day: date | None = None
         self._board_lot_validated_in_rth_day: date | None = None
         self._board_lot_refresh_not_before: float = 0.0
+        self._account_exposure: dict[str, Any] = {}
+        self._account_exposure_not_before: float = 0.0
         self._board_lot_residual_symbols: set[str] = set()
         self._broker_position_symbols: set[str] = set()
         self._board_lot_log_throttle = RepeatedLogThrottle(window_seconds=300)
@@ -2106,6 +2108,45 @@ class AppRunner:
         logger.info("board lots refreshed: reason=%s session=%s symbols=%s", reason, today, sorted(lots))
         return True
 
+    def _refresh_account_exposure_if_due(self) -> None:
+        if time.monotonic() < self._account_exposure_not_before:
+            return
+        reader = getattr(self.broker, "get_account_info", None)
+        if not callable(reader):
+            return
+        self._account_exposure_not_before = time.monotonic() + 60
+        try:
+            account = reader()
+        except Exception:
+            logger.warning("account exposure snapshot unavailable", exc_info=True)
+            return
+        cash: dict[str, float] = {}
+        for balance in getattr(account, "cash_balances", None) or []:
+            currency = str(getattr(balance, "currency", "") or "").upper()
+            if not currency:
+                continue
+            cash[currency] = float(getattr(balance, "available_cash", 0) or 0)
+        margin = next(iter(getattr(account, "margin_infos", None) or []), None)
+        exposure: dict[str, Any] = {
+            "cash_by_currency": cash,
+            # A negative balance is financed, not idle: US entries debit USD
+            # against HKD collateral, so name the leg the account is borrowing.
+            "financed_currencies": sorted(
+                currency for currency, amount in cash.items() if amount < 0
+            ),
+            "total_assets": float(getattr(account, "total_assets", 0) or 0),
+            "account_currency": str(getattr(account, "currency", "") or "").upper(),
+            "risk_level": int(getattr(margin, "risk_level", 0) or 0),
+            "margin_call": float(getattr(margin, "margin_call", 0) or 0),
+            "init_margin": float(getattr(margin, "init_margin", 0) or 0),
+            "maintenance_margin": float(
+                getattr(margin, "maintenance_margin", 0) or 0
+            ),
+            "buy_power": float(getattr(margin, "buy_power", 0) or 0),
+        }
+        with self._state_lock:
+            self._account_exposure = exposure
+
     def _refresh_board_lots_if_due(self) -> None:
         if time.monotonic() < self._board_lot_refresh_not_before:
             return
@@ -2386,6 +2427,7 @@ class AppRunner:
                     "residual_symbols": sorted(self._board_lot_residual_symbols),
                     "entries_inhibited": bool(self._board_lot_residual_symbols),
                 },
+                "financing": dict(self._account_exposure),
                 "runner_running": self._running and thread_alive,
                 "thread_alive": thread_alive,
                 "quotes_subscribed": self._quotes_subscribed,
@@ -6287,6 +6329,11 @@ class AppRunner:
             except Exception:
                 logger.exception("error checking pause auto resume")
             self._refresh_board_lots_if_due()
+
+            try:
+                self._refresh_account_exposure_if_due()
+            except Exception:
+                logger.exception("error refreshing account exposure")
             try:
                 if self._reconcile_runtime_positions():
                     self._broadcast_status()
