@@ -475,6 +475,57 @@ class TestSettings:
 
         assert s.hard_max_position_notional == 5000
 
+    def test_paper_exception_lapses_when_the_account_identity_changes(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The attestation must bind to the account it was made about.
+
+        Today the exception is two env vars and nothing else, so a copied
+        .env — or the same .env repointed at funded credentials — keeps the
+        25,000 ceiling. The startup banner says a funded account must never
+        carry this, but nothing enforces it.
+
+        Bind it: when the operator records which account they attested for,
+        a different account must fall back to the funded ceiling. The
+        fingerprint reuses the same credential SHA-256 the runner already
+        computes for order provenance (``_credential_identity_fingerprint``),
+        so the binding is fail-closed and needs no broker call.
+        """
+        monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
+        monkeypatch.setenv("AUTO_TRADE_PAPER_MAX_POSITION_NOTIONAL", "25000")
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_ACCOUNT_FINGERPRINT",
+            "a" * 64,
+        )
+
+        s = Settings()
+
+        # The attested account still gets the exception.
+        assert s.paper_exception_notional_for("a" * 64) == 25000
+        # A different account does not, however the .env travelled.
+        assert s.paper_exception_notional_for("b" * 64) == 5000
+        # An unknown identity fails closed rather than assuming a match.
+        assert s.paper_exception_notional_for("") == 5000
+
+    def test_paper_exception_without_fingerprint_keeps_current_behaviour(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Binding is opt-in; omitting it must not silently tighten the cap.
+
+        Existing deployments that attested without recording an identity keep
+        working exactly as before, so this change cannot strand a running
+        paper account.
+        """
+        monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
+        monkeypatch.setenv("AUTO_TRADE_PAPER_MAX_POSITION_NOTIONAL", "25000")
+
+        s = Settings()
+
+        assert s.hard_max_position_notional == 25000
+        assert s.paper_exception_notional_for("anything") == 25000
+
     def test_paper_experiment_cannot_relax_any_other_p0_invariant(
         self,
         monkeypatch: pytest.MonkeyPatch,

@@ -877,6 +877,20 @@ class Settings(BaseSettings):
         allow_inf_nan=False,
         validation_alias="AUTO_TRADE_PAPER_MAX_POSITION_NOTIONAL",
     )
+    # Optional: the credential fingerprint the paper attestation was made
+    # about. Empty keeps the pre-existing behaviour, so an existing paper
+    # deployment is not stranded by adding this.
+    paper_account_fingerprint: str = Field(
+        default="",
+        validation_alias="AUTO_TRADE_PAPER_ACCOUNT_FINGERPRINT",
+    )
+
+    def paper_exception_notional_for(self, fingerprint: str) -> float:
+        if not self.paper_account_fingerprint:
+            return self.hard_max_position_notional
+        if fingerprint and fingerprint == self.paper_account_fingerprint:
+            return self.hard_max_position_notional
+        return min(self.hard_max_position_notional, FUNDED_MAX_POSITION_NOTIONAL)
     auto_primary_switch_enabled: bool = Field(
         default=False,
         validation_alias="AUTO_TRADE_AUTO_PRIMARY_SWITCH_ENABLED",
