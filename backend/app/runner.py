@@ -2111,7 +2111,7 @@ class AppRunner:
     def _refresh_account_exposure_if_due(self) -> None:
         if time.monotonic() < self._account_exposure_not_before:
             return
-        reader = getattr(self.broker, "get_account_info", None)
+        reader = getattr(self.broker, "get_account", None)
         if not callable(reader):
             return
         self._account_exposure_not_before = time.monotonic() + 60

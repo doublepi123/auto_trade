@@ -3449,7 +3449,7 @@ class TestAppRunner:
         class _Broker:
             calls = 0
 
-            def get_account_info(self) -> object:
+            def get_account(self) -> object:
                 type(self).calls += 1
                 return SimpleNamespace(
                     total_assets=Decimal("685417.74"),
