@@ -101,6 +101,9 @@ _LLM_STOP_LOSS_ACTIONS = {"STOP_LOSS_SELL_NOW", "STOP_LOSS_COVER_NOW"}
 _LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
 _TERMINAL_ORDER_STATUSES = {"FILLED", "REJECTED", "CANCELLED"}
 _ENTRY_ACTIONS = {"BUY", "SELL_SHORT"}
+# Matches the ledger reconciler's own ceiling (scripts/reconcile_broker_order_ledger.py);
+# the broker answers order lookups only inside this history.
+_BROKER_ORDER_LOOKUP_WINDOW = timedelta(days=90)
 _POSITION_REDUCING_ACTIONS = {"SELL", "BUY_TO_COVER"}
 _PENDING_TIMEOUT_PAUSE_RE = re.compile(r"pending order (?P<order_id>\S+) timed out after")
 _ORDER_SUBMISSION_UNCERTAIN_PREFIX = "ORDER_SUBMISSION_UNCERTAIN:"
@@ -5438,6 +5441,11 @@ class AppRunner:
         status_reader = getattr(self.broker, "get_order_status", None)
         if not callable(status_reader):
             return
+        # The broker only answers for a bounded history (the ledger reconciler
+        # pins the same 90 days), and past it every lookup returns 602023
+        # forever. Backoff caps at an hour, so without this an unreachable
+        # fill is re-polled hourly for eternity against the shared rate limit.
+        reachable_after = datetime.now(timezone.utc) - _BROKER_ORDER_LOOKUP_WINDOW
         with self._db_session() as db:
             # Settlement outlives the session the fill belongs to, so the
             # eligible set is every unsettled FILLED row rather than only the
@@ -5448,6 +5456,7 @@ class AppRunner:
                 for order in db.query(OrderRecord).filter(
                     OrderRecord.status == "FILLED",
                     OrderRecord.broker_order_id.isnot(None),
+                    OrderRecord.created_at >= reachable_after,
                     # A zero is the broker's placeholder while the fill is
                     # still settling, not a proven free execution, so it must
                     # stay eligible until a positive charge replaces it.

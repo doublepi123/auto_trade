@@ -3696,6 +3696,108 @@ class TestAppRunner:
         assert updates[0][1]["actual_fee"] == Decimal("2.21")
         assert updates[0][1]["fee_source"] == "ACTUAL"
 
+    def test_fill_older_than_the_broker_lookup_window_stops_being_polled(
+        self,
+    ) -> None:
+        """An unreachable charge must be abandoned, not retried forever.
+
+        Carrying unsettled fills forward is correct, but the broker only
+        answers for a bounded history — `scripts/reconcile_broker_order_ledger.py`
+        pins that window at 90 days. Past it every lookup returns 602023, and
+        the backoff caps at one hour, so 21 May-2026 fills are re-polled every
+        hour for eternity: 21 wasted broker calls an hour that can never
+        succeed, competing with the quote path for the same rate limit.
+
+        Age is the only signal available before the call, so an order beyond
+        the window must be excluded from the eligible set outright.
+        """
+        runner = AppRunner()
+        reachable = "settles-within-window"
+        unreachable = "past-broker-window"
+
+        class _Detail:
+            status = "FILLED"
+            executed_quantity = Decimal("68")
+            executed_price = Decimal("366.84")
+            actual_fee = Decimal("3.17")
+            fee_currency = "USD"
+            broker_submitted_at = None
+            broker_updated_at = None
+
+        polled: list[str] = []
+
+        def _capture(
+            oid: str,
+            _status: str,
+            _updated: object,
+            _qty: float,
+            _px: float,
+            _metadata: dict[str, object],
+        ) -> None:
+            return None
+
+        runner._update_order_status = _capture
+
+        class _Broker:
+            def get_order_status(self, oid: str) -> _Detail:
+                polled.append(oid)
+                return _Detail()
+
+        runner.broker = _Broker()
+
+        import os
+        import tempfile
+        from collections.abc import Iterator
+        from contextlib import contextmanager
+
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session, sessionmaker
+
+        from app.models import Base, OrderRecord
+
+        engine = create_engine(
+            f"sqlite:///{tempfile.gettempdir()}/window_{os.getpid()}.db"
+        )
+        Base.metadata.create_all(engine, tables=[OrderRecord.__table__])
+        factory = sessionmaker(bind=engine)
+        now = datetime.now(timezone.utc)
+        with factory() as seed:
+            seed.query(OrderRecord).delete()
+            for oid, age in ((reachable, 2), (unreachable, 120)):
+                row = OrderRecord()
+                row.broker_order_id = oid
+                row.symbol = "TSLA.US"
+                row.side = "BUY"
+                row.quantity = 68.0
+                row.price = 366.84
+                row.status = "FILLED"
+                row.actual_fee = 0.0
+                row.fee_source = "ACTUAL"
+                row.created_at = now - timedelta(days=age)
+                seed.add(row)
+            seed.commit()
+
+        @contextmanager
+        def _session() -> Iterator[Session]:
+            db = factory()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        runner._db_session = _session
+
+        runner._enrich_broker_order_costs([])
+
+        assert reachable in polled, (
+            "a recent unsettled fill must still be polled for its charge"
+        )
+        assert unreachable not in polled, (
+            "a fill older than the broker's 90-day lookup window can never be "
+            "answered; polling it every hour forever burns rate limit on a "
+            "call that is guaranteed to fail"
+        )
+
     def test_final_order_quote_gate_blocks_stale_quote_before_submit(self) -> None:
         class Broker:
             def __init__(self) -> None:
