@@ -3498,6 +3498,101 @@ class TestAppRunner:
         runner.diagnostics()
         assert _Broker.calls == before
 
+    def test_unsettled_fee_is_still_enriched_after_the_trading_day_rolls(
+        self,
+    ) -> None:
+        """Settlement outlives the day the fill belongs to.
+
+        Enrichment is fed from `get_today_orders`, so a fill whose charge has
+        not settled by the close drops out of the feed and keeps its
+        placeholder zero for good. Orders 69/70 are live proof: filled
+        2026-09-17, still reported as 0.00 by the broker the next morning, and
+        tomorrow they are no longer "today".
+
+        The eligible-row query already finds them — it selects on
+        `actual_fee IS NULL OR <= 0`. What it cannot do is see an id the caller
+        never passed in, so carry the unsettled rows forward instead of
+        depending on the broker still calling them today.
+        """
+        runner = AppRunner()
+        settled_at = "carried-forward-order"
+
+        class _Detail:
+            status = "FILLED"
+            executed_quantity = Decimal("68")
+            executed_price = Decimal("366.84")
+            actual_fee = Decimal("3.17")
+            fee_currency = "USD"
+            broker_submitted_at = None
+            broker_updated_at = None
+
+        updates: list[str] = []
+
+        def _capture(
+            oid: str,
+            _status: str,
+            _updated: object,
+            _qty: float,
+            _px: float,
+            _metadata: dict[str, object],
+        ) -> None:
+            updates.append(oid)
+
+        runner._update_order_status = _capture
+
+        class _Broker:
+            def get_order_status(self, _oid: str) -> _Detail:
+                return _Detail()
+
+        runner.broker = _Broker()
+
+        import os
+        import tempfile
+        from collections.abc import Iterator
+        from contextlib import contextmanager
+
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session, sessionmaker
+
+        from app.models import Base, OrderRecord
+
+        engine = create_engine(
+            f"sqlite:///{tempfile.gettempdir()}/carry_{os.getpid()}.db"
+        )
+        Base.metadata.create_all(engine, tables=[OrderRecord.__table__])
+        factory = sessionmaker(bind=engine)
+        with factory() as seed:
+            seed.query(OrderRecord).delete()
+            stale = OrderRecord()
+            stale.broker_order_id = settled_at
+            stale.symbol = "TSLA.US"
+            stale.side = "BUY"
+            stale.quantity = 68.0
+            stale.price = 366.84
+            stale.status = "FILLED"
+            stale.actual_fee = 0.0
+            stale.fee_source = "ACTUAL"
+            seed.add(stale)
+            seed.commit()
+
+        @contextmanager
+        def _session() -> Iterator[Session]:
+            db = factory()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        runner._db_session = _session
+
+        # The broker's today feed no longer mentions it: the day has rolled.
+        runner._enrich_broker_order_costs([])
+
+        assert updates == [settled_at], (
+            "an unsettled fill must stay eligible after its trading day ends; "
+            "feeding enrichment only from today's broker orders strands it"
+        )
+
     def test_placeholder_zero_fee_is_re_enriched_once_the_broker_settles(self) -> None:
         """A zero charge before settlement must not become the final answer.
 

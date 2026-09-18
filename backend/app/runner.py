@@ -5437,19 +5437,16 @@ class AppRunner:
         status_reader = getattr(self.broker, "get_order_status", None)
         if not callable(status_reader):
             return
-        filled_ids = [
-            str(getattr(order, "broker_order_id", "") or "")
-            for order in broker_orders
-            if str(getattr(order, "status", "") or "").upper() == "FILLED"
-            and str(getattr(order, "broker_order_id", "") or "")
-        ]
-        if not filled_ids:
-            return
         with self._db_session() as db:
+            # Settlement outlives the session the fill belongs to, so the
+            # eligible set is every unsettled FILLED row rather than only the
+            # ids the broker still calls "today" — otherwise a charge that
+            # settles overnight is never collected.
             missing_ids = {
                 str(order.broker_order_id)
                 for order in db.query(OrderRecord).filter(
-                    OrderRecord.broker_order_id.in_(filled_ids),
+                    OrderRecord.status == "FILLED",
+                    OrderRecord.broker_order_id.isnot(None),
                     # A zero is the broker's placeholder while the fill is
                     # still settling, not a proven free execution, so it must
                     # stay eligible until a positive charge replaces it.
@@ -5458,6 +5455,7 @@ class AppRunner:
                         OrderRecord.actual_fee <= 0,
                     ),
                 ).all()
+                if str(order.broker_order_id or "")
             }
         now = time.monotonic()
         eligible_ids = [
