@@ -295,6 +295,7 @@ class AppRunner:
         self._board_lot_residual_symbols: set[str] = set()
         self._broker_position_symbols: set[str] = set()
         self._board_lot_log_throttle = RepeatedLogThrottle(window_seconds=300)
+        self._fee_enrichment_log_throttle = RepeatedLogThrottle(window_seconds=3600)
         self._trade_svc = TradeExecutionService(
             board_lot_resolver=self._board_lot_cache.resolve,
             record_board_lot_residual=self._record_board_lot_residual,
@@ -5493,11 +5494,16 @@ class AppRunner:
                 self._fee_enrichment_next_retry_at.pop(order_id, None)
             except Exception:
                 self._schedule_fee_enrichment_retry(order_id, now)
-                logger.warning(
-                    "broker charges are not yet available for order %s",
-                    order_id,
-                    exc_info=True,
-                )
+                # Orders older than the broker's lookup window fail on every
+                # sweep, so throttle rather than restate the same traceback.
+                if self._fee_enrichment_log_throttle.should_log(f"fee:{order_id}"):
+                    logger.warning(
+                        "broker charges are not yet available for order %s "
+                        "(suppressed=%d)",
+                        order_id,
+                        self._fee_enrichment_log_throttle.take_suppressed_count(),
+                        exc_info=True,
+                    )
 
     def _schedule_fee_enrichment_retry(self, order_id: str, now: float) -> None:
         attempts = self._fee_enrichment_attempts.get(order_id, 0) + 1
