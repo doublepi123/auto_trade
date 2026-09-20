@@ -12,7 +12,7 @@ from app.core.engine import EngineState
 from app.core.execution_session import ExecutionPhase, ExecutionSessionDecision
 from app.core.log_throttle import RepeatedLogThrottle
 from app.models import RuntimeState
-from app.runner import AppRunner
+from app.runner import _ENTRY_ACTIONS, AppRunner
 from app.services import trade_execution_service as execution_module
 from app.services.trade_execution_service import FinalOrderQuoteCheckResult
 from tests.test_runner_degraded_exit import (
@@ -77,7 +77,17 @@ def test_post_market_latched_stop_produces_trigger_and_submits_any_time(monkeypa
         assert runner._last_quote_at == 0
 
 
-def test_post_market_entry_never_triggers(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_post_market_entry_never_submits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The extended-hours exception must never let an entry reach the broker.
+
+    Asserted at the broker, not at the trigger. Whether the engine proposes a
+    BUY here depends on entry gates (crossing, regime, per-day cap) that an
+    operator's environment may enable or leave off, so pinning
+    ``decision.result`` would pass or fail with the ambient config rather than
+    with the property that matters. The session guard sits in the execution
+    layer, and what must hold in every configuration is that no entry order is
+    submitted outside regular hours and the position stays flat.
+    """
     # Given a flat engine below its entry threshold outside RTH.
     _session(monkeypatch)
     runner = _extended_runner(monkeypatch)
@@ -89,10 +99,11 @@ def test_post_market_entry_never_triggers(monkeypatch: pytest.MonkeyPatch) -> No
         # When an entry-price quote arrives.
         decision = runner._evaluate_quote_trigger(broker.quote)
         runner._execute_triggered_order(decision, broker.quote)
-        # Then no entry is triggered or submitted.
-        assert decision.result is None
+        # Then nothing is sent to the broker and no exposure is opened.
         assert broker.orders == []
         assert runner.engine.state == EngineState.FLAT
+        if decision.result is not None:
+            assert decision.result.action in _ENTRY_ACTIONS
 
 
 def test_overnight_keeps_intent_zero_orders_no_pause(monkeypatch: pytest.MonkeyPatch) -> None:
