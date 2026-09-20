@@ -27,6 +27,7 @@ from app.core.board_lot import BoardLotCache
 from app.core.broker import BrokerGateway, Position, Quote
 from app.core.engine import EngineSnapshot, EngineState, StrategyEngine, StrategyParams, TriggerResult
 from app.core.exit_policy import ExitPolicyConfig, ExitQuote, PositionExitContext, ReductionCause, ReductionDecision, evaluate_exit_policy
+from app.core.exit_pricing import degraded_exit_limit, select_reference_price
 from app.core.fees import one_side_fee_rate
 from app.core.log_throttle import RepeatedLogThrottle
 from app.core.market_calendar import is_closing_window, is_opening_warmup, is_trading_hours, trade_day_for
@@ -197,6 +198,10 @@ class _QuoteTriggerDecision:
     reduction_newly_latched: bool = False
     reduction_should_clear: bool = False
     early_return: bool = False
+    quote_degraded: bool = False
+    exit_limit_price: float | None = None
+    exit_price_floor: float | None = None
+    exit_hold_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -206,6 +211,14 @@ class _ReductionIntent:
     reason: str
     trigger_price: float
     started_at: datetime
+
+
+@dataclass(frozen=True)
+class _ReduceOnlyPriceFloor:
+    action: str
+    price: float
+    source_timestamp: datetime
+    expires_at: datetime
 
 
 # Latched-exit escalation order, mirroring evaluate_exit_policy's evaluation
@@ -299,6 +312,7 @@ class AppRunner:
         self._broker_position_symbols: set[str] = set()
         self._board_lot_log_throttle = RepeatedLogThrottle(window_seconds=300)
         self._fee_enrichment_log_throttle = RepeatedLogThrottle(window_seconds=3600)
+        self._degraded_exit_log_throttle = RepeatedLogThrottle(window_seconds=60)
         self._trade_svc = TradeExecutionService(
             board_lot_resolver=self._board_lot_cache.resolve,
             record_board_lot_residual=self._record_board_lot_residual,
@@ -413,6 +427,7 @@ class AppRunner:
         self._last_llm_action_at: dict[tuple[str, str], float] = {}
         self._llm_order_execution_enabled = False
         self._reduction_intents: dict[str, _ReductionIntent] = {}
+        self._reduce_only_price_floors: dict[str, _ReduceOnlyPriceFloor] = {}
         # Process-local peak executable price per open position, for the
         # profit-lock exit. Intentionally not durable: after a restart the
         # lock stays unarmed until fresh quotes rebuild the evidence, while
@@ -2991,12 +3006,13 @@ class AppRunner:
                 "ask": quote.ask,
                 "timestamp": quote.timestamp,
             })
-            if (
-                not quote_quality["price_positive"]
-                or not quote_quality["spread_reasonable"]
-                or not quote_quality["last_bbo_consistent"]
-                or not quote_quality["source_timestamp_fresh"]
-            ):
+            entry_grade = bool(
+                quote_quality["price_positive"]
+                and quote_quality["spread_reasonable"]
+                and quote_quality["last_bbo_consistent"]
+                and quote_quality["source_timestamp_fresh"]
+            )
+            if not entry_grade:
                 if is_primary_symbol:
                     self.decision_funnel.record_quality_rejection([
                         predicate
@@ -3011,9 +3027,16 @@ class AppRunner:
                 self._quote_rejection_message = (
                     f"{quote.symbol} quote rejected by live quality gate"
                 )
-                decision.early_return = True
-                return decision
-            if is_primary_symbol:
+                degraded_exit_candidate = (
+                    self._trade_svc.tracked_position(quote.symbol) is not None
+                    or quote.symbol in self._reduction_intents
+                    or active_engine.state != EngineState.FLAT
+                )
+                if not degraded_exit_candidate:
+                    decision.early_return = True
+                    return decision
+                decision.quote_degraded = True
+            if is_primary_symbol and entry_grade:
                 # Funnel stage 2: the runner evaluated a quote against the
                 # engine thresholds (loop running, quality gate passed).
                 self.decision_funnel.record_evaluation()
@@ -3033,6 +3056,7 @@ class AppRunner:
                         active_engine,
                         active_market,
                         daily_loss_snapshot=daily_loss_snapshot,
+                        quote_quality=quote_quality,
                     )
                 )
                 decision.reduction_should_clear = should_clear
@@ -3046,7 +3070,8 @@ class AppRunner:
                             # Funnel stage 4: protective exit suppressed by
                             # the session guard.
                             self.decision_funnel.record_skip("SESSION")
-                        active_engine.record_price(quote.last_price)
+                        if quote_quality["price_positive"]:
+                            active_engine.record_price(quote.last_price)
                         return decision
                     decision.engine_snapshot = active_engine.snapshot()
                     transition_status = active_engine.transition_for_action(reduction_intent.action)
@@ -3067,6 +3092,8 @@ class AppRunner:
                             active_engine.state.value,
                             transition_status,
                         )
+                elif decision.quote_degraded:
+                    decision.early_return = True
                 elif self._opening_execution_capital_slot_reserved():
                     # The opening strategy owns the single capital slot from
                     # its signal window through settlement. Its selected
@@ -3144,6 +3171,14 @@ class AppRunner:
                     decision.engine_snapshot = active_engine.snapshot()
                     decision.result = active_engine.update_price(quote.last_price)
                 if decision.result is not None and decision.result.triggered:
+                    if decision.result.action in _POSITION_REDUCING_ACTIONS:
+                        self._bind_exit_price_locked(decision, quote)
+                        if decision.exit_hold_reason:
+                            if decision.engine_snapshot is not None:
+                                active_engine.restore(decision.engine_snapshot)
+                            decision.result = None
+                            decision.early_return = True
+                            return decision
                     if (
                         not risk_result.approved
                         and not self._risk_rejection_allows_action(decision.result.action)
@@ -3154,7 +3189,8 @@ class AppRunner:
                             self.decision_funnel.record_skip("RISK")
                         if decision.engine_snapshot is not None:
                             active_engine.restore(decision.engine_snapshot)
-                        active_engine.record_price(quote.last_price)
+                        if quote_quality["price_positive"]:
+                            active_engine.record_price(quote.last_price)
                         decision.result = None
                         return decision
                     if is_primary_symbol:
@@ -3188,6 +3224,52 @@ class AppRunner:
                 ):
                     self.decision_funnel.record_skip("COOLDOWN")
         return decision
+
+    def _bind_exit_price_locked(self, decision: _QuoteTriggerDecision, quote: Quote) -> None:
+        """Bind executable exit evidence without changing healthy quote pricing."""
+        result = decision.result
+        if result is None:
+            return
+        self._reduce_only_price_floors.pop(quote.symbol, None)
+        now = datetime.now(timezone.utc)
+        reference = select_reference_price(
+            [entry for entry in self._recent_quotes if entry.get("symbol") == quote.symbol],
+            side=result.action,
+            now=now,
+            max_age_seconds=settings.degraded_exit_reference_max_age_seconds,
+        )
+        if reference is None:
+            decision.exit_hold_reason = "no trusted reference price within window"
+            return
+        pricing = degraded_exit_limit(
+            side=result.action,
+            bid=quote.bid,
+            ask=quote.ask,
+            reference=reference,
+            max_adverse_deviation_pct=settings.degraded_exit_max_adverse_deviation_pct,
+        )
+        field = "bid" if result.action == "SELL" else "ask"
+        if pricing is None or not self._quote_source_timestamp_is_fresh(quote.timestamp):
+            decision.exit_hold_reason = f"fresh {field} unverifiable"
+            return
+        if not pricing.marketable:
+            decision.exit_hold_reason = (
+                f"bid {quote.bid} below floor {pricing.floor_price}"
+                if result.action == "SELL"
+                else f"ask {quote.ask} above floor {pricing.floor_price}"
+            )
+            return
+        self._reduce_only_price_floors[quote.symbol] = _ReduceOnlyPriceFloor(
+            action=result.action,
+            price=pricing.floor_price,
+            source_timestamp=reference.source_timestamp,
+            expires_at=reference.source_timestamp + timedelta(
+                seconds=settings.degraded_exit_reference_max_age_seconds,
+            ),
+        )
+        if decision.quote_degraded:
+            decision.exit_limit_price = pricing.limit_price
+            decision.exit_price_floor = pricing.floor_price
 
     def _execute_triggered_order(
         self,
@@ -3264,7 +3346,9 @@ class AppRunner:
             execution_quote = quote
             if decision.reduce_only:
                 executable_price = (
-                    float(quote.bid)
+                    decision.exit_limit_price
+                    if decision.exit_limit_price is not None
+                    else float(quote.bid)
                     if result.action == "SELL" and float(quote.bid) > 0
                     else float(quote.ask)
                     if result.action == "BUY_TO_COVER" and float(quote.ask) > 0
@@ -3593,6 +3677,7 @@ class AppRunner:
 
             if (
                 decision.reduction_intent is not None
+                and not decision.exit_hold_reason
                 and decision.result is None
                 and decision.engine_snapshot is not None
                 and self._maybe_permit_persisted_reduction()
@@ -3604,6 +3689,18 @@ class AppRunner:
                 decision = self._evaluate_quote_trigger(quote, is_push=False)
                 processing_started = decision.processing_started
 
+            if decision.exit_hold_reason:
+                reason = f"{quote.symbol} protective exit held: {decision.exit_hold_reason}"
+                self._set_last_action_message(reason)
+                if self._degraded_exit_log_throttle.should_log(quote.symbol):
+                    logger.warning(
+                        "protective exit held: symbol=%s reason=%s suppressed=%s",
+                        quote.symbol,
+                        decision.exit_hold_reason,
+                        self._degraded_exit_log_throttle.take_suppressed_count(),
+                    )
+                    self._record_risk_event(reason, event_type="DEGRADED_EXIT_HELD")
+                    self.notifier.notify_risk_event("DEGRADED_EXIT_HELD", reason)
             if decision.early_return:
                 return
 
@@ -5086,6 +5183,34 @@ class AppRunner:
                 "timestamp": quote.timestamp,
             }
         )
+        if action in _POSITION_REDUCING_ACTIONS:
+            with self._state_lock:
+                recorded_floor = self._reduce_only_price_floors.get(symbol)
+            # An armed degraded-exit floor is an additional constraint, never
+            # a prerequisite for exiting through paths that did not register one.
+            # Missing or expired evidence uses the unchanged legacy gate below.
+            if (
+                recorded_floor is not None
+                and datetime.now(timezone.utc) <= recorded_floor.expires_at
+            ):
+                executable = Decimal(str(quote.bid if action == "SELL" else quote.ask))
+                if not executable.is_finite() or executable <= 0:
+                    return "fresh executable BBO price is unavailable"
+                if not quality["source_timestamp_fresh"]:
+                    return "fresh executable quote failed the final quality gate"
+                if recorded_floor.action != action:
+                    return "non-expired reduce-only price floor is unavailable"
+                floor = Decimal(str(recorded_floor.price))
+                if action == "SELL" and executable < floor:
+                    return f"fresh bid {executable} below floor {floor}"
+                if action == "BUY_TO_COVER" and executable > floor:
+                    return f"fresh ask {executable} above floor {floor}"
+                return FinalOrderQuoteCheckResult(
+                    executable_price=executable,
+                    bid=Decimal(str(quote.bid)),
+                    ask=Decimal(str(quote.ask)),
+                    price_floor=floor,
+                )
         if not all(
             bool(quality[name])
             for name in (
@@ -7162,6 +7287,7 @@ class AppRunner:
         market: str,
         *,
         daily_loss_snapshot: DailyLossSnapshot,
+        quote_quality: Mapping[str, Any] | None = None,
     ) -> tuple[_ReductionIntent | None, bool, bool]:
         existing = self._reduction_intents.get(quote.symbol)
         tracked = self._trade_svc.tracked_position(quote.symbol)
@@ -7186,22 +7312,32 @@ class AppRunner:
             avg_price = 0.0
             opened_at = None
 
-        executable_price = (
-            float(quote.bid)
-            if side == "LONG" and float(quote.bid) > 0
-            else float(quote.ask)
-            if side == "SHORT" and float(quote.ask) > 0
-            else float(quote.last_price)
+        quality = quote_quality if quote_quality is not None else self._evaluate_quote_quality({
+            "last_price": quote.last_price,
+            "bid": quote.bid,
+            "ask": quote.ask,
+            "timestamp": quote.timestamp,
+        })
+        executable_price = float(quote.bid if side == "LONG" else quote.ask)
+        executable_field_valid = math.isfinite(executable_price) and executable_price > 0
+        # A wide spread is a market condition, not corrupt price evidence.
+        price_evidence_trusted = bool(
+            executable_field_valid
+            and quality["source_timestamp_fresh"]
+            and quality["last_bbo_consistent"]
         )
-        if side == "LONG":
-            unrealized_pnl = (executable_price - avg_price) * quantity
-        else:
-            unrealized_pnl = (avg_price - executable_price) * quantity
+        unrealized_pnl: float | None = None
+        if price_evidence_trusted:
+            unrealized_pnl = (
+                (executable_price - avg_price) * quantity
+                if side == "LONG"
+                else (avg_price - executable_price) * quantity
+            )
         opening_policy = self._opening_execution_policies.get(quote.symbol)
         # The profit lock applies to range-strategy positions only; opening
         # momentum executions carry their own stop/target semantics.
         peak_executable_price: float | None = None
-        if tracked is not None and opening_policy is None:
+        if tracked is not None and opening_policy is None and price_evidence_trusted:
             peak_executable_price = self._track_position_peak(
                 quote.symbol,
                 side,
@@ -7250,9 +7386,9 @@ class AppRunner:
                 market,
                 engine.params.flatten_minutes_before_close,
             ),
-            combined_daily_pnl=(
-                daily_loss_snapshot.realized_pnl + unrealized_pnl
-            ),
+            realized_daily_pnl=daily_loss_snapshot.realized_pnl,
+            unrealized_pnl=unrealized_pnl,
+            price_evidence_trusted=price_evidence_trusted,
             max_daily_loss=daily_loss_snapshot.max_daily_loss,
             peak_executable_price=peak_executable_price,
         )

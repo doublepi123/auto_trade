@@ -11,17 +11,19 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-from app.core.broker import OrderResult, Position, Quote
+from app.core.broker import BrokerGateway, OrderResult, Position, Quote
 from app.core.notify import ServerChanNotifier
 from app.core.risk import RiskConfig, RiskController
 from app.services import trade_execution_service as trade_svc_module
 from app.services.trade_execution_service import (
+    ApprovedOrder,
     EntryPolicyCheckResult,
     FinalOrderQuoteCheckResult,
     OrderPersistenceError,
     OrderStatus,
     TradeExecutionService,
     _PendingOrder,
+    _PreSubmitRiskRequest,
 )
 
 
@@ -51,6 +53,155 @@ class TestOrderStatus:
         assert result.issue == "fresh quote rejected"
         assert result.bid is None
         assert result.ask is None
+
+
+class TestReduceOnlyPriceFloor:
+    def setup_method(self) -> None:
+        class _FakeFloorBroker(BrokerGateway):
+            def __init__(self) -> None:
+                self.symbol = "AAPL.US"
+                self.side = "LONG"
+                self.submissions: list[OrderResult] = []
+
+            def get_positions(self) -> list[Position]:
+                return [Position(self.symbol, self.side, Decimal("1"), Decimal("370"))]
+
+            def submit_limit_order(
+                self, symbol: str, side: str, quantity: Decimal, price: Decimal,
+            ) -> OrderResult:
+                result = OrderResult("floor-order", symbol, side, quantity, price, "SUBMITTED")
+                self.submissions.append(result)
+                return result
+
+        self.broker = _FakeFloorBroker()
+        self.quote_result = FinalOrderQuoteCheckResult(
+            executable_price=Decimal("358.35"),
+            bid=Decimal("358.35"),
+            ask=Decimal("411.4"),
+            price_floor=Decimal("368.7291"),
+        )
+        self.skips: list[dict[str, object]] = []
+        self.service = TradeExecutionService(
+            record_order=lambda *_args: None,
+            update_order_status=lambda *_args: None,
+            record_risk_event=lambda _reason: None,
+            record_order_skipped=lambda _symbol, _action, _reason, payload: self.skips.append(payload),
+            final_order_quote_check=lambda _broker, _symbol, _action, _price: self.quote_result,
+        )
+
+    def test_final_precheck_never_binds_below_price_floor(self) -> None:
+        # Given
+        risk = RiskController()
+        # When
+        result = self.service._final_submission_precheck(
+            "SELL", "AAPL.US", Decimal("1"), Decimal("370.58"), self.broker, risk,
+            bind_final_executable_price=True, exit_allow_loss_exit=True, reduce_only=True,
+        )
+        # Then
+        assert isinstance(result, ApprovedOrder)
+        assert result.price == Decimal("368.73")
+
+    @pytest.mark.parametrize("allow_loss_exit", [True, False])
+    def test_allow_loss_exit_does_not_bypass_price_floor(self, allow_loss_exit: bool) -> None:
+        # Given: the fee guard would reject the raw bid but accepts the floor.
+        risk = RiskController()
+        # When
+        result = self.service._final_submission_precheck(
+            "SELL", "AAPL.US", Decimal("1"), Decimal("370.58"), self.broker, risk,
+            bind_final_executable_price=True, exit_allow_loss_exit=allow_loss_exit,
+            exit_avg_price=Decimal("360"), exit_min_profit_amount=Decimal("1"),
+            exit_fee_rate=Decimal("0.001"), reduce_only=True,
+        )
+        # Then
+        assert isinstance(result, ApprovedOrder)
+        assert result.price == Decimal("368.73")
+
+    @pytest.mark.parametrize("symbol, expected", [("AAPL.US", "368.73"), ("00700.HK", "368.8")])
+    def test_price_floor_rounds_up_to_tick_for_sell(self, symbol: str, expected: str) -> None:
+        # Given
+        self.broker.symbol = symbol
+        # When
+        result = self.service._final_submission_precheck(
+            "SELL", symbol, Decimal("1"), Decimal("370.58"), self.broker, RiskController(),
+            bind_final_executable_price=True, exit_allow_loss_exit=True, reduce_only=True,
+        )
+        # Then
+        assert isinstance(result, ApprovedOrder)
+        assert result.price == Decimal(expected)
+        if symbol.endswith(".HK"):
+            assert result.price % trade_svc_module._hk_tick_for(result.price) == 0
+
+    @pytest.mark.parametrize("symbol, expected", [("AAPL.US", "358.35"), ("00700.HK", "358.200")])
+    def test_no_floor_keeps_existing_marketable_normalization(self, symbol: str, expected: str) -> None:
+        # Given
+        self.broker.symbol = symbol
+        self.quote_result = FinalOrderQuoteCheckResult(executable_price=Decimal("358.359"))
+        # When
+        result = self.service._final_submission_precheck(
+            "SELL", symbol, Decimal("1"), Decimal("370.58"), self.broker, RiskController(),
+            bind_final_executable_price=True, exit_allow_loss_exit=True, reduce_only=True,
+        )
+        # Then
+        assert isinstance(result, ApprovedOrder)
+        assert str(result.price) == expected
+
+    @pytest.mark.parametrize("symbol, expected", [("AAPL.US", "368.72"), ("00700.HK", "368.6")])
+    def test_buy_to_cover_caps_price_with_downward_tick_rounding(self, symbol: str, expected: str) -> None:
+        # Given
+        self.broker.symbol = symbol
+        self.broker.side = "SHORT"
+        self.quote_result = FinalOrderQuoteCheckResult(
+            executable_price=Decimal("411.4"), price_floor=Decimal("368.7291"),
+        )
+        # When
+        result = self.service._final_submission_precheck(
+            "BUY_TO_COVER", symbol, Decimal("1"), Decimal("370.58"), self.broker, RiskController(),
+            bind_final_executable_price=True, exit_allow_loss_exit=True, reduce_only=True,
+        )
+        # Then
+        assert isinstance(result, ApprovedOrder)
+        assert result.price == Decimal(expected)
+
+    @pytest.mark.parametrize("floor", ["NaN", "sNaN", "Infinity", "-Infinity", "0", "-1"])
+    def test_invalid_floor_blocks_submission_as_risk(self, floor: str) -> None:
+        # Given
+        self.quote_result = FinalOrderQuoteCheckResult(
+            executable_price=Decimal("358.35"), price_floor=Decimal(floor),
+        )
+        # When
+        result = self.service._submit_limit_order(
+            "SELL", "AAPL.US", Decimal("1"), Decimal("370.58"), self.broker,
+            RiskController(), ServerChanNotifier(""), bind_final_executable_price=True,
+            exit_allow_loss_exit=True, reduce_only=True,
+        )
+        # Then
+        assert result is not None
+        assert result.status == "SKIPPED"
+        assert self.skips[0]["skip_category"] == "RISK"
+        assert self.broker.submissions == []
+
+    def test_pre_submit_risk_check_invoked_exactly_once_with_floor(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # Given
+        invocations: list[str] = []
+        boundary = self.service.pre_submit_risk_check
+
+        def observe(request: _PreSubmitRiskRequest, broker: BrokerGateway) -> OrderStatus | ApprovedOrder:
+            invocations.append("called")
+            return boundary(request, broker)
+
+        monkeypatch.setattr(self.service, "pre_submit_risk_check", observe)
+        # When
+        result = self.service._submit_limit_order(
+            "SELL", "AAPL.US", Decimal("1"), Decimal("370.58"), self.broker,
+            RiskController(), ServerChanNotifier(""), bind_final_executable_price=True,
+            exit_allow_loss_exit=True, reduce_only=True,
+        )
+        # Then
+        assert result is not None
+        assert result.status == "SUBMITTED"
+        assert invocations == ["called"]
+        assert len(self.broker.submissions) == 1
+        assert self.broker.submissions[0].price == Decimal("368.73")
 
 
 class TestTradeExecutionServiceBasics:

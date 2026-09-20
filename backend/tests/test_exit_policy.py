@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.core.exit_policy import (
     ExitPolicyConfig,
     ExitQuote,
     PositionExitContext,
     ReductionCause,
+    ReductionDecision,
     evaluate_exit_policy,
 )
 
@@ -30,16 +33,20 @@ def _evaluate(
     quote: ExitQuote | None = None,
     now: datetime = NOW,
     flatten: bool = False,
-    combined_pnl: float = 0,
-):
+    realized_daily_pnl: float = 0,
+    unrealized_pnl: float | None = 0,
+    price_evidence_trusted: bool = True,
+) -> ReductionDecision | None:
     return evaluate_exit_policy(
         config=ExitPolicyConfig(stop_loss_pct=1, max_holding_minutes=60),
         position=position or _position(),
         quote=quote or ExitQuote(last=100, bid=99.9, ask=100.1),
         now=now,
         in_flatten_window=flatten,
-        combined_daily_pnl=combined_pnl,
+        realized_daily_pnl=realized_daily_pnl,
+        unrealized_pnl=unrealized_pnl,
         max_daily_loss=500,
+        price_evidence_trusted=price_evidence_trusted,
     )
 
 
@@ -64,7 +71,7 @@ def test_short_price_stop_uses_executable_ask() -> None:
 def test_daily_loss_has_priority_over_price_stop() -> None:
     decision = _evaluate(
         quote=ExitQuote(last=98, bid=98, ask=98.1),
-        combined_pnl=-500,
+        unrealized_pnl=-500,
     )
     assert decision is not None
     assert decision.cause == ReductionCause.DAILY_LOSS
@@ -91,8 +98,77 @@ def test_missing_opened_at_disables_only_time_stop() -> None:
     assert _evaluate(position=position, now=NOW + timedelta(days=1)) is None
 
 
-def test_invalid_quote_cannot_trigger_exit() -> None:
-    assert _evaluate(quote=ExitQuote(last=0, bid=0, ask=0), combined_pnl=-1000) is None
+@pytest.mark.parametrize("realized_daily_pnl, unrealized_pnl, expected", [
+    (0, -1000, None),
+    (-1000, None, ReductionCause.DAILY_LOSS),
+])
+def test_invalid_quote_cannot_trigger_exit(
+    realized_daily_pnl: float, unrealized_pnl: float | None,
+    expected: ReductionCause | None,
+) -> None:
+    """Invalid quotes cannot establish unrealized loss; realized breaches need no quote."""
+    decision = _evaluate(
+        quote=ExitQuote(last=0, bid=0, ask=0),
+        realized_daily_pnl=realized_daily_pnl, unrealized_pnl=unrealized_pnl,
+    )
+    if expected is None:
+        assert decision is None
+    else:
+        assert decision is not None
+        assert decision.cause == expected
+
+
+def test_time_stop_fires_without_executable_price() -> None:
+    decision = _evaluate(quote=ExitQuote(0, 0, 0), now=NOW + timedelta(hours=2))
+    assert decision is not None
+    assert decision.cause == ReductionCause.TIME_STOP
+    assert decision.trigger_price == 0.0
+
+
+def test_eod_flatten_fires_without_executable_price() -> None:
+    decision = _evaluate(quote=ExitQuote(0, 0, 0), flatten=True)
+    assert decision is not None
+    assert decision.cause == ReductionCause.EOD_FLATTEN
+    assert decision.trigger_price == 0.0
+
+
+def test_realized_daily_loss_breach_fires_without_quote() -> None:
+    decision = _evaluate(
+        quote=ExitQuote(0, 0, 0), realized_daily_pnl=-1000, unrealized_pnl=None,
+        price_evidence_trusted=False,
+    )
+    assert decision is not None
+    assert decision.cause == ReductionCause.DAILY_LOSS
+    assert decision.trigger_price == 0.0
+
+
+def test_unrealized_daily_loss_requires_trusted_valuation() -> None:
+    decision = _evaluate(
+        realized_daily_pnl=-100, unrealized_pnl=-900, price_evidence_trusted=False,
+    )
+    assert decision is None
+
+
+def test_price_stop_suppressed_when_price_evidence_untrusted() -> None:
+    decision = _evaluate(quote=ExitQuote(98, 98, 98.1), price_evidence_trusted=False)
+    assert decision is None
+
+
+def test_untrusted_price_evidence_still_allows_time_stop() -> None:
+    decision = _evaluate(
+        quote=ExitQuote(98, 98, 98.1), price_evidence_trusted=False,
+        now=NOW + timedelta(hours=2),
+    )
+    assert decision is not None
+    assert decision.cause == ReductionCause.TIME_STOP
+
+
+def test_nan_bid_never_falls_back_to_last_for_price_stop() -> None:
+    decision = _evaluate(
+        quote=ExitQuote(last=98, bid=float("nan"), ask=float("nan")),
+        price_evidence_trusted=False,
+    )
+    assert decision is None
 
 
 def _evaluate_with_profit_lock(
@@ -103,7 +179,8 @@ def _evaluate_with_profit_lock(
     activation_pct: float = 0.4,
     lock_pct: float = 0.2,
     combined_pnl: float = 0,
-):
+    price_evidence_trusted: bool = True,
+) -> ReductionDecision | None:
     return evaluate_exit_policy(
         config=ExitPolicyConfig(
             stop_loss_pct=1,
@@ -115,8 +192,10 @@ def _evaluate_with_profit_lock(
         quote=quote,
         now=NOW,
         in_flatten_window=False,
-        combined_daily_pnl=combined_pnl,
+        realized_daily_pnl=0,
+        unrealized_pnl=combined_pnl,
         max_daily_loss=500,
+        price_evidence_trusted=price_evidence_trusted,
         peak_executable_price=peak,
     )
 
@@ -194,3 +273,10 @@ def test_short_profit_lock_symmetric() -> None:
     assert decision.cause == ReductionCause.PROFIT_LOCK
     assert decision.threshold_price == 99.8  # 100 entry * (1 - 0.2%)
 
+
+def test_profit_lock_suppressed_when_price_evidence_untrusted() -> None:
+    decision = _evaluate_with_profit_lock(
+        quote=ExitQuote(100.19, 100.19, 100.21), peak=100.41,
+        price_evidence_trusted=False,
+    )
+    assert decision is None

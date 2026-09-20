@@ -40,6 +40,36 @@ class TestSettings:
         assert s.watchlist_quant_v6_provider_page_timeout_seconds == 30.0
         assert s.watchlist_quant_v6_compute_workers == 4
         assert s.watchlist_quant_v6_pipeline_memory_limit_mib == 2_048
+        assert s.degraded_exit_max_adverse_deviation_pct == 0.5
+        assert s.degraded_exit_reference_max_age_seconds == 300
+
+    @pytest.mark.parametrize("value", ["30", "0", "1801"])
+    def test_degraded_exit_reference_age_rejects_values_at_or_below_quote_freshness(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_DEGRADED_EXIT_REFERENCE_MAX_AGE_SECONDS",
+            value,
+        )
+
+        with pytest.raises(ValidationError):
+            Settings()
+
+    @pytest.mark.parametrize("value", ["0", "1.01", "5"])
+    def test_degraded_exit_deviation_rejects_values_wider_than_the_hard_stop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_DEGRADED_EXIT_MAX_ADVERSE_DEVIATION_PCT",
+            value,
+        )
+
+        with pytest.raises(ValidationError):
+            Settings()
 
     def test_quant_v6_evaluation_controls_read_environment(
         self,

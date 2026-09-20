@@ -1056,6 +1056,36 @@ class Settings(BaseSettings):
         allow_inf_nan=False,
         validation_alias="AUTO_TRADE_LLM_MAX_ORDER_PRICE_DEVIATION_PCT",
     )
+    degraded_exit_max_adverse_deviation_pct: float = Field(
+        default=0.5,
+        gt=0,
+        le=1.0,
+        allow_inf_nan=False,
+        validation_alias=(
+            "AUTO_TRADE_DEGRADED_EXIT_MAX_ADVERSE_DEVIATION_PCT"
+        ),
+        description=(
+            "Maximum adverse quote deviation a degraded-quote protective exit "
+            "may still accept. Default 0.5% is half the 1.0% hard stop so "
+            "slippage never dominates the loss; the 1.0% ceiling keeps it "
+            "from ever exceeding the hard stop itself."
+        ),
+    )
+    degraded_exit_reference_max_age_seconds: int = Field(
+        default=300,
+        gt=30,
+        le=1800,
+        validation_alias=(
+            "AUTO_TRADE_DEGRADED_EXIT_REFERENCE_MAX_AGE_SECONDS"
+        ),
+        description=(
+            "Maximum age of the fallback reference price a degraded-quote "
+            "protective exit may use. Must exceed the 30s quote-freshness "
+            "ceiling (a reference at or below it could never be used in the "
+            "degraded path) and stays far under the 60-minute hard "
+            "max-holding limit."
+        ),
+    )
 
     cors_origins: str = Field(
         default="http://localhost:3000,http://localhost:8080",

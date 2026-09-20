@@ -157,6 +157,7 @@ class FinalOrderQuoteCheckResult:
     issue: str = ""
     bid: Decimal | None = None
     ask: Decimal | None = None
+    price_floor: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -1601,6 +1602,23 @@ class TradeExecutionService:
         return price
 
     @staticmethod
+    def _normalize_price_floor(
+        symbol: str,
+        action: str,
+        floor: Decimal,
+    ) -> Decimal:
+        """Round the reduction price bound toward safety on the market tick."""
+        rounding = ROUND_CEILING if action == "SELL" else ROUND_FLOOR
+        upper_symbol = symbol.upper()
+        if upper_symbol.endswith(".US"):
+            return floor.quantize(US_PRICE_TICK, rounding=rounding)
+        if upper_symbol.endswith(".HK"):
+            tick = _hk_tick_for(floor)
+            steps = (floor / tick).to_integral_value(rounding=rounding)
+            return (steps * tick).quantize(tick)
+        return floor
+
+    @staticmethod
     def _coerce_non_negative_decimal(value: object) -> Decimal:
         try:
             amount = Decimal(str(value))
@@ -2635,6 +2653,7 @@ class TradeExecutionService:
         reduce_only: bool = False,
     ) -> OrderStatus | ApprovedOrder:
         protective_commit_required = False
+        final_price_floor: Decimal | None = None
         boundary_result = self.pre_submit_risk_check(
             _PreSubmitRiskRequest(
                 action=action,
@@ -2782,6 +2801,7 @@ class TradeExecutionService:
                 final_executable_price = quote_check_result.executable_price
                 final_bid = quote_check_result.bid
                 final_ask = quote_check_result.ask
+                final_price_floor = quote_check_result.price_floor
             else:
                 quote_issue = quote_check_result
             if quote_issue:
@@ -2833,6 +2853,27 @@ class TradeExecutionService:
                     "fresh executable BBO price is unavailable",
                     skip_category="RISK",
                 )
+            if final_price_floor is not None:
+                if not final_price_floor.is_finite() or final_price_floor <= 0:
+                    return self._skip_order(
+                        symbol,
+                        action,
+                        "reduce-only price floor must be finite and greater than zero",
+                        skip_category="RISK",
+                    )
+                floor_tick = self._normalize_price_floor(symbol, action, final_price_floor)
+                if floor_tick <= 0:
+                    return self._skip_order(
+                        symbol,
+                        action,
+                        "reduce-only price floor is below the minimum price tick",
+                        skip_category="RISK",
+                    )
+                # Loss exits bypass fees, never the caller's execution price bound.
+                if action == "SELL":
+                    marketable_price = max(marketable_price, floor_tick)
+                elif action == "BUY_TO_COVER":
+                    marketable_price = min(marketable_price, floor_tick)
             if (
                 action in _POSITION_REDUCING_ACTIONS
                 and not exit_allow_loss_exit

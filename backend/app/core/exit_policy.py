@@ -54,8 +54,10 @@ def evaluate_exit_policy(
     quote: ExitQuote,
     now: datetime,
     in_flatten_window: bool,
-    combined_daily_pnl: float,
+    realized_daily_pnl: float,
+    unrealized_pnl: float | None,
     max_daily_loss: float,
+    price_evidence_trusted: bool = True,
     peak_executable_price: float | None = None,
 ) -> ReductionDecision | None:
     """Return the highest-priority deterministic reduction for a position."""
@@ -63,64 +65,83 @@ def evaluate_exit_policy(
     if side not in {"LONG", "SHORT"} or position.quantity <= 0:
         return None
     executable_price = _executable_price(side, quote)
-    if executable_price <= 0:
-        return None
+    trigger_price = executable_price if executable_price > 0 else 0.0
     action = "SELL" if side == "LONG" else "BUY_TO_COVER"
 
     if (
-        math.isfinite(combined_daily_pnl)
+        math.isfinite(realized_daily_pnl)
         and math.isfinite(max_daily_loss)
         and max_daily_loss > 0
-        and combined_daily_pnl <= -max_daily_loss
+        and realized_daily_pnl <= -max_daily_loss
     ):
         return ReductionDecision(
             action=action,
             cause=ReductionCause.DAILY_LOSS,
             reason=(
-                f"daily loss limit reached: combined={combined_daily_pnl:.2f}, "
+                f"daily loss limit reached: realized={realized_daily_pnl:.2f}, "
                 f"limit={max_daily_loss:.2f}"
             ),
-            trigger_price=executable_price,
+            trigger_price=trigger_price,
             threshold_price=None,
         )
 
-    if config.stop_loss_pct > 0 and position.avg_entry_price > 0:
-        stop_fraction = config.stop_loss_pct / 100
-        if side == "LONG":
-            stop_price = position.avg_entry_price * (1 - stop_fraction)
-            stop_hit = executable_price <= stop_price
-        else:
-            stop_price = position.avg_entry_price * (1 + stop_fraction)
-            stop_hit = executable_price >= stop_price
-        if stop_hit:
-            return ReductionDecision(
-                action=action,
-                cause=ReductionCause.PRICE_STOP,
-                reason=(
-                    f"{side.lower()} hard stop reached: executable={executable_price:.4f}, "
-                    f"stop={stop_price:.4f}"
-                ),
-                trigger_price=executable_price,
-                threshold_price=stop_price,
-            )
+    if price_evidence_trusted and executable_price > 0:
+        if unrealized_pnl is not None:
+            combined_daily_pnl = realized_daily_pnl + unrealized_pnl
+            if (
+                math.isfinite(combined_daily_pnl)
+                and math.isfinite(max_daily_loss)
+                and max_daily_loss > 0
+                and combined_daily_pnl <= -max_daily_loss
+            ):
+                return ReductionDecision(
+                    action=action,
+                    cause=ReductionCause.DAILY_LOSS,
+                    reason=(
+                        f"daily loss limit reached: combined={combined_daily_pnl:.2f}, "
+                        f"limit={max_daily_loss:.2f}"
+                    ),
+                    trigger_price=trigger_price,
+                    threshold_price=None,
+                )
 
-    profit_lock = _profit_lock_decision(
-        config=config,
-        position=position,
-        side=side,
-        action=action,
-        executable_price=executable_price,
-        peak_executable_price=peak_executable_price,
-    )
-    if profit_lock is not None:
-        return profit_lock
+        if config.stop_loss_pct > 0 and position.avg_entry_price > 0:
+            stop_fraction = config.stop_loss_pct / 100
+            if side == "LONG":
+                stop_price = position.avg_entry_price * (1 - stop_fraction)
+                stop_hit = executable_price <= stop_price
+            else:
+                stop_price = position.avg_entry_price * (1 + stop_fraction)
+                stop_hit = executable_price >= stop_price
+            if stop_hit:
+                return ReductionDecision(
+                    action=action,
+                    cause=ReductionCause.PRICE_STOP,
+                    reason=(
+                        f"{side.lower()} hard stop reached: executable={executable_price:.4f}, "
+                        f"stop={stop_price:.4f}"
+                    ),
+                    trigger_price=trigger_price,
+                    threshold_price=stop_price,
+                )
+
+        profit_lock = _profit_lock_decision(
+            config=config,
+            position=position,
+            side=side,
+            action=action,
+            executable_price=executable_price,
+            peak_executable_price=peak_executable_price,
+        )
+        if profit_lock is not None:
+            return profit_lock
 
     if in_flatten_window:
         return ReductionDecision(
             action=action,
             cause=ReductionCause.EOD_FLATTEN,
             reason="end-of-day flatten window reached",
-            trigger_price=executable_price,
+            trigger_price=trigger_price,
             threshold_price=None,
         )
 
@@ -136,7 +157,7 @@ def evaluate_exit_policy(
             action=action,
             cause=ReductionCause.TIME_STOP,
             reason=f"maximum holding time reached: {config.max_holding_minutes} minutes",
-            trigger_price=executable_price,
+            trigger_price=trigger_price,
             threshold_price=None,
         )
     return None
@@ -208,6 +229,8 @@ def _executable_price(side: str, quote: ExitQuote) -> float:
     candidate = quote.bid if side == "LONG" else quote.ask
     if math.isfinite(candidate) and candidate > 0:
         return candidate
+    # This fallback can reach price-dependent exits only when price_evidence_trusted
+    # is True; the runner requires a valid executable field before granting trust.
     if math.isfinite(quote.last) and quote.last > 0:
         return quote.last
     return 0.0

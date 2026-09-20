@@ -158,6 +158,38 @@ def test_deploy_files_expose_p0_hard_safety_controls() -> None:
     assert "AUTO_TRADE_ALLOW_SHORT_ENTRIES=" not in env_example
 
 
+def test_deploy_files_expose_degraded_exit_pricing_controls() -> None:
+    compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+    dockerhub = (ROOT / "docker-compose.dockerhub.yaml").read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    keys = {
+        "AUTO_TRADE_DEGRADED_EXIT_MAX_ADVERSE_DEVIATION_PCT",
+        "AUTO_TRADE_DEGRADED_EXIT_REFERENCE_MAX_AGE_SECONDS",
+    }
+    for key in keys:
+        assert f"{key}=" in compose
+        assert f"{key}=" in dockerhub
+        assert f"{key}=" in env_example
+
+    from app.config import Settings
+
+    compose_deviation_default = (
+        "AUTO_TRADE_DEGRADED_EXIT_MAX_ADVERSE_DEVIATION_PCT="
+        "${AUTO_TRADE_DEGRADED_EXIT_MAX_ADVERSE_DEVIATION_PCT:-"
+        f"{Settings().degraded_exit_max_adverse_deviation_pct}}}"
+    )
+    assert compose_deviation_default in compose
+    assert compose_deviation_default in dockerhub
+
+    compose_age_default = (
+        "AUTO_TRADE_DEGRADED_EXIT_REFERENCE_MAX_AGE_SECONDS="
+        "${AUTO_TRADE_DEGRADED_EXIT_REFERENCE_MAX_AGE_SECONDS:-"
+        f"{Settings().degraded_exit_reference_max_age_seconds}}}"
+    )
+    assert compose_age_default in compose
+    assert compose_age_default in dockerhub
+
+
 def test_deploy_files_expose_universe_and_live_regime_controls() -> None:
     keys = {
         "AUTO_TRADE_UNIVERSE_SELECTION_ENABLED",
