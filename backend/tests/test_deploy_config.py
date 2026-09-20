@@ -372,3 +372,42 @@ def test_compose_defaults_do_not_shadow_quant_v6_retention_kill_switch() -> None
         assert int(match.group(1)) == expected, (
             f"{name} fallback {match.group(1)} shadows the Settings default {expected}"
         )
+
+
+def test_deploy_files_expose_extended_hours_protective_exit_control() -> None:
+    """Compose must forward the extended-hours protective-exit opt-in.
+
+    A Settings field absent from compose is silently ignored at runtime: the
+    container keeps the field default regardless of what the operator sets in
+    .env (recorded auto-primary-switch incident). The ``:-`` fallback must
+    equal the Settings default so an unset variable ships fail-closed.
+    """
+    from app.config import Settings
+
+    compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+    dockerhub_compose = (
+        ROOT / "docker-compose.dockerhub.yaml"
+    ).read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    # Content assertions come first so a missing deployment entry fails as an
+    # AssertionError on file content, not as a missing Settings attribute.
+    assert "AUTO_TRADE_EXTENDED_HOURS_PROTECTIVE_EXITS_ENABLED=" in compose, (
+        "docker-compose.yaml must forward the extended-hours protective-exit flag"
+    )
+    assert (
+        "AUTO_TRADE_EXTENDED_HOURS_PROTECTIVE_EXITS_ENABLED="
+        in dockerhub_compose
+    ), "docker-compose.dockerhub.yaml must forward the extended-hours protective-exit flag"
+    assert (
+        "AUTO_TRADE_EXTENDED_HOURS_PROTECTIVE_EXITS_ENABLED=" in env_example
+    ), ".env.example must document the extended-hours protective-exit flag"
+
+    expected_default = (
+        "AUTO_TRADE_EXTENDED_HOURS_PROTECTIVE_EXITS_ENABLED="
+        "${AUTO_TRADE_EXTENDED_HOURS_PROTECTIVE_EXITS_ENABLED:-"
+        f"{str(Settings().extended_hours_protective_exits_enabled).lower()}"
+        "}"
+    )
+    assert expected_default in compose
+    assert expected_default in dockerhub_compose

@@ -1168,3 +1168,30 @@ class TestSettings:
         assert s.minimax_model == "MiniMax-M3"
         assert s.minimax_thinking_type == "adaptive"
         assert s.minimax_max_completion_tokens == 8192
+
+    def test_extended_hours_protective_exits_default_false(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.delenv(
+            "AUTO_TRADE_EXTENDED_HOURS_PROTECTIVE_EXITS_ENABLED",
+            raising=False,
+        )
+        # Read the true code default, not the developer-local .env.
+        monkeypatch.chdir(tmp_path)
+
+        assert Settings().extended_hours_protective_exits_enabled is False
+
+    @pytest.mark.parametrize("value", ["true", "1"])
+    def test_extended_hours_protective_exits_opt_in_reads_environment(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+    ) -> None:
+        monkeypatch.setenv(
+            "AUTO_TRADE_EXTENDED_HOURS_PROTECTIVE_EXITS_ENABLED",
+            value,
+        )
+
+        assert Settings().extended_hours_protective_exits_enabled is True

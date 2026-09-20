@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import math
@@ -43,6 +44,10 @@ RETRYABLE_EXC = _retryable_exc
 
 logger = logging.getLogger("auto_trade.broker")
 DisconnectHook = Callable[[str], None]
+
+
+class ExtendedHoursUnsupportedError(RuntimeError):
+    """The requested extended-hours session cannot be submitted safely."""
 
 _RETRYABLE_MESSAGE_MARKERS = (
     "限流",
@@ -177,6 +182,7 @@ class OrderStatusResult:
     fee_currency: str = ""
     broker_submitted_at: datetime | None = None
     broker_updated_at: datetime | None = None
+    outside_rth: str = ""
 
 
 @dataclass
@@ -1604,12 +1610,19 @@ class BrokerGateway:
                 self._subscribed_symbols.update(missing_symbols)
                 self._subscription_topics = list(topics)
 
-    def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
+    def submit_limit_order(
+        self, symbol: str, side: str, quantity: Decimal, price: Decimal,
+        *, outside_rth: str | None = None,
+    ) -> OrderResult:
         # NOTE: submit_limit_order 故意不使用 _call_with_retry。
         # 下单是 non-idempotent 操作 — 网络重试可能导致重复下单(双倍仓位)。
         # 网络失败由调用方(AppRunner)在下一循环重新决策,而非 broker 层重试。
         # 对比:cancel_order 用了重试,因为取消是幂等的(取消已取消订单无害)。
-        return self._submit_limit_order_inner(symbol, side, quantity, price)
+        if outside_rth is None:
+            return self._submit_limit_order_inner(symbol, side, quantity, price)
+        return self._submit_limit_order_inner(
+            symbol, side, quantity, price, outside_rth=outside_rth,
+        )
 
     def _submit_limit_order_inner(
         self,
@@ -1617,6 +1630,8 @@ class BrokerGateway:
         side: str,
         quantity: Decimal,
         price: Decimal,
+        *,
+        outside_rth: str | None = None,
     ) -> OrderResult:
         with self._lock:
             self._init_clients()
@@ -1630,6 +1645,33 @@ class BrokerGateway:
             lo_type = getattr(OrderType, "LO", "LO") if OrderType else "LO"
             day_tif = getattr(TimeInForceType, "Day", "DAY") if TimeInForceType else "DAY"
 
+            session_kwargs: dict[str, object] = {}
+            if outside_rth is not None:
+                if outside_rth != "ANY_TIME":
+                    raise ExtendedHoursUnsupportedError(
+                        f"unsupported outside_rth session: {outside_rth}"
+                    )
+                OutsideRTH = getattr(module, "OutsideRTH", None)
+                any_time = getattr(OutsideRTH, "AnyTime", None)
+                if any_time is None:
+                    raise ExtendedHoursUnsupportedError(
+                        "OutsideRTH.AnyTime not found in SDK"
+                    )
+                try:
+                    parameters = inspect.signature(self._trade_ctx.submit_order).parameters
+                except (TypeError, ValueError) as exc:
+                    raise ExtendedHoursUnsupportedError(
+                        "cannot inspect SDK submit_order outside_rth support"
+                    ) from exc
+                if "outside_rth" not in parameters and not any(
+                    parameter.kind is inspect.Parameter.VAR_KEYWORD
+                    for parameter in parameters.values()
+                ):
+                    raise ExtendedHoursUnsupportedError(
+                        "SDK submit_order does not accept outside_rth"
+                    )
+                session_kwargs["outside_rth"] = any_time
+
             response = self._trade_ctx.submit_order(
                 symbol=symbol,
                 order_type=lo_type,
@@ -1638,6 +1680,7 @@ class BrokerGateway:
                 time_in_force=day_tif,
                 submitted_price=price,
                 remark="auto-trade",
+                **session_kwargs,
             )
 
             order_id = str(getattr(response, "order_id", getattr(response, "broker_order_id", "")) or "").strip()
@@ -1659,6 +1702,13 @@ class BrokerGateway:
                 self._init_clients()
                 detail = self._trade_ctx.order_detail(order_id)
                 actual_fee, fee_currency = _order_charge(detail)
+                raw_session = _get_value(detail, "outside_rth", "")
+                session_name = str(getattr(raw_session, "name", raw_session)).split(".")[-1]
+                outside_rth = {
+                    "ANYTIME": "ANY_TIME",
+                    "RTHONLY": "RTH_ONLY",
+                    "OVERNIGHT": "OVERNIGHT",
+                }.get(session_name.upper().replace("_", ""), "")
                 return OrderStatusResult(
                     broker_order_id=_require_matching_order_id(detail, order_id),
                     status=_normalize_order_status(_get_value(detail, "status", "SUBMITTED")),
@@ -1674,6 +1724,7 @@ class BrokerGateway:
                     ),
                     actual_fee=actual_fee,
                     fee_currency=fee_currency,
+                    outside_rth=outside_rth,
                     broker_submitted_at=_parse_datetime(
                         _get_value(detail, "submitted_at", None)
                     ),

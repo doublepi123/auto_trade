@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Callable, Final, Optional, Protocol, assert_ne
 
 from app.config import settings
 from app.core.board_lot import BoardLotResolution, quantize_to_board_lot
+from app.core.broker import ExtendedHoursUnsupportedError
+from app.core.execution_session import resolve_execution_session
 from app.core.fees import (
     estimate_round_trip_fee,
     evaluate_long_round_trip_edge,
@@ -136,6 +138,7 @@ class OrderStatus:
     fee_currency: str = ""
     broker_submitted_at: datetime | None = None
     broker_updated_at: datetime | None = None
+    outside_rth: str = ""
 
     @staticmethod
     def _positive(value: Optional[Decimal]) -> Decimal:
@@ -185,6 +188,9 @@ class _PendingOrder:
     restore_engine_snapshot_fn: Callable[[EngineSnapshot], None] | None = None
     timeout_recovery_attempted: bool = False
     known_terminal_status: str = ""
+    extended_hours: bool = False
+    extended_hours_key: tuple[str, str, date] | None = None
+    extended_hours_cancel_requested: bool = False
 
 
 @dataclass
@@ -248,6 +254,14 @@ class ApprovedOrder:
     bid: Decimal | None = None
     ask: Decimal | None = None
     protective_commit_required: bool = False
+    outside_rth: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExtendedHoursExitDecision:
+    permitted: bool
+    phase: str
+    reason: str
 
 
 _BoardLotResolver = Callable[[str], BoardLotResolution]
@@ -298,6 +312,8 @@ class _TerminalCallbackStore(Protocol):
 
 
 class TradeExecutionService:
+    _extended_hours_sdk_unsupported: bool = False
+
     def __init__(
         self,
         record_order: Callable[..., None],
@@ -328,6 +344,8 @@ class TradeExecutionService:
         *,
         board_lot_resolver: _BoardLotResolver | None = None,
         record_board_lot_residual: _RecordBoardLotResidual | None = None,
+        extended_hours_protective_exits_enabled: bool = False,
+        paper_account_confirmed: bool = False,
     ) -> None:
         self._record_order = record_order
         self._update_order_status = update_order_status
@@ -363,6 +381,12 @@ class TradeExecutionService:
         self._board_lot_resolver = board_lot_resolver
         self._record_board_lot_residual = record_board_lot_residual
         self._degraded_lot_rejections: dict[str, tuple[Decimal, date]] = {}
+        self.extended_hours_protective_exits_enabled = extended_hours_protective_exits_enabled
+        self.paper_account_confirmed = paper_account_confirmed
+        self._extended_hours_context: tuple[str, str, datetime] | None = None
+        self._extended_hours_unsupported: set[tuple[str, str, date]] = set()
+        self._extended_hours_attempts: dict[tuple[str, str, date], int] = {}
+        self._extended_hours_retry_at: dict[tuple[str, str, date], float] = {}
         self._state_lock = RLock()
         self._submission_lock = RLock()
         self._pending_orders: dict[str, _PendingOrder] = {}
@@ -375,6 +399,51 @@ class TradeExecutionService:
         self._fill_finalization_in_flight: set[str] = set()
         self._finalized_order_ids: set[str] = set()
         self._active_execution_context: dict[str, object] = {}
+
+    def extended_hours_exit_decision(
+        self, *, action: str, symbol: str, market: str, reduce_only: bool,
+        instant: datetime | None = None,
+    ) -> ExtendedHoursExitDecision:
+        """Shared in-memory permission check; never performs broker I/O."""
+        if not (reduce_only and action in _POSITION_REDUCING_ACTIONS):
+            return ExtendedHoursExitDecision(False, "UNKNOWN", "extended hours require a reduce-only exit")
+        if not self.extended_hours_protective_exits_enabled:
+            return ExtendedHoursExitDecision(False, "UNKNOWN", "extended-hours protective exits are disabled")
+        if self.paper_account_confirmed:
+            return ExtendedHoursExitDecision(False, "UNKNOWN", "paper account does not support extended hours")
+        now = instant if instant is not None else datetime.now(timezone.utc)
+        session = resolve_execution_session(market, now)
+        if not session.extended_hours_executable:
+            return ExtendedHoursExitDecision(False, session.phase, session.reason)
+        key = (symbol.upper(), session.phase, trade_day_for(market, now))
+        with self._state_lock:
+            if self._extended_hours_sdk_unsupported:
+                return ExtendedHoursExitDecision(False, session.phase, "SDK extended-hours execution is unsupported")
+            if key in self._extended_hours_unsupported:
+                return ExtendedHoursExitDecision(False, session.phase, "extended-hours execution is unsupported for this symbol and phase")
+            if time.monotonic() < self._extended_hours_retry_at.get(key, 0):
+                return ExtendedHoursExitDecision(False, session.phase, "extended-hours retry backoff has not elapsed")
+            if self._extended_hours_attempts.get(key, 0) >= 3:
+                return ExtendedHoursExitDecision(False, session.phase, "extended-hours phase attempt cap reached")
+        return ExtendedHoursExitDecision(True, session.phase, session.reason)
+
+    def _extended_hours_terminal_outcome(
+        self, key: tuple[str, str, date], *, unsupported: bool,
+    ) -> None:
+        """Retain reduction intent while bounding retries after definitive outcomes."""
+        with self._state_lock:
+            attempts = self._extended_hours_attempts.get(key, 0) + 1
+            self._extended_hours_attempts[key] = attempts
+            self._extended_hours_retry_at[key] = time.monotonic() + 60.0
+            if unsupported or attempts >= 3:
+                self._extended_hours_unsupported.add(key)
+
+    def _active_extended_hours_key(self) -> tuple[str, str, date] | None:
+        context = self._extended_hours_context
+        if context is None:
+            return None
+        symbol, phase, decided_at = context
+        return (symbol.upper(), phase, trade_day_for(market_for_symbol(symbol), decided_at))
 
     @staticmethod
     def _accepts_positional_args(callback: Callable[..., object], count: int) -> bool:
@@ -431,6 +500,9 @@ class TradeExecutionService:
                     submitted_at=pending.submitted_at,
                     restore_engine_snapshot_fn=pending.restore_engine_snapshot_fn,
                     timeout_recovery_attempted=pending.timeout_recovery_attempted,
+                    extended_hours=pending.extended_hours,
+                    extended_hours_key=pending.extended_hours_key,
+                    extended_hours_cancel_requested=pending.extended_hours_cancel_requested,
                 )
             self._pending_orders_by_id = refreshed
             self._rebuild_pending_orders_by_symbol_locked()
@@ -468,6 +540,9 @@ class TradeExecutionService:
                         submitted_at=existing.submitted_at,
                         restore_engine_snapshot_fn=existing.restore_engine_snapshot_fn if existing.restore_engine_snapshot_fn is not None else pending.restore_engine_snapshot_fn,
                         timeout_recovery_attempted=existing.timeout_recovery_attempted,
+                        extended_hours=existing.extended_hours or pending.extended_hours,
+                        extended_hours_key=existing.extended_hours_key or pending.extended_hours_key,
+                        extended_hours_cancel_requested=existing.extended_hours_cancel_requested,
                     )
                 merged_by_id[pending.broker_order_id] = pending
 
@@ -876,6 +951,7 @@ class TradeExecutionService:
                 )
             finally:
                 self._active_execution_context = {}
+                self._extended_hours_context = None
 
     def _execute_under_submission_guard(
         self,
@@ -930,12 +1006,17 @@ class TradeExecutionService:
         if trading_session_mode == "RTH_ONLY":
             if not is_trading_hours(market):
                 # SESSION skip records ORDER_SKIPPED only; TRADING_SESSION_BLOCKED is layer A.
-                return self._skip_order(
-                    symbol,
-                    action,
-                    f"non-RTH for {market}",
-                    skip_category="SESSION",
+                decided_at = datetime.now(timezone.utc)
+                decision = self.extended_hours_exit_decision(
+                    action=action, symbol=symbol, market=market,
+                    reduce_only=reduce_only, instant=decided_at,
                 )
+                if not decision.permitted:
+                    return self._skip_order(
+                        symbol, action, f"non-RTH for {market}: {decision.reason}",
+                        skip_category="SESSION",
+                    )
+                self._extended_hours_context = (symbol, decision.phase, decided_at)
             if action in _ENTRY_ACTIONS and is_opening_warmup(
                 market,
                 settings.trading_open_warmup_minutes,
@@ -2549,14 +2630,30 @@ class TradeExecutionService:
             submit_started_at = datetime.now(timezone.utc)
             submit_started_monotonic = time.perf_counter()
 
-            def submit_approved_order() -> OrderResult:
+            def submit_approved_order() -> OrderResult | OrderStatus:
                 try:
+                    if approved_order.outside_rth is not None:
+                        return broker.submit_limit_order(
+                            approved_order.symbol,
+                            approved_order.side,
+                            approved_order.quantity,
+                            approved_order.price,
+                            outside_rth=approved_order.outside_rth,
+                        )
                     return broker.submit_limit_order(
                         approved_order.symbol,
                         approved_order.side,
                         approved_order.quantity,
                         approved_order.price,
                     )
+                except ExtendedHoursUnsupportedError as exc:
+                    TradeExecutionService._extended_hours_sdk_unsupported = True
+                    key = self._active_extended_hours_key()
+                    if key is not None:
+                        self._extended_hours_terminal_outcome(key, unsupported=True)
+                    if restore_engine_snapshot is not None and engine_snapshot is not None:
+                        restore_engine_snapshot(engine_snapshot)
+                    return self._skip_order(symbol, action, str(exc), skip_category="RISK")
                 except Exception as exc:
                     raise BrokerSubmissionUncertainError(
                         action=approved_order.action,
@@ -2614,6 +2711,8 @@ class TradeExecutionService:
             else:
                 broker_result = submit_approved_order()
 
+            if isinstance(broker_result, OrderStatus):
+                return broker_result
             return self._process_submitted_order(
                 precheck_result,
                 broker_result,
@@ -2853,6 +2952,16 @@ class TradeExecutionService:
                     "fresh executable BBO price is unavailable",
                     skip_category="RISK",
                 )
+            if self._extended_hours_context is not None:
+                extended_floor = price * (
+                    Decimal("0.995") if action == "SELL" else Decimal("1.005")
+                )
+                if final_price_floor is None:
+                    final_price_floor = extended_floor
+                elif action == "SELL":
+                    final_price_floor = max(final_price_floor, extended_floor)
+                else:
+                    final_price_floor = min(final_price_floor, extended_floor)
             if final_price_floor is not None:
                 if not final_price_floor.is_finite() or final_price_floor <= 0:
                     return self._skip_order(
@@ -2947,6 +3056,23 @@ class TradeExecutionService:
                 action,
                 risk_result.reason,
             )
+        outside_rth: str | None = None
+        if self._extended_hours_context is not None:
+            execution_market = market_for_symbol(symbol)
+            if not is_trading_hours(execution_market):
+                now = datetime.now(timezone.utc)
+                decision = self.extended_hours_exit_decision(
+                    action=action, symbol=symbol, market=execution_market,
+                    reduce_only=reduce_only, instant=now,
+                )
+                if not decision.permitted:
+                    return self._skip_order(
+                        symbol, action,
+                        f"execution session closed before submission: {decision.reason}",
+                        skip_category="SESSION",
+                    )
+                outside_rth = "ANY_TIME"
+                self._extended_hours_context = (symbol, decision.phase, now)
         return dataclass_replace(
             boundary_approval,
             price=(
@@ -2955,6 +3081,7 @@ class TradeExecutionService:
                 else boundary_approval.price
             ),
             protective_commit_required=protective_commit_required,
+            outside_rth=outside_rth,
         )
 
     @staticmethod
@@ -3217,6 +3344,7 @@ class TradeExecutionService:
                     engine_snapshot,
                     avg_price=avg_price,
                     restore_engine_snapshot_fn=restore_engine_snapshot,
+                    extended_hours=approved_order.outside_rth is not None,
                 )
             except OrderPersistenceError:
                 return self._recover_from_missing_order_record(
@@ -3248,6 +3376,14 @@ class TradeExecutionService:
             return order_status
 
         if order_status.status != "FILLED":
+            if approved_order.outside_rth is not None and order_status.status == "REJECTED":
+                key = self._active_extended_hours_key()
+                if key is not None:
+                    self._extended_hours_terminal_outcome(key, unsupported=True)
+                self._record_risk_event(f"extended-hours order {result.broker_order_id} rejected; phase disabled")
+                if restore_engine_snapshot is not None and engine_snapshot is not None:
+                    restore_engine_snapshot(engine_snapshot)
+                return order_status
             self._pause_after_failed_order(result.broker_order_id, order_status.status, risk, notify_risk_event)
             logger.warning("%s not filled: %s status=%s", action, result.broker_order_id, order_status.status)
             return order_status
@@ -3267,6 +3403,7 @@ class TradeExecutionService:
         *,
         avg_price: Decimal | None = None,
         restore_engine_snapshot_fn: Callable[[EngineSnapshot], None] | None = None,
+        extended_hours: bool = False,
     ) -> None:
         pending = _PendingOrder(
             broker=broker,
@@ -3283,6 +3420,8 @@ class TradeExecutionService:
             next_status_check_at=time.monotonic() + self._order_status_poll_interval_seconds,
             submitted_at=time.monotonic(),
             restore_engine_snapshot_fn=restore_engine_snapshot_fn,
+            extended_hours=extended_hours,
+            extended_hours_key=self._active_extended_hours_key() if extended_hours else None,
         )
         with self._state_lock:
             existing_by_id = self._pending_orders_by_id.get(
@@ -3343,6 +3482,9 @@ class TradeExecutionService:
                         existing_by_id.timeout_recovery_attempted
                         or pending.timeout_recovery_attempted
                     ),
+                    extended_hours=existing_by_id.extended_hours or pending.extended_hours,
+                    extended_hours_key=existing_by_id.extended_hours_key or pending.extended_hours_key,
+                    extended_hours_cancel_requested=existing_by_id.extended_hours_cancel_requested,
                 )
             self._pending_orders_by_id[pending.broker_order_id] = pending
             self._rebuild_pending_orders_by_symbol_locked()
@@ -3431,6 +3573,9 @@ class TradeExecutionService:
             submitted_at=pending.submitted_at,
             restore_engine_snapshot_fn=pending.restore_engine_snapshot_fn,
             timeout_recovery_attempted=pending.timeout_recovery_attempted,
+            extended_hours=pending.extended_hours,
+            extended_hours_key=pending.extended_hours_key,
+            extended_hours_cancel_requested=pending.extended_hours_cancel_requested,
         )
         with self._state_lock:
             self._pending_orders_by_id[updated_pending.broker_order_id] = updated_pending
@@ -3459,10 +3604,28 @@ class TradeExecutionService:
                 if self._should_restore_after_partial_terminal_fill(updated_pending, fill_qty) and effective_restore is not None and updated_pending.engine_snapshot is not None:
                     effective_restore(updated_pending.engine_snapshot)
                 return
-            self._pause_after_failed_order(updated_pending.broker_order_id, status, risk, notify_risk_event)
+            if updated_pending.extended_hours and updated_pending.extended_hours_key is not None:
+                self._extended_hours_terminal_outcome(
+                    updated_pending.extended_hours_key, unsupported=status == "REJECTED",
+                )
+            else:
+                self._pause_after_failed_order(updated_pending.broker_order_id, status, risk, notify_risk_event)
             self._clear_pending_order(updated_pending.broker_order_id)
             if effective_restore is not None and updated_pending.engine_snapshot is not None:
                 effective_restore(updated_pending.engine_snapshot)
+            return
+        if (
+            updated_pending.extended_hours
+            and order_status.outside_rth != "ANY_TIME"
+            and not updated_pending.extended_hours_cancel_requested
+        ):
+            if updated_pending.extended_hours_key is not None:
+                self._extended_hours_terminal_outcome(updated_pending.extended_hours_key, unsupported=True)
+            self._handle_pending_order_timeout(
+                dataclass_replace(updated_pending, extended_hours_cancel_requested=True),
+                risk=risk, notifier=notifier,
+                restore_engine_snapshot=restore_engine_snapshot, notify_risk_event=notify_risk_event,
+            )
             return
         logger.debug("pending order still live: %s status=%s", updated_pending.broker_order_id, status)
 
@@ -3518,6 +3681,10 @@ class TradeExecutionService:
                         notifier=notifier,
                         fill_qty=fill_qty,
                         notify_risk_event=notify_risk_event,
+                    )
+                elif pending.extended_hours and pending.extended_hours_key is not None:
+                    self._extended_hours_terminal_outcome(
+                        pending.extended_hours_key, unsupported=order_status.status == "REJECTED",
                     )
                 else:
                     self._pause_after_timed_out_terminal_order(
@@ -3575,6 +3742,10 @@ class TradeExecutionService:
                         fill_qty=fill_qty,
                         notify_risk_event=notify_risk_event,
                     )
+                elif pending.extended_hours and pending.extended_hours_key is not None:
+                    self._extended_hours_terminal_outcome(
+                        pending.extended_hours_key, unsupported=cancel_status.status == "REJECTED",
+                    )
                 else:
                     self._pause_after_timed_out_terminal_order(
                         pending.broker_order_id,
@@ -3627,13 +3798,18 @@ class TradeExecutionService:
                             notify_risk_event=notify_risk_event,
                         )
                     elif recovery_status.status in _FAILED_ORDER_STATUSES:
-                        self._pause_after_timed_out_terminal_order(
-                            pending.broker_order_id,
-                            recovery_status.status,
-                            reason,
-                            risk,
-                            notify_risk_event,
-                        )
+                        if pending.extended_hours and pending.extended_hours_key is not None:
+                            self._extended_hours_terminal_outcome(
+                                pending.extended_hours_key, unsupported=recovery_status.status == "REJECTED",
+                            )
+                        else:
+                            self._pause_after_timed_out_terminal_order(
+                                pending.broker_order_id,
+                                recovery_status.status,
+                                reason,
+                                risk,
+                                notify_risk_event,
+                            )
                     else:
                         # FILLED without a broker quantity uses the submitted
                         # quantity, matching the normal terminal-fill path.
@@ -4519,6 +4695,7 @@ class TradeExecutionService:
             fee_currency=str(getattr(result, "fee_currency", "") or ""),
             broker_submitted_at=getattr(result, "broker_submitted_at", None),
             broker_updated_at=getattr(result, "broker_updated_at", None),
+            outside_rth=str(getattr(result, "outside_rth", "") or ""),
         )
 
     def _safe_notify_order(
@@ -4578,6 +4755,7 @@ class TradeExecutionService:
             fee_currency=str(getattr(result, "fee_currency", "") or ""),
             broker_submitted_at=getattr(result, "broker_submitted_at", None),
             broker_updated_at=getattr(result, "broker_updated_at", None),
+            outside_rth=str(getattr(result, "outside_rth", "") or ""),
         )
 
     def _record_entry_price(

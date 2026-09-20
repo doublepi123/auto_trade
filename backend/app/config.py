@@ -1041,6 +1041,22 @@ class Settings(BaseSettings):
         le=180,
         validation_alias="AUTO_TRADE_HARD_FLATTEN_MINUTES_BEFORE_CLOSE",
     )
+    # Opt-in ONLY for reduce-only protective exits (stop-loss / max-holding /
+    # flatten) submitted during US pre/post market via outside_rth=ANY_TIME.
+    # Never entries. Longbridge paper accounts do NOT support US extended-hours
+    # trading, so enabling it on a paper account will not produce fills.
+    # Overnight (20:00-04:00 ET) is NOT covered.
+    extended_hours_protective_exits_enabled: bool = Field(
+        default=False,
+        validation_alias="AUTO_TRADE_EXTENDED_HOURS_PROTECTIVE_EXITS_ENABLED",
+        description=(
+            "Permit reduce-only protective exits (stop-loss / max-holding / "
+            "flatten), never entries, to submit during US pre/post market via "
+            "outside_rth=ANY_TIME. Longbridge paper accounts do not support US "
+            "extended-hours trading, so enabling it on a paper account will "
+            "not produce fills. Overnight (20:00-04:00 ET) is not covered."
+        ),
+    )
     llm_shadow_mode: bool = Field(
         default=True,
         validation_alias="AUTO_TRADE_LLM_SHADOW_MODE",

@@ -1,8 +1,11 @@
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false
+from __future__ import annotations
+
 import os
 import subprocess
 import threading
 from decimal import Decimal
+from enum import Enum
 from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -18,6 +21,7 @@ from app.core.broker import (
     BrokerCredentials,
     BrokerGateway,
     CashBalance,
+    ExtendedHoursUnsupportedError,
     MarginInfo,
     NetAsset,
     OrderResult,
@@ -35,6 +39,189 @@ from app.core.broker import (
     _parse_candle_timestamp,
     _SIDE_MAP,
 )
+
+
+class _FakeSessionModule:
+    class OrderSide(Enum):
+        Buy = "Buy"
+        Sell = "Sell"
+
+    class OrderType(Enum):
+        LO = "LO"
+
+    class TimeInForceType(Enum):
+        Day = "Day"
+
+    class OutsideRTH(Enum):
+        AnyTime = 1
+        RTHOnly = 2
+        Overnight = 3
+        Unknown = 0
+
+
+@pytest.fixture
+def session_broker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[BrokerGateway, list[dict[str, object]]]:
+    called: list[dict[str, object]] = []
+
+    class TradeContext:
+        def submit_order(self, **kwargs: object) -> SimpleNamespace:
+            called.append(kwargs)
+            return SimpleNamespace(order_id="order-123", status="Submitted")
+
+    monkeypatch.setattr(broker_module, "_import_openapi", lambda: _FakeSessionModule)
+    gw = BrokerGateway()
+    gw._trade_ctx = TradeContext()
+    gw._quote_ctx = object()
+    return gw, called
+
+
+def test_submit_limit_order_without_session_option_is_unchanged(
+    session_broker: tuple[BrokerGateway, list[dict[str, object]]],
+) -> None:
+    gw, called = session_broker
+    gw.submit_limit_order("AAPL.US", "BUY", Decimal("10"), Decimal("150.0"))
+    assert len(called) == 1
+    assert "outside_rth" not in called[0]
+    assert called[0] == {
+        "symbol": "AAPL.US", "order_type": _FakeSessionModule.OrderType.LO,
+        "side": _FakeSessionModule.OrderSide.Buy,
+        "submitted_quantity": Decimal("10"),
+        "time_in_force": _FakeSessionModule.TimeInForceType.Day,
+        "submitted_price": Decimal("150.0"), "remark": "auto-trade",
+    }
+
+
+@pytest.mark.parametrize("side", ["BUY", "SELL"])
+def test_submit_limit_order_any_time_passes_sdk_enum(
+    session_broker: tuple[BrokerGateway, list[dict[str, object]]], side: str,
+) -> None:
+    gw, called = session_broker
+    gw.submit_limit_order("AAPL.US", side, Decimal("10"), Decimal("150.0"), outside_rth="ANY_TIME")
+    assert len(called) == 1
+    assert called[0]["outside_rth"] is _FakeSessionModule.OutsideRTH.AnyTime
+    assert called[0] == {
+        "symbol": "AAPL.US", "order_type": _FakeSessionModule.OrderType.LO,
+        "side": getattr(_FakeSessionModule.OrderSide, _SIDE_MAP[side]),
+        "submitted_quantity": Decimal("10"),
+        "time_in_force": _FakeSessionModule.TimeInForceType.Day,
+        "submitted_price": Decimal("150.0"), "remark": "auto-trade",
+        "outside_rth": _FakeSessionModule.OutsideRTH.AnyTime,
+    }
+
+
+@pytest.mark.parametrize("missing", ["enum", "member"])
+def test_submit_limit_order_raises_when_sdk_lacks_outside_rth_enum(
+    session_broker: tuple[BrokerGateway, list[dict[str, object]]],
+    monkeypatch: pytest.MonkeyPatch, missing: str,
+) -> None:
+    gw, called = session_broker
+    module = SimpleNamespace()
+    if missing == "member":
+        module.OutsideRTH = SimpleNamespace()
+    monkeypatch.setattr(broker_module, "_import_openapi", lambda: module)
+    with pytest.raises(ExtendedHoursUnsupportedError):
+        gw.submit_limit_order("AAPL.US", "SELL", Decimal("10"), Decimal("150"), outside_rth="ANY_TIME")
+    assert called == []
+
+
+def test_submit_limit_order_raises_when_trade_ctx_signature_lacks_outside_rth(
+    session_broker: tuple[BrokerGateway, list[dict[str, object]]],
+) -> None:
+    gw, called = session_broker
+
+    class TradeContext:
+        def submit_order(
+            self, symbol: str, order_type: object, side: object,
+            submitted_quantity: Decimal, time_in_force: object,
+            submitted_price: Decimal | None = None, remark: str | None = None,
+        ) -> SimpleNamespace:
+            called.append({"symbol": symbol})
+            return SimpleNamespace(order_id="order-123")
+
+    gw._trade_ctx = TradeContext()
+    with pytest.raises(ExtendedHoursUnsupportedError):
+        gw.submit_limit_order("AAPL.US", "SELL", Decimal("10"), Decimal("150"), outside_rth="ANY_TIME")
+    assert called == []
+
+
+def test_submit_limit_order_accepts_named_session_parameter(
+    session_broker: tuple[BrokerGateway, list[dict[str, object]]],
+) -> None:
+    gw, called = session_broker
+
+    class TradeContext:
+        def submit_order(
+            self, symbol: str, order_type: object, side: object,
+            submitted_quantity: Decimal, time_in_force: object,
+            submitted_price: Decimal | None = None, remark: str | None = None,
+            outside_rth: object = None,
+        ) -> SimpleNamespace:
+            called.append({"outside_rth": outside_rth})
+            return SimpleNamespace(order_id="order-123")
+
+    gw._trade_ctx = TradeContext()
+    gw.submit_limit_order("AAPL.US", "SELL", Decimal("10"), Decimal("150"), outside_rth="ANY_TIME")
+    assert called == [{"outside_rth": _FakeSessionModule.OutsideRTH.AnyTime}]
+
+
+def test_submit_limit_order_accepts_var_keyword_signature(
+    session_broker: tuple[BrokerGateway, list[dict[str, object]]],
+) -> None:
+    gw, called = session_broker
+    result = gw.submit_limit_order("AAPL.US", "SELL", Decimal("10"), Decimal("150"), outside_rth="ANY_TIME")
+    assert result.broker_order_id == "order-123"
+    assert len(called) == 1
+    assert called[0]["outside_rth"] is _FakeSessionModule.OutsideRTH.AnyTime
+
+
+@pytest.mark.parametrize("session", ["OVERNIGHT", "RTH_ONLY", "", "AnyTime"])
+def test_submit_limit_order_rejects_unsupported_session_value(
+    session_broker: tuple[BrokerGateway, list[dict[str, object]]], session: str,
+) -> None:
+    gw, called = session_broker
+    with pytest.raises(ExtendedHoursUnsupportedError):
+        gw.submit_limit_order("AAPL.US", "SELL", Decimal("10"), Decimal("150"), outside_rth=session)
+    assert called == []
+
+
+def test_submit_limit_order_rejects_uninspectable_signature(
+    session_broker: tuple[BrokerGateway, list[dict[str, object]]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gw, called = session_broker
+    monkeypatch.setattr(type(gw._trade_ctx).submit_order, "__signature__", "invalid", raising=False)
+    with pytest.raises(ExtendedHoursUnsupportedError):
+        gw.submit_limit_order("AAPL.US", "SELL", Decimal("10"), Decimal("150"), outside_rth="ANY_TIME")
+    assert called == []
+
+
+@pytest.mark.parametrize(("session", "expected"), [
+    (_FakeSessionModule.OutsideRTH.AnyTime, "ANY_TIME"),
+    (_FakeSessionModule.OutsideRTH.RTHOnly, "RTH_ONLY"),
+    (_FakeSessionModule.OutsideRTH.Overnight, "OVERNIGHT"),
+    (_FakeSessionModule.OutsideRTH.Unknown, ""),
+    ("AnyTime", "ANY_TIME"), ("OutsideRTH.AnyTime", "ANY_TIME"),
+    ("ANY_TIME", "ANY_TIME"), ("RTHOnly", "RTH_ONLY"),
+    ("RTH_ONLY", "RTH_ONLY"), ("Overnight", "OVERNIGHT"),
+    ("Unknown", ""), (None, ""),
+])
+def test_get_order_status_surfaces_outside_rth(session: object, expected: str) -> None:
+    detail = SimpleNamespace(order_id="order-123", status="Submitted")
+    if session is not None:
+        detail.outside_rth = session
+
+    class TradeContext:
+        def order_detail(self, order_id: str) -> SimpleNamespace:
+            assert order_id == "order-123"
+            return detail
+
+    gw = BrokerGateway()
+    gw._trade_ctx = TradeContext()
+    gw._quote_ctx = object()
+    result = gw.get_order_status("order-123")
+    assert result.outside_rth == expected
 
 
 class TestQuote:

@@ -27,10 +27,11 @@ from app.core.board_lot import BoardLotCache
 from app.core.broker import BrokerGateway, Position, Quote
 from app.core.engine import EngineSnapshot, EngineState, StrategyEngine, StrategyParams, TriggerResult
 from app.core.exit_policy import ExitPolicyConfig, ExitQuote, PositionExitContext, ReductionCause, ReductionDecision, evaluate_exit_policy
-from app.core.exit_pricing import degraded_exit_limit, select_reference_price
+from app.core.execution_session import resolve_execution_session
+from app.core.exit_pricing import degraded_exit_limit, parse_quote_source_timestamp, select_reference_price
 from app.core.fees import one_side_fee_rate
 from app.core.log_throttle import RepeatedLogThrottle
-from app.core.market_calendar import is_closing_window, is_opening_warmup, is_trading_hours, trade_day_for
+from app.core.market_calendar import is_closing_window, is_opening_warmup, is_trading_hours, market_for_symbol, trade_day_for
 from app.core.notifiers.multi_channel import MultiChannelNotifier
 from app.core.notifiers.retry_queue import NotificationRetryQueue
 from app.core.notifiers.serverchan import ServerChanNotifier
@@ -202,6 +203,7 @@ class _QuoteTriggerDecision:
     exit_limit_price: float | None = None
     exit_price_floor: float | None = None
     exit_hold_reason: str = ""
+    execution_phase: str | None = None
 
 
 @dataclass(frozen=True)
@@ -313,6 +315,7 @@ class AppRunner:
         self._board_lot_log_throttle = RepeatedLogThrottle(window_seconds=300)
         self._fee_enrichment_log_throttle = RepeatedLogThrottle(window_seconds=3600)
         self._degraded_exit_log_throttle = RepeatedLogThrottle(window_seconds=60)
+        self._extended_hours_exit_log_throttle = RepeatedLogThrottle(window_seconds=60)
         self._trade_svc = TradeExecutionService(
             board_lot_resolver=self._board_lot_cache.resolve,
             record_board_lot_residual=self._record_board_lot_residual,
@@ -2973,6 +2976,10 @@ class AppRunner:
                     and push_quality["spread_reasonable"]
                     and push_quality["last_bbo_consistent"]
                     and push_quality["source_timestamp_fresh"]
+                    and not (
+                        self._get_trading_session_mode() == "RTH_ONLY"
+                        and not is_trading_hours(self.engine.params.market)
+                    )
                 ):
                     self._last_trusted_push_quote_at = time.monotonic()
                     self.quote_stream_health.record_quote(quote.timestamp)
@@ -3066,13 +3073,31 @@ class AppRunner:
                     if self._get_trading_session_mode() == "RTH_ONLY" and not is_trading_hours(
                         active_market
                     ):
-                        if is_primary_symbol:
-                            # Funnel stage 4: protective exit suppressed by
-                            # the session guard.
-                            self.decision_funnel.record_skip("SESSION")
-                        if quote_quality["price_positive"]:
-                            active_engine.record_price(quote.last_price)
-                        return decision
+                        permission = self._trade_svc.extended_hours_exit_decision(
+                            action=reduction_intent.action,
+                            symbol=quote.symbol,
+                            market=active_market,
+                            reduce_only=True,
+                        )
+                        if not permission.permitted:
+                            if is_primary_symbol:
+                                self.decision_funnel.record_skip("SESSION")
+                            if quote_quality["price_positive"]:
+                                active_engine.record_price(quote.last_price)
+                            if self._extended_hours_exit_log_throttle.should_log(
+                                f"{quote.symbol}:{permission.reason}"
+                            ):
+                                self._set_last_action_message(
+                                    f"{quote.symbol} protective exit waiting: {permission.reason}"
+                                )
+                                logger.warning(
+                                    "protective exit waiting: symbol=%s reason=%s suppressed=%s",
+                                    quote.symbol,
+                                    permission.reason,
+                                    self._extended_hours_exit_log_throttle.take_suppressed_count(),
+                                )
+                            return decision
+                        decision.execution_phase = permission.phase
                     decision.engine_snapshot = active_engine.snapshot()
                     transition_status = active_engine.transition_for_action(reduction_intent.action)
                     if transition_status == "OK":
@@ -4667,7 +4692,14 @@ class AppRunner:
         # This timestamp is the health signal for the trading symbol. A fresh
         # watchlist quote must not mask a silent primary feed or suppress the
         # primary's active refresh loop.
-        if trusted and quote.symbol == self.engine.params.symbol:
+        if (
+            trusted
+            and quote.symbol == self.engine.params.symbol
+            and not (
+                self._get_trading_session_mode() == "RTH_ONLY"
+                and not is_trading_hours(self.engine.params.market)
+            )
+        ):
             self._last_quote_at = time.monotonic()
             # NOTE: the quote-stream health tracker records push-stream quotes
             # only (in _evaluate_quote_trigger), not active polling refresh, so
@@ -5186,9 +5218,30 @@ class AppRunner:
         if action in _POSITION_REDUCING_ACTIONS:
             with self._state_lock:
                 recorded_floor = self._reduce_only_price_floors.get(symbol)
-            # An armed degraded-exit floor is an additional constraint, never
-            # a prerequisite for exiting through paths that did not register one.
-            # Missing or expired evidence uses the unchanged legacy gate below.
+            market = market_for_symbol(symbol)
+            # These constraints protect exits deliberately released into a thin
+            # pre/post book. Applying them to ordinary reductions would invent
+            # a new reason an exit cannot leave, recreating the defect we fix.
+            if not is_trading_hours(market) and self._trade_svc.extended_hours_exit_decision(
+                action=action, symbol=symbol, market=market, reduce_only=True,
+            ).permitted:
+                session = resolve_execution_session(market)
+                if not session.extended_hours_executable:
+                    return "execution session is not executable"
+                if (
+                    recorded_floor is None
+                    or datetime.now(timezone.utc) > recorded_floor.expires_at
+                ):
+                    return "extended-hours exit requires a registered price floor"
+                source_timestamp = parse_quote_source_timestamp(quote.timestamp)
+                if (
+                    source_timestamp is None
+                    or session.phase_started_at is None
+                    or source_timestamp < session.phase_started_at
+                ):
+                    return "executable quote predates the current execution session"
+            # For ordinary reductions a floor remains an additional constraint,
+            # never a prerequisite for paths that did not register one.
             if (
                 recorded_floor is not None
                 and datetime.now(timezone.utc) <= recorded_floor.expires_at
