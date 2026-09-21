@@ -12,7 +12,7 @@ from sqlalchemy import create_engine, inspect, text
 
 
 _REVISION = "20260802_opening_breakout_depth"
-_HEAD_REVISION = "20260921_fill_settlements"
+_HEAD_REVISION = "20260922_fill_intent"
 _PREDECESSOR = "20260801_durable_job_leases"
 _WATCHLIST_REVISION = "20260801_watchlist_quant_v6"
 _TABLE = "opening_momentum_shadow_runs"

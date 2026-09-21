@@ -1227,6 +1227,8 @@ class FillSettlement(Base):
     tracked_side: Mapped[str | None] = mapped_column(Text, nullable=True)
     tracked_quantity_after: Mapped[float] = mapped_column(Float, nullable=False)
     tracked_cost_after: Mapped[float] = mapped_column(Float, nullable=False)
+    persist_position: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="0")
+    cost_basis_opened_at: Mapped[datetime | None] = mapped_column(_TZDateTime, nullable=True)
     first_terminal_status: Mapped[str] = mapped_column(Text, nullable=False)
     risk_applied_at: Mapped[datetime | None] = mapped_column(_TZDateTime, nullable=True)
     risk_applied_via: Mapped[str | None] = mapped_column(Text, nullable=True)

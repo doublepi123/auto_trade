@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Final
 from uuid import uuid4
@@ -56,6 +57,40 @@ class TestFillSettlementLedger:
 
     def teardown_method(self) -> None:
         self.engine.dispose()
+
+    @pytest.mark.parametrize("persist_position", [False, True])
+    @pytest.mark.parametrize("offset_hours", [0, 8])
+    def test_record_or_get_round_trips_persist_position_and_opened_at(
+        self, persist_position: bool, offset_hours: int,
+    ) -> None:
+        # Given a committed receipt carrying the original position intent.
+        opened_at = datetime(2026, 9, 21, 14, 30, 12, 123456, tzinfo=timezone(timedelta(hours=offset_hours)))
+        intent = replace(ENTRY, persist_position=persist_position, cost_basis_opened_at=opened_at)
+        with Session(self.engine) as db:
+            self.ledger.record_or_get(db, intent)
+            db.commit()
+        # When a new session repeats the fill with different intent metadata.
+        with Session(self.engine) as db:
+            stored, inserted = self.ledger.record_or_get(db, replace(
+                intent, persist_position=not persist_position, cost_basis_opened_at=None,
+            ))
+            # Then the durable original survives exactly, including its timezone.
+            assert inserted is False
+            assert (stored.persist_position, stored.cost_basis_opened_at) == (persist_position, opened_at)
+            assert not db.dirty
+
+    def test_persist_position_false_round_trips(self) -> None:
+        # Given an explicit False even though a positive position remains.
+        with Session(self.engine) as db:
+            self.ledger.record_or_get(db, replace(ENTRY, persist_position=False))
+            db.commit()
+        # When reading the durable receipt from a fresh session.
+        with Session(self.engine) as db:
+            stored = self.ledger.get(db, ENTRY.broker_order_id)
+            # Then positive quantity never substitutes for the stored decision.
+            assert stored is not None
+            assert stored.persist_position is False
+            assert stored.cost_basis_opened_at is None
 
     @pytest.mark.parametrize("persist_first", [False, True])
     def test_record_or_get_inserts_once_and_returns_stored_on_repeat(

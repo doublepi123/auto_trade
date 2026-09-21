@@ -7,6 +7,7 @@ from typing import assert_never
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 
 from app.domain.fill_settlement import FillFacts, RepeatVerdict, compare_repeat
 from app.models import FillSettlement
@@ -31,6 +32,8 @@ class SettlementIntent:
     gross_pnl: Decimal | None = None
     net_pnl: Decimal | None = None
     pnl_source: str | None = None
+    persist_position: bool = False
+    cost_basis_opened_at: datetime | None = None
 
 
 class FillSettlementLedger:
@@ -78,6 +81,11 @@ class FillSettlementLedger:
             gross_pnl=float(intent.gross_pnl) if intent.gross_pnl is not None else None,
             net_pnl=float(intent.net_pnl) if intent.net_pnl is not None else None,
             pnl_source=intent.pnl_source,
+            persist_position=intent.persist_position,
+            cost_basis_opened_at=(
+                intent.cost_basis_opened_at.astimezone(timezone.utc)
+                if intent.cost_basis_opened_at is not None else None
+            ),
         )
         db.add(row)
         return row, True
@@ -87,7 +95,16 @@ class FillSettlementLedger:
         for pending in db.new:
             if isinstance(pending, FillSettlement) and pending.broker_order_id == key:
                 return pending
-        return db.get(FillSettlement, key)
+        row = db.get(FillSettlement, key)
+        if row is not None and row.cost_basis_opened_at is not None:
+            if row.cost_basis_opened_at.tzinfo is None:
+                # SQLite drops timezone metadata; writes above are always UTC.
+                # Restore the loaded value without scheduling an accounting UPDATE.
+                set_committed_value(
+                    row, "cost_basis_opened_at",
+                    row.cost_basis_opened_at.replace(tzinfo=timezone.utc),
+                )
+        return row
 
     def mark_risk_applied(self, db: Session, key: str, via: str) -> bool:
         row = self.get(db, key)

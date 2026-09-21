@@ -30,7 +30,8 @@ WATCHLIST_QUANT_V6_REVISION = '20260801_watchlist_quant_v6'
 DURABLE_JOB_LEASES_REVISION = '20260801_durable_job_leases'
 OPENING_BREAKOUT_DEPTH_REVISION = '20260802_opening_breakout_depth'
 FILL_SETTLEMENTS_REVISION = '20260921_fill_settlements'
-HEAD_REVISION = FILL_SETTLEMENTS_REVISION
+FILL_INTENT_REVISION = '20260922_fill_intent'
+HEAD_REVISION = FILL_INTENT_REVISION
 # IMPORTANT: 每次新增 alembic 迁移时，必须同步更新 HEAD_REVISION 及 mark_migrated_if_needed 的列检测逻辑
 
 
@@ -230,6 +231,18 @@ def mark_migrated_if_needed():
         fill_settlements_schema_complete = (
             fill_settlements_table_present and fill_settlements_trigger_present
         )
+        fill_columns = (
+            {column['name'] for column in inspector.get_columns('fill_settlements')}
+            if fill_settlements_table_present else set()
+        )
+        fill_schema_revision = advance_added_columns(
+            current_revision=FILL_SETTLEMENTS_REVISION,
+            predecessor=FILL_SETTLEMENTS_REVISION,
+            revision=FILL_INTENT_REVISION,
+            label='fill-settlements intent',
+            actual_columns=fill_columns,
+            added_columns={'persist_position', 'cost_basis_opened_at'},
+        )
         opening_columns = (
             {
                 column['name']
@@ -280,9 +293,11 @@ def mark_migrated_if_needed():
                     f'found {recorded_revisions}'
                 )
             recorded_revision = recorded_revisions[0]
-            if recorded_revision == FILL_SETTLEMENTS_REVISION:
+            if recorded_revision in {FILL_SETTLEMENTS_REVISION, FILL_INTENT_REVISION}:
                 if not fill_settlements_schema_complete:
                     raise RuntimeError('partial fill-settlements schema; refusing to stamp')
+                if recorded_revision == FILL_INTENT_REVISION and fill_schema_revision != FILL_INTENT_REVISION:
+                    raise RuntimeError('partial fill-settlements intent schema; refusing to stamp')
                 if (
                     not quant_schema_complete
                     or not lease_schema_complete
@@ -292,6 +307,13 @@ def mark_migrated_if_needed():
                         'alembic_version is fill-settlements but its '
                         'predecessor schema is incomplete'
                     )
+                if recorded_revision != fill_schema_revision:
+                    conn.execute(
+                        text('UPDATE alembic_version SET version_num = :version_num'),
+                        {'version_num': fill_schema_revision},
+                    )
+                    conn.commit()
+                    print(f'advanced alembic_version to {fill_schema_revision}')
                 return
             if (
                 fill_settlements_schema_complete
@@ -315,13 +337,13 @@ def mark_migrated_if_needed():
                 if fill_settlements_schema_complete:
                     conn.execute(
                         text('UPDATE alembic_version SET version_num = :version_num'),
-                        {'version_num': FILL_SETTLEMENTS_REVISION},
+                        {'version_num': fill_schema_revision},
                     )
                     conn.commit()
                     print(
                         'advanced alembic_version from '
                         f'{OPENING_BREAKOUT_DEPTH_REVISION} to '
-                        f'{FILL_SETTLEMENTS_REVISION}'
+                        f'{fill_schema_revision}'
                     )
                 return
             if (
@@ -556,7 +578,7 @@ def mark_migrated_if_needed():
                     f'lineage: {version_num} != '
                     f'{OPENING_BREAKOUT_DEPTH_REVISION}'
                 )
-            version_num = FILL_SETTLEMENTS_REVISION
+            version_num = fill_schema_revision
 
         conn.execute(text(\"CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)\"))
         conn.execute(text('INSERT INTO alembic_version (version_num) VALUES (:version_num)'), {'version_num': version_num})

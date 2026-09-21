@@ -1462,6 +1462,16 @@ def _ensure_fill_settlements_table(db_engine: Engine) -> None:
             )
             """
         )
+        columns = {column["name"] for column in inspect(connection).get_columns("fill_settlements")}
+        # Legacy quantity alone cannot prove that a position write occurred.
+        if "persist_position" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE fill_settlements ADD COLUMN persist_position BOOLEAN NOT NULL DEFAULT 0"
+            )
+        if "cost_basis_opened_at" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE fill_settlements ADD COLUMN cost_basis_opened_at DATETIME"
+            )
         connection.exec_driver_sql(
             "CREATE TRIGGER IF NOT EXISTS trg_fill_settlements_no_delete "
             "BEFORE DELETE ON fill_settlements "

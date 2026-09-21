@@ -834,7 +834,7 @@ def test_alembic_quant_v6_revision_upgrades_and_downgrades_safely(
     )
     existing_application_logger.disabled = False
     script = ScriptDirectory.from_config(config)
-    assert script.get_current_head() == "20260921_fill_settlements"
+    assert script.get_current_head() == "20260922_fill_intent"
     revision = script.get_revision("20260801_watchlist_quant_v6")
     assert revision is not None
     assert revision.down_revision == "20260727_opening_execution"
@@ -857,7 +857,7 @@ def test_alembic_quant_v6_revision_upgrades_and_downgrades_safely(
         "20260801_watchlist_quant_v6",
         "20260801_durable_job_leases",
         "20260802_opening_breakout_depth",
-        "20260921_fill_settlements",
+        "20260922_fill_intent",
     ),
 )
 def test_entrypoint_legacy_stamp_follows_every_frozen_revision(

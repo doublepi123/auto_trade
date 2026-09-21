@@ -18,7 +18,7 @@ from app.models import DurableJobLease
 
 _REVISION = "20260801_durable_job_leases"
 _PREDECESSOR = "20260801_watchlist_quant_v6"
-_HEAD_REVISION = "20260921_fill_settlements"
+_HEAD_REVISION = "20260922_fill_intent"
 
 
 def _create_lease_table(engine: Engine) -> None:
