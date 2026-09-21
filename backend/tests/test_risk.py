@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import date, datetime, timezone
 import threading
 
@@ -36,6 +38,144 @@ class TestRiskConfig:
 
 
 class TestRiskController:
+    def test_consume_settlement_applies_the_event_once_per_key(self) -> None:
+        # Given
+        ctrl = RiskController()
+        ctrl.consume_settlement("o1", -50.0)
+
+        # When
+        consumed = ctrl.consume_settlement("o1", -50.0)
+
+        # Then
+        assert ctrl.daily_pnl == -50.0
+        assert ctrl.consecutive_losses == 1
+        assert consumed is False
+        assert ctrl.settlement_consumed("o1") is True
+
+    def test_consume_settlement_returns_true_only_on_first_application(self) -> None:
+        # Given
+        ctrl = RiskController()
+        assert ctrl.settlement_consumed("o1") is False
+
+        # When
+        results = [
+            ctrl.consume_settlement("o1", -50.0),
+            ctrl.consume_settlement("o1", -50.0),
+            ctrl.consume_settlement("o2", -50.0),
+        ]
+
+        # Then
+        assert results == [True, False, True]
+        assert ctrl.daily_pnl == -100.0
+        assert ctrl.consecutive_losses == 2
+
+    def test_consume_settlement_computes_full_transition_before_pause(self) -> None:
+        # Given
+        ctrl = RiskController(RiskConfig(max_drawdown_amount=30.0))
+        ctrl.record_trade(100.0)
+
+        # When: downstream persistence fails after bookkeeping has completed.
+        with pytest.raises(RuntimeError, match="database is locked"):
+            assert ctrl.consume_settlement("o1", -30.0) is True
+            assert ctrl.paused is True
+            assert ctrl.daily_pnl == 70.0
+            assert ctrl.consecutive_losses == 1
+            assert ctrl.cumulative_realized_pnl == 70.0
+            assert ctrl.peak_realized_pnl == 100.0
+            raise RuntimeError("database is locked")
+
+        # Then
+        assert ctrl.settlement_consumed("o1") is True
+        assert ctrl.consume_settlement("o1", -30.0) is False
+        assert ctrl.daily_pnl == 70.0
+        assert ctrl.consecutive_losses == 1
+        assert ctrl.cumulative_realized_pnl == 70.0
+        assert ctrl.peak_realized_pnl == 100.0
+        assert ctrl.drawdown_amount == 30.0
+        assert ctrl.pause_auto_resumable is True
+        assert ctrl.pause_reason.startswith("DRAWDOWN_LIMIT:")
+        assert ctrl.consume_drawdown_limit_reason() == ctrl.pause_reason
+        assert ctrl.consume_drawdown_limit_reason() is None
+
+    def test_consume_settlement_proceeds_when_halted(self) -> None:
+        # Given
+        ctrl = RiskController()
+        ctrl.kill_switch = True
+        assert ctrl.trading_state().value == "HALTED"
+
+        # When
+        consumed = ctrl.consume_settlement("o1", -50.0)
+
+        # Then
+        assert consumed is True
+        assert ctrl.daily_pnl == -50.0
+        assert ctrl.consecutive_losses == 1
+        assert ctrl.kill_switch is True
+        assert ctrl.trading_state().value == "HALTED"
+
+    def test_consume_settlement_survives_day_rollover_and_replace_daily_pnl(
+        self,
+    ) -> None:
+        # Given
+        current_day = [date(2026, 7, 31)]
+        ctrl = RiskController(trade_day_provider=lambda: current_day[0])
+        ctrl.consume_settlement("o1", -50.0)
+        current_day[0] = date(2026, 8, 1)
+        ctrl.check()
+        assert ctrl.daily_pnl == 0.0
+        assert ctrl.settlement_consumed("o1") is True
+        ctrl.replace_daily_pnl(-20.0, 2)
+
+        # When
+        consumed = ctrl.consume_settlement("o1", -50.0)
+
+        # Then
+        assert consumed is False
+        assert ctrl.daily_pnl == -20.0
+        assert ctrl.consecutive_losses == 2
+        assert ctrl.daily_pnl_date == date(2026, 8, 1)
+        assert ctrl.cumulative_realized_pnl == -50.0
+        assert ctrl.peak_realized_pnl == 0.0
+        assert ctrl.paused is False
+
+    def test_mark_settlement_consumed_blocks_later_consumption_without_applying_pnl(
+        self,
+    ) -> None:
+        # Given
+        ctrl = RiskController()
+
+        # When
+        ctrl.mark_settlement_consumed("o1")
+        ctrl.mark_settlement_consumed("o1")
+
+        # Then
+        assert ctrl.daily_pnl == 0.0
+        assert ctrl.consecutive_losses == 0
+        assert ctrl.cumulative_realized_pnl == 0.0
+        assert ctrl.peak_realized_pnl == 0.0
+        assert ctrl.settlement_consumed("o1") is True
+        assert ctrl.consume_settlement("o1", -50.0) is False
+        assert ctrl.daily_pnl == 0.0
+        assert ctrl.consecutive_losses == 0
+
+    def test_winning_settlement_resets_consecutive_losses_once(self) -> None:
+        # Given
+        ctrl = RiskController()
+        ctrl.record_trade(-50.0)
+        assert ctrl.consume_settlement("o1", 100.0) is True
+        assert ctrl.consecutive_losses == 0
+        ctrl.record_trade(-10.0)
+
+        # When
+        consumed = ctrl.consume_settlement("o1", 100.0)
+
+        # Then
+        assert consumed is False
+        assert ctrl.daily_pnl == 40.0
+        assert ctrl.consecutive_losses == 1
+        assert ctrl.cumulative_realized_pnl == 40.0
+        assert ctrl.peak_realized_pnl == 50.0
+
     def test_default_approved(self) -> None:
         ctrl = RiskController()
         result = ctrl.check()

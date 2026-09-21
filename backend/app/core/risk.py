@@ -111,6 +111,7 @@ class RiskController:
         self.cumulative_realized_pnl: float = 0.0
         self.peak_realized_pnl: float = 0.0
         self._pending_drawdown_limit_reason: str | None = None
+        self._consumed_settlement_keys: set[str] = set()
         self.kill_switch: bool = False
         self.paused: bool = False
         self._pause_reason: str = ""
@@ -251,6 +252,24 @@ class RiskController:
         if limit < 0:
             raise ValueError(f"{name} must be non-negative")
         return limit
+
+    def consume_settlement(self, key: str, pnl: float) -> bool:
+        """Atomically account for an executed fill once, even while halted."""
+        with self._lock:
+            if key in self._consumed_settlement_keys:
+                return False
+            self.record_trade(pnl)
+            self._consumed_settlement_keys.add(key)
+            return True
+
+    def settlement_consumed(self, key: str) -> bool:
+        with self._lock:
+            return key in self._consumed_settlement_keys
+
+    def mark_settlement_consumed(self, key: str) -> None:
+        """Remember a fill already accounted for by startup ledger replay."""
+        with self._lock:
+            self._consumed_settlement_keys.add(key)
 
     def record_trade(self, pnl: float) -> None:
         with self._lock:
