@@ -29,7 +29,8 @@ OPENING_EXECUTION_REVISION = '20260727_opening_execution'
 WATCHLIST_QUANT_V6_REVISION = '20260801_watchlist_quant_v6'
 DURABLE_JOB_LEASES_REVISION = '20260801_durable_job_leases'
 OPENING_BREAKOUT_DEPTH_REVISION = '20260802_opening_breakout_depth'
-HEAD_REVISION = OPENING_BREAKOUT_DEPTH_REVISION
+FILL_SETTLEMENTS_REVISION = '20260921_fill_settlements'
+HEAD_REVISION = FILL_SETTLEMENTS_REVISION
 # IMPORTANT: 每次新增 alembic 迁移时，必须同步更新 HEAD_REVISION 及 mark_migrated_if_needed 的列检测逻辑
 
 
@@ -211,6 +212,24 @@ def mark_migrated_if_needed():
     with engine.connect() as conn:
         inspector = inspect(conn)
         tables = set(inspector.get_table_names())
+        fill_settlements_table_present = 'fill_settlements' in tables
+        fill_settlements_trigger_present = conn.execute(
+            text(
+                'SELECT name FROM sqlite_master '
+                'WHERE type = :object_type AND name = :trigger_name '
+                'AND tbl_name = :table_name'
+            ),
+            {
+                'object_type': 'trigger',
+                'trigger_name': 'trg_fill_settlements_no_delete',
+                'table_name': 'fill_settlements',
+            },
+        ).scalar_one_or_none() is not None
+        if fill_settlements_table_present != fill_settlements_trigger_present:
+            raise RuntimeError('partial fill-settlements schema; refusing to stamp')
+        fill_settlements_schema_complete = (
+            fill_settlements_table_present and fill_settlements_trigger_present
+        )
         opening_columns = (
             {
                 column['name']
@@ -261,6 +280,28 @@ def mark_migrated_if_needed():
                     f'found {recorded_revisions}'
                 )
             recorded_revision = recorded_revisions[0]
+            if recorded_revision == FILL_SETTLEMENTS_REVISION:
+                if not fill_settlements_schema_complete:
+                    raise RuntimeError('partial fill-settlements schema; refusing to stamp')
+                if (
+                    not quant_schema_complete
+                    or not lease_schema_complete
+                    or not breakout_depth_schema_complete
+                ):
+                    raise RuntimeError(
+                        'alembic_version is fill-settlements but its '
+                        'predecessor schema is incomplete'
+                    )
+                return
+            if (
+                fill_settlements_schema_complete
+                and recorded_revision != OPENING_BREAKOUT_DEPTH_REVISION
+            ):
+                raise RuntimeError(
+                    'fill-settlements schema is outside the expected recorded '
+                    f'lineage: {recorded_revision} != '
+                    f'{OPENING_BREAKOUT_DEPTH_REVISION}'
+                )
             if recorded_revision == OPENING_BREAKOUT_DEPTH_REVISION:
                 if (
                     not quant_schema_complete
@@ -270,6 +311,17 @@ def mark_migrated_if_needed():
                     raise RuntimeError(
                         'alembic_version is opening-breakout-depth but its '
                         'schema or predecessor schema is incomplete'
+                    )
+                if fill_settlements_schema_complete:
+                    conn.execute(
+                        text('UPDATE alembic_version SET version_num = :version_num'),
+                        {'version_num': FILL_SETTLEMENTS_REVISION},
+                    )
+                    conn.commit()
+                    print(
+                        'advanced alembic_version from '
+                        f'{OPENING_BREAKOUT_DEPTH_REVISION} to '
+                        f'{FILL_SETTLEMENTS_REVISION}'
                     )
                 return
             if (
@@ -374,6 +426,11 @@ def mark_migrated_if_needed():
                 )
             return
         if 'strategy_config' not in tables:
+            if fill_settlements_schema_complete:
+                raise RuntimeError(
+                    'fill-settlements schema is outside the expected revision '
+                    'lineage: missing predecessor schema'
+                )
             return
 
         strategy_columns = {column['name'] for column in inspector.get_columns('strategy_config')}
@@ -491,6 +548,15 @@ def mark_migrated_if_needed():
             actual_columns=opening_columns,
             added_columns={'candidate_breakout_depth_bps'},
         )
+
+        if fill_settlements_schema_complete:
+            if version_num != OPENING_BREAKOUT_DEPTH_REVISION:
+                raise RuntimeError(
+                    'fill-settlements schema is outside the expected revision '
+                    f'lineage: {version_num} != '
+                    f'{OPENING_BREAKOUT_DEPTH_REVISION}'
+                )
+            version_num = FILL_SETTLEMENTS_REVISION
 
         conn.execute(text(\"CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL PRIMARY KEY)\"))
         conn.execute(text('INSERT INTO alembic_version (version_num) VALUES (:version_num)'), {'version_num': version_num})

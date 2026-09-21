@@ -729,6 +729,7 @@ def init_db() -> None:
     _ensure_runtime_state_entry_rearm_column(engine)
     _ensure_order_broker_id_uniqueness(engine)
     _ensure_order_terminal_callbacks_table(engine)
+    _ensure_fill_settlements_table(engine)
     _ensure_reconciliation_incidents_table(engine)
     _ensure_trade_event_source_event_key(engine)
     _ensure_tracked_entries_table(engine)
@@ -1431,6 +1432,40 @@ def _ensure_trade_event_source_event_key(db_engine: Engine) -> None:
             "ux_trade_events_source_event_key_nonempty "
             "ON trade_events (source_event_key) "
             "WHERE source_event_key <> ''"
+        )
+
+
+def _ensure_fill_settlements_table(db_engine: Engine) -> None:
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS fill_settlements (
+                broker_order_id TEXT NOT NULL PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                action TEXT NOT NULL,
+                booked_quantity FLOAT NOT NULL,
+                booked_price FLOAT NOT NULL,
+                quantity_source TEXT NOT NULL,
+                price_source TEXT NOT NULL,
+                cost_basis_price FLOAT,
+                consumed_quantity FLOAT,
+                gross_pnl FLOAT,
+                net_pnl FLOAT,
+                pnl_source TEXT,
+                tracked_side TEXT,
+                tracked_quantity_after FLOAT NOT NULL,
+                tracked_cost_after FLOAT NOT NULL,
+                first_terminal_status TEXT NOT NULL,
+                risk_applied_at DATETIME,
+                risk_applied_via TEXT,
+                created_at DATETIME NOT NULL
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "CREATE TRIGGER IF NOT EXISTS trg_fill_settlements_no_delete "
+            "BEFORE DELETE ON fill_settlements "
+            "BEGIN SELECT RAISE(ABORT, 'fill_settlements rows cannot be deleted'); END"
         )
 
 

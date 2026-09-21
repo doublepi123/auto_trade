@@ -12,6 +12,7 @@ from sqlalchemy import create_engine, inspect, text
 
 
 _REVISION = "20260802_opening_breakout_depth"
+_HEAD_REVISION = "20260921_fill_settlements"
 _PREDECESSOR = "20260801_durable_job_leases"
 _WATCHLIST_REVISION = "20260801_watchlist_quant_v6"
 _TABLE = "opening_momentum_shadow_runs"
@@ -70,7 +71,7 @@ def test_opening_breakout_depth_revision_is_head_and_preserves_rows(
     config = _alembic_config(backend_root, db_path)
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_current_head() == _REVISION
+    assert script.get_current_head() == _HEAD_REVISION
     revision = script.get_revision(_REVISION)
     assert revision is not None
     assert revision.down_revision == _PREDECESSOR

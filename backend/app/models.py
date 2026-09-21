@@ -1207,6 +1207,45 @@ class OrderRecord(Base):
     mae_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
 
+class FillSettlement(Base):
+    """Durable accounting receipt; risk application markers remain updatable."""
+
+    __tablename__ = "fill_settlements"
+
+    broker_order_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    symbol: Mapped[str] = mapped_column(Text, nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    booked_quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    booked_price: Mapped[float] = mapped_column(Float, nullable=False)
+    quantity_source: Mapped[str] = mapped_column(Text, nullable=False)
+    price_source: Mapped[str] = mapped_column(Text, nullable=False)
+    cost_basis_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    consumed_quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gross_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pnl_source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tracked_side: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tracked_quantity_after: Mapped[float] = mapped_column(Float, nullable=False)
+    tracked_cost_after: Mapped[float] = mapped_column(Float, nullable=False)
+    first_terminal_status: Mapped[str] = mapped_column(Text, nullable=False)
+    risk_applied_at: Mapped[datetime | None] = mapped_column(_TZDateTime, nullable=True)
+    risk_applied_via: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        _TZDateTime, default=_utcnow, nullable=False,
+    )
+
+
+event.listen(
+    FillSettlement.__table__,
+    "after_create",
+    DDL(
+        "CREATE TRIGGER IF NOT EXISTS trg_fill_settlements_no_delete "
+        "BEFORE DELETE ON fill_settlements "
+        "BEGIN SELECT RAISE(ABORT, 'fill_settlements rows cannot be deleted'); END"
+    ).execute_if(dialect="sqlite"),
+)
+
+
 class OrderTerminalCallback(Base):
     __tablename__ = "order_terminal_callbacks"
 
