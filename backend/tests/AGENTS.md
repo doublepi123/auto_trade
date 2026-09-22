@@ -6,20 +6,33 @@
 ## STRUCTURE
 Flat by design. `test_<module>.py` mirrors `app/<...>/<module>.py`; `tests/platform/` mirrors `app/platform/`; `tests/fixtures/` holds replay data (e.g. `pltr_risk_cap_bypass.py`). No other subdirectories — do not introduce one.
 
-## conftest.py — ENV ONLY, NO FIXTURES
-51 lines that run once per process:
+## conftest.py — ENV, SCHEDULING, PLUGIN REGISTRATION; NO FIXTURES
+Process-level setup:
 1. Installs a `MetaPathFinder` that makes `import longport` / `longbridge` raise `ImportError` (escape hatch: `AUTO_TRADE_ALLOW_BROKER_SDK_IMPORTS=1`). Tests therefore always run against fakes.
 2. Points `AUTO_TRADE_DATABASE_URL` at `/tmp/auto_trade_pytest_<pid>.db` (override: `AUTO_TRADE_TEST_DATABASE_URL`) and the credential key at a temp path.
 3. Blanks ~10 credential env vars; pins deterministic LLM provider defaults.
 
-Add env defaults here; add fixtures **nowhere** — the file deliberately defines none.
+Add env defaults here; do not define fixtures in `conftest.py`. Module-local
+fixtures remain valid. `conftest.py` also owns collection scheduling and registers
+`tests.runner_db_isolation_plugin`, whose function-scoped autouse fixture owns
+the per-test database lifecycle exclusively for legacy `tests/test_runner.py`,
+which must not be edited for this isolation change. It rebinds the explicit live
+engine/session-factory references, calls the real `database.init_db()`, restores
+the original objects, disposes the engine, and removes its private temporary
+database after each test. Multiple runners within one test share that database.
+The existing xdist grouping is unchanged; the recorded cross-module leak has not
+been resolved by this lifecycle change.
 
 ## DB ISOLATION — TWO ACCEPTED PATTERNS
 **A. Own engine + dependency override** (preferred for API tests, see `test_trades_export.py`): module-level `TEST_DATABASE_URL` including `os.getpid()`; `setup_class` creates the engine, `drop_all` + `create_all`, installs `app.dependency_overrides[get_db]`, builds `TestClient(app)`; `teardown_class` pops the override and disposes; `setup_method` deletes rows table-by-table.
 
 **B. Shared app DB** (see `test_credentials_api.py`): module-level `database.init_db()`, `SessionLocal`, an `autouse` fixture for monkeypatching, and `_clean_<table>()` helpers.
 
-Clean by `db.query(Model).delete()` — never by deleting the DB file. Use `monkeypatch.delenv(..., raising=False)`, never `os.environ.pop`.
+For mutable tables in patterns A/B, clean by `db.query(Model).delete()` — never
+unlink a shared DB file. Append-only tables must instead be isolated with a new
+database per test, never by deleting rows or disabling triggers. The named runner
+plugin removes only its own private database after disposal. Use
+`monkeypatch.delenv(..., raising=False)`, never `os.environ.pop`.
 
 ## FAKES
 Inline classes, `_Fake` prefix, named for the collaborator, hand-written and minimal — MagicMock is not the house style. Real examples: `_FakeBroker` (records calls into instance attributes for assertions), `_FakeRunner`, `_FakeDb` / `_FakeQuery`, `_FakeClock` / `_FakeMonotonicClock`, `_FakeCandles`. Inject via `monkeypatch.setattr(<api module>, "get_runner", lambda: _FakeRunner(broker))`.
@@ -81,6 +94,6 @@ python3 -m pytest tests/test_engine.py -v
 ## ANTI-PATTERNS (THIS DIR)
 - Adding fixtures to `conftest.py`.
 - `MagicMock` where a 10-line `_Fake` would do.
-- Sharing a DB file between test modules, or cleaning up by unlinking the file.
+- Sharing a DB file between test modules, or unlinking a shared database for cleanup (the runner plugin's disposed private database is the explicit exception).
 - Weakening a rule-enforcing test (updating a pinned hash, deleting a compose assertion) instead of fixing the code.
 - New subdirectories under `tests/` beyond `platform/` and `fixtures/`.

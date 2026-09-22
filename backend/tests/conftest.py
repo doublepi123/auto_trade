@@ -8,6 +8,8 @@ import tempfile
 
 import pytest
 
+pytest_plugins = ("tests.runner_db_isolation_plugin",)
+
 
 class _BlockBrokerSdkFinder(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname: str, path: object | None, target: object | None = None):
