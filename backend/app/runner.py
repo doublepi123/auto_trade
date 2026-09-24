@@ -316,6 +316,9 @@ class AppRunner:
         self._fee_enrichment_log_throttle = RepeatedLogThrottle(window_seconds=3600)
         self._degraded_exit_log_throttle = RepeatedLogThrottle(window_seconds=60)
         self._extended_hours_exit_log_throttle = RepeatedLogThrottle(window_seconds=60)
+        # Pre-market watchlist quotes routinely carry wide spreads; one line per
+        # symbol per window is enough to see it, and suppressed counts survive.
+        self._quote_quality_log_throttle = RepeatedLogThrottle(window_seconds=300)
         self._trade_svc = TradeExecutionService(
             board_lot_resolver=self._board_lot_cache.resolve,
             record_board_lot_residual=self._record_board_lot_residual,
@@ -398,6 +401,10 @@ class AppRunner:
         self._last_order_sync_at = 0.0
         self._order_sync_interval_seconds = 15.0
         self._last_order_sync_succeeded = False
+        # Result of the last sync that actually finished. Readiness reads this
+        # instead of the in-flight flag above, which is cleared at the start of
+        # every sync so the trading path fails closed while one is running.
+        self._last_completed_order_sync_succeeded = False
         self._fee_enrichment_next_retry_at: dict[str, float] = {}
         self._fee_enrichment_attempts: dict[str, int] = {}
         self._fee_enrichment_batch_size = 3
@@ -2457,7 +2464,7 @@ class AppRunner:
                 "pending_order_symbols": pending_order_symbols,
                 "pending_order_ids": pending_order_ids,
                 "unrepresentable_live_order_issues": unrepresentable_live_order_issues,
-                "order_sync_succeeded": self._last_order_sync_succeeded,
+                "order_sync_succeeded": self._last_completed_order_sync_succeeded,
                 "order_reconciliation_state": order_reconciliation_state,
                 "execution_state": self.execution_state()[0],
                 "reduction_reason": self.execution_state()[1],
@@ -4738,13 +4745,16 @@ class AppRunner:
             and float(quote.bid) > 0
             and float(quote.ask) > 0
             and not quality["spread_reasonable"]
+            and self._quote_quality_log_throttle.should_log(f"wide:{quote.symbol}")
         ):
             logger.warning(
-                "quote_quality: wide spread for %s: last=%s bid=%s ask=%s",
+                "quote_quality: wide spread for %s: last=%s bid=%s ask=%s "
+                "suppressed_all_symbols=%d",
                 quote.symbol,
                 quote.last_price,
                 quote.bid,
                 quote.ask,
+                self._quote_quality_log_throttle.take_suppressed_count(),
             )
 
     def fresh_market_price(
@@ -5486,6 +5496,21 @@ class AppRunner:
             self._last_order_sync_at = now
             self._last_order_sync_succeeded = False
 
+        try:
+            result = self._run_today_order_sync()
+        except BaseException:
+            with self._state_lock:
+                self._last_completed_order_sync_succeeded = False
+            raise
+        # Publish only once every step, including the risk ledger replay, has
+        # returned. Every failure branch leaves the in-flight flag False.
+        with self._state_lock:
+            self._last_completed_order_sync_succeeded = (
+                self._last_order_sync_succeeded
+            )
+        return result
+
+    def _run_today_order_sync(self) -> tuple[int, Sequence[object]]:
         try:
             broker_orders = self.broker.get_today_orders()
         except Exception as exc:

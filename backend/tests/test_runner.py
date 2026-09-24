@@ -19,6 +19,7 @@ from app import database
 from app import runner as runner_module
 from app.core.broker import OrderResult, OrderStatusResult, Position, Quote
 from app.core.engine import EngineSnapshot, EngineState, StrategyParams
+from app.core.log_throttle import RepeatedLogThrottle
 from app.runner import (
     AppRunner,
     _OpeningExecutionPolicy,
@@ -4622,6 +4623,46 @@ class TestAppRunner:
         with caplog.at_level(logging.WARNING):
             runner._remember_quote(Quote(symbol="TSLA.US", last_price=100.0, bid=80.0, ask=130.0, timestamp=_fresh_timestamp()))
         assert "quote_quality: wide spread" in caplog.text
+
+    def test_wide_spread_warning_is_throttled_per_symbol_and_reports_suppressed(
+        self,
+        caplog,
+    ) -> None:
+        import logging
+
+        clock = [1000.0]
+        runner = AppRunner()
+        runner._running = True
+        runner._quote_quality_log_throttle = RepeatedLogThrottle(
+            window_seconds=300,
+            clock=lambda: clock[0],
+        )
+        wide = Quote(symbol="TRV.US", last_price=360.0, bid=153.0, ask=362.0, timestamp=_fresh_timestamp())
+        other = Quote(symbol="KLAC.US", last_price=100.0, bid=80.0, ask=130.0, timestamp=_fresh_timestamp())
+
+        def wide_lines() -> list[str]:
+            return [
+                record.getMessage()
+                for record in caplog.records
+                if "quote_quality: wide spread" in record.getMessage()
+            ]
+
+        with caplog.at_level(logging.WARNING):
+            for _ in range(50):
+                runner._remember_quote(wide)
+            runner._remember_quote(other)
+        assert len(wide_lines()) == 2, "repeated wide-spread quotes flooded the log"
+        assert any("KLAC.US" in line for line in wide_lines())
+
+        clock[0] += 301
+        with caplog.at_level(logging.WARNING):
+            runner._remember_quote(wide)
+        lines = wide_lines()
+        assert len(lines) == 3 and "TRV.US" in lines[-1]
+        # The throttle keeps one shared counter, so the count is an aggregate
+        # across symbols; it is reported on a later line, never dropped.
+        reported = [int(line.rsplit("suppressed_all_symbols=", 1)[1]) for line in lines]
+        assert sum(reported) == 49
 
     def test_llm_policy_quote_rejects_wrong_symbol_and_wide_spread(self) -> None:
         class Broker:

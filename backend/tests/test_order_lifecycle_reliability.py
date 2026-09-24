@@ -120,6 +120,178 @@ def test_identical_terminal_fill_replay_persists_one_order_and_side_effect() -> 
     assert notifier.order_ids == ["fill-replay-1"]
 
 
+class _BlockingOrderBroker:
+    """Holds get_today_orders open so a probe can observe an in-flight sync."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        import threading
+
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self._fail = fail
+
+    def get_today_orders(self) -> list[object]:
+        self.entered.set()
+        assert self.release.wait(5), "test never released the broker call"
+        if self._fail:
+            raise RuntimeError("snapshot unavailable")
+        return []
+
+
+def _run_sync_while_probing(
+    runner: AppRunner,
+    broker: _BlockingOrderBroker,
+) -> tuple[bool, bool]:
+    import threading
+
+    errors: list[BaseException] = []
+
+    def _sync() -> None:
+        try:
+            runner.sync_today_orders_from_broker(force=True)
+        except BaseException as exc:  # surfaced to the test thread below
+            errors.append(exc)
+
+    worker = threading.Thread(target=_sync)
+    worker.start()
+    try:
+        assert broker.entered.wait(5), "sync never reached the broker"
+        in_flight_diagnostic = runner.diagnostics()["order_sync_succeeded"]
+        in_flight_internal = runner._last_order_sync_succeeded
+    finally:
+        broker.release.set()
+        worker.join(5)
+    assert not worker.is_alive()
+    assert errors == [], f"sync worker raised: {errors!r}"
+    return in_flight_diagnostic, in_flight_internal
+
+
+def test_diagnostics_keep_last_completed_order_sync_result_while_next_sync_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given a previous sync that completed successfully
+    runner = AppRunner()
+    runner._last_order_sync_succeeded = True
+    runner._last_completed_order_sync_succeeded = True
+    broker = _BlockingOrderBroker()
+    runner.broker = broker  # pyright: ignore[reportAttributeAccessIssue]
+    monkeypatch.setattr(runner, "_sync_risk_from_order_ledger", lambda: None)
+
+    # When the readiness probe lands while the next sync is still in flight
+    in_flight_diagnostic, in_flight_internal = _run_sync_while_probing(runner, broker)
+
+    # Then readiness reports the last completed result, not a transient false
+    assert in_flight_diagnostic is True, (
+        "readiness flapped to false merely because a sync was in flight"
+    )
+    # And the trading-path flag keeps its fail-closed in-flight semantics
+    assert in_flight_internal is False
+    assert runner.diagnostics()["order_sync_succeeded"] is True
+
+
+def test_diagnostics_report_failure_once_a_sync_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given a previous successful sync
+    runner = AppRunner()
+    runner._last_order_sync_succeeded = True
+    runner._last_completed_order_sync_succeeded = True
+    broker = _BlockingOrderBroker(fail=True)
+    runner.broker = broker  # pyright: ignore[reportAttributeAccessIssue]
+    monkeypatch.setattr(runner, "_persist_risk_pause_best_effort", lambda db=None: None)
+    monkeypatch.setattr(runner, "_record_risk_event", lambda _reason, db=None: None)
+    monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+    # When the next sync fails
+    _run_sync_while_probing(runner, broker)
+
+    # Then both views report failure
+    assert runner.diagnostics()["order_sync_succeeded"] is False
+    assert runner._last_order_sync_succeeded is False
+
+
+def test_order_sync_persistence_failure_is_reported_as_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given a previous successful sync
+    runner = AppRunner()
+    runner._last_order_sync_succeeded = True
+    runner._last_completed_order_sync_succeeded = True
+    broker = _BlockingOrderBroker()
+    broker.release.set()
+    runner.broker = broker  # pyright: ignore[reportAttributeAccessIssue]
+    monkeypatch.setattr(runner, "_persist_risk_pause_best_effort", lambda db=None: None)
+    monkeypatch.setattr(runner, "_record_risk_event", lambda _reason, db=None: None)
+    monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+    def _broken_session():  # pyright: ignore[reportUnusedFunction]
+        raise RuntimeError("database unavailable")
+
+    monkeypatch.setattr(runner, "_db_session", _broken_session)
+
+    # When the broker answers but the reconciliation cannot be persisted
+    runner.sync_today_orders_from_broker(force=True)
+
+    # Then neither view may claim success
+    assert runner._last_order_sync_succeeded is False
+    assert runner.diagnostics()["order_sync_succeeded"] is False
+
+
+@pytest.mark.parametrize("failing_step", ["latch", "risk_ledger"])
+def test_escaping_sync_exception_never_leaves_readiness_reporting_success(
+    monkeypatch: pytest.MonkeyPatch,
+    failing_step: str,
+) -> None:
+    # Given a previous sync that completed successfully
+    runner = AppRunner()
+    runner._last_order_sync_succeeded = True
+    runner._last_completed_order_sync_succeeded = True
+    broker = _BlockingOrderBroker()
+    broker.release.set()
+    runner.broker = broker  # pyright: ignore[reportAttributeAccessIssue]
+    monkeypatch.setattr(runner, "_sync_risk_from_order_ledger", lambda: None)
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError(f"{failing_step} failed")
+
+    target = (
+        "_latch_live_order_reconciliation"
+        if failing_step == "latch"
+        else "_sync_risk_from_order_ledger"
+    )
+    monkeypatch.setattr(runner, target, _boom)
+
+    # When a later step raises out of the sync after the broker answered
+    with pytest.raises(RuntimeError, match=f"{failing_step} failed"):
+        runner.sync_today_orders_from_broker(force=True)
+
+    # Then readiness must not keep the stale success
+    assert runner.diagnostics()["order_sync_succeeded"] is False
+
+
+def test_throttled_sync_call_leaves_completed_result_untouched(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given a sync that just completed successfully
+    runner = AppRunner()
+    runner._last_order_sync_succeeded = True
+    runner._last_completed_order_sync_succeeded = True
+    runner._last_order_sync_at = __import__("time").monotonic()
+
+    class _MustNotBeCalled:
+        def get_today_orders(self) -> list[object]:
+            raise AssertionError("throttled sync reached the broker")
+
+    runner.broker = _MustNotBeCalled()  # pyright: ignore[reportAttributeAccessIssue]
+
+    # When a non-forced sync lands inside the interval
+    assert runner.sync_today_orders_from_broker() == 0
+
+    # Then neither flag changes
+    assert runner._last_order_sync_succeeded is True
+    assert runner.diagnostics()["order_sync_succeeded"] is True
+
+
 def test_diagnostics_surfaces_manual_reconciliation_for_unresolved_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
