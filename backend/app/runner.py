@@ -79,8 +79,11 @@ from app.services.trade_execution_service import (
 from app.services.watchlist_service import WatchlistService
 from app.services.quote_stream_health_service import QuoteStreamHealthTracker
 from app.services.decision_funnel_service import (
+    DecisionFunnelSnapshot,
     DecisionFunnelTracker,
-    persist_session_summary,
+    add_session_counts,
+    combine_snapshots,
+    is_empty_snapshot,
 )
 
 logger = logging.getLogger("auto_trade.runner")
@@ -154,6 +157,27 @@ _POSITION_DRIFT_SIGNATURE_QUANTUM = Decimal("0.000001")
 # Decision funnel: one INFO summary line at most once per hour (emitted from
 # the run loop's housekeeping, never from the quote hot path).
 _DECISION_FUNNEL_SUMMARY_LOG_INTERVAL_SECONDS = 3600.0
+# How often the live session's funnel counts move to the database. Without it
+# a mid-session restart erased every count gathered before the restart.
+_DECISION_FUNNEL_CHECKPOINT_INTERVAL_SECONDS = 60.0
+# Unwritten deltas are merged per (symbol, market, session day). The cap only
+# binds when the database stays unwritable across many primary switches; the
+# oldest entry is then dropped and reported as a telemetry gap, never hidden.
+_DECISION_FUNNEL_MAX_PENDING = 64
+# Rows written per writer pass, so a recovering database is caught up in
+# bounded steps instead of one long burst on the shared SQLite writer.
+_DECISION_FUNNEL_WRITES_PER_PASS = 16
+
+
+@dataclass(eq=False)
+class _FunnelPendingEntry:
+    """Unwritten funnel counts for one (symbol, market, session day).
+
+    Mutable so later deltas merge in place; identity tells a settling write
+    whether the entry it wrote is still the one queued.
+    """
+
+    snapshot: DecisionFunnelSnapshot
 _RUNTIME_STATE_PERSIST_ATTEMPTS = 3
 _RUNTIME_STATE_PERSIST_STALL_ALERT_PASSES = 3
 _RUNTIME_STATE_PERSISTENCE_STALLED_EVENT = "RUNTIME_STATE_PERSISTENCE_STALLED"
@@ -295,6 +319,21 @@ class AppRunner:
             trade_day_provider=self._market_trade_day,
         )
         self._decision_funnel_last_summary_log_at = 0.0
+        # Durable funnel checkpointing (see _decision_funnel_write_once). The
+        # binding names the (symbol, market) the in-memory counts belong to;
+        # "moved" is what the binding already handed to the pending queue per
+        # session day. Everything below except the writer thread handle and
+        # the checkpoint clock is guarded by _state_lock.
+        self._decision_funnel_binding: tuple[str, str] | None = None
+        self._decision_funnel_moved: dict[str, DecisionFunnelSnapshot] = {}
+        self._decision_funnel_pending: dict[
+            tuple[str, str, str], _FunnelPendingEntry
+        ] = {}
+        self._decision_funnel_writer: threading.Thread | None = None
+        self._decision_funnel_write_lock = threading.Lock()
+        self._decision_funnel_dropped_entries = 0
+        self._decision_funnel_checkpoint_at = 0.0
+        self._decision_funnel_writer_log_throttle = RepeatedLogThrottle(window_seconds=600)
         self._notification_retry_queue = NotificationRetryQueue(
             lambda title, content, severity: self.notifier.send_once(title, content, severity)
         )
@@ -922,6 +961,8 @@ class AppRunner:
                 self._load_credentials(db=db),
                 resubscribe=False,
             )
+        # In-memory only and never raises; the background writer does the I/O.
+        self._bind_decision_funnel()
         self._register_broker_disconnect_hook()
         self._refresh_trading_session_mode()
 
@@ -2895,6 +2936,9 @@ class AppRunner:
                 self._primary_generation += 1
             else:
                 self.engine.params = new_params
+            # Same lock as quote evaluation: no quote can be counted for the
+            # new symbol while the funnel is still bound to the old one.
+            self._rebind_decision_funnel_locked()
             if (
                 self.engine.params.symbol,
                 self.engine.params.buy_low,
@@ -6716,34 +6760,254 @@ class AppRunner:
                 return False
             return True
 
+    def _bind_decision_funnel(self) -> None:
+        """Attach the funnel counters to the current primary symbol.
+
+        In-memory only and never raises, so telemetry cannot abort startup.
+        Binding the symbol it is already bound to (stop then start in one
+        process) is a no-op, so nothing is handed off or counted twice.
+        """
+        with self._state_lock:
+            self._rebind_decision_funnel_locked()
+
+    def _rebind_decision_funnel_locked(self) -> None:
+        """Follow the engine's (symbol, market). Caller holds ``_state_lock``.
+
+        On a primary switch the old symbol's unwritten counts move to the
+        pending queue under the OLD binding and the counters restart at zero,
+        so one symbol's counts are never persisted under another. If that
+        hand-off fails the counts are discarded and reported as a telemetry
+        gap rather than risk crediting the new symbol. Called inside the
+        strategy-reload critical section, hence never raises.
+        """
+        try:
+            symbol = str(self.engine.params.symbol or "")
+            target = (symbol, str(self.engine.params.market or "")) if symbol else None
+            previous = self._decision_funnel_binding
+            if target == previous:
+                return
+            moved = self._decision_funnel_moved
+            # Stay unbound until the counters are proven empty: if everything
+            # below fails, counts are lost (and reported), never misattributed.
+            self._decision_funnel_binding = None
+            self._decision_funnel_moved = {}
+            try:
+                taken = self.decision_funnel.take_all_sessions()
+            except Exception:
+                self.decision_funnel.discard_all()
+                self._warn_decision_funnel(
+                    "handoff",
+                    "decision funnel telemetry gap: could not read %s's counts "
+                    "before switching to %s; they were discarded",
+                    previous,
+                    target,
+                    exc_info=True,
+                )
+                taken = []
+            self._decision_funnel_binding = target
+            if previous is None:
+                if any(not is_empty_snapshot(snapshot) for snapshot in taken):
+                    # Counted while unbound (after a failed rebind): no symbol
+                    # can be proven to own them, so they are not persisted.
+                    self._warn_decision_funnel(
+                        "unbound",
+                        "decision funnel telemetry gap: discarded counts gathered "
+                        "while unbound before binding %s",
+                        target,
+                    )
+            elif taken:
+                try:
+                    self._move_decision_funnel_sessions_locked(previous, taken, moved)
+                except Exception:
+                    self._warn_decision_funnel(
+                        "handoff",
+                        "decision funnel telemetry gap: could not queue %s's counts "
+                        "before switching to %s",
+                        previous,
+                        target,
+                        exc_info=True,
+                    )
+        except Exception:
+            self._warn_decision_funnel(
+                "rebind",
+                "decision funnel unbound after a failed rebind; counts are not "
+                "persisted until the next rebind",
+                exc_info=True,
+            )
+
+    def _move_decision_funnel_sessions_locked(
+        self,
+        binding: tuple[str, str],
+        snapshots: Sequence[DecisionFunnelSnapshot],
+        moved: dict[str, DecisionFunnelSnapshot],
+    ) -> None:
+        """Queue what each snapshot adds beyond what ``binding`` already moved.
+
+        ``moved`` advances as each delta is queued, so a failure part-way
+        through can lose counts but never queue the same counts twice.
+        """
+        for snapshot in snapshots:
+            already = moved.get(snapshot.session_date)
+            delta = (
+                snapshot
+                if already is None
+                else combine_snapshots(snapshot, already, sign=-1)
+            )
+            self._queue_decision_funnel_delta_locked(binding, delta)
+            moved[snapshot.session_date] = snapshot
+
+    def _queue_decision_funnel_delta_locked(
+        self,
+        binding: tuple[str, str],
+        delta: DecisionFunnelSnapshot,
+    ) -> None:
+        """Merge a delta into the pending entry for (symbol, market, day)."""
+        if not delta.session_date or is_empty_snapshot(delta):
+            return
+        key = (binding[0], binding[1], delta.session_date)
+        entry = self._decision_funnel_pending.get(key)
+        if entry is not None:
+            entry.snapshot = combine_snapshots(entry.snapshot, delta, sign=1)
+            return
+        self._decision_funnel_pending[key] = _FunnelPendingEntry(delta)
+        while len(self._decision_funnel_pending) > _DECISION_FUNNEL_MAX_PENDING:
+            dropped_key = next(iter(self._decision_funnel_pending))
+            dropped = self._decision_funnel_pending.pop(dropped_key)
+            self._decision_funnel_dropped_entries += 1
+            self._warn_decision_funnel(
+                "gap",
+                "decision funnel telemetry gap: backlog full, dropped unwritten "
+                "counts for %s on %s (threshold_crossings=%d triggers=%d skips=%s "
+                "dropped_entries_total=%d)",
+                dropped_key[0],
+                dropped_key[2],
+                dropped.snapshot.threshold_crossings,
+                dropped.snapshot.triggers,
+                json.dumps(dropped.snapshot.skips_by_category, sort_keys=True),
+                self._decision_funnel_dropped_entries,
+            )
+
+    def _warn_decision_funnel(
+        self,
+        key: str,
+        message: str,
+        *args: object,
+        exc_info: bool = False,
+    ) -> None:
+        if self._decision_funnel_writer_log_throttle.should_log(key):
+            logger.warning(
+                message + " (suppressed_funnel_warnings=%d)",
+                *args,
+                self._decision_funnel_writer_log_throttle.take_suppressed_count(),
+                exc_info=exc_info,
+            )
+
+    def _start_decision_funnel_writer(self, now: float) -> None:
+        """Run one writer pass on a daemon thread; at most one in flight."""
+        writer = self._decision_funnel_writer
+        if writer is not None and writer.is_alive():
+            return  # still waiting on SQLite: skip rather than pile up writers
+        self._decision_funnel_checkpoint_at = now
+        writer = threading.Thread(
+            target=self._decision_funnel_writer_pass,
+            name="decision-funnel-writer",
+            daemon=True,
+        )
+        self._decision_funnel_writer = writer
+        writer.start()
+
+    def _decision_funnel_writer_pass(self) -> None:
+        try:
+            self._decision_funnel_write_once()
+        except Exception:
+            self._warn_decision_funnel(
+                "write",
+                "decision funnel checkpoint failed; counts stay queued",
+                exc_info=True,
+            )
+
+    def _decision_funnel_write_once(self) -> None:
+        """Add the funnel's new counts to the database. Background writer only.
+
+        Each count is added to its (session day, symbol) row exactly once:
+        the live session contributes only what grew since the last move, and
+        a pending entry is settled inside the committing session, right after
+        ``commit()`` returns, so a failure while the session closes cannot
+        re-queue counts that were already committed. A failed write leaves
+        the entry queued for the next pass. At most one pass runs at a time.
+        """
+        with self._decision_funnel_write_lock:
+            with self._state_lock:
+                if self._decision_funnel_binding is None and self.engine.params.symbol:
+                    # A failed rebind left the funnel unbound; recover here
+                    # instead of waiting for the next reload or restart.
+                    self._rebind_decision_funnel_locked()
+                binding = self._decision_funnel_binding
+                if binding is not None:
+                    closed, live = self.decision_funnel.collect_sessions()
+                    self._move_decision_funnel_sessions_locked(
+                        binding, [*closed, live], self._decision_funnel_moved
+                    )
+                    self._decision_funnel_moved = {live.session_date: live}
+                else:
+                    # No primary symbol, so nothing was counted; keep the
+                    # closed-session queue from growing one entry per day.
+                    self.decision_funnel.drain_closed_sessions()
+                batch: list[
+                    tuple[tuple[str, str, str], _FunnelPendingEntry, DecisionFunnelSnapshot]
+                ] = []
+                for key, entry in self._decision_funnel_pending.items():
+                    if len(batch) >= _DECISION_FUNNEL_WRITES_PER_PASS:
+                        break
+                    batch.append((key, entry, entry.snapshot))
+            first_error: Exception | None = None
+            for key, entry, snapshot in batch:
+                # One unwritable row must not hold every other symbol's counts
+                # back; its entry simply stays queued for the next pass.
+                try:
+                    with self._db_session() as db:
+                        add_session_counts(db, snapshot, symbol=key[0], market=key[1])
+                        db.commit()
+                        # Settle before the session closes: a teardown failure
+                        # must not re-queue counts that are already committed.
+                        with self._state_lock:
+                            self._settle_decision_funnel_write_locked(key, entry, snapshot)
+                except Exception as exc:
+                    first_error = first_error or exc
+            if first_error is not None:
+                raise first_error
+
+    def _settle_decision_funnel_write_locked(
+        self,
+        key: tuple[str, str, str],
+        entry: _FunnelPendingEntry,
+        written: DecisionFunnelSnapshot,
+    ) -> None:
+        """Deduct committed counts; later merges into the entry stay queued."""
+        if self._decision_funnel_pending.get(key) is not entry:
+            return  # dropped (and reported) while the write was in flight
+        remaining = combine_snapshots(entry.snapshot, written, sign=-1)
+        if is_empty_snapshot(remaining):
+            del self._decision_funnel_pending[key]
+        else:
+            entry.snapshot = remaining
+
     def _decision_funnel_housekeeping(self) -> None:
         """Run-loop maintenance for the decision funnel (every ~5s).
 
-        Persists any closed session's summary row (durable evidence for the
-        multi-session diagnosis) and emits the hourly INFO summary line. All
-        I/O lives here, off the quote hot path.
+        Starts the background writer about once a minute (it adds new counts,
+        including closed sessions, to the durable summary rows) and emits the
+        hourly INFO summary line. The run loop itself never touches the
+        database here, so a busy SQLite writer cannot delay reconciliation,
+        position sync or quote refresh.
         """
-        closed = self.decision_funnel.drain_closed_sessions()
-        if closed:
-            with self._state_lock:
-                symbol = self.engine.params.symbol
-                market = self.engine.params.market
-            for snapshot in closed:
-                try:
-                    with self._db_session() as db:
-                        persist_session_summary(
-                            db,
-                            snapshot,
-                            symbol=symbol,
-                            market=market,
-                        )
-                        db.commit()
-                except Exception:
-                    logger.exception(
-                        "failed to persist decision funnel session summary"
-                    )
-                    self.decision_funnel.requeue_closed_sessions([snapshot])
         now = time.monotonic()
+        if (
+            self._decision_funnel_writer is None
+            or now - self._decision_funnel_checkpoint_at
+            >= _DECISION_FUNNEL_CHECKPOINT_INTERVAL_SECONDS
+        ):
+            self._start_decision_funnel_writer(now)
         if (
             now - self._decision_funnel_last_summary_log_at
             >= _DECISION_FUNNEL_SUMMARY_LOG_INTERVAL_SECONDS

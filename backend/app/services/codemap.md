@@ -52,7 +52,7 @@ The load-bearing safety distinction (P0): **`trade_execution_service.py` is the 
 | `historical_ledger_import_service.py` | Import historical broker order ledger (plan/apply, conflict + replay errors) |
 | `historical_order_completeness_reader.py` | Longport historical-fill completeness proof |
 | `credentials_service.py` | AES-GCM + RSA hybrid encryption; plaintext only via `get_plain_credentials()` |
-| `decision_funnel_service.py` | `DecisionFunnelTracker` 9-stage counters (quote→…→persisted) → `GET /api/diagnostics` |
+| `decision_funnel_service.py` | `DecisionFunnelTracker` 9-stage counters (quote→…→persisted) → `GET /api/diagnostics`; a runner background writer adds the counts gathered since its last write to `decision_funnel_session_summaries` (one row per session × symbol) about every 60 s, so a mid-session restart continues the row instead of erasing it |
 | `data_aggregator.py` | Candle fetching + ATR/Bollinger computation |
 | `snapshot_helper.py` | `open_read_snapshot()` safe read-only DB engine pool |
 

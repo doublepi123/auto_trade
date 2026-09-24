@@ -405,6 +405,473 @@ class TestDecisionFunnelSessionPersistence:
             assert rows[0].skips_json == '{"SESSION": 2}'
 
 
+class TestDecisionFunnelRestartDurability:
+    """A mid-session restart must not erase the session's funnel evidence.
+
+    Counters live in memory and used to reach the database only at day
+    rollover, so every restart during RTH silently dropped the counts before
+    it (observed: 09-10/16/17/18 summaries undercounted the event log). The
+    runner now adds each checkpoint's delta to the durable row.
+    """
+
+    _DAY = date(2026, 9, 24)
+
+    def setup_method(self) -> None:
+        with database.SessionLocal() as db:
+            db.query(DecisionFunnelSessionSummary).delete()
+            db.commit()
+
+    def _bound(
+        self,
+        symbol: str = "TSLA.US",
+        clock: list[date] | None = None,
+    ) -> AppRunner:
+        day = clock if clock is not None else [self._DAY]
+        runner = _runner()
+        runner.engine.params = StrategyParams(
+            symbol=symbol, market="US", buy_low=1.0, sell_high=2.0
+        )
+        runner.decision_funnel = DecisionFunnelTracker(trade_day_provider=lambda: day[0])
+        runner._bind_decision_funnel()
+        return runner
+
+    @staticmethod
+    def _switch(runner: AppRunner, symbol: str) -> None:
+        runner.engine.params = StrategyParams(
+            symbol=symbol, market="US", buy_low=1.0, sell_high=2.0
+        )
+        runner._bind_decision_funnel()
+
+    @staticmethod
+    def _count(runner: AppRunner, times: int) -> None:
+        for _ in range(times):
+            runner.decision_funnel.record_skip("REGIME")
+
+    def _store(self, symbol: str, regime: int) -> None:
+        tracker = DecisionFunnelTracker(trade_day_provider=lambda: self._DAY)
+        for _ in range(regime):
+            tracker.record_skip("REGIME")
+        with database.SessionLocal() as db:
+            persist_session_summary(db, tracker.snapshot(), symbol=symbol, market="US")
+            db.commit()
+
+    def _stored_regime(self, symbol: str, day: date | None = None) -> int | None:
+        with database.SessionLocal() as db:
+            row = (
+                db.query(DecisionFunnelSessionSummary)
+                .filter(
+                    DecisionFunnelSessionSummary.symbol == symbol,
+                    DecisionFunnelSessionSummary.session_date == (day or self._DAY),
+                )
+                .one_or_none()
+            )
+        return None if row is None else json.loads(row.skips_json).get("REGIME", 0)
+
+    @staticmethod
+    def _drain(runner: AppRunner) -> None:
+        for _ in range(50):
+            runner._decision_funnel_write_once()
+            if not runner._decision_funnel_pending:
+                return
+        raise AssertionError("pending funnel writes never drained")
+
+    def test_restart_mid_session_adds_to_the_durable_row(self) -> None:
+        # Given a process that counted part of a session and checkpointed it
+        first = self._bound()
+        self._count(first, 3)
+        self._drain(first)
+
+        # When a new process counts more in the same session and checkpoints
+        second = self._bound()
+        self._count(second, 1)
+        self._drain(second)
+
+        # Then the durable row holds the whole session, not just the tail
+        assert self._stored_regime("TSLA.US") == 4, (
+            "a mid-session restart erased the session's earlier funnel counts"
+        )
+
+    def test_repeated_checkpoints_and_rebinds_never_double_count(self) -> None:
+        # Given a checkpointed binding
+        runner = self._bound()
+        self._count(runner, 3)
+        self._drain(runner)
+
+        # When it checkpoints again, and the same process stops and starts
+        self._drain(runner)
+        runner._bind_decision_funnel()
+        self._drain(runner)
+        self._count(runner, 1)
+        self._drain(runner)
+
+        # Then every count reached the row exactly once
+        assert self._stored_regime("TSLA.US") == 4
+
+    def test_primary_switch_keeps_each_symbols_counts(self) -> None:
+        runner = self._bound("TSLA.US")
+        self._count(runner, 5)
+        self._drain(runner)
+
+        self._switch(runner, "NVDA.US")
+        self._count(runner, 2)
+        self._drain(runner)
+
+        assert self._stored_regime("TSLA.US") == 5
+        assert self._stored_regime("NVDA.US") == 2
+
+    def test_switch_before_any_checkpoint_adds_to_the_old_symbols_row(self) -> None:
+        # Given 4 stored for TSLA by an earlier process, 3 more unwritten here
+        self._store("TSLA.US", 4)
+        runner = self._bound("TSLA.US")
+        self._count(runner, 3)
+
+        # When the primary switches before any checkpoint ran
+        self._switch(runner, "NVDA.US")
+        self._count(runner, 1)
+        self._drain(runner)
+
+        assert self._stored_regime("TSLA.US") == 7
+        assert self._stored_regime("NVDA.US") == 1
+
+    def test_switching_back_and_forth_in_one_day_is_exact(self) -> None:
+        runner = self._bound("TSLA.US")
+        self._count(runner, 5)
+        self._drain(runner)
+        self._switch(runner, "NVDA.US")
+        self._count(runner, 2)
+        self._switch(runner, "TSLA.US")
+        self._count(runner, 3)
+        self._drain(runner)
+
+        assert self._stored_regime("TSLA.US") == 8
+        assert self._stored_regime("NVDA.US") == 2
+
+    def test_strategy_reload_switch_rebinds_the_funnel(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.services.strategy_service import StrategyService
+
+        # Given a bound TSLA session with unwritten counts
+        runner = self._bound("TSLA.US")
+        self._count(runner, 3)
+        config = SimpleNamespace(
+            symbol="NVDA.US", market="US", buy_low=400.0, sell_high=410.0,
+            short_selling=False, min_profit_amount=0.0, auto_resume_minutes=3,
+            max_daily_loss=5000.0, max_consecutive_losses=3, fee_rate_us=0.0005,
+            fee_rate_hk=0.003, min_repricing_pct=0.003,
+            llm_action_cooldown_seconds=60, trading_session_mode="RTH_ONLY",
+            margin_safety_factor=0.35,
+        )
+        monkeypatch.setattr(StrategyService, "__init__", lambda self, db: None)
+        monkeypatch.setattr(StrategyService, "get_config", lambda _self: config)
+        monkeypatch.setattr(runner.broker, "get_positions", lambda: [])
+        monkeypatch.setattr(runner._state_svc, "load_symbol_runtime", lambda *args: None)
+        monkeypatch.setattr(runner, "_sync_symbol_runtimes", lambda _db: None)
+        runner._quotes_subscribed = False
+
+        # When the live strategy reload switches the primary symbol
+        runner.reload_strategy()
+        self._count(runner, 1)
+        self._drain(runner)
+
+        # Then the reload handed TSLA's counts off before NVDA counted
+        assert self._stored_regime("TSLA.US") == 3
+        assert self._stored_regime("NVDA.US") == 1
+
+    def test_failed_hand_off_never_credits_the_new_symbol(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        # Given 5 unwritten TSLA counts and a hand-off that fails
+        runner = self._bound("TSLA.US")
+        self._count(runner, 5)
+
+        def _broken() -> list[object]:
+            raise RuntimeError("tracker failure")
+
+        monkeypatch.setattr(runner.decision_funnel, "take_all_sessions", _broken)
+
+        # When the primary switches anyway and NVDA counts one
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            self._switch(runner, "NVDA.US")
+        self._count(runner, 1)
+        self._drain(runner)
+
+        # Then TSLA's counts are a reported gap, never NVDA's
+        assert self._stored_regime("NVDA.US") == 1
+        assert self._stored_regime("TSLA.US") is None
+        assert "telemetry gap" in caplog.text
+
+    def test_commit_then_teardown_failure_never_double_counts(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from contextlib import contextmanager
+
+        # Given a session whose teardown fails after a successful commit
+        runner = self._bound()
+        self._count(runner, 3)
+
+        @contextmanager
+        def _teardown_fails():
+            db = database.SessionLocal()
+            try:
+                yield db
+            finally:
+                db.close()
+            raise RuntimeError("teardown failed")
+
+        monkeypatch.setattr(runner, "_db_session", _teardown_fails)
+        with pytest.raises(RuntimeError, match="teardown failed"):
+            runner._decision_funnel_write_once()
+        assert self._stored_regime("TSLA.US") == 3
+
+        # When the next pass runs normally
+        monkeypatch.undo()
+        self._drain(runner)
+
+        # Then the committed slice was not applied a second time
+        assert self._stored_regime("TSLA.US") == 3
+
+    def test_failed_write_keeps_the_counts_for_the_next_pass(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner = self._bound()
+        self._count(runner, 3)
+
+        def _database_down(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("database unavailable")
+
+        monkeypatch.setattr(runner_module, "add_session_counts", _database_down)
+        with pytest.raises(RuntimeError, match="database unavailable"):
+            runner._decision_funnel_write_once()
+        self._count(runner, 1)
+        monkeypatch.undo()
+        self._drain(runner)
+
+        assert self._stored_regime("TSLA.US") == 4
+
+    def test_one_failing_row_never_blocks_the_others(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Given pending counts for two symbols, the first of which cannot be written
+        runner = self._bound("TSLA.US")
+        self._count(runner, 2)
+        self._switch(runner, "NVDA.US")
+        self._count(runner, 3)
+        real_add = runner_module.add_session_counts
+
+        def _tsla_row_fails(db: object, delta: object, *, symbol: str, market: str) -> None:
+            if symbol == "TSLA.US":
+                raise RuntimeError("TSLA row unwritable")
+            real_add(db, delta, symbol=symbol, market=market)  # pyright: ignore[reportArgumentType]
+
+        monkeypatch.setattr(runner_module, "add_session_counts", _tsla_row_fails)
+
+        # When a writer pass runs
+        with pytest.raises(RuntimeError, match="TSLA row unwritable"):
+            runner._decision_funnel_write_once()
+
+        # Then the other symbol still reached the database, and TSLA stays queued
+        assert self._stored_regime("NVDA.US") == 3
+        assert self._stored_regime("TSLA.US") is None
+        monkeypatch.undo()
+        self._drain(runner)
+        assert self._stored_regime("TSLA.US") == 2
+        assert self._stored_regime("NVDA.US") == 3
+
+    def test_backlog_merges_per_symbol_and_day(self) -> None:
+        # Given the database is never written while symbols alternate
+        runner = self._bound("TSLA.US")
+        for index in range(1000):
+            self._switch(runner, "TSLA.US" if index % 2 == 0 else "NVDA.US")
+            self._count(runner, 1)
+        for _ in range(1000):  # zero-count switches must queue nothing
+            self._switch(runner, "AAPL.US")
+            self._switch(runner, "MSFT.US")
+
+        # Then the backlog holds one entry per symbol and day
+        assert len(runner._decision_funnel_pending) == 2
+        self._drain(runner)
+        assert self._stored_regime("TSLA.US") == 500
+        assert self._stored_regime("NVDA.US") == 500
+
+    def test_backlog_is_capped_and_the_gap_is_reported(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+
+        limit = runner_module._DECISION_FUNNEL_MAX_PENDING
+        runner = self._bound("S0.US")
+        with caplog.at_level(logging.WARNING):
+            for index in range(limit + 10):
+                self._count(runner, 1)
+                self._switch(runner, f"S{index + 1}.US")
+
+        assert len(runner._decision_funnel_pending) <= limit
+        assert "telemetry gap" in caplog.text
+
+    def test_each_pass_writes_a_bounded_batch(self) -> None:
+        batch = runner_module._DECISION_FUNNEL_WRITES_PER_PASS
+        runner = self._bound("S0.US")
+        for index in range(batch + 5):
+            self._count(runner, 1)
+            self._switch(runner, f"S{index + 1}.US")
+
+        runner._decision_funnel_write_once()
+        with database.SessionLocal() as db:
+            written = db.query(DecisionFunnelSessionSummary).count()
+        assert written == batch
+
+        self._drain(runner)
+        with database.SessionLocal() as db:
+            assert db.query(DecisionFunnelSessionSummary).count() == batch + 5
+
+    def test_day_rollover_keeps_each_day_exact(self) -> None:
+        clock = [self._DAY]
+        next_day = date(2026, 9, 25)
+        runner = self._bound(clock=clock)
+        self._count(runner, 2)
+        self._drain(runner)
+        self._count(runner, 1)
+
+        clock[0] = next_day
+        self._count(runner, 1)
+        self._drain(runner)
+
+        assert self._stored_regime("TSLA.US") == 3
+        assert self._stored_regime("TSLA.US", next_day) == 1
+
+    def test_rollover_racing_the_writer_never_double_counts(self) -> None:
+        # Given a day whose clock turns over mid-pass: the next read of the
+        # trade day still returns D, every later read returns D+1
+        next_day = date(2026, 9, 25)
+        current = [self._DAY]
+        one_more_read_of_old_day: list[date] = []
+
+        def _trade_day() -> date:
+            return one_more_read_of_old_day.pop(0) if one_more_read_of_old_day else current[0]
+
+        runner = _runner()
+        runner.engine.params = StrategyParams(
+            symbol="TSLA.US", market="US", buy_low=1.0, sell_high=2.0
+        )
+        runner.decision_funnel = DecisionFunnelTracker(trade_day_provider=_trade_day)
+        runner._bind_decision_funnel()
+        self._count(runner, 2)
+        self._drain(runner)
+        self._count(runner, 1)
+
+        # When midnight lands between the closed-session drain and the live
+        # snapshot of one writer pass
+        current[0] = next_day
+        one_more_read_of_old_day.append(self._DAY)
+        runner._decision_funnel_write_once()
+        self._count(runner, 1)
+        self._drain(runner)
+
+        # Then each day holds exactly its own counts
+        assert self._stored_regime("TSLA.US") == 3
+        assert self._stored_regime("TSLA.US", next_day) == 1
+
+    def test_binding_never_touches_the_database_or_raises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def _no_db(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("binding performed database I/O")
+
+        monkeypatch.setattr(runner_module, "add_session_counts", _no_db)
+        runner = self._bound("TSLA.US")
+        self._count(runner, 1)
+
+        def _broken() -> list[object]:
+            raise RuntimeError("tracker failure")
+
+        monkeypatch.setattr(runner.decision_funnel, "take_all_sessions", _broken)
+        monkeypatch.setattr(runner.decision_funnel, "snapshot", _broken)
+
+        self._switch(runner, "NVDA.US")
+
+        assert runner._decision_funnel_binding == ("NVDA.US", "US")
+
+    def test_unrecoverable_rebind_leaves_the_funnel_unbound_not_misattributed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        import logging
+
+        # Given 5 unwritten TSLA counts whose tracker cannot be read or cleared
+        runner = self._bound("TSLA.US")
+        self._count(runner, 5)
+
+        def _broken() -> None:
+            raise RuntimeError("tracker failure")
+
+        monkeypatch.setattr(runner.decision_funnel, "take_all_sessions", _broken)
+        monkeypatch.setattr(runner.decision_funnel, "discard_all", _broken)
+
+        # When the primary switches: the call must not raise
+        self._switch(runner, "NVDA.US")
+
+        # Then the funnel is unbound, so TSLA's counts can never land on NVDA
+        assert runner._decision_funnel_binding is None
+
+        # And once the tracker works again the writer rebinds and reports the
+        # counts it could not attribute as a gap instead of persisting them
+        monkeypatch.undo()
+        with caplog.at_level(logging.WARNING):
+            self._drain(runner)
+        assert runner._decision_funnel_binding == ("NVDA.US", "US")
+        assert self._stored_regime("NVDA.US") is None
+        assert self._stored_regime("TSLA.US") is None
+        assert "gathered while unbound" in caplog.text
+        self._count(runner, 1)
+        self._drain(runner)
+        assert self._stored_regime("NVDA.US") == 1
+
+    def test_run_loop_housekeeping_never_waits_on_the_database(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import threading
+        import time as time_module
+
+        runner = self._bound()
+        entered = threading.Event()
+        release = threading.Event()
+        calls: list[str] = []
+
+        def _blocked_write() -> None:
+            calls.append(threading.current_thread().name)
+            entered.set()
+            release.wait(5)
+
+        monkeypatch.setattr(runner, "_decision_funnel_write_once", _blocked_write)
+        try:
+            started = time_module.monotonic()
+            runner._decision_funnel_housekeeping()
+            assert entered.wait(5)
+            runner._decision_funnel_checkpoint_at = 0.0
+            runner._decision_funnel_housekeeping()
+            elapsed = time_module.monotonic() - started
+        finally:
+            release.set()
+            if runner._decision_funnel_writer is not None:
+                runner._decision_funnel_writer.join(5)
+
+        assert elapsed < 1.0, "housekeeping blocked the run loop on the database"
+        assert calls == ["decision-funnel-writer"]
+
+
 class TestDecisionFunnelSuppressionVisibility:
     """The funnel must explain a zero-order session, not just report zero.
 

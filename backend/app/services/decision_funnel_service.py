@@ -44,8 +44,12 @@ Interpretation contract (read the counters in order, first zero indicts):
 Counters reset per trading session (exchange-local trading day, via the
 injected ``trade_day_provider`` — the runner passes its existing
 ``_market_trade_day``). On rollover the completed session's snapshot is
-queued for the run loop to persist via :func:`persist_session_summary`;
-mutators never perform I/O.
+queued for the runner to persist; mutators never perform I/O.
+
+The runner also moves the live session's counts to the database about once a
+minute, from a background writer, as deltas added with
+:func:`add_session_counts`. A mid-session restart therefore continues the
+session's row instead of erasing everything counted before it.
 """
 from __future__ import annotations
 
@@ -54,7 +58,7 @@ import logging
 import threading
 from collections import deque
 from collections.abc import Callable, Sequence
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import date, datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -290,12 +294,152 @@ class DecisionFunnelTracker:
             logger.debug("decision-funnel drain failed", exc_info=True)
             return []
 
-    def requeue_closed_sessions(
-        self, snapshots: list[DecisionFunnelSnapshot]
-    ) -> None:
-        """Put back sessions whose persistence failed (order preserved)."""
+    def collect_sessions(
+        self,
+    ) -> tuple[list[DecisionFunnelSnapshot], DecisionFunnelSnapshot]:
+        """Atomically take the closed sessions and snapshot the live one.
+
+        One lock acquisition, so a day rollover cannot fall between the two
+        and leave counts attributed to neither session, or to both.
+        """
         with self._lock:
-            self._closed_sessions.extendleft(reversed(list(snapshots)))
+            self._maybe_rollover_locked()
+            closed = list(self._closed_sessions)
+            self._closed_sessions.clear()
+            return closed, self._snapshot_locked()
+
+    def take_all_sessions(self) -> list[DecisionFunnelSnapshot]:
+        """Atomically take every unpersisted session and restart at zero.
+
+        Returns the closed sessions still queued followed by the current one.
+        Used when the primary symbol changes mid-session, so counts gathered
+        for one symbol are never attributed to another.
+        """
+        with self._lock:
+            self._maybe_rollover_locked()
+            taken = list(self._closed_sessions)
+            self._closed_sessions.clear()
+            taken.append(self._snapshot_locked())
+            self._reset_counters_locked()
+            return taken
+
+    def discard_all(self) -> None:
+        """Drop every count. Last resort when ownership cannot be proven."""
+        with self._lock:
+            self._closed_sessions.clear()
+            self._reset_counters_locked()
+
+
+def combine_snapshots(
+    base: DecisionFunnelSnapshot,
+    other: DecisionFunnelSnapshot,
+    *,
+    sign: int,
+) -> DecisionFunnelSnapshot:
+    """Counter-wise ``base + sign * other`` for one session, floored at zero."""
+    combined: dict[str, object] = {"session_date": base.session_date}
+    for item in fields(DecisionFunnelSnapshot):
+        if item.name == "session_date":
+            continue
+        left = getattr(base, item.name)
+        right = getattr(other, item.name)
+        if isinstance(left, dict):
+            combined[item.name] = {
+                key: max(0, int(left.get(key, 0) or 0) + sign * int(right.get(key, 0) or 0))
+                for key in set(left) | set(right)
+            }
+        else:
+            combined[item.name] = max(0, int(left or 0) + sign * int(right or 0))
+    return DecisionFunnelSnapshot(**combined)  # pyright: ignore[reportArgumentType]
+
+
+def is_empty_snapshot(snapshot: DecisionFunnelSnapshot) -> bool:
+    """True when a snapshot carries no counts at all."""
+    for item in fields(DecisionFunnelSnapshot):
+        if item.name == "session_date":
+            continue
+        value = getattr(snapshot, item.name)
+        if isinstance(value, dict):
+            if any(int(count or 0) for count in value.values()):
+                return False
+        elif int(value or 0):
+            return False
+    return True
+
+
+def _json_counts(raw: str | None) -> dict[str, int]:
+    try:
+        decoded = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(decoded, dict):
+        return {}
+    return {str(key): int(value or 0) for key, value in decoded.items()}
+
+
+_SCALAR_COUNTERS: tuple[str, ...] = (
+    "primary_quotes_seen",
+    "quality_rejections",
+    "entry_crossing_blocks",
+    "fresh_primary_quote",
+    "evaluations",
+    "threshold_crossings",
+    "triggers",
+    "sized_quantity_positive",
+    "submit_attempts",
+    "broker_acks",
+    "persisted",
+    "pre_submit_risk_check_invocations",
+)
+
+
+def add_session_counts(
+    db: Session,
+    delta: DecisionFunnelSnapshot,
+    *,
+    symbol: str,
+    market: str,
+) -> None:
+    """Add counts gathered since the last write to the (session, symbol) row.
+
+    The runner hands each count to this function exactly once, so a process
+    restart continues the row instead of overwriting it with its own tail.
+    The caller commits.
+    """
+    session_day = date.fromisoformat(delta.session_date)
+    row = (
+        db.query(DecisionFunnelSessionSummary)
+        .filter(
+            DecisionFunnelSessionSummary.session_date == session_day,
+            DecisionFunnelSessionSummary.symbol == symbol,
+        )
+        .first()
+    )
+    if row is None:
+        row = DecisionFunnelSessionSummary(
+            session_date=session_day,
+            symbol=symbol,
+            market=market,
+            **{name: 0 for name in _SCALAR_COUNTERS},
+            skips_json="{}",
+            quality_rejections_json="{}",
+        )
+        db.add(row)
+    row.market = market
+    for name in _SCALAR_COUNTERS:
+        setattr(row, name, int(getattr(row, name) or 0) + int(getattr(delta, name) or 0))
+
+    def added(current: str | None, extra: dict[str, int]) -> str:
+        merged = _json_counts(current)
+        for key, value in extra.items():
+            merged[key] = merged.get(key, 0) + int(value or 0)
+        return json.dumps(merged, sort_keys=True)
+
+    row.skips_json = added(row.skips_json, delta.skips_by_category)
+    row.quality_rejections_json = added(
+        row.quality_rejections_json, delta.quality_rejections_by_reason
+    )
+    row.updated_at = datetime.now(timezone.utc)
 
 
 def persist_session_summary(
