@@ -9620,6 +9620,7 @@ class AppRunner:
         # empty categories are ignored by the tracker, never invented.
         if self._is_primary_symbol(symbol):
             self.decision_funnel.record_skip(str(payload.get("skip_category") or ""))
+        payload = self._with_counterfactual_entry(symbol, side, payload)
         with self._db_session() as db:
             record_trade_event(
                 db,
@@ -9631,6 +9632,31 @@ class AppRunner:
                 payload={"source": "trade_precheck", **payload},
             )
             db.commit()
+
+    def _with_counterfactual_entry(
+        self,
+        symbol: str,
+        side: str,
+        payload: dict[str, object],
+    ) -> dict[str, object]:
+        """Attach a read-only snapshot so regime-gated entries can be replayed.
+
+        Telemetry only: the snapshot never feeds back into any decision.
+        """
+        if side not in _ENTRY_ACTIONS or payload.get("skip_category") != "REGIME":
+            return payload
+        with self._state_lock:
+            params = self.engine.params
+            if not symbol or symbol != params.symbol:
+                return payload
+            snapshot: dict[str, object] = {
+                "last_price": float(self.engine.last_price),
+                "buy_low": float(params.buy_low),
+                "sell_high": float(params.sell_high),
+                "stop_loss_pct": float(params.stop_loss_pct),
+                "max_holding_minutes": int(params.max_holding_minutes),
+            }
+        return {**payload, "counterfactual_entry": snapshot}
 
     @staticmethod
     def _broker_side_for_action(action: str) -> str:

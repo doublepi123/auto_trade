@@ -1,6 +1,7 @@
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false
 from __future__ import annotations
 
+import json
 from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
@@ -51,6 +52,78 @@ class TestTradeEventSync:
             assert "expected profit" in event.message
             assert "expected_profit" in event.payload_json
             assert '"skip_category": "FEE"' in event.payload_json
+        finally:
+            db.close()
+
+    def test_regime_entry_skip_records_counterfactual_entry_snapshot(self) -> None:
+        _clean()
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(
+            symbol="TSLA.US",
+            market="US",
+            buy_low=367.26,
+            sell_high=374.68,
+            stop_loss_pct=1.0,
+            max_holding_minutes=60,
+        )
+        runner.engine.last_price = 366.52
+
+        runner._record_order_skipped(
+            "TSLA.US",
+            "BUY",
+            "strategy v2 shadow gate rejected entry",
+            {
+                "skip_category": "REGIME",
+                "entry_policy": "STRATEGY_V2_SHADOW_GATE",
+                "policy_reason": "SHADOW_REGIME_REJECTED",
+            },
+        )
+
+        db = SessionLocal()
+        try:
+            event = db.query(TradeEvent).one()
+            payload = json.loads(event.payload_json)
+            assert payload["policy_reason"] == "SHADOW_REGIME_REJECTED"
+            assert payload["counterfactual_entry"] == {
+                "last_price": 366.52,
+                "buy_low": 367.26,
+                "sell_high": 374.68,
+                "stop_loss_pct": 1.0,
+                "max_holding_minutes": 60,
+            }
+        finally:
+            db.close()
+
+    @pytest.mark.parametrize(
+        ("symbol", "side", "category"),
+        [
+            ("TSLA.US", "SELL", "REGIME"),
+            ("TSLA.US", "BUY", "COOLDOWN"),
+            ("NVDA.US", "BUY", "REGIME"),
+        ],
+    )
+    def test_counterfactual_entry_snapshot_is_limited_to_primary_regime_entries(
+        self,
+        symbol: str,
+        side: str,
+        category: str,
+    ) -> None:
+        _clean()
+        runner = AppRunner()
+        runner.engine.params = StrategyParams(
+            symbol="TSLA.US",
+            market="US",
+            buy_low=367.26,
+            sell_high=374.68,
+        )
+        runner.engine.last_price = 366.52
+
+        runner._record_order_skipped(symbol, side, "skipped", {"skip_category": category})
+
+        db = SessionLocal()
+        try:
+            payload = json.loads(db.query(TradeEvent).one().payload_json)
+            assert "counterfactual_entry" not in payload
         finally:
             db.close()
 

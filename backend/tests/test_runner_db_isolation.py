@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from app import database, runner
+from app.api import deps
 from app.models import FillSettlement
 from app.services import order_terminal_callback_service as callbacks
 from tests.runner_db_isolation_plugin import runner_database_for
@@ -69,6 +70,18 @@ def test_non_target_modules_keep_the_shared_database() -> None:
         # Then original objects remain bound.
         assert database.SessionLocal is _ORIGINAL_FACTORY
         assert database.engine is original_engine
+
+
+def test_audit_singleton_created_during_target_does_not_outlive_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Given no process-wide audit logger yet.
+    monkeypatch.setattr(deps, "_audit_logger_singleton", None)
+    # When a target test lazily creates it against the private database.
+    with runner_database_for(_TARGET):
+        deps.init_audit_logger()
+    # Then later tests get a logger bound to the shared database again.
+    assert deps.init_audit_logger()._session_factory is database.SessionLocal
 
 
 @pytest.mark.parametrize("fail", [False, True])
