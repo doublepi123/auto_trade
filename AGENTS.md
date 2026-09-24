@@ -80,7 +80,7 @@ Three god modules dominate: [`runner.py`](file:///home/lcy/code/auto_trade/backe
 
 ## CODE MAP
 
-`main.py` lifespan: `init_db()` → `init_audit_logger()` → `runner.start()` via `asyncio.to_thread` (failure aborts startup) → optional `PlatformRunner` → 11 cron-health registrations → `LivenessWatchdog` → **12 background asyncio tasks** → **93 `include_router`** calls. Each cron holds its own `asyncio.Lock`; `_opening_research_quiet_window()` makes research crons yield around the open.
+`main.py` lifespan: `init_db()` → `init_audit_logger()` → `runner.start()` via `asyncio.to_thread` (failure aborts startup) → optional `PlatformRunner` → 12 cron-health registrations → `LivenessWatchdog` → **13 background asyncio tasks** → **93 `include_router`** calls. Each cron holds its own `asyncio.Lock`; `_opening_research_quiet_window()` makes research crons yield around the open.
 
 `AppRunner`: one daemon `_run_loop` thread on a 5s cycle (resubscribe → pending reconcile → today-order sync → auto-resume → position reconcile → engine/position sync → stale-quote refresh → silent-feed resubscribe → state persist → funnel housekeeping), plus a `post-fill-persist` daemon thread. Locks: `_start_lock`, `_state_lock` (RLock), `_order_persistence_lock`, and `TradeExecutionService.submission_guard()`. Quote hot path: broker WS push → `_on_quote` → `_evaluate_quote_trigger` (under `_state_lock`, snapshots engine, calls `StrategyEngine.update_price() -> TriggerResult`) → `_broadcast_status()` → `_execute_triggered_order` → `TradeExecutionService`.
 
@@ -261,7 +261,7 @@ New tables since the last refresh (all with `_ensure_*` runtime migrations in `d
 3. Watch the run to a conclusion (`/repos/:owner/:repo/actions/runs?branch=main`). Compare its failing jobs against the **previous** run before judging: `main` can already be red, in which case the bar is "no job fails that was not already failing", not "green". A red `main` that predates your change is still a defect to report, not to inherit silently.
 4. `docker compose up --build -d`.
 5. Gate 4. Verify the deployed image actually contains the change (grep a new symbol inside the container) — a healthy container proves nothing if it is still running the old image.
-6. `POST /api/trade/control/resume` if the system is paused and the pause reason is resolved by this change. On `409`, read the `detail`, resolve the named condition, retry; escalate to `force-resume` only when the 409 reason is demonstrably stale.
+6. `POST /api/control/resume` if the system is paused and the pause reason is resolved by this change. On `409`, read the `detail`, resolve the named condition, retry; escalate to `force-resume` only when the 409 reason is demonstrably stale.
 7. Report what shipped, with the literal gate output as evidence.
 
 Local deploy does not wait on CI — the image is built from the working tree, so a slow or flaky pipeline never blocks restoring a halted system. But CI failing on your own SHA still has to be chased down to a verdict, because `Build and push Docker images` is gated behind every test job: while it is red, no image reaches Docker Hub and any other deployment target silently keeps the old code.
@@ -318,3 +318,16 @@ If gate 4 fails, roll back immediately — `git revert` the commit, rebuild, con
 - **Frozen v5 negative control** (`domain/strategy_v2/PREREGISTRATION.md`): v5 keeps running unchanged as a negative control — if the pipeline ever certifies it as having edge, the pipeline is wrong. Promotion needs four ANDs: net CI lower > 0; version-specific first-passage beating its own driftless baseline; ≥60 distinct days and ~180 resolved brackets; deflated Sharpe `distinguishable_from_luck`. Any parameter change resets the evidence clock.
 - **Research artifact retention**: Artifact *bytes* expire (30d replay/quant-v6, 90d diagnostic WAIT, 14d ordinary WAIT); provenance/checksum rows and every live evidence table (`orders`, `transactions`, `trade_events`, `audit_logs`, `risk_events`, `tracked_entries`, `strategy_v2_shadow_trades`) are never pruned. `0` disables a window.
 - **Prompt modules**: Composable modules assembled by `PromptBuilder`
+
+---
+
+## Repository Map
+
+A full codemap is available at `codemap.md` in the project root.
+
+Before working on any task, read `codemap.md` to understand:
+- Project architecture and entry points
+- Directory responsibilities and design patterns
+- Data flow and integration points between modules
+
+For deep work on a specific folder, also read that folder's `codemap.md`.
