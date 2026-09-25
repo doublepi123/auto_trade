@@ -8583,6 +8583,28 @@ class AppRunner:
                 setattr(order, name, value)
 
     @staticmethod
+    def _frozen_exit_fee_estimate(
+        order: OrderRecord,
+        fill_price: float,
+        fill_quantity: float,
+        fee_rate: float,
+    ) -> float:
+        """Exit fee when no positive broker charge exists.
+
+        Mirrors ``DailyPnlService._effective_authoritative_fee``: the fee
+        frozen on the order at submission, prorated to the executed quantity,
+        else the order's frozen fee rate. Recomputed from inputs, so repeated
+        calls never charge it twice.
+        """
+        estimated = float(getattr(order, "estimated_fee", None) or 0)
+        if estimated > 0:
+            submitted = float(getattr(order, "quantity", None) or 0)
+            if submitted > fill_quantity > 0:
+                estimated *= fill_quantity / submitted
+            return estimated
+        return fill_price * fill_quantity * fee_rate
+
+    @staticmethod
     def _update_execution_outcome_fields(order: OrderRecord) -> None:
         if order.filled_at is not None and order.submit_started_at is not None:
             order.fill_latency_ms = max(
@@ -8612,11 +8634,23 @@ class AppRunner:
                 else (cost_basis_price - fill_price) * fill_quantity
             )
             entry_fee = cost_basis_price * fill_quantity * fee_rate
-            if order.actual_fee is not None:
-                exit_fee = max(0.0, float(order.actual_fee))
+            actual_fee = (
+                None if order.actual_fee is None else max(0.0, float(order.actual_fee))
+            )
+            if actual_fee is not None and not (
+                actual_fee == 0.0
+                and str(getattr(order, "fee_source", "") or "").upper() == "ACTUAL"
+            ):
+                exit_fee = actual_fee
                 pnl_fee_source = "MIXED"
             else:
-                exit_fee = fill_price * fill_quantity * fee_rate
+                # A broker 0.00 charge (paper accounts report it with no fee
+                # items) is not proof of free execution; charge the frozen
+                # exit estimate like the ledger replay does, so the stored
+                # outcome matches /api/trades and the daily risk replay.
+                exit_fee = AppRunner._frozen_exit_fee_estimate(
+                    order, fill_price, fill_quantity, fee_rate
+                )
                 pnl_fee_source = "ESTIMATED"
             pnl_fee = entry_fee + exit_fee
             order.cost_basis_quantity = fill_quantity

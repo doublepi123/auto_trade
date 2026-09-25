@@ -4037,6 +4037,86 @@ class TestAppRunner:
         assert order.gross_pnl == pytest.approx(2.0)
         assert order.pnl_source == pnl_source
 
+    @staticmethod
+    def _zero_charge_exit(**overrides: object) -> SimpleNamespace:
+        values: dict[str, object] = dict(
+            filled_at=datetime.now(timezone.utc),
+            submit_started_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+            executed_price=110.0,
+            executed_quantity=10.0,
+            quantity=10.0,
+            side="SELL",
+            cost_basis_price=100.0,
+            position_quantity_before=10.0,
+            pnl_fee_rate=0.0005,
+            estimated_fee=0.6,
+            actual_fee=0.0,
+            fee_source="ACTUAL",
+            pnl_source="TRACKED_ENTRY",
+            decision_bid=110.0,
+            decision_ask=110.1,
+        )
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def test_zero_actual_charge_uses_the_frozen_exit_estimate_idempotently(self) -> None:
+        # A paper broker reports a 0.00 charge with no fee items; like the
+        # ledger replay, the persisted outcome must not treat it as free.
+        order = self._zero_charge_exit()
+
+        AppRunner._update_execution_outcome_fields(order)
+        AppRunner._update_execution_outcome_fields(order)
+
+        entry_fee = 100.0 * 10 * 0.0005
+        assert order.gross_pnl == pytest.approx(100.0)
+        assert order.pnl_fee == pytest.approx(entry_fee + 0.6)
+        assert order.net_pnl == pytest.approx(100.0 - entry_fee - 0.6)
+        assert order.pnl_fee_source == "ESTIMATED"
+        assert order.actual_fee == 0.0 and order.fee_source == "ACTUAL"
+
+    def test_zero_actual_charge_prorates_the_estimate_for_a_partial_fill(self) -> None:
+        order = self._zero_charge_exit(executed_quantity=4.0, position_quantity_before=4.0)
+
+        AppRunner._update_execution_outcome_fields(order)
+
+        assert order.pnl_fee == pytest.approx(100.0 * 4 * 0.0005 + 0.6 * 4 / 10)
+
+    def test_zero_actual_charge_without_an_estimate_uses_the_frozen_fee_rate(self) -> None:
+        order = self._zero_charge_exit(estimated_fee=None)
+
+        AppRunner._update_execution_outcome_fields(order)
+
+        assert order.pnl_fee == pytest.approx((100.0 + 110.0) * 10 * 0.0005)
+        assert order.pnl_fee_source == "ESTIMATED"
+
+    def test_settled_positive_charge_keeps_the_mixed_contract(self) -> None:
+        order = self._zero_charge_exit(actual_fee=2.79)
+
+        AppRunner._update_execution_outcome_fields(order)
+
+        assert order.pnl_fee == pytest.approx(100.0 * 10 * 0.0005 + 2.79)
+        assert order.pnl_fee_source == "MIXED"
+
+    def test_unreported_charge_uses_the_frozen_exit_estimate(self) -> None:
+        # estimated_fee (0.6) deliberately differs from price*qty*rate (0.55),
+        # so the old rate-only fallback is distinguishable from the new one.
+        order = self._zero_charge_exit(actual_fee=None, fee_source="UNKNOWN")
+
+        AppRunner._update_execution_outcome_fields(order)
+
+        assert order.pnl_fee == pytest.approx(1.10)
+        assert order.net_pnl == pytest.approx(98.90)
+        assert order.pnl_fee_source == "ESTIMATED"
+
+        # And the same row converges as the charge is reported: 0 then positive
+        order.actual_fee, order.fee_source = 0.0, "ACTUAL"
+        AppRunner._update_execution_outcome_fields(order)
+        assert order.pnl_fee == pytest.approx(1.10)
+        order.actual_fee = 2.79
+        AppRunner._update_execution_outcome_fields(order)
+        assert order.pnl_fee == pytest.approx(0.5 + 2.79)
+        assert order.pnl_fee_source == "MIXED"
+
     def test_execution_outcome_normalizes_mixed_timezone_latency(self) -> None:
         order = SimpleNamespace(
             filled_at=datetime(2026, 8, 4, 19, 32, 22),

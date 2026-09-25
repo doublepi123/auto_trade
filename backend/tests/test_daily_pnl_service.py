@@ -286,6 +286,133 @@ class TestDailyPnlService:
         finally:
             db.close()
 
+    def test_zero_actual_charge_persisted_outcome_matches_the_ledger_replay(self) -> None:
+        # The stored net_pnl (read directly by ~20 analytics services) must
+        # agree with what /api/trades and the daily risk replay report.
+        from app.runner import AppRunner
+
+        self._cleanup()
+        trade_day = date(2026, 7, 24)
+        db = self._get_db()
+        db.add_all([
+            OrderRecord(
+                broker_order_id="paper-zero-buy",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=10,
+                price=100,
+                executed_quantity=10,
+                executed_price=100,
+                actual_fee=0,
+                estimated_fee=0.5,
+                fee_source="ACTUAL",
+                status="FILLED",
+                filled_at=self._dt(trade_day, 10),
+            ),
+            OrderRecord(
+                broker_order_id="paper-zero-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=10,
+                price=110,
+                executed_quantity=10,
+                executed_price=110,
+                # Fill-time outcome: the charge had not been reported yet.
+                actual_fee=None,
+                estimated_fee=0.55,
+                fee_source="UNKNOWN",
+                status="FILLED",
+                filled_at=self._dt(trade_day, 11),
+                cost_basis_price=100,
+                cost_basis_quantity=10,
+                position_quantity_before=10,
+                pnl_fee_rate=0.0005,
+                pnl_source="TRACKED_ENTRY",
+            ),
+        ])
+        db.commit()
+        exit_order = db.query(OrderRecord).filter(
+            OrderRecord.broker_order_id == "paper-zero-sell"
+        ).one()
+        AppRunner._update_execution_outcome_fields(exit_order)
+        db.commit()
+
+        # When the broker later reports its 0.00 placeholder charge
+        exit_order.actual_fee = 0.0
+        exit_order.fee_source = "ACTUAL"
+        AppRunner._update_execution_outcome_fields(exit_order)
+        db.commit()
+        db.expire_all()
+        stored = db.query(OrderRecord).filter(
+            OrderRecord.broker_order_id == "paper-zero-sell"
+        ).one()
+        trip = DailyPnlService(db).pair_round_trips(include_excursions=False)[0]
+        result = DailyPnlService(db).calculate(trade_day=trade_day)
+
+        assert stored.net_pnl == approx(trip.net_pnl), (
+            f"orders.net_pnl={stored.net_pnl} disagrees with /api/trades {trip.net_pnl}"
+        )
+        assert stored.net_pnl == approx(98.95)
+        assert result.realized_pnl == approx(98.95)
+        db.close()
+
+    def test_refresh_then_order_sync_then_refresh_never_flip_flops(self) -> None:
+        # Live order of events: fill-time outcome frozen as MIXED with the
+        # entry fee only, the post-fill refresh repairs it, then today-order
+        # sync rewrites the row through the runner helper, then refresh again.
+        from app.runner import AppRunner
+
+        self._cleanup()
+        trade_day = date(2026, 7, 24)
+        db = self._get_db()
+        db.add(OrderRecord(
+            broker_order_id="paper-zero-sequence-sell",
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=10,
+            price=110,
+            executed_quantity=10,
+            executed_price=110,
+            actual_fee=0,
+            estimated_fee=0.55,
+            fee_source="ACTUAL",
+            status="FILLED",
+            filled_at=self._dt(trade_day, 11),
+            cost_basis_price=100,
+            cost_basis_quantity=10,
+            position_quantity_before=10,
+            gross_pnl=100,
+            pnl_fee=0.5,
+            pnl_fee_source="MIXED",
+            pnl_fee_rate=0.0005,
+            net_pnl=99.5,
+            pnl_source="TRACKED_ENTRY",
+        ))
+        db.commit()
+
+        def stored() -> OrderRecord:
+            db.expire_all()
+            return db.query(OrderRecord).filter(
+                OrderRecord.broker_order_id == "paper-zero-sequence-sell"
+            ).one()
+
+        DailyPnlService(db).refresh_execution_outcomes(symbol="AAPL.US")
+        after_repair = (stored().pnl_fee, stored().net_pnl, stored().pnl_fee_source)
+        row = stored()
+        AppRunner._update_execution_outcome_fields(row)
+        db.commit()
+        after_sync = (stored().pnl_fee, stored().net_pnl, stored().pnl_fee_source)
+        second = DailyPnlService(db).refresh_execution_outcomes(symbol="AAPL.US")
+        after_second = (stored().pnl_fee, stored().net_pnl, stored().pnl_fee_source)
+        trip = DailyPnlService(db).pair_round_trips(include_excursions=False)[0]
+
+        assert after_repair == (approx(1.05), approx(98.95), "ESTIMATED")
+        assert after_sync == after_repair, "order sync undid the zero-charge repair"
+        assert second == 0
+        assert after_second == after_repair
+        assert trip.net_pnl == approx(98.95)
+        db.close()
+
     def test_repairs_authoritative_zero_exit_fee_idempotently(self) -> None:
         self._cleanup()
         trade_day = date(2026, 7, 24)
