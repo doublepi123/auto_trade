@@ -3697,6 +3697,87 @@ class TestAppRunner:
         assert updates[0][1]["actual_fee"] == Decimal("2.21")
         assert updates[0][1]["fee_source"] == "ACTUAL"
 
+    def test_zero_charge_orders_take_turns_instead_of_starving_the_rest(
+        self,
+    ) -> None:
+        """A broker that keeps answering 0.00 must not pin the batch forever.
+
+        Each sweep polls only the first few unsettled ids in sorted order. A
+        zero answer used to clear the order's backoff, so the same leading ids
+        were re-polled on every run-loop pass (about 5 s plus loop time) and a
+        later order was never reached. Live
+        evidence: orders 71-73 were polled endlessly while order 74 kept its
+        stale net_pnl after 2d1e63ae was deployed.
+        """
+        import os
+        import tempfile
+        from collections.abc import Iterator
+        from contextlib import contextmanager
+
+        from sqlalchemy import create_engine
+        from sqlalchemy.orm import Session, sessionmaker
+
+        from app.models import Base, OrderRecord
+
+        runner = AppRunner()
+        order_ids = [f"zero-charge-{index}" for index in range(4)]
+
+        class _Detail:
+            status = "FILLED"
+            executed_quantity = Decimal("65")
+            executed_price = Decimal("379.3")
+            actual_fee = Decimal("0.00")
+            fee_currency = "USD"
+            broker_submitted_at = None
+            broker_updated_at = None
+
+        polled: list[str] = []
+
+        class _Broker:
+            def get_order_status(self, oid: str) -> _Detail:
+                polled.append(oid)
+                return _Detail()
+
+        runner.broker = _Broker()
+        runner._update_order_status = lambda *_args: None
+
+        engine = create_engine(
+            f"sqlite:///{tempfile.gettempdir()}/fee_starve_{os.getpid()}.db"
+        )
+        Base.metadata.create_all(engine, tables=[OrderRecord.__table__])
+        factory = sessionmaker(bind=engine)
+        with factory() as seed:
+            seed.query(OrderRecord).delete()
+            for oid in order_ids:
+                row = OrderRecord()
+                row.broker_order_id = oid
+                row.symbol = "TSLA.US"
+                row.side = "SELL"
+                row.quantity = 65.0
+                row.price = 379.3
+                row.status = "FILLED"
+                row.actual_fee = 0.0
+                row.fee_source = "ACTUAL"
+                seed.add(row)
+            seed.commit()
+
+        @contextmanager
+        def _session() -> Iterator[Session]:
+            db = factory()
+            try:
+                yield db
+            finally:
+                db.close()
+
+        runner._db_session = _session
+
+        runner._enrich_broker_order_costs([])
+        runner._enrich_broker_order_costs([])
+
+        assert set(polled) == set(order_ids), (
+            f"orders never polled: {sorted(set(order_ids) - set(polled))}"
+        )
+
     def test_fill_older_than_the_broker_lookup_window_stops_being_polled(
         self,
     ) -> None:

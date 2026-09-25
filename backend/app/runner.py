@@ -5746,8 +5746,19 @@ class AppRunner:
                     float(getattr(detail, "executed_price", 0) or 0),
                     metadata,
                 )
-                self._fee_enrichment_attempts.pop(order_id, None)
-                self._fee_enrichment_next_retry_at.pop(order_id, None)
+                try:
+                    settled = float(str(metadata["actual_fee"])) > 0
+                except ValueError:
+                    settled = False
+                if settled:
+                    self._fee_enrichment_attempts.pop(order_id, None)
+                    self._fee_enrichment_next_retry_at.pop(order_id, None)
+                else:
+                    # 0.00 is the broker's settling placeholder (the paper
+                    # account keeps reporting it). Back off like any unsettled
+                    # answer: clearing the backoff here re-polled the same
+                    # leading ids every sweep and starved the later ones.
+                    self._schedule_fee_enrichment_retry(order_id, now)
             except Exception:
                 self._schedule_fee_enrichment_retry(order_id, now)
                 # Orders older than the broker's lookup window fail on every
