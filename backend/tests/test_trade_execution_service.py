@@ -3692,6 +3692,18 @@ class TestTradeExecutionServiceBasics:
                 0.38,
                 "ESTIMATED",
             ),
+            (
+                # A paper broker reports 0.00 with no fee items while (or
+                # instead of) settling. It is not proof of a free exit, so the
+                # outcome booked into risk charges the frozen exit estimate,
+                # like the order ledger and the daily replay do.
+                "SELL",
+                "LONG",
+                Decimal("110"),
+                Decimal("0"),
+                0.42,
+                "ESTIMATED",
+            ),
         ],
     )
     def test_exit_fill_persists_authoritative_tracked_entry_pnl_metadata(

@@ -3934,7 +3934,11 @@ class TradeExecutionService:
         if actual_fee_raw is not None:
             try:
                 candidate = Decimal(str(actual_fee_raw))
-                if candidate.is_finite() and candidate >= 0:
+                # 0.00 is the broker's settling placeholder (a paper account
+                # reports it with no fee items), not proof of a free exit, so
+                # it is charged like an unreported fee rather than booked
+                # into risk as zero.
+                if candidate.is_finite() and candidate > 0:
                     actual_exit_fee = candidate
             except Exception:
                 actual_exit_fee = None
