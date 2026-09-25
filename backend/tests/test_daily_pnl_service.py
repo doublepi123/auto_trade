@@ -2012,3 +2012,766 @@ class TestDailyPnlService:
         assert issue.filled_quantity == 1
         assert issue.matched_quantity == 0
         assert issue.unmatched_quantity == 1
+
+    def test_sec98_partial_then_external_close_recognises_full_entry_fee(self) -> None:
+        """§9.8 marker: local partial exit + external close of the remainder.
+
+        Entry BUY 2 @ 250 with the marker (frozen estimated_fee = order_fee
+        = 1.568 + 0.0000641*250*2 = 1.60005); local SELL 1 @ 250 is an
+        authoritative TRACKED_ENTRY exit carrying the marker, whose persisted
+        outcome is computed with the proportional allocated_entry_fee; the
+        external SELL 1 @ 250 has no marker and falls back to fee_rate_us.
+        Both replay views must total
+        1.60005 + (1.568 + 0.0000641*250) + 250*1*0.0005 = 3.309075.
+        """
+        import json as _json
+        from decimal import Decimal as _Decimal
+
+        from app.runner import AppRunner
+
+        marker = _json.dumps({"accounting_fee_model": "us-sec98-v1"})
+        self._cleanup()
+        trade_day = date(2026, 9, 24)
+        entry_at = self._dt(trade_day, 10)
+        local_exit_at = self._dt(trade_day, 11)
+        external_exit_at = self._dt(trade_day, 12)
+        db = self._get_db()
+        try:
+            # 1) Entry order with the marker; estimated_fee frozen via order_fee.
+            db.add(OrderRecord(
+                broker_order_id="sec98-e2e-entry",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=2,
+                price=250,
+                executed_quantity=2,
+                executed_price=250,
+                estimated_fee=1.60005,
+                fee_source="ESTIMATED",
+                status="FILLED",
+                created_at=entry_at,
+                filled_at=entry_at,
+                config_snapshot=marker,
+            ))
+            # 2) Local partial SELL 1: authoritative TRACKED_ENTRY with marker.
+            #    Persisted outcome computed exactly as the live path does.
+            entry_fee_alloc = _Decimal("1.568") / 2 + _Decimal("0.0000641") * _Decimal("250") * _Decimal("1")
+            exit_fee_local = _Decimal("1.568") + _Decimal("0.0000641") * _Decimal("250") * _Decimal("1")
+            local_gross = (_Decimal("250") - _Decimal("250")) * _Decimal("1")
+            local_order = OrderRecord(
+                broker_order_id="sec98-e2e-local-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=1,
+                price=250,
+                executed_quantity=1,
+                executed_price=250,
+                actual_fee=0,
+                fee_source="ACTUAL",
+                status="FILLED",
+                created_at=local_exit_at,
+                filled_at=local_exit_at,
+                config_snapshot=marker,
+                pnl_source="TRACKED_ENTRY",
+                cost_basis_price=250,
+                cost_basis_quantity=1,
+                cost_basis_opened_at=entry_at,
+                position_quantity_before=2,
+                pnl_fee_rate=0.0005,
+            )
+            db.add(local_order)
+            db.commit()
+            db.refresh(local_order)
+            AppRunner._update_execution_outcome_fields(local_order)
+            db.commit()
+            assert local_order.pnl_fee is not None
+            assert float(entry_fee_alloc + exit_fee_local) == approx(
+                float(local_order.pnl_fee), abs=1e-9
+            )
+            # 3) External SELL 1: broker-synced, no marker, legacy fee rate.
+            db.add(OrderRecord(
+                broker_order_id="sec98-e2e-external-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=1,
+                price=250,
+                executed_quantity=1,
+                executed_price=250,
+                status="FILLED",
+                created_at=external_exit_at,
+                filled_at=external_exit_at,
+            ))
+            db.commit()
+
+            expected_total = 1.60005 + (1.568 + 0.0000641 * 250) + 250 * 1 * 0.0005
+
+            trips = DailyPnlService(db).pair_round_trips(
+                symbol="AAPL.US", include_excursions=False,
+            )
+            assert len(trips) == 2
+            assert sum(t.est_fees for t in trips) == approx(
+                expected_total, abs=1e-6
+            )
+            assert sum(t.net_pnl for t in trips) == approx(
+                -expected_total, abs=1e-6
+            )
+
+            result = DailyPnlService(db).calculate(
+                trade_day=trade_day, symbol="AAPL.US",
+            )
+            assert result.is_complete is True
+            assert result.realized_pnl == approx(-expected_total, abs=1e-6)
+        finally:
+            db.close()
+            self._cleanup()
+
+    def test_legacy_partial_then_external_close_unchanged(self) -> None:
+        """No marker anywhere: today's numbers through both replay views."""
+        self._cleanup()
+        trade_day = date(2026, 9, 24)
+        entry_at = self._dt(trade_day, 10)
+        local_exit_at = self._dt(trade_day, 11)
+        external_exit_at = self._dt(trade_day, 12)
+        db = self._get_db()
+        try:
+            from app.runner import AppRunner
+
+            db.add(OrderRecord(
+                broker_order_id="legacy-e2e-entry",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=2,
+                price=250,
+                executed_quantity=2,
+                executed_price=250,
+                estimated_fee=0.25,
+                fee_source="ESTIMATED",
+                status="FILLED",
+                created_at=entry_at,
+                filled_at=entry_at,
+            ))
+            local_order = OrderRecord(
+                broker_order_id="legacy-e2e-local-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=1,
+                price=250,
+                executed_quantity=1,
+                executed_price=250,
+                actual_fee=0,
+                fee_source="ACTUAL",
+                status="FILLED",
+                created_at=local_exit_at,
+                filled_at=local_exit_at,
+                pnl_source="TRACKED_ENTRY",
+                cost_basis_price=250,
+                cost_basis_quantity=1,
+                cost_basis_opened_at=entry_at,
+                position_quantity_before=2,
+                pnl_fee_rate=0.0005,
+            )
+            db.add(local_order)
+            db.commit()
+            db.refresh(local_order)
+            AppRunner._update_execution_outcome_fields(local_order)
+            db.commit()
+            db.add(OrderRecord(
+                broker_order_id="legacy-e2e-external-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=1,
+                price=250,
+                executed_quantity=1,
+                executed_price=250,
+                status="FILLED",
+                created_at=external_exit_at,
+                filled_at=external_exit_at,
+            ))
+            db.commit()
+
+            # entry fee 0.25 allocated half to each close; both exits fall
+            # back to the frozen estimate/rate: 0.125 each (250*1*0.0005).
+            expected_total = 0.25 + 0.125 + 0.125
+
+            trips = DailyPnlService(db).pair_round_trips(
+                symbol="AAPL.US", include_excursions=False,
+            )
+            assert len(trips) == 2
+            assert sum(t.est_fees for t in trips) == approx(
+                expected_total, abs=1e-6
+            )
+            result = DailyPnlService(db).calculate(
+                trade_day=trade_day, symbol="AAPL.US",
+            )
+            assert result.realized_pnl == approx(-expected_total, abs=1e-6)
+        finally:
+            db.close()
+            self._cleanup()
+
+    def _sec98_exit_order(
+        self,
+        order_id: str,
+        filled_at: datetime,
+        *,
+        position_before: int,
+        fill_qty: int,
+        cost_basis_opened_at: datetime,
+        price: float = 250.0,
+    ) -> OrderRecord:
+        """Marker SELL ready for the live-path outcome computation."""
+        import json as _json
+
+        marker = _json.dumps({"accounting_fee_model": "us-sec98-v1"})
+        return OrderRecord(
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=fill_qty,
+            price=price,
+            executed_quantity=fill_qty,
+            executed_price=price,
+            actual_fee=0,
+            fee_source="ACTUAL",
+            status="FILLED",
+            created_at=filled_at,
+            filled_at=filled_at,
+            config_snapshot=marker,
+            pnl_source="TRACKED_ENTRY",
+            cost_basis_price=price,
+            cost_basis_quantity=fill_qty,
+            cost_basis_opened_at=cost_basis_opened_at,
+            position_quantity_before=position_before,
+            pnl_fee_rate=0.0005,
+        )
+
+    def _persist_authoritative_sec98_outcome(
+        self,
+        db,
+        order: OrderRecord,
+    ) -> None:
+        from app.runner import AppRunner
+
+        db.add(order)
+        db.commit()
+        db.refresh(order)
+        AppRunner._update_execution_outcome_fields(order)
+        db.commit()
+
+    def test_sec98_two_local_partials_then_external_close(self) -> None:
+        """S1: BUY 100 (marker) → local SELL 40 → local SELL 30 → external
+        SELL 30 (no marker).
+
+        Rule R re-derives the entry pool at each authoritative marker exit
+        (order_fee(B, Q)) and the remainder carries to the external close:
+        1.2682 + 2.209 + 1.26475 + 2.04875 + 1.26475 + 3.75 = 11.80545.
+        """
+        import json as _json
+        from decimal import Decimal as _Decimal
+
+        trade_day = date(2026, 9, 25)
+        entry_at = self._dt(trade_day, 10)
+        first_exit_at = self._dt(trade_day, 11)
+        second_exit_at = self._dt(trade_day, 12)
+        external_exit_at = self._dt(trade_day, 13)
+        marker = _json.dumps({"accounting_fee_model": "us-sec98-v1"})
+        self._cleanup()
+        db = self._get_db()
+        try:
+            db.add(OrderRecord(
+                broker_order_id="s1-entry",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=100,
+                price=250,
+                executed_quantity=100,
+                executed_price=250,
+                estimated_fee=3.1705,
+                fee_source="ESTIMATED",
+                status="FILLED",
+                created_at=entry_at,
+                filled_at=entry_at,
+                config_snapshot=marker,
+            ))
+            self._persist_authoritative_sec98_outcome(db, self._sec98_exit_order(
+                "s1-local-sell-40",
+                first_exit_at,
+                position_before=100,
+                fill_qty=40,
+                cost_basis_opened_at=entry_at,
+            ))
+            self._persist_authoritative_sec98_outcome(db, self._sec98_exit_order(
+                "s1-local-sell-30",
+                second_exit_at,
+                position_before=60,
+                fill_qty=30,
+                cost_basis_opened_at=entry_at,
+            ))
+            db.add(OrderRecord(
+                broker_order_id="s1-external-sell-30",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=30,
+                price=250,
+                executed_quantity=30,
+                executed_price=250,
+                status="FILLED",
+                created_at=external_exit_at,
+                filled_at=external_exit_at,
+            ))
+            db.commit()
+
+            expected = _Decimal("11.80545")
+
+            trips = DailyPnlService(db).pair_round_trips(
+                symbol="AAPL.US", include_excursions=False,
+            )
+            assert len(trips) == 3
+            assert sum(t.net_pnl for t in trips) == approx(-float(expected), abs=1e-6)
+
+            result = DailyPnlService(db).calculate(
+                trade_day=trade_day, symbol="AAPL.US",
+            )
+            assert result.is_complete is True
+            assert result.realized_pnl == approx(-float(expected), abs=1e-6)
+        finally:
+            db.close()
+            self._cleanup()
+
+    def test_sec98_rule_r_skips_a_disputed_cost_basis(self) -> None:
+        # A marker partial exit that declares a conflicting basis (10 vs the
+        # replayed 250) is rejected as COST_BASIS_CONFLICT. Rule R must not
+        # rebuild the remaining entry fee pool from that rejected basis, so
+        # the external close still carries order_fee(250, 2) / 2 = 0.800025.
+        import json as _json
+
+        trade_day = date(2026, 9, 25)
+        next_day = date(2026, 9, 26)
+        entry_at = self._dt(trade_day, 10)
+        marker = _json.dumps({"accounting_fee_model": "us-sec98-v1"})
+        self._cleanup()
+        db = self._get_db()
+        try:
+            db.add(OrderRecord(
+                broker_order_id="conflict-entry",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=2,
+                price=250,
+                executed_quantity=2,
+                executed_price=250,
+                estimated_fee=1.60005,
+                fee_source="ESTIMATED",
+                status="FILLED",
+                created_at=entry_at,
+                filled_at=entry_at,
+                config_snapshot=marker,
+            ))
+            disputed = self._sec98_exit_order(
+                "conflict-local-sell",
+                self._dt(trade_day, 11),
+                position_before=2,
+                fill_qty=1,
+                cost_basis_opened_at=entry_at,
+            )
+            disputed.cost_basis_price = 10
+            self._persist_authoritative_sec98_outcome(db, disputed)
+            external_at = self._dt(next_day, 11)
+            db.add(OrderRecord(
+                broker_order_id="conflict-external-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=1,
+                price=250,
+                executed_quantity=1,
+                executed_price=250,
+                status="FILLED",
+                created_at=external_at,
+                filled_at=external_at,
+            ))
+            db.commit()
+
+            trips = DailyPnlService(db).pair_round_trips(
+                symbol="AAPL.US", include_excursions=False,
+            )
+            external = [
+                t for t in trips if t.exit_broker_order_id == "conflict-external-sell"
+            ]
+            assert len(external) == 1
+            assert external[0].net_pnl == approx(-(0.800025 + 0.125), abs=1e-6)
+
+            result = DailyPnlService(db).calculate(
+                trade_day=next_day, symbol="AAPL.US",
+            )
+            assert result.realized_pnl == approx(external[0].net_pnl, abs=1e-6)
+        finally:
+            db.close()
+            self._cleanup()
+
+    def test_sec98_rule_r_never_reports_a_modelled_entry_fee_as_actual(self) -> None:
+        # The entry carried a settled broker charge (10). Once Rule R
+        # replaces its remaining pool with the §9.8 model, that remainder is
+        # an estimate: a later external close with its own actual charge
+        # must not be reported as a fully ACTUAL round trip.
+        import json as _json
+
+        trade_day = date(2026, 9, 25)
+        entry_at = self._dt(trade_day, 10)
+        marker = _json.dumps({"accounting_fee_model": "us-sec98-v1"})
+        self._cleanup()
+        db = self._get_db()
+        try:
+            db.add(OrderRecord(
+                broker_order_id="actual-entry",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=2,
+                price=250,
+                executed_quantity=2,
+                executed_price=250,
+                actual_fee=10,
+                estimated_fee=1.60005,
+                fee_source="ACTUAL",
+                status="FILLED",
+                created_at=entry_at,
+                filled_at=entry_at,
+                config_snapshot=marker,
+            ))
+            self._persist_authoritative_sec98_outcome(db, self._sec98_exit_order(
+                "actual-local-sell",
+                self._dt(trade_day, 11),
+                position_before=2,
+                fill_qty=1,
+                cost_basis_opened_at=entry_at,
+            ))
+            external_at = self._dt(trade_day, 12)
+            db.add(OrderRecord(
+                broker_order_id="actual-external-sell",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=1,
+                price=250,
+                executed_quantity=1,
+                executed_price=250,
+                actual_fee=1,
+                fee_source="ACTUAL",
+                status="FILLED",
+                created_at=external_at,
+                filled_at=external_at,
+            ))
+            db.commit()
+
+            trips = DailyPnlService(db).pair_round_trips(
+                symbol="AAPL.US", include_excursions=False,
+            )
+            external = [
+                t for t in trips if t.exit_broker_order_id == "actual-external-sell"
+            ]
+            assert len(external) == 1
+            assert external[0].fee_source != "ACTUAL", (
+                "a §9.8 modelled entry share was reported as a broker charge"
+            )
+            assert external[0].actual_fees is None
+        finally:
+            db.close()
+            self._cleanup()
+
+    def test_sec98_partially_filled_entry_keeps_the_fixed_fee(self) -> None:
+        """S2: BUY submitted 4, filled 2 (marker, estimate frozen for 4) →
+        local SELL 1 → external SELL 1.
+
+        The frozen estimate is NOT scaled by executed/submitted (that would
+        halve the fixed 1.568); the fill carries order_fee(executed):
+        0.800025 + 1.584025 + 0.800025 + 0.125 = 3.309075.
+        """
+        import json as _json
+        from decimal import Decimal as _Decimal
+
+        trade_day = date(2026, 9, 25)
+        entry_at = self._dt(trade_day, 10)
+        local_exit_at = self._dt(trade_day, 11)
+        external_exit_at = self._dt(trade_day, 12)
+        marker = _json.dumps({"accounting_fee_model": "us-sec98-v1"})
+        self._cleanup()
+        db = self._get_db()
+        try:
+            db.add(OrderRecord(
+                broker_order_id="s2-entry",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=4,
+                price=250,
+                executed_quantity=2,
+                executed_price=250,
+                estimated_fee=1.6321,  # frozen via order_fee(250, 4)
+                fee_source="ESTIMATED",
+                status="FILLED",
+                created_at=entry_at,
+                filled_at=entry_at,
+                config_snapshot=marker,
+            ))
+            self._persist_authoritative_sec98_outcome(db, self._sec98_exit_order(
+                "s2-local-sell-1",
+                local_exit_at,
+                position_before=2,
+                fill_qty=1,
+                cost_basis_opened_at=entry_at,
+            ))
+            db.add(OrderRecord(
+                broker_order_id="s2-external-sell-1",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=1,
+                price=250,
+                executed_quantity=1,
+                executed_price=250,
+                status="FILLED",
+                created_at=external_exit_at,
+                filled_at=external_exit_at,
+            ))
+            db.commit()
+
+            expected = _Decimal("3.309075")
+
+            trips = DailyPnlService(db).pair_round_trips(
+                symbol="AAPL.US", include_excursions=False,
+            )
+            assert len(trips) == 2
+            assert sum(t.net_pnl for t in trips) == approx(-float(expected), abs=1e-6)
+
+            result = DailyPnlService(db).calculate(
+                trade_day=trade_day, symbol="AAPL.US",
+            )
+            assert result.is_complete is True
+            assert result.realized_pnl == approx(-float(expected), abs=1e-6)
+        finally:
+            db.close()
+            self._cleanup()
+
+    def test_sec98_partially_filled_entry_external_close_only(self) -> None:
+        """Blocker 1b minimal: BUY submitted 4, filled 2 (marker) closed only
+        by an external SELL 2. Entry side = order_fee(250, 2) = 1.60005
+        (not the scaled 0.81605), exit side 0.25: total 1.85005."""
+        import json as _json
+        from decimal import Decimal as _Decimal
+
+        trade_day = date(2026, 9, 25)
+        entry_at = self._dt(trade_day, 10)
+        external_exit_at = self._dt(trade_day, 12)
+        marker = _json.dumps({"accounting_fee_model": "us-sec98-v1"})
+        self._cleanup()
+        db = self._get_db()
+        try:
+            db.add(OrderRecord(
+                broker_order_id="s3-entry",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=4,
+                price=250,
+                executed_quantity=2,
+                executed_price=250,
+                estimated_fee=1.6321,
+                fee_source="ESTIMATED",
+                status="FILLED",
+                created_at=entry_at,
+                filled_at=entry_at,
+                config_snapshot=marker,
+            ))
+            db.add(OrderRecord(
+                broker_order_id="s3-external-sell-2",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=2,
+                price=250,
+                executed_quantity=2,
+                executed_price=250,
+                status="FILLED",
+                created_at=external_exit_at,
+                filled_at=external_exit_at,
+            ))
+            db.commit()
+
+            expected = _Decimal("1.85005")
+
+            trips = DailyPnlService(db).pair_round_trips(
+                symbol="AAPL.US", include_excursions=False,
+            )
+            assert len(trips) == 1
+            assert sum(t.net_pnl for t in trips) == approx(-float(expected), abs=1e-6)
+
+            result = DailyPnlService(db).calculate(
+                trade_day=trade_day, symbol="AAPL.US",
+            )
+            assert result.realized_pnl == approx(-float(expected), abs=1e-6)
+        finally:
+            db.close()
+            self._cleanup()
+
+    def test_legacy_two_local_partials_then_external_close_unchanged(self) -> None:
+        """L1: the S1 sequence without any marker keeps today's numbers:
+        100*250*0.0005 + 2*(40*250*0.0005) + 2*(30*250*0.0005) + 2*(30*250*0.0005)
+        = 12.5 + 10 + 7.5 + 7.5 = 37.5."""
+        trade_day = date(2026, 9, 25)
+        entry_at = self._dt(trade_day, 10)
+        first_exit_at = self._dt(trade_day, 11)
+        second_exit_at = self._dt(trade_day, 12)
+        external_exit_at = self._dt(trade_day, 13)
+        self._cleanup()
+        db = self._get_db()
+        try:
+            from app.runner import AppRunner
+
+            db.add(OrderRecord(
+                broker_order_id="l1-entry",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=100,
+                price=250,
+                executed_quantity=100,
+                executed_price=250,
+                estimated_fee=12.5,
+                fee_source="ESTIMATED",
+                status="FILLED",
+                created_at=entry_at,
+                filled_at=entry_at,
+            ))
+            for order_id, at, before, fill in (
+                ("l1-local-sell-40", first_exit_at, 100, 40),
+                ("l1-local-sell-30", second_exit_at, 60, 30),
+            ):
+                order = OrderRecord(
+                    broker_order_id=order_id,
+                    symbol="AAPL.US",
+                    side="SELL",
+                    quantity=fill,
+                    price=250,
+                    executed_quantity=fill,
+                    executed_price=250,
+                    actual_fee=0,
+                    fee_source="ACTUAL",
+                    status="FILLED",
+                    created_at=at,
+                    filled_at=at,
+                    pnl_source="TRACKED_ENTRY",
+                    cost_basis_price=250,
+                    cost_basis_quantity=fill,
+                    cost_basis_opened_at=entry_at,
+                    position_quantity_before=before,
+                    pnl_fee_rate=0.0005,
+                )
+                db.add(order)
+                db.commit()
+                db.refresh(order)
+                AppRunner._update_execution_outcome_fields(order)
+                db.commit()
+            db.add(OrderRecord(
+                broker_order_id="l1-external-sell-30",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=30,
+                price=250,
+                executed_quantity=30,
+                executed_price=250,
+                status="FILLED",
+                created_at=external_exit_at,
+                filled_at=external_exit_at,
+            ))
+            db.commit()
+
+            expected = 25.0
+
+            trips = DailyPnlService(db).pair_round_trips(
+                symbol="AAPL.US", include_excursions=False,
+            )
+            assert len(trips) == 3
+            assert sum(t.net_pnl for t in trips) == approx(-expected, abs=1e-6)
+            result = DailyPnlService(db).calculate(
+                trade_day=trade_day, symbol="AAPL.US",
+            )
+            assert result.realized_pnl == approx(-expected, abs=1e-6)
+        finally:
+            db.close()
+            self._cleanup()
+
+    def test_legacy_partially_filled_entry_unchanged(self) -> None:
+        """L2: the S2 sequence without any marker keeps today's numbers:
+        the frozen estimate 0.25 stays scaled by executed/submitted (0.125),
+        so total = 0.125 + 0.25 + 0.25 = 0.625."""
+        trade_day = date(2026, 9, 25)
+        entry_at = self._dt(trade_day, 10)
+        local_exit_at = self._dt(trade_day, 11)
+        external_exit_at = self._dt(trade_day, 12)
+        self._cleanup()
+        db = self._get_db()
+        try:
+            from app.runner import AppRunner
+
+            db.add(OrderRecord(
+                broker_order_id="l2-entry",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=4,
+                price=250,
+                executed_quantity=2,
+                executed_price=250,
+                estimated_fee=0.25,  # frozen for the submitted 4
+                fee_source="ESTIMATED",
+                status="FILLED",
+                created_at=entry_at,
+                filled_at=entry_at,
+            ))
+            order = OrderRecord(
+                broker_order_id="l2-local-sell-1",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=1,
+                price=250,
+                executed_quantity=1,
+                executed_price=250,
+                actual_fee=0,
+                fee_source="ACTUAL",
+                status="FILLED",
+                created_at=local_exit_at,
+                filled_at=local_exit_at,
+                pnl_source="TRACKED_ENTRY",
+                cost_basis_price=250,
+                cost_basis_quantity=1,
+                cost_basis_opened_at=entry_at,
+                position_quantity_before=2,
+                pnl_fee_rate=0.0005,
+            )
+            db.add(order)
+            db.commit()
+            db.refresh(order)
+            AppRunner._update_execution_outcome_fields(order)
+            db.commit()
+            db.add(OrderRecord(
+                broker_order_id="l2-external-sell-1",
+                symbol="AAPL.US",
+                side="SELL",
+                quantity=1,
+                price=250,
+                executed_quantity=1,
+                executed_price=250,
+                status="FILLED",
+                created_at=external_exit_at,
+                filled_at=external_exit_at,
+            ))
+            db.commit()
+
+            # Today's numbers, per view: the legacy entry lot's fee keeps the
+            # executed/submitted scaling (0.25 * 2/4 = 0.125), so
+            # pair_round_trips totals 0.125 + 0.25 + 0.0625 = 0.4375 while
+            # calculate()'s authoritative rebases give 0.5. Both are today's
+            # behaviour and must not change.
+            trips = DailyPnlService(db).pair_round_trips(
+                symbol="AAPL.US", include_excursions=False,
+            )
+            assert len(trips) == 2
+            assert sum(t.net_pnl for t in trips) == approx(-0.4375, abs=1e-6)
+            result = DailyPnlService(db).calculate(
+                trade_day=trade_day, symbol="AAPL.US",
+            )
+            assert result.realized_pnl == approx(-0.5, abs=1e-6)
+        finally:
+            db.close()
+            self._cleanup()

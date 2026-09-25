@@ -10,6 +10,10 @@ from typing import Literal
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.core.accounting_fees import (
+    model_applies,
+    model_from_config_snapshot,
+)
 from app.domain.strategy_v2 import (
     ProfitLockAction,
     ProfitLockConfig,
@@ -484,7 +488,13 @@ class LiveExitChallengerService:
     ) -> float:
         notional = entry_price * quantity
         if (
-            order.estimated_fee is not None
+            # Research pairs stay rate-based: under the §9.8 accounting model
+            # estimated_fee/notional is not a rate (it carries the fixed
+            # commission), so a US entry order carrying that marker must use
+            # the configured rate instead. HK keeps the legacy estimate basis
+            # even with the marker: its accounting is still rate-based.
+            not pair_cost_basis_applies(order)
+            and order.estimated_fee is not None
             and math.isfinite(float(order.estimated_fee))
             and float(order.estimated_fee) >= 0
             and notional > 0
@@ -556,6 +566,15 @@ class LiveExitChallengerService:
             or not math.isfinite(net_pnl)
         ):
             return False
+        if pair_cost_basis_applies(baseline):
+            rate_basis = rate_basis_baseline_outcome(
+                row,
+                baseline,
+                exit_price=exit_price,
+            )
+            if rate_basis is None:
+                return False
+            pnl_fee, net_pnl = rate_basis
         row.status = "CLOSED"
         row.challenger_exit_at = baseline.filled_at
         row.challenger_exit_price = exit_price
@@ -616,6 +635,15 @@ class LiveExitChallengerService:
             else baseline.price
         )
         baseline_net_pnl = float(baseline.net_pnl)
+        if pair_cost_basis_applies(baseline):
+            rate_basis = rate_basis_baseline_outcome(
+                row,
+                baseline,
+                exit_price=exit_price,
+            )
+            if rate_basis is None:
+                return  # no gross to put on the pair's basis: do not pair
+            baseline_net_pnl = rate_basis[1]
         if (
             _as_utc(baseline.filled_at) < _as_utc(row.entry_at)
             or not math.isfinite(exit_price)
@@ -965,6 +993,37 @@ def _minute_floor(value: datetime) -> datetime:
 
 def _market_for_symbol(symbol: str) -> str:
     return "HK" if symbol.upper().endswith(".HK") else "US"
+
+
+def pair_cost_basis_applies(order: OrderRecord) -> bool:
+    """True when the order's accounting uses the §9.8 model (US only)."""
+    return model_applies(
+        model_from_config_snapshot(getattr(order, "config_snapshot", None)),
+        _market_for_symbol(order.symbol),
+    )
+
+
+def rate_basis_baseline_outcome(
+    row: LiveExitChallengerTrade,
+    baseline: OrderRecord,
+    *,
+    exit_price: float,
+) -> tuple[float, float] | None:
+    """Baseline (fees, net) on the pair's own frozen rate; None if no gross.
+
+    The runner writes the §9.8 marker for every order, HK included, but the
+    measured-commission accounting model is US-only (``pair_cost_basis_applies``
+    is False for HK), so HK baselines never take this path.
+    """
+    if baseline.gross_pnl is None:
+        return None
+    gross_pnl = float(baseline.gross_pnl)
+    fees = (
+        (float(row.entry_price) + exit_price)
+        * float(row.quantity)
+        * float(row.estimated_fee_rate)
+    )
+    return fees, gross_pnl - fees
 
 
 def _max_drawdown(values: list[float]) -> float:

@@ -1892,8 +1892,39 @@ class ResearchObservationHealthService:
                     else baseline_order.price
                 )
                 actual_gross_pnl = float(baseline_order.gross_pnl)
-                actual_fees = float(baseline_order.pnl_fee)
-                actual_net_pnl = float(baseline_order.net_pnl)
+                # The rate-basis recomputation below REPLACES the fee/net the
+                # comparisons run against, so the source baseline's own
+                # accounting values must be validated independently first:
+                # a baseline with non-finite or negative pnl_fee, or a
+                # non-finite net/gross, must be invalid evidence regardless
+                # of what the pair's rate basis would say.
+                source_fees = float(baseline_order.pnl_fee)
+                source_net_pnl = float(baseline_order.net_pnl)
+                if (
+                    not math.isfinite(source_fees)
+                    or source_fees < 0
+                    or not math.isfinite(source_net_pnl)
+                    or not math.isfinite(actual_gross_pnl)
+                ):
+                    return False
+                # A US baseline carrying the §9.8 marker holds
+                # measured-commission pnl_fee/net_pnl, while the research
+                # pair is rate-based; expected fees/net then come from the
+                # pair's own frozen rate (same source the writer uses).
+                rate_basis = (
+                    live_exit_module.rate_basis_baseline_outcome(
+                        trade,
+                        baseline_order,
+                        exit_price=actual_exit_price,
+                    )
+                    if live_exit_module.pair_cost_basis_applies(baseline_order)
+                    else None
+                )
+                if rate_basis is None:
+                    actual_fees = source_fees
+                    actual_net_pnl = source_net_pnl
+                else:
+                    actual_fees, actual_net_pnl = rate_basis
                 if (
                     actual_exit_at is None
                     or not _positive_finite(actual_exit_price)
@@ -1970,6 +2001,43 @@ class ResearchObservationHealthService:
             assert net_pnl_delta is not None
             expected_baseline_net_pnl = baseline_order.net_pnl
             assert expected_baseline_net_pnl is not None
+            if live_exit_module.pair_cost_basis_applies(baseline_order):
+                # §9.8 marker on a US baseline: the rate-basis replacement
+                # below would mask a corrupt source row, so the source
+                # fields are validated independently first. Legacy and HK
+                # baselines keep HEAD's contract here: only a finite net_pnl
+                # is required of the pairing (the challenger-close branch
+                # above already required the full field set when the
+                # challenger itself closed on the baseline).
+                source_gross_pnl = baseline_order.gross_pnl
+                source_fees = baseline_order.pnl_fee
+                source_net_pnl = baseline_order.net_pnl
+                if (
+                    source_gross_pnl is None
+                    or not math.isfinite(float(source_gross_pnl))
+                    or source_fees is None
+                    or not math.isfinite(float(source_fees))
+                    or float(source_fees) < 0
+                    or source_net_pnl is None
+                    or not math.isfinite(float(source_net_pnl))
+                ):
+                    return False
+                expected_exit_price_for_basis = float(
+                    baseline_order.executed_price
+                    if baseline_order.executed_price is not None
+                    else baseline_order.price
+                )
+                # Rate-basis baseline net (same source as the writer and the
+                # challenger-close check above). None means no gross exists
+                # to put on the pair's basis: the evidence is invalid.
+                rate_basis = live_exit_module.rate_basis_baseline_outcome(
+                    trade,
+                    baseline_order,
+                    exit_price=expected_exit_price_for_basis,
+                )
+                if rate_basis is None:
+                    return False
+                expected_baseline_net_pnl = rate_basis[1]
             expected_exit_at = _as_utc(baseline_order.filled_at)
             expected_exit_price = float(
                 baseline_order.executed_price

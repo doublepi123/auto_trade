@@ -7,11 +7,22 @@ import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
+from typing import cast
 from unittest.mock import MagicMock, call
 
 import pytest
 
-from app.core.broker import BrokerGateway, OrderResult, Position, Quote
+from app.core.broker import (
+    BrokerGateway,
+    OrderResult,
+    OrderStatusResult,
+    Position,
+    Quote,
+)
+from app.core.accounting_fees import (
+    ACCOUNTING_FEE_MODEL_US_SEC98,
+    order_fee,
+)
 from app.core.notify import ServerChanNotifier
 from app.core.risk import RiskConfig, RiskController
 from app.services import trade_execution_service as trade_svc_module
@@ -5513,3 +5524,489 @@ class TestHkBoardLotNormalization:
         # Then
         assert status is not None and status.status == "SUBMITTED"
         assert [o.quantity for o in self.broker.submissions] == [Decimal("1000")]
+
+
+class TestAccountingFeeModelSec98:
+    """US accounting fees under the §9.8 measured commission model.
+
+    Accounting only: persisted pnl_fee/net_pnl and the net booked into
+    RiskController. The trading guards stay on the configured fee_rate via
+    core/fees.py and must not see the marker at all.
+    """
+
+    SEC98_MODEL = "us-sec98-v1"
+    # Tracked LONG 65 @ 378.9677, SELL fill 65 @ 379.30, no positive actual fee.
+    COST_BASIS = Decimal("378.9677")
+    FILL_PRICE = Decimal("379.30")
+    QTY = Decimal("65")
+    FEE_RATE = Decimal("0.0005")
+
+    def _service(self) -> TradeExecutionService:
+        return TradeExecutionService(
+            record_order=lambda *_args: None,
+            update_order_status=lambda *_args: None,
+            record_risk_event=lambda *_args: None,
+        )
+
+    def _tracked_service(self) -> TradeExecutionService:
+        svc = self._service()
+        svc.load_tracked_entries({
+            "AAPL.US": (
+                self.QTY,
+                self.QTY * self.COST_BASIS,
+                "LONG",
+                datetime(2026, 9, 24, 13, 40, tzinfo=timezone.utc),
+            )
+        })
+        return svc
+
+    def _sec98_pending(self) -> _PendingOrder:
+        return _PendingOrder(
+            broker=MagicMock(),
+            broker_order_id="sec98-authoritative-sell",
+            symbol="AAPL.US",
+            action="SELL",
+            quantity=self.QTY,
+            price=Decimal("379.10"),  # limit price differs from the fill price
+            engine_snapshot=None,
+            avg_price=self.COST_BASIS,
+            pnl_fee_rate=self.FEE_RATE,
+            fee_model=self.SEC98_MODEL,
+        )
+
+    def _legacy_pending(self) -> _PendingOrder:
+        return _PendingOrder(
+            broker=MagicMock(),
+            broker_order_id="legacy-authoritative-sell",
+            symbol="AAPL.US",
+            action="SELL",
+            quantity=self.QTY,
+            price=Decimal("379.10"),
+            engine_snapshot=None,
+            avg_price=self.COST_BASIS,
+            pnl_fee_rate=self.FEE_RATE,
+        )
+
+    def _terminal_status(self, order_id: str) -> OrderStatus:
+        return OrderStatus(
+            order_id,
+            "FILLED",
+            executed_quantity=self.QTY,
+            executed_price=self.FILL_PRICE,
+            actual_fee=Decimal("0"),  # paper placeholder, not proof of a free exit
+            broker_updated_at=datetime(2026, 9, 24, 14, 5, tzinfo=timezone.utc),
+        )
+
+    def test_sec98_exit_outcome_pins_the_measured_commission(self) -> None:
+        svc = self._tracked_service()
+        pending = self._sec98_pending()
+        terminal = self._terminal_status(pending.broker_order_id)
+
+        svc._finalize_pending_fill(pending, terminal, risk=RiskController())
+
+        # entry = 1.568 + 0.0000641 * 378.9677 * 65
+        entry_fee = Decimal("1.568") + Decimal("0.0000641") * self.COST_BASIS * self.QTY
+        # exit = 1.568 + 0.0000641 * 379.30 * 65 (the fill price, not the limit)
+        exit_fee = Decimal("1.568") + Decimal("0.0000641") * self.FILL_PRICE * self.QTY
+        gross = (self.FILL_PRICE - self.COST_BASIS) * self.QTY
+        net_pnl, metadata = svc._plan_authoritative_exit_outcome(
+            pending,
+            terminal,
+            fill_price=self.FILL_PRICE,
+            fill_qty=self.QTY,
+            fallback_avg_price=self.COST_BASIS,
+        )
+        assert net_pnl == gross - entry_fee - exit_fee
+        assert metadata["pnl_fee"] == pytest.approx(float(entry_fee + exit_fee))
+        assert metadata["pnl_fee_source"] == "ESTIMATED"
+        assert metadata["net_pnl"] == pytest.approx(float(gross - entry_fee - exit_fee))
+        # Consistency: gross_pnl - pnl_fee == net_pnl
+        assert float(metadata["gross_pnl"]) - float(
+            metadata["pnl_fee"]
+        ) == pytest.approx(float(metadata["net_pnl"]))
+
+    def test_sec98_booked_risk_net_matches_the_persisted_outcome(self) -> None:
+        updates: list[tuple[object, ...]] = []
+
+        def update_order_status(*args: object) -> None:
+            updates.append(args)
+
+        svc = TradeExecutionService(
+            record_order=lambda *_args: None,
+            update_order_status=update_order_status,
+            record_risk_event=lambda *_args: None,
+        )
+        svc.load_tracked_entries({
+            "AAPL.US": (
+                self.QTY,
+                self.QTY * self.COST_BASIS,
+                "LONG",
+                datetime(2026, 9, 24, 13, 40, tzinfo=timezone.utc),
+            )
+        })
+        pending = self._sec98_pending()
+        terminal = self._terminal_status(pending.broker_order_id)
+
+        class _RecordingRisk(RiskController):
+            def __init__(self) -> None:
+                super().__init__()
+                self.recorded: list[float] = []
+
+            def record_trade(self, pnl: float, **_kwargs: object) -> None:
+                self.recorded.append(pnl)
+                super().record_trade(pnl, **_kwargs)
+
+        risk = _RecordingRisk()
+        svc._finalize_pending_fill(pending, terminal, risk=risk)
+        entry_fee = Decimal("1.568") + Decimal("0.0000641") * self.COST_BASIS * self.QTY
+        exit_fee = Decimal("1.568") + Decimal("0.0000641") * self.FILL_PRICE * self.QTY
+        gross = (self.FILL_PRICE - self.COST_BASIS) * self.QTY
+
+        assert updates, "exit outcome must be persisted"
+        metadata = cast(dict[str, object], updates[-1][-1])
+        assert float(metadata["net_pnl"]) == pytest.approx(
+            float(gross - entry_fee - exit_fee)
+        )
+        assert risk.recorded == [float(gross - entry_fee - exit_fee)]
+
+    def test_same_case_without_the_marker_reproduces_today_s_numbers(self) -> None:
+        svc = self._tracked_service()
+        pending = self._legacy_pending()
+        terminal = self._terminal_status(pending.broker_order_id)
+
+        svc._finalize_pending_fill(pending, terminal, risk=RiskController())
+        net_pnl, metadata = svc._plan_authoritative_exit_outcome(
+            pending,
+            terminal,
+            fill_price=self.FILL_PRICE,
+            fill_qty=self.QTY,
+            fallback_avg_price=self.COST_BASIS,
+        )
+
+        legacy_fee = (self.COST_BASIS + self.FILL_PRICE) * self.QTY * self.FEE_RATE
+        gross = (self.FILL_PRICE - self.COST_BASIS) * self.QTY
+        assert net_pnl == gross - legacy_fee
+        assert metadata["pnl_fee"] == pytest.approx(float(legacy_fee))
+        assert metadata["pnl_fee_source"] == "ESTIMATED"
+
+    def test_sec98_positive_actual_fee_stays_mixed(self) -> None:
+        svc = self._tracked_service()
+        pending = self._sec98_pending()
+        terminal = OrderStatus(
+            pending.broker_order_id,
+            "FILLED",
+            executed_quantity=self.QTY,
+            executed_price=self.FILL_PRICE,
+            actual_fee=Decimal("2.79"),
+            broker_updated_at=datetime(2026, 9, 24, 14, 5, tzinfo=timezone.utc),
+        )
+
+        _net_pnl, metadata = svc._plan_authoritative_exit_outcome(
+            pending,
+            terminal,
+            fill_price=self.FILL_PRICE,
+            fill_qty=self.QTY,
+            fallback_avg_price=self.COST_BASIS,
+        )
+
+        entry_fee = Decimal("1.568") + Decimal("0.0000641") * self.COST_BASIS * self.QTY
+        assert metadata["pnl_fee"] == pytest.approx(float(entry_fee + Decimal("2.79")))
+        assert metadata["pnl_fee_source"] == "MIXED"
+
+    def test_sec98_partial_fill_allocates_the_entry_fee_proportionally(self) -> None:
+        svc = self._tracked_service()
+        pending = self._sec98_pending()
+        fill_qty = Decimal("40")
+        _net_pnl, metadata = svc._plan_authoritative_exit_outcome(
+            pending,
+            self._terminal_status(pending.broker_order_id),
+            fill_price=self.FILL_PRICE,
+            fill_qty=fill_qty,
+            fallback_avg_price=self.COST_BASIS,
+        )
+
+        # Proportional allocation from the remaining position:
+        # (1.568 + 0.0000641*378.9677*65) * 40/65 = 3.14696892205 * 0.615384…
+        # = 1.936593184646…
+        whole_entry = Decimal("1.568") + Decimal("0.0000641") * self.COST_BASIS * self.QTY
+        expected_entry = whole_entry * fill_qty / self.QTY
+        exit_fee = Decimal("1.568") + Decimal("0.0000641") * self.FILL_PRICE * fill_qty
+        assert metadata["pnl_fee"] == pytest.approx(float(expected_entry + exit_fee))
+        assert metadata["position_quantity_before"] == pytest.approx(float(self.QTY))
+
+    def test_sec98_sequential_partial_exits_over_recognise_within_bound(self) -> None:
+        # Buy 100 @ 250, then two local exits: 40 shares and (closing) 60.
+        # Proportional allocation over-recognises the fixed commission by at
+        # most one extra 1.568: 1.2682 + 2.5295 = 3.7977, bounded by
+        # order_fee(250,100) = 3.1705 and 3.1705 + 1.568. The over-charge is
+        # what makes an externally-closed remainder still receive the rest of
+        # the entry fee (conservative for risk, never under-charging).
+        svc = self._service()
+        fill_price = Decimal("250.30")
+
+        def tracked(position_qty: str) -> None:
+            svc.load_tracked_entries({
+                "AAPL.US": (
+                    Decimal(position_qty),
+                    Decimal(position_qty) * Decimal("250"),
+                    "LONG",
+                    datetime(2026, 9, 24, 13, 40, tzinfo=timezone.utc),
+                )
+            })
+
+        def plan_entry_fee(position_qty: str, fill_qty: str, order_id: str) -> Decimal:
+            # actual_fee 0 (paper placeholder) forces the estimated exit fee,
+            # which is the fill-price sec98 order fee; the entry part is then
+            # pnl_fee minus that known exit fee.
+            pending = _PendingOrder(
+                broker=MagicMock(),
+                broker_order_id=order_id,
+                symbol="AAPL.US",
+                action="SELL",
+                quantity=Decimal(fill_qty),
+                price=Decimal("250.10"),
+                engine_snapshot=None,
+                avg_price=Decimal("250"),
+                pnl_fee_rate=self.FEE_RATE,
+                fee_model=self.SEC98_MODEL,
+            )
+            terminal = OrderStatus(
+                order_id,
+                "FILLED",
+                executed_quantity=Decimal(fill_qty),
+                executed_price=fill_price,
+                actual_fee=Decimal("0"),
+                broker_updated_at=datetime(2026, 9, 24, 14, 5, tzinfo=timezone.utc),
+            )
+            _net_pnl, metadata = svc._plan_authoritative_exit_outcome(
+                pending,
+                terminal,
+                fill_price=fill_price,
+                fill_qty=Decimal(fill_qty),
+                fallback_avg_price=Decimal("250"),
+            )
+            exit_fee = Decimal("1.568") + Decimal("0.0000641") * fill_price * Decimal(fill_qty)
+            entry_fee = Decimal(str(metadata["pnl_fee"])) - exit_fee
+            assert metadata["position_quantity_before"] == pytest.approx(
+                float(Decimal(position_qty))
+            )
+            return entry_fee
+
+        tracked("100")
+        first_entry_fee = plan_entry_fee("100", "40", "sec98-seq-exit-1")
+        tracked("60")
+        second_entry_fee = plan_entry_fee("60", "60", "sec98-seq-exit-2")
+
+        whole = order_fee(
+            model=ACCOUNTING_FEE_MODEL_US_SEC98,
+            market="US",
+            price=Decimal("250"),
+            quantity=Decimal("100"),
+            legacy_rate=self.FEE_RATE,
+        )
+        assert first_entry_fee == pytest.approx(Decimal("1.2682"))
+        assert second_entry_fee == pytest.approx(Decimal("2.5295"))
+        assert first_entry_fee + second_entry_fee == pytest.approx(Decimal("3.7977"))
+        assert whole <= first_entry_fee + second_entry_fee <= whole + Decimal("1.568")
+
+    def test_sec98_allocated_entry_fee_without_prior_position_falls_back(self) -> None:
+        # No tracked position (broker fallback path): position_quantity_before
+        # equals the fill, so the sec98 allocation degenerates to the whole
+        # order fee — still the measured commission, not the legacy rate.
+        svc = self._service()
+        pending = self._sec98_pending()
+        _net_pnl, metadata = svc._plan_authoritative_exit_outcome(
+            pending,
+            self._terminal_status(pending.broker_order_id),
+            fill_price=self.FILL_PRICE,
+            fill_qty=self.QTY,
+            fallback_avg_price=self.COST_BASIS,
+        )
+
+        entry_fee = Decimal("1.568") + Decimal("0.0000641") * self.COST_BASIS * self.QTY
+        exit_fee = Decimal("1.568") + Decimal("0.0000641") * self.FILL_PRICE * self.QTY
+        assert metadata["pnl_fee"] == pytest.approx(float(entry_fee + exit_fee))
+        assert metadata["pnl_source"] == "BROKER_POSITION"
+
+    def test_estimated_fee_freeze_uses_sec98_with_the_marker(self) -> None:
+        # Drive the submission path far enough to freeze estimated_fee in
+        # _process_submitted_order. The broker fills only when asked for status
+        # (like a resting limit order), so the order first goes pending.
+        updates: list[dict[str, object]] = []
+
+        class _FakePendingBroker:
+            def get_positions(self) -> list[Position]:
+                return [Position("AAPL.US", "LONG", Decimal("65"), Decimal("378.9677"))]
+
+            def get_order_status(self, order_id: str) -> object:
+                return OrderStatusResult(
+                    order_id,
+                    "FILLED",
+                    executed_quantity=Decimal("65"),
+                    executed_price=Decimal("379.30"),
+                )
+
+            def cancel_order(self, order_id: str) -> object:
+                return OrderStatusResult(order_id, "CANCELLED")
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: updates.append(args),
+            update_order_status=lambda *_args: None,
+            record_risk_event=lambda *_args: None,
+        )
+        svc._active_execution_context = {
+            "market": "US",
+            "fee_rate": 0.0005,
+            "accounting_fee_model": self.SEC98_MODEL,
+        }
+        broker = _FakePendingBroker()
+        approved = ApprovedOrder(
+            action="SELL",
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=self.QTY,
+            price=Decimal("379.10"),
+        )
+        result = OrderResult(
+            "sec98-freeze-order",
+            "AAPL.US",
+            "SELL",
+            self.QTY,
+            Decimal("379.10"),
+            "SUBMITTED",
+        )
+
+        svc._process_submitted_order(
+            approved,
+            result,
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            submit_started_at=datetime.now(timezone.utc),
+            submit_started_monotonic=time.perf_counter(),
+            avg_price=self.COST_BASIS,
+        )
+
+        assert updates, "order must be persisted with the frozen estimate"
+        metadata = cast(dict[str, object], updates[0][-1])
+        expected = float(
+            abs(
+                Decimal("1.568")
+                + Decimal("0.0000641") * Decimal("379.10") * self.QTY
+            )
+        )
+        assert metadata["estimated_fee"] == pytest.approx(expected)
+        assert metadata["fee_source"] == "ESTIMATED"
+
+    def test_estimated_fee_freeze_without_the_marker_is_unchanged(self) -> None:
+        updates: list[dict[str, object]] = []
+
+        class _FakePendingBroker:
+            def get_positions(self) -> list[Position]:
+                return [Position("AAPL.US", "LONG", Decimal("65"), Decimal("378.9677"))]
+
+            def get_order_status(self, order_id: str) -> object:
+                return OrderStatusResult(
+                    order_id,
+                    "FILLED",
+                    executed_quantity=Decimal("65"),
+                    executed_price=Decimal("379.30"),
+                )
+
+            def cancel_order(self, order_id: str) -> object:
+                return OrderStatusResult(order_id, "CANCELLED")
+
+        svc = TradeExecutionService(
+            record_order=lambda *args: updates.append(args),
+            update_order_status=lambda *_args: None,
+            record_risk_event=lambda *_args: None,
+        )
+        svc._active_execution_context = {
+            "market": "US",
+            "fee_rate": 0.0005,
+        }
+        approved = ApprovedOrder(
+            action="SELL",
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=self.QTY,
+            price=Decimal("379.10"),
+        )
+        result = OrderResult(
+            "legacy-freeze-order",
+            "AAPL.US",
+            "SELL",
+            self.QTY,
+            Decimal("379.10"),
+            "SUBMITTED",
+        )
+
+        svc._process_submitted_order(
+            approved,
+            result,
+            _FakePendingBroker(),
+            RiskController(),
+            ServerChanNotifier(""),
+            submit_started_at=datetime.now(timezone.utc),
+            submit_started_monotonic=time.perf_counter(),
+            avg_price=self.COST_BASIS,
+        )
+
+        assert updates
+        metadata = cast(dict[str, object], updates[0][-1])
+        expected = float(
+            abs(Decimal("379.10") * self.QTY * Decimal(str(0.0005)))
+        )
+        assert metadata["estimated_fee"] == pytest.approx(expected)
+
+    def test_exit_profit_guard_ignores_the_accounting_model(self) -> None:
+        # The guard must keep using the configured fee_rate regardless of the
+        # accounting marker carried by the execution context.
+        svc = self._service()
+        skipped: list[dict[str, object]] = []
+        svc._record_order_skipped = (
+            lambda _s, _a, _r, payload: skipped.append(payload)
+        )
+        avg_price = Decimal("378.9677")
+        exit_price = Decimal("379.10")
+        qty = self.QTY
+        rate = self.FEE_RATE
+
+        baseline_guards = svc._profit_guard_for_exit(
+            action="SELL",
+            symbol="AAPL.US",
+            avg_price=avg_price,
+            exit_price=exit_price,
+            quantity=qty,
+            min_profit_amount=Decimal("0.12"),
+            allow_loss_exit=False,
+            fee_rate=rate,
+        )
+        assert baseline_guards is not None  # rate-based fees exceed the margin
+        baseline_payload = skipped[0]
+
+        skipped.clear()
+        svc._active_execution_context = {
+            "market": "US",
+            "fee_rate": float(rate),
+            "accounting_fee_model": self.SEC98_MODEL,
+        }
+        with_marker = svc._profit_guard_for_exit(
+            action="SELL",
+            symbol="AAPL.US",
+            avg_price=avg_price,
+            exit_price=exit_price,
+            quantity=qty,
+            min_profit_amount=Decimal("0.12"),
+            allow_loss_exit=False,
+            fee_rate=rate,
+        )
+
+        assert with_marker is not None
+        guard_payload = skipped[0]
+        assert guard_payload["estimated_fees"] == pytest.approx(
+            float(baseline_payload["estimated_fees"])
+        )
+        assert guard_payload["estimated_fees"] == pytest.approx(
+            float((avg_price + exit_price) * qty * rate)
+        )

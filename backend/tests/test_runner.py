@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import threading
 import time
@@ -4197,6 +4198,404 @@ class TestAppRunner:
         AppRunner._update_execution_outcome_fields(order)
         assert order.pnl_fee == pytest.approx(0.5 + 2.79)
         assert order.pnl_fee_source == "MIXED"
+
+    def test_sec98_marker_recomputes_outcome_with_the_measured_commission(self) -> None:
+        # Same numbers as the TES test: tracked LONG 65 @ 378.9677, SELL fill
+        # 65 @ 379.30, paper 0.00 charge. The runner helper must agree exactly
+        # with _plan_authoritative_exit_outcome, using the fill price (379.30),
+        # not the limit price (379.10) or the frozen estimated_fee.
+        snapshot = json.dumps({"accounting_fee_model": "us-sec98-v1"})
+        order = SimpleNamespace(
+            filled_at=datetime.now(timezone.utc),
+            submit_started_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+            symbol="AAPL.US",
+            executed_price=379.30,
+            executed_quantity=65.0,
+            quantity=65.0,
+            side="SELL",
+            cost_basis_price=378.9677,
+            position_quantity_before=65.0,
+            pnl_fee_rate=0.0005,
+            estimated_fee=3.14752015,  # frozen at the 379.10 limit price
+            actual_fee=0.0,
+            fee_source="ACTUAL",
+            pnl_source="TRACKED_ENTRY",
+            config_snapshot=snapshot,
+            decision_bid=379.30,
+            decision_ask=379.31,
+        )
+
+        AppRunner._update_execution_outcome_fields(order)
+
+        entry_fee = Decimal("1.568") + Decimal("0.0000641") * Decimal("378.9677") * Decimal("65")
+        exit_fee = Decimal("1.568") + Decimal("0.0000641") * Decimal("379.30") * Decimal("65")
+        pnl_fee = entry_fee + exit_fee
+        assert order.pnl_fee == pytest.approx(float(pnl_fee))
+        assert order.pnl_fee_source == "ESTIMATED"
+        assert order.net_pnl == pytest.approx(
+            float((Decimal("379.30") - Decimal("378.9677")) * Decimal("65") - pnl_fee)
+        )
+        # gross_pnl - pnl_fee == net_pnl on the stored floats
+        assert order.gross_pnl - order.pnl_fee == pytest.approx(order.net_pnl)
+
+    def test_sec98_marker_matches_the_tes_planning_helper_exactly(self) -> None:
+        # The runner helper and TES _plan_authoritative_exit_outcome must
+        # produce the same pnl_fee/net_pnl for the same inputs.
+        snapshot = json.dumps({"accounting_fee_model": "us-sec98-v1"})
+        order = SimpleNamespace(
+            filled_at=datetime.now(timezone.utc),
+            submit_started_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+            symbol="AAPL.US",
+            executed_price=379.30,
+            executed_quantity=65.0,
+            quantity=65.0,
+            side="SELL",
+            cost_basis_price=378.9677,
+            position_quantity_before=65.0,
+            pnl_fee_rate=0.0005,
+            estimated_fee=3.14752015,
+            actual_fee=0.0,
+            fee_source="ACTUAL",
+            pnl_source="TRACKED_ENTRY",
+            config_snapshot=snapshot,
+            decision_bid=379.30,
+            decision_ask=379.31,
+        )
+        from app.services.trade_execution_service import (
+            TradeExecutionService as _Tes,
+        )
+        from unittest.mock import MagicMock as _MagicMock
+
+        tes = _Tes(
+            record_order=lambda *_args: None,
+            update_order_status=lambda *_args: None,
+            record_risk_event=lambda *_args: None,
+        )
+        tes.load_tracked_entries({
+            "AAPL.US": (
+                Decimal("65"),
+                Decimal("65") * Decimal("378.9677"),
+                "LONG",
+                datetime(2026, 9, 24, 13, 40, tzinfo=timezone.utc),
+            )
+        })
+        pending = trade_execution_service_module._PendingOrder(
+            broker=_MagicMock(),
+            broker_order_id="sec98-runner-parity",
+            symbol="AAPL.US",
+            action="SELL",
+            quantity=Decimal("65"),
+            price=Decimal("379.10"),
+            engine_snapshot=None,
+            avg_price=Decimal("378.9677"),
+            pnl_fee_rate=Decimal("0.0005"),
+            fee_model="us-sec98-v1",
+        )
+        terminal = OrderStatus(
+            pending.broker_order_id,
+            "FILLED",
+            executed_quantity=Decimal("65"),
+            executed_price=Decimal("379.30"),
+            actual_fee=Decimal("0"),
+        )
+        _net_pnl, metadata = tes._plan_authoritative_exit_outcome(
+            pending,
+            terminal,
+            fill_price=Decimal("379.30"),
+            fill_qty=Decimal("65"),
+            fallback_avg_price=Decimal("378.9677"),
+        )
+
+        AppRunner._update_execution_outcome_fields(order)
+
+        assert order.pnl_fee == pytest.approx(float(metadata["pnl_fee"]))
+        assert order.net_pnl == pytest.approx(float(metadata["net_pnl"]))
+
+    def test_sec98_marker_without_a_prior_position_uses_the_whole_order_fee(self) -> None:
+        # Partial reduction against a larger tracked position: proportional
+        # allocation gives the 40-share fill 40/65 of the entry order's fee.
+        snapshot = json.dumps({"accounting_fee_model": "us-sec98-v1"})
+        order = SimpleNamespace(
+            filled_at=datetime.now(timezone.utc),
+            submit_started_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+            symbol="AAPL.US",
+            executed_price=379.30,
+            executed_quantity=40.0,
+            quantity=40.0,
+            side="SELL",
+            cost_basis_price=378.9677,
+            position_quantity_before=65.0,
+            pnl_fee_rate=0.0005,
+            estimated_fee=3.14752015,
+            actual_fee=None,
+            fee_source="UNKNOWN",
+            pnl_source="TRACKED_ENTRY",
+            config_snapshot=snapshot,
+            decision_bid=379.30,
+            decision_ask=379.31,
+        )
+
+        AppRunner._update_execution_outcome_fields(order)
+
+        # (1.568 + 0.0000641*378.9677*65) * 40/65 + (1.568 + 0.0000641*379.30*40)
+        whole_entry = Decimal("1.568") + Decimal("0.0000641") * Decimal("378.9677") * Decimal("65")
+        expected_entry = whole_entry * Decimal("40") / Decimal("65")
+        exit_fee = Decimal("1.568") + Decimal("0.0000641") * Decimal("379.30") * Decimal("40")
+        assert order.pnl_fee == pytest.approx(float(expected_entry + exit_fee))
+        assert order.pnl_fee_source == "ESTIMATED"
+
+    def test_sec98_marker_sequential_exits_match_tes_allocations(self) -> None:
+        # The runner helper must produce the same entry allocations as TES
+        # for 100 bought @ 250 reduced 40 then (closing) 60: 1.2682 + 2.5295
+        # = 3.7977, which is >= order_fee(250,100)=3.1705 and <= +1.568.
+        snapshot = json.dumps({"accounting_fee_model": "us-sec98-v1"})
+
+        def order_for(position_before: float, fill: float) -> SimpleNamespace:
+            return SimpleNamespace(
+                filled_at=datetime.now(timezone.utc),
+                submit_started_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+                symbol="AAPL.US",
+                executed_price=250.30,
+                executed_quantity=fill,
+                quantity=fill,
+                side="SELL",
+                cost_basis_price=250.0,
+                position_quantity_before=position_before,
+                pnl_fee_rate=0.0005,
+                estimated_fee=None,
+                actual_fee=0.0,
+                fee_source="ACTUAL",
+                pnl_source="TRACKED_ENTRY",
+                config_snapshot=snapshot,
+                decision_bid=250.30,
+                decision_ask=250.31,
+            )
+
+        partial = order_for(100.0, 40.0)
+        AppRunner._update_execution_outcome_fields(partial)
+        closing = order_for(60.0, 60.0)
+        AppRunner._update_execution_outcome_fields(closing)
+
+        exit_fee_partial = Decimal("1.568") + Decimal("0.0000641") * Decimal("250.30") * Decimal("40")
+        exit_fee_closing = Decimal("1.568") + Decimal("0.0000641") * Decimal("250.30") * Decimal("60")
+        first_entry = Decimal(str(partial.pnl_fee)) - exit_fee_partial
+        second_entry = Decimal(str(closing.pnl_fee)) - exit_fee_closing
+
+        assert first_entry == pytest.approx(Decimal("1.2682"))
+        assert second_entry == pytest.approx(Decimal("2.5295"))
+        assert first_entry + second_entry == pytest.approx(Decimal("3.7977"))
+        assert Decimal("3.1705") <= first_entry + second_entry <= Decimal("4.7385")
+
+    def test_sec98_marker_positive_actual_fee_keeps_mixed(self) -> None:
+        snapshot = json.dumps({"accounting_fee_model": "us-sec98-v1"})
+        order = SimpleNamespace(
+            filled_at=datetime.now(timezone.utc),
+            submit_started_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+            symbol="AAPL.US",
+            executed_price=379.30,
+            executed_quantity=65.0,
+            quantity=65.0,
+            side="SELL",
+            cost_basis_price=378.9677,
+            position_quantity_before=65.0,
+            pnl_fee_rate=0.0005,
+            estimated_fee=3.14752015,
+            actual_fee=2.79,
+            fee_source="ACTUAL",
+            pnl_source="TRACKED_ENTRY",
+            config_snapshot=snapshot,
+            decision_bid=379.30,
+            decision_ask=379.31,
+        )
+
+        AppRunner._update_execution_outcome_fields(order)
+
+        entry_fee = Decimal("1.568") + Decimal("0.0000641") * Decimal("378.9677") * Decimal("65")
+        assert order.pnl_fee == pytest.approx(float(entry_fee + Decimal("2.79")))
+        assert order.pnl_fee_source == "MIXED"
+
+    def test_sec98_marker_hk_symbol_keeps_the_legacy_formula(self) -> None:
+        # HK always keeps the legacy rate formula, marker or not.
+        snapshot = json.dumps({"accounting_fee_model": "us-sec98-v1"})
+        order = SimpleNamespace(
+            filled_at=datetime.now(timezone.utc),
+            submit_started_at=datetime.now(timezone.utc) - timedelta(seconds=1),
+            symbol="00700.HK",
+            executed_price=379.30,
+            executed_quantity=65.0,
+            quantity=65.0,
+            side="SELL",
+            cost_basis_price=378.9677,
+            position_quantity_before=65.0,
+            pnl_fee_rate=0.0005,
+            estimated_fee=None,
+            actual_fee=0.0,
+            fee_source="ACTUAL",
+            pnl_source="TRACKED_ENTRY",
+            config_snapshot=snapshot,
+            decision_bid=379.30,
+            decision_ask=379.31,
+        )
+
+        AppRunner._update_execution_outcome_fields(order)
+
+        legacy_entry = 378.9677 * 65 * 0.0005
+        legacy_exit = 379.30 * 65 * 0.0005
+        assert order.pnl_fee == pytest.approx(legacy_entry + legacy_exit)
+        assert order.pnl_fee_source == "ESTIMATED"
+
+    def test_zero_charge_exit_without_marker_is_unchanged(self) -> None:
+        # Legacy rows (no marker in config_snapshot) reproduce today's numbers.
+        order = self._zero_charge_exit(config_snapshot="{}")
+
+        AppRunner._update_execution_outcome_fields(order)
+
+        entry_fee = 100.0 * 10 * 0.0005
+        assert order.pnl_fee == pytest.approx(entry_fee + 0.6)
+        assert order.net_pnl == pytest.approx(100.0 - entry_fee - 0.6)
+
+    def test_execution_ledger_context_carries_the_accounting_fee_model(self) -> None:
+        runner = AppRunner()
+
+        context = runner._execution_ledger_context(
+            runner_module._QuoteTriggerDecision(),
+            Quote(
+                "NVDA.US",
+                209.62,
+                209.61,
+                209.63,
+                _fresh_timestamp(),
+            ),
+            "test",
+        )
+        snapshot = json.loads(cast(str, context["config_snapshot"]))
+        from app.core.accounting_fees import (
+            ACCOUNTING_FEE_MODEL_US_SEC98 as _MODEL,
+        )
+
+        assert snapshot["accounting_fee_model"] == _MODEL
+        assert context["accounting_fee_model"] == _MODEL
+        # The snapshot hash covers the marker: same inputs, stable digest.
+        assert context["config_version"] == hashlib.sha256(
+            cast(str, context["config_snapshot"]).encode("utf-8")
+        ).hexdigest()
+
+    def test_load_pending_orders_restores_the_fee_model(self) -> None:
+        from app.database import SessionLocal
+        from app.models import OrderRecord, TradeEvent
+
+        order_id = "sec98-pending-restore"
+        created_at = datetime.now(timezone.utc)
+        with SessionLocal() as db:
+            db.query(OrderRecord).filter(
+                OrderRecord.broker_order_id == order_id
+            ).delete()
+            db.query(TradeEvent).filter(
+                TradeEvent.broker_order_id == order_id
+            ).delete()
+            db.add(
+                OrderRecord(
+                    broker_order_id=order_id,
+                    symbol="AAPL.US",
+                    side="SELL",
+                    quantity=65.0,
+                    price=379.10,
+                    status="SUBMITTED",
+                    created_at=created_at,
+                    config_snapshot=json.dumps(
+                        {"accounting_fee_model": "us-sec98-v1"}
+                    ),
+                )
+            )
+            db.add(
+                TradeEvent(
+                    event_type="ORDER_SUBMITTED",
+                    symbol="AAPL.US",
+                    broker_order_id=order_id,
+                    side="SELL",
+                    status="SUBMITTED",
+                    message="locally submitted exit",
+                    created_at=created_at,
+                )
+            )
+            db.commit()
+
+        runner = AppRunner()
+        with SessionLocal() as db:
+            issues = runner._load_pending_orders(db)
+
+        pending = runner._trade_svc.pending_order_by_broker_id(order_id)
+        try:
+            assert issues == []
+            assert pending is not None
+            assert pending.fee_model == "us-sec98-v1"
+        finally:
+            with SessionLocal() as db:
+                db.query(OrderRecord).filter(
+                    OrderRecord.broker_order_id == order_id
+                ).delete()
+                db.query(TradeEvent).filter(
+                    TradeEvent.broker_order_id == order_id
+                ).delete()
+                db.commit()
+
+    def test_load_pending_orders_without_marker_restores_empty_fee_model(self) -> None:
+        from app.database import SessionLocal
+        from app.models import OrderRecord, TradeEvent
+
+        order_id = "legacy-pending-restore"
+        created_at = datetime.now(timezone.utc)
+        with SessionLocal() as db:
+            db.query(OrderRecord).filter(
+                OrderRecord.broker_order_id == order_id
+            ).delete()
+            db.query(TradeEvent).filter(
+                TradeEvent.broker_order_id == order_id
+            ).delete()
+            db.add(
+                OrderRecord(
+                    broker_order_id=order_id,
+                    symbol="AAPL.US",
+                    side="SELL",
+                    quantity=65.0,
+                    price=379.10,
+                    status="SUBMITTED",
+                    created_at=created_at,
+                    config_snapshot="{}",
+                )
+            )
+            db.add(
+                TradeEvent(
+                    event_type="ORDER_SUBMITTED",
+                    symbol="AAPL.US",
+                    broker_order_id=order_id,
+                    side="SELL",
+                    status="SUBMITTED",
+                    message="locally submitted exit",
+                    created_at=created_at,
+                )
+            )
+            db.commit()
+
+        runner = AppRunner()
+        with SessionLocal() as db:
+            issues = runner._load_pending_orders(db)
+
+        pending = runner._trade_svc.pending_order_by_broker_id(order_id)
+        try:
+            assert issues == []
+            assert pending is not None
+            assert pending.fee_model == ""
+        finally:
+            with SessionLocal() as db:
+                db.query(OrderRecord).filter(
+                    OrderRecord.broker_order_id == order_id
+                ).delete()
+                db.query(TradeEvent).filter(
+                    TradeEvent.broker_order_id == order_id
+                ).delete()
+                db.commit()
+
 
     def test_execution_outcome_normalizes_mixed_timezone_latency(self) -> None:
         order = SimpleNamespace(
@@ -9293,8 +9692,23 @@ class TestAppRunner:
 
         runner._on_quote(quote)
 
+        # Live-path orders carry the §9.8 accounting marker from deployment
+        # onward, so accounting books the measured US commission. The 2-share
+        # exit reduces a 5-share position, so the entry side is the
+        # proportional allocation of the entry order's fee:
+        # (1.568 + 0.0000641*150*5) * 2/5, plus the exit order's own fee
+        # (1.568 + 0.0000641*205*2). Trading decisions are unchanged.
         assert runner.risk.daily_pnl == pytest.approx(
-            110.0 - (2 * 150 + 2 * 205) * 0.0005
+            float(
+                Decimal("110.0")
+                - (
+                    (Decimal("1.568") + Decimal("0.0000641") * Decimal("150") * Decimal("5"))
+                    * Decimal("2")
+                    / Decimal("5")
+                    + Decimal("1.568")
+                    + Decimal("0.0000641") * Decimal("205") * Decimal("2")
+                )
+            )
         )
         assert runner.engine.state == EngineState.LONG
         assert runner._trade_svc._pending_order is None

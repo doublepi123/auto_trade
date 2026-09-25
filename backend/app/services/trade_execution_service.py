@@ -12,6 +12,10 @@ from threading import RLock
 from typing import TYPE_CHECKING, Callable, Final, Optional, Protocol, assert_never, cast
 
 from app.config import settings
+from app.core.accounting_fees import (
+    allocated_entry_fee as _accounting_allocated_entry_fee,
+)
+from app.core.accounting_fees import order_fee as _accounting_order_fee
 from app.core.board_lot import BoardLotResolution, quantize_to_board_lot
 from app.core.broker import ExtendedHoursUnsupportedError
 from app.core.execution_session import resolve_execution_session
@@ -217,6 +221,7 @@ class _PendingOrder:
     engine_snapshot: EngineSnapshot | None
     avg_price: Decimal | None = None
     pnl_fee_rate: Decimal = Decimal("0")
+    fee_model: str = ""
     next_status_check_at: float = 0.0
     submitted_at: float = 0.0
     restore_engine_snapshot_fn: Callable[[EngineSnapshot], None] | None = None
@@ -535,6 +540,7 @@ class TradeExecutionService:
                     engine_snapshot=pending.engine_snapshot,
                     avg_price=pending.avg_price,
                     pnl_fee_rate=pending.pnl_fee_rate,
+                    fee_model=pending.fee_model,
                     next_status_check_at=pending.next_status_check_at,
                     submitted_at=pending.submitted_at,
                     restore_engine_snapshot_fn=pending.restore_engine_snapshot_fn,
@@ -574,6 +580,11 @@ class TradeExecutionService:
                             existing.pnl_fee_rate
                             if existing.pnl_fee_rate > 0
                             else pending.pnl_fee_rate
+                        ),
+                        fee_model=(
+                            pending.fee_model
+                            if pending.fee_model
+                            else existing.fee_model
                         ),
                         next_status_check_at=existing.next_status_check_at,
                         submitted_at=existing.submitted_at,
@@ -2215,6 +2226,9 @@ class TradeExecutionService:
             quantity=Decimal(qty),
             price=price,
             engine_snapshot=engine_snapshot,
+            fee_model=str(
+                self._active_execution_context.get("accounting_fee_model", "") or ""
+            ),
         )
         self._finalize_pending_fill_once(
             pending, order_status, risk=risk, notifier=notifier,
@@ -2316,6 +2330,9 @@ class TradeExecutionService:
             engine_snapshot=engine_snapshot,
             avg_price=pos_avg_price,
             pnl_fee_rate=self._coerce_non_negative_decimal(fee_rate),
+            fee_model=str(
+                self._active_execution_context.get("accounting_fee_model", "") or ""
+            ),
         )
         self._finalize_pending_fill_once(
             pending, order_status, risk=risk, notifier=notifier,
@@ -2389,6 +2406,9 @@ class TradeExecutionService:
             quantity=Decimal(qty),
             price=price,
             engine_snapshot=engine_snapshot,
+            fee_model=str(
+                self._active_execution_context.get("accounting_fee_model", "") or ""
+            ),
         )
         self._finalize_pending_fill_once(
             pending, order_status, risk=risk, notifier=notifier,
@@ -2490,6 +2510,9 @@ class TradeExecutionService:
             engine_snapshot=engine_snapshot,
             avg_price=pos_avg_price,
             pnl_fee_rate=self._coerce_non_negative_decimal(fee_rate),
+            fee_model=str(
+                self._active_execution_context.get("accounting_fee_model", "") or ""
+            ),
         )
         self._finalize_pending_fill_once(
             pending, order_status, risk=risk, notifier=notifier,
@@ -3159,7 +3182,21 @@ class TradeExecutionService:
             "acknowledged_at": acknowledged_at,
             "ack_latency_ms": ack_latency_ms,
             "estimated_fee": float(
-                abs(qty * price * Decimal(str(ledger_metadata.get("fee_rate", 0))))
+                abs(
+                    _accounting_order_fee(
+                        model=(
+                            str(ledger_metadata["accounting_fee_model"])
+                            if ledger_metadata.get("accounting_fee_model") is not None
+                            else None
+                        ),
+                        market=str(ledger_metadata.get("market", "US")),
+                        price=price,
+                        quantity=qty,
+                        legacy_rate=Decimal(
+                            str(ledger_metadata.get("fee_rate", 0))
+                        ),
+                    )
+                )
             ),
             "fee_source": "ESTIMATED",
         })
@@ -3348,6 +3385,9 @@ class TradeExecutionService:
             pnl_fee_rate=self._coerce_non_negative_decimal(
                 self._active_execution_context.get("fee_rate", 0)
             ),
+            fee_model=str(
+                self._active_execution_context.get("accounting_fee_model", "") or ""
+            ),
             next_status_check_at=time.monotonic() + self._order_status_poll_interval_seconds,
             submitted_at=time.monotonic(),
             restore_engine_snapshot_fn=restore_engine_snapshot_fn,
@@ -3397,6 +3437,11 @@ class TradeExecutionService:
                         pending.pnl_fee_rate
                         if pending.pnl_fee_rate > 0
                         else existing_by_id.pnl_fee_rate
+                    ),
+                    fee_model=(
+                        pending.fee_model
+                        if pending.fee_model
+                        else existing_by_id.fee_model
                     ),
                     next_status_check_at=pending.next_status_check_at,
                     submitted_at=(
@@ -3500,6 +3545,7 @@ class TradeExecutionService:
             engine_snapshot=pending.engine_snapshot,
             avg_price=pending.avg_price,
             pnl_fee_rate=pending.pnl_fee_rate,
+            fee_model=pending.fee_model,
             next_status_check_at=now + self._order_status_poll_interval_seconds,
             submitted_at=pending.submitted_at,
             restore_engine_snapshot_fn=pending.restore_engine_snapshot_fn,
@@ -3928,7 +3974,16 @@ class TradeExecutionService:
             else (cost_basis_price - fill_price) * fill_qty
         )
         fee_rate = self._coerce_non_negative_decimal(pending.pnl_fee_rate)
-        entry_fee = cost_basis_price * fill_qty * fee_rate
+        fee_model = pending.fee_model or None
+        market = market_for_symbol(pending.symbol)
+        entry_fee = _accounting_allocated_entry_fee(
+            model=fee_model,
+            market=market,
+            cost_basis_price=cost_basis_price,
+            position_quantity_before=position_quantity_before,
+            fill_quantity=fill_qty,
+            legacy_rate=fee_rate,
+        )
         actual_fee_raw = getattr(order_status, "actual_fee", None)
         actual_exit_fee: Decimal | None = None
         if actual_fee_raw is not None:
@@ -3943,7 +3998,13 @@ class TradeExecutionService:
             except Exception:
                 actual_exit_fee = None
         if actual_exit_fee is None:
-            exit_fee = fill_price * fill_qty * fee_rate
+            exit_fee = _accounting_order_fee(
+                model=fee_model,
+                market=market,
+                price=fill_price,
+                quantity=fill_qty,
+                legacy_rate=fee_rate,
+            )
             pnl_fee_source = "ESTIMATED"
         else:
             exit_fee = actual_exit_fee
@@ -4152,6 +4213,9 @@ class TradeExecutionService:
             pnl_fee_rate=self._coerce_non_negative_decimal(
                 self._active_execution_context.get("fee_rate", 0)
             ),
+            fee_model=str(
+                self._active_execution_context.get("accounting_fee_model", "") or ""
+            ),
         )
         self._finalize_pending_fill(pending, order_status, risk=risk, notifier=notifier, fill_qty=fill_qty, notify_risk_event=notify_risk_event)
         if engine_snapshot is not None and self._should_restore_after_partial_terminal_fill(pending, fill_qty) and restore_engine_snapshot is not None:
@@ -4298,6 +4362,9 @@ class TradeExecutionService:
             avg_price=avg_price,
             pnl_fee_rate=self._coerce_non_negative_decimal(
                 self._active_execution_context.get("fee_rate", 0)
+            ),
+            fee_model=str(
+                self._active_execution_context.get("accounting_fee_model", "") or ""
             ),
             next_status_check_at=time.monotonic() + self._order_status_poll_interval_seconds,
             submitted_at=time.monotonic(),

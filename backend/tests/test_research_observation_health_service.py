@@ -3084,3 +3084,417 @@ def test_health_report_remains_strictly_read_only_and_safety_false(
     assert statements == []
     assert report.order_submission_allowed is False
     assert report.automatic_promotion_allowed is False
+
+
+def test_live_exit_health_accepts_sec98_marker_baseline_on_rate_basis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end §9.8 evidence: challenger closed+paired via the service.
+
+    A US baseline carrying the accounting marker holds measured-commission
+    pnl_fee/net_pnl. The challenger pair is rate-based, so the writer stores
+    rate-basis challenger/baseline values; the validator must expect those,
+    not the accounting numbers.
+    """
+    monkeypatch.setattr(settings, "live_exit_challenger_enabled", True)
+    monkeypatch.setattr(settings, "entry_round_trip_slippage_bps", 4.0)
+    db = _db()
+    try:
+        db.add(StrategyConfig(symbol="AAPL.US", market="US"))
+        db.add(StrategyV2ShadowConfig(symbol="AAPL.US", enabled=True))
+        db.commit()
+        LiveExitChallengerService(db).ensure_registrations(
+            symbol="AAPL.US",
+            market="US",
+            now=_NOW,
+        )
+        entry_at = _NOW + timedelta(minutes=2)
+        entry = OrderRecord(
+            broker_order_id="sec98-health-entry",
+            symbol="AAPL.US",
+            side="BUY",
+            quantity=10,
+            price=100,
+            executed_quantity=10,
+            executed_price=100,
+            status="FILLED",
+            filled_at=entry_at,
+            config_version="sec98-health-v1",
+        )
+        db.add(entry)
+        db.commit()
+        now = _NOW + timedelta(minutes=10)
+        service = ResearchObservationHealthService(db, now=now)
+
+        registrations = db.query(
+            LiveExitChallengerRegistration
+        ).all()
+        trades: list[LiveExitChallengerTrade] = []
+        for registration in registrations:
+            trade = LiveExitChallengerTrade(
+                registration_id=registration.id,
+                entry_order_id=entry.id,
+                symbol="AAPL.US",
+                entry_config_version="sec98-health-v1",
+                status="OPEN",
+                entry_at=entry_at,
+                entry_price=100,
+                quantity=10,
+                estimated_fee_rate=0.0005,
+                last_bar_at=entry_at.replace(second=0, microsecond=0),
+                updated_at=now,
+            )
+            trades.append(trade)
+            db.add(trade)
+        db.commit()
+
+        baseline_exit_at = entry_at + timedelta(seconds=45)
+        marker = json.dumps({"accounting_fee_model": "us-sec98-v1"})
+        baseline = OrderRecord(
+            broker_order_id="sec98-health-exit",
+            symbol="AAPL.US",
+            side="SELL",
+            quantity=10,
+            price=99,
+            executed_quantity=10,
+            executed_price=99,
+            status="FILLED",
+            filled_at=baseline_exit_at,
+            exit_cause="TIME_STOP",
+            gross_pnl=-10,
+            # Measured-commission accounting values under §9.8 (marker set):
+            # the research pair must NOT be held to these numbers.
+            pnl_fee=1.913,
+            net_pnl=-11.913,
+            config_snapshot=marker,
+        )
+        db.add(baseline)
+        db.flush()
+
+        # Close + pair through the service, exactly like the live flow.
+        writer = LiveExitChallengerService(db)
+        for trade in trades:
+            writer._finalize_against_baseline(
+                trade,
+                baseline,
+                paired_at=now,
+            )
+            trade.updated_at = now
+        db.commit()
+
+        rate_fees = (100 + 99) * 10 * 0.0005
+        for trade in trades:
+            assert trade.challenger_estimated_fees == pytest.approx(rate_fees)
+            assert trade.challenger_net_pnl == pytest.approx(-10 - rate_fees)
+            assert trade.baseline_net_pnl == pytest.approx(-10 - rate_fees)
+
+        healthy = service._live_exit_challenger_component()
+        assert healthy.status == "HEALTHY", healthy
+        assert healthy.observed_count == 11
+        assert healthy.expected_count == 11
+        assert healthy.blockers == []
+
+        # Tampering with the rate-basis net must invalidate the evidence.
+        original = trades[0].baseline_net_pnl
+        assert original is not None
+        trades[0].baseline_net_pnl = original + 1.0
+        trades[0].updated_at = now
+        db.commit()
+        tampered = service._live_exit_challenger_component()
+        assert tampered.status == "DEGRADED", tampered
+        assert tampered.blockers == ["LIVE_EXIT_EVIDENCE_INVALID_1"]
+        trades[0].baseline_net_pnl = original
+        trades[0].updated_at = now
+        db.commit()
+
+        restored = service._live_exit_challenger_component()
+        assert restored.status == "HEALTHY", restored
+        assert restored.observed_count == 11
+
+        # Tampering the SOURCE baseline order must also invalidate the
+        # evidence. The rate-basis recomputation must not replace the
+        # finite/non-negative checks on the original accounting values.
+        baseline_tamper_values: tuple[tuple[str, object], ...] = (
+            ("pnl_fee", -1.0),
+            ("pnl_fee", float("nan")),
+            ("net_pnl", float("nan")),
+            ("gross_pnl", float("nan")),
+        )
+        for field, invalid_value in baseline_tamper_values:
+            original_value = getattr(baseline, field)
+            assert original_value is not None
+            setattr(baseline, field, invalid_value)
+            db.commit()
+
+            invalid_baseline = service._live_exit_challenger_component()
+
+            assert invalid_baseline.status == "DEGRADED", (field, invalid_value)
+            assert invalid_baseline.blockers == ["LIVE_EXIT_EVIDENCE_INVALID_11"]
+            setattr(baseline, field, original_value)
+            db.commit()
+
+        untampered = service._live_exit_challenger_component()
+        assert untampered.status == "HEALTHY", untampered
+        assert untampered.observed_count == 11
+    finally:
+        db.close()
+
+
+def test_live_exit_health_hk_marker_baseline_stays_on_accounting_basis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HK keeps the legacy formula: the validator still compares against the
+    order's own pnl_fee/net_pnl even when the marker is present."""
+    monkeypatch.setattr(settings, "live_exit_challenger_enabled", True)
+    monkeypatch.setattr(settings, "entry_round_trip_slippage_bps", 4.0)
+    db = _db()
+    try:
+        db.add(StrategyConfig(symbol="00700.HK", market="HK"))
+        db.add(StrategyV2ShadowConfig(symbol="00700.HK", enabled=True))
+        db.commit()
+        LiveExitChallengerService(db).ensure_registrations(
+            symbol="00700.HK",
+            market="HK",
+            now=_NOW,
+        )
+        entry_at = _NOW + timedelta(minutes=2)
+        entry = OrderRecord(
+            broker_order_id="hk-health-entry",
+            symbol="00700.HK",
+            side="BUY",
+            quantity=100,
+            price=300,
+            executed_quantity=100,
+            executed_price=300,
+            status="FILLED",
+            filled_at=entry_at,
+            config_version="hk-health-v1",
+        )
+        db.add(entry)
+        db.commit()
+        now = _NOW + timedelta(minutes=10)
+        service = ResearchObservationHealthService(db, now=now)
+
+        registrations = db.query(
+            LiveExitChallengerRegistration
+        ).all()
+        trades: list[LiveExitChallengerTrade] = []
+        for registration in registrations:
+            trade = LiveExitChallengerTrade(
+                registration_id=registration.id,
+                entry_order_id=entry.id,
+                symbol="00700.HK",
+                entry_config_version="hk-health-v1",
+                status="OPEN",
+                entry_at=entry_at,
+                entry_price=300,
+                quantity=100,
+                estimated_fee_rate=0.003,
+                last_bar_at=entry_at.replace(second=0, microsecond=0),
+                updated_at=now,
+            )
+            trades.append(trade)
+            db.add(trade)
+        db.commit()
+
+        baseline_exit_at = entry_at + timedelta(seconds=45)
+        baseline = OrderRecord(
+            broker_order_id="hk-health-exit",
+            symbol="00700.HK",
+            side="SELL",
+            quantity=100,
+            price=301,
+            executed_quantity=100,
+            executed_price=301,
+            status="FILLED",
+            filled_at=baseline_exit_at,
+            exit_cause="TIME_STOP",
+            gross_pnl=100.0,
+            # Legacy HK accounting: rate-based even with the marker present.
+            pnl_fee=(300 + 301) * 100 * 0.003,
+            net_pnl=100.0 - (300 + 301) * 100 * 0.003,
+            config_snapshot=json.dumps(
+                {"accounting_fee_model": "us-sec98-v1"}
+            ),
+        )
+        db.add(baseline)
+        db.flush()
+
+        writer = LiveExitChallengerService(db)
+        for trade in trades:
+            writer._finalize_against_baseline(
+                trade,
+                baseline,
+                paired_at=now,
+            )
+            trade.updated_at = now
+        db.commit()
+
+        legacy_fee = (300 + 301) * 100 * 0.003
+        for trade in trades:
+            assert trade.challenger_estimated_fees == pytest.approx(legacy_fee)
+            assert trade.baseline_net_pnl == pytest.approx(100.0 - legacy_fee)
+
+        healthy = service._live_exit_challenger_component()
+        assert healthy.status == "HEALTHY", healthy
+        assert healthy.observed_count == 11
+        assert healthy.blockers == []
+    finally:
+        db.close()
+
+
+def _seed_paired_live_exit_evidence(
+    db: Session,
+    *,
+    symbol: str,
+) -> tuple[list[LiveExitChallengerTrade], OrderRecord]:
+    """Open a real position, close challengers by their own policy, then pair
+    them with a baseline whose net_pnl is finite but gross_pnl/pnl_fee are
+    None (the legacy row shape HEAD's pairing path accepted).
+
+    Closing and pairing go through the service's own methods; the baseline
+    carries only the fields _pair_baseline requires (net_pnl, filled_at).
+    """
+    from app.models import TrackedEntry
+
+    service = LiveExitChallengerService(db)
+    service.ensure_registrations(
+        symbol=symbol,
+        market="HK" if symbol.endswith(".HK") else "US",
+        now=_NOW,
+    )
+    entry_at = _NOW + timedelta(minutes=2)
+    entry = OrderRecord(
+        broker_order_id=f"{symbol}-pair-entry",
+        symbol=symbol,
+        side="BUY",
+        quantity=10,
+        price=100,
+        executed_quantity=10,
+        executed_price=100,
+        status="FILLED",
+        filled_at=entry_at,
+        config_version="pair-config-v1",
+    )
+    db.add(entry)
+    db.add(TrackedEntry(
+        symbol=symbol,
+        side="LONG",
+        quantity=10,
+        cost=1_000,
+        opened_at=entry_at,
+    ))
+    db.commit()
+    assert service.prepare_open_position(
+        symbol=symbol,
+        now=entry_at + timedelta(seconds=30),
+    ) is True
+    now = _NOW + timedelta(minutes=10)
+    challenger_exit_at = entry_at + timedelta(seconds=45)
+    trades = db.query(LiveExitChallengerTrade).all()
+    for trade in trades:
+        service._close_challenger(
+            trade,
+            exit_at=challenger_exit_at,
+            exit_price=101.0,
+            reason="PROFIT_LOCK",
+        )
+        trade.updated_at = now
+    # Legacy row shape: finite net_pnl, no gross/fee breakdown. HEAD's
+    # _pair_baseline only required net_pnl here.
+    baseline = OrderRecord(
+        broker_order_id=f"{symbol}-pair-exit",
+        symbol=symbol,
+        side="SELL",
+        quantity=10,
+        price=99,
+        executed_quantity=10,
+        executed_price=99,
+        status="FILLED",
+        filled_at=challenger_exit_at,
+        exit_cause="TIME_STOP",
+        gross_pnl=None,
+        pnl_fee=None,
+        net_pnl=-11.0,
+    )
+    db.add(baseline)
+    db.flush()
+    for trade in trades:
+        service._pair_baseline(
+            trade,
+            baseline,
+            paired_at=now,
+        )
+    db.commit()
+    # The ORM column carries onupdate=utcnow, so every writer mutation above
+    # stamps wall-clock time; pin the replay-stable timestamp with a core
+    # UPDATE that bypasses the onupdate.
+    from sqlalchemy import update
+
+    trade_model = type(trades[0])
+    db.execute(
+        update(trade_model)
+        .where(trade_model.id.in_([trade.id for trade in trades]))
+        .values(updated_at=now)
+    )
+    db.commit()
+    db.expire_all()
+    return db.query(trade_model).all(), baseline
+
+
+def test_live_exit_health_legacy_pairing_without_gross_or_fee_stays_valid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Blocker 2 regression: a legacy US pairing whose baseline has a finite
+    net_pnl but gross_pnl/pnl_fee None was valid on HEAD and must stay valid.
+
+    The §9.8 source-field requirements apply ONLY to marker baselines.
+    """
+    monkeypatch.setattr(settings, "live_exit_challenger_enabled", True)
+    monkeypatch.setattr(settings, "entry_round_trip_slippage_bps", 4.0)
+    db = _db()
+    try:
+        db.add(StrategyConfig(symbol="AAPL.US", market="US"))
+        db.add(StrategyV2ShadowConfig(symbol="AAPL.US", enabled=True))
+        db.commit()
+        trades, baseline = _seed_paired_live_exit_evidence(db, symbol="AAPL.US")
+        assert baseline.gross_pnl is None and baseline.pnl_fee is None
+        assert all(t.baseline_net_pnl is not None for t in trades)
+
+        service = ResearchObservationHealthService(
+            db, now=_NOW + timedelta(minutes=11),
+        )
+        component = service._live_exit_challenger_component()
+
+        assert component.status == "HEALTHY", component
+        assert component.observed_count == len(trades)
+        assert component.blockers == []
+    finally:
+        db.close()
+
+
+def test_live_exit_health_hk_pairing_without_gross_or_fee_stays_valid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same contract for an HK pairing (HK never takes the marker path)."""
+    monkeypatch.setattr(settings, "live_exit_challenger_enabled", True)
+    monkeypatch.setattr(settings, "entry_round_trip_slippage_bps", 4.0)
+    db = _db()
+    try:
+        db.add(StrategyConfig(symbol="00700.HK", market="HK"))
+        db.add(StrategyV2ShadowConfig(symbol="00700.HK", enabled=True))
+        db.commit()
+        trades, baseline = _seed_paired_live_exit_evidence(db, symbol="00700.HK")
+        assert baseline.gross_pnl is None and baseline.pnl_fee is None
+        assert all(t.baseline_net_pnl is not None for t in trades)
+
+        service = ResearchObservationHealthService(
+            db, now=_NOW + timedelta(minutes=11),
+        )
+        component = service._live_exit_challenger_component()
+
+        assert component.status == "HEALTHY", component
+        assert component.observed_count == len(trades)
+        assert component.blockers == []
+    finally:
+        db.close()

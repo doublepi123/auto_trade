@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from datetime import datetime, timedelta, timezone
 
@@ -16,6 +17,7 @@ from app.models import (
     LiveExitChallengerRegistration,
     LiveExitChallengerTrade,
     OrderRecord,
+    StrategyConfig,
     TrackedEntry,
 )
 from app.services.live_exit_challenger_service import (
@@ -26,6 +28,7 @@ from app.services.live_exit_challenger_service import (
 _REGISTERED_AT = datetime(2026, 7, 24, 14, 30, 10, tzinfo=timezone.utc)
 _ENTRY_AT = datetime(2026, 7, 24, 14, 31, tzinfo=timezone.utc)
 _SYMBOL = "AAPL.US"
+_HK_SYMBOL = "00700.HK"
 
 
 def _bar(
@@ -153,6 +156,84 @@ class TestLiveExitChallengerService:
         db.add(exit_order)
         db.query(TrackedEntry).filter(
             TrackedEntry.symbol == _SYMBOL
+        ).delete()
+        db.commit()
+        db.refresh(exit_order)
+        return exit_order
+
+    @staticmethod
+    def _register_hk(service: LiveExitChallengerService) -> None:
+        assert service.ensure_registrations(
+            symbol=_HK_SYMBOL,
+            market="HK",
+            now=_REGISTERED_AT,
+        ) is True
+
+    @staticmethod
+    def _open_hk_real_position(
+        db: Session,
+        *,
+        entry_at: datetime = _ENTRY_AT,
+    ) -> OrderRecord:
+        entry = OrderRecord(
+            broker_order_id=f"hk-entry-{entry_at.isoformat()}",
+            symbol=_HK_SYMBOL,
+            side="BUY",
+            quantity=100,
+            price=300,
+            executed_quantity=100,
+            executed_price=300,
+            status="FILLED",
+            filled_at=entry_at,
+            config_version="hk-live-config-v1",
+            estimated_fee=90.0,
+        )
+        db.add(entry)
+        db.add(
+            TrackedEntry(
+                symbol=_HK_SYMBOL,
+                side="LONG",
+                quantity=100,
+                cost=30_000,
+                opened_at=entry_at,
+            )
+        )
+        db.commit()
+        db.refresh(entry)
+        return entry
+
+    @staticmethod
+    def _close_hk_real_position(
+        db: Session,
+        *,
+        entry_at: datetime = _ENTRY_AT,
+        exit_at: datetime,
+        exit_price: float = 301.0,
+    ) -> OrderRecord:
+        gross_pnl = (exit_price - 300) * 100
+        pnl_fee = (300 + exit_price) * 100 * 0.003
+        exit_order = OrderRecord(
+            broker_order_id=f"hk-exit-{exit_at.isoformat()}",
+            symbol=_HK_SYMBOL,
+            side="SELL",
+            quantity=100,
+            price=exit_price,
+            executed_quantity=100,
+            executed_price=exit_price,
+            status="FILLED",
+            filled_at=exit_at,
+            exit_cause="TIME_STOP",
+            exit_reason="maximum holding time reached",
+            gross_pnl=gross_pnl,
+            pnl_fee=pnl_fee,
+            net_pnl=gross_pnl - pnl_fee,
+            cost_basis_price=300,
+            cost_basis_quantity=100,
+            cost_basis_opened_at=entry_at,
+        )
+        db.add(exit_order)
+        db.query(TrackedEntry).filter(
+            TrackedEntry.symbol == _HK_SYMBOL
         ).delete()
         db.commit()
         db.refresh(exit_order)
@@ -812,3 +893,269 @@ class TestLiveExitChallengerService:
         with self._db() as db:
             report = LiveExitChallengerService(db).get_report(_SYMBOL)
         assert report.enabled is True
+
+    def test_entry_fee_rate_ignores_sec98_marker_orders(self) -> None:
+        # Research pairs stay rate-based: an entry order carrying the
+        # accounting-fee marker must NOT poison estimated_fee_rate with
+        # estimated_fee/notional (which is not a rate under the sec98 model).
+        with self._db() as db:
+            service = LiveExitChallengerService(db)
+            entry = self._open_real_position(db)
+            entry.config_snapshot = json.dumps(
+                {"accounting_fee_model": "us-sec98-v1"}
+            )
+            entry.estimated_fee = 3.17  # would imply ~0.000317 rate via notional
+            db.commit()
+            db.refresh(entry)
+
+            rate = service._entry_fee_rate(
+                entry,
+                entry_price=100.0,
+                quantity=10.0,
+            )
+
+            config = db.query(StrategyConfig).order_by(
+                StrategyConfig.id.desc()
+            ).first()
+            expected = float(
+                getattr(config, "fee_rate_us", 0.0005)
+                if config is not None
+                else 0.0005
+            )
+            assert rate == pytest.approx(expected)
+
+    def test_entry_fee_rate_legacy_order_still_uses_the_frozen_estimate(self) -> None:
+        with self._db() as db:
+            service = LiveExitChallengerService(db)
+            entry = self._open_real_position(db)
+            entry.estimated_fee = 0.5
+            db.commit()
+            db.refresh(entry)
+
+            rate = service._entry_fee_rate(
+                entry,
+                entry_price=100.0,
+                quantity=10.0,
+            )
+
+            assert rate == pytest.approx(0.5 / 1000.0)
+
+    def test_close_from_baseline_recomputes_rate_fees_when_baseline_carries_marker(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service = LiveExitChallengerService(db)
+            self._register(service)
+            entry = self._open_real_position(db)
+            entry.config_snapshot = json.dumps(
+                {"accounting_fee_model": "us-sec98-v1"}
+            )
+            db.commit()
+            # The challenger rows are rate-based regardless of the marker.
+            assert service.prepare_open_position(
+                symbol=_SYMBOL,
+                now=_ENTRY_AT + timedelta(seconds=30),
+            ) is True
+            row = db.query(LiveExitChallengerTrade).first()
+            assert row is not None and row.status == "OPEN"
+
+            baseline = self._close_real_position(
+                db,
+                exit_at=_ENTRY_AT + timedelta(minutes=5),
+                exit_price=102.0,
+            )
+            # Baseline accounting values under the sec98 model; the
+            # challenger must NOT inherit them when the marker is present.
+            baseline.config_snapshot = json.dumps(
+                {"accounting_fee_model": "us-sec98-v1"}
+            )
+            baseline.pnl_fee = 6.30
+            baseline.net_pnl = 14.0  # sec98 accounting value; must not leak
+            db.commit()
+            db.refresh(baseline)
+
+            assert service._close_from_baseline(row, baseline) is True
+            db.flush()
+
+            db.refresh(row)
+            expected_fees = (100.0 + 102.0) * 10.0 * row.estimated_fee_rate
+            assert row.challenger_estimated_fees == pytest.approx(expected_fees)
+            assert row.challenger_net_pnl == pytest.approx(20.0 - expected_fees)
+
+    def test_pair_baseline_recomputes_rate_net_when_baseline_carries_marker(
+        self,
+    ) -> None:
+        # The paired delta compares the challenger (rate-based) against the
+        # baseline. A baseline carrying the §9.8 accounting marker holds a
+        # measured-commission net_pnl, so pairing must put it on the same
+        # rate basis, otherwise net_pnl_delta mixes two cost models.
+        with self._db() as db:
+            service = LiveExitChallengerService(db)
+            self._register(service)
+            self._open_real_position(db)
+            assert service.prepare_open_position(
+                symbol=_SYMBOL,
+                now=_ENTRY_AT + timedelta(seconds=30),
+            ) is True
+            row = db.query(LiveExitChallengerTrade).first()
+            assert row is not None
+            row.status = "CLOSED"
+            row.challenger_net_pnl = 5.0
+            baseline = self._close_real_position(
+                db,
+                exit_at=_ENTRY_AT + timedelta(minutes=5),
+                exit_price=102.0,
+            )
+            baseline.config_snapshot = json.dumps(
+                {"accounting_fee_model": "us-sec98-v1"}
+            )
+            baseline.pnl_fee = 6.30
+            baseline.net_pnl = 13.70
+            db.commit()
+            db.refresh(row)
+            db.refresh(baseline)
+
+            service._pair_baseline(
+                row,
+                baseline,
+                paired_at=_ENTRY_AT + timedelta(minutes=6),
+            )
+
+            rate_net = 20.0 - (100.0 + 102.0) * 10.0 * row.estimated_fee_rate
+            assert row.baseline_net_pnl == pytest.approx(rate_net)
+            assert row.net_pnl_delta == pytest.approx(5.0 - rate_net)
+
+    def test_close_from_baseline_legacy_baseline_still_copies_accounting_values(
+        self,
+    ) -> None:
+        with self._db() as db:
+            service = LiveExitChallengerService(db)
+            self._register(service)
+            self._open_real_position(db)
+            assert service.prepare_open_position(
+                symbol=_SYMBOL,
+                now=_ENTRY_AT + timedelta(seconds=30),
+            ) is True
+            row = db.query(LiveExitChallengerTrade).first()
+            assert row is not None and row.status == "OPEN"
+
+            baseline = self._close_real_position(
+                db,
+                exit_at=_ENTRY_AT + timedelta(minutes=5),
+                exit_price=102.0,
+            )
+            db.commit()
+            db.refresh(baseline)
+
+            assert service._close_from_baseline(row, baseline) is True
+            db.flush()
+
+            db.refresh(row)
+            # legacy copy-through: baseline gross=20, pnl_fee=1.0, net=19.0
+            assert row.challenger_estimated_fees == pytest.approx(1.0)
+            assert row.challenger_net_pnl == pytest.approx(19.0)
+
+    def test_entry_fee_rate_hk_order_with_marker_keeps_legacy_estimate_basis(
+        self,
+    ) -> None:
+        # The runner writes the marker for every order, HK included, but the
+        # §9.8 model is US-only. For HK the frozen estimate keeps defining
+        # the research rate, exactly as with no marker.
+        with self._db() as db:
+            service = LiveExitChallengerService(db)
+            entry = OrderRecord(
+                broker_order_id="hk-marker-entry",
+                symbol="00700.HK",
+                side="BUY",
+                quantity=100,
+                price=300,
+                executed_quantity=100,
+                executed_price=300,
+                status="FILLED",
+                filled_at=_ENTRY_AT,
+                config_version="hk-config-v1",
+                estimated_fee=0.9,
+                config_snapshot=json.dumps(
+                    {"accounting_fee_model": "us-sec98-v1"}
+                ),
+            )
+            db.add(entry)
+            db.commit()
+
+            rate = service._entry_fee_rate(
+                entry,
+                entry_price=300.0,
+                quantity=100.0,
+            )
+
+            assert rate == pytest.approx(0.9 / 30_000.0)
+
+    def test_close_from_baseline_hk_marker_copies_accounting_values(self) -> None:
+        with self._db() as db:
+            service = LiveExitChallengerService(db)
+            self._register_hk(service)
+            self._open_hk_real_position(db)
+            assert service.prepare_open_position(
+                symbol=_HK_SYMBOL,
+                now=_ENTRY_AT + timedelta(seconds=30),
+            ) is True
+            row = db.query(LiveExitChallengerTrade).first()
+            assert row is not None and row.status == "OPEN"
+
+            baseline = self._close_hk_real_position(
+                db,
+                exit_at=_ENTRY_AT + timedelta(minutes=5),
+                exit_price=301.0,
+            )
+            # The marker on an HK baseline must not switch the pair onto a
+            # separate rate basis: HK accounting keeps the legacy formula, so
+            # copying the accounting values is exactly today's behaviour.
+            baseline.config_snapshot = json.dumps(
+                {"accounting_fee_model": "us-sec98-v1"}
+            )
+            db.commit()
+            db.refresh(baseline)
+
+            assert service._close_from_baseline(row, baseline) is True
+            db.flush()
+
+            db.refresh(row)
+            # copy-through of the baseline's own numbers:
+            # gross = 100, pnl_fee = (300+301)*100*0.003 = 180.3
+            assert row.challenger_estimated_fees == pytest.approx(180.3)
+            assert row.challenger_net_pnl == pytest.approx(100.0 - 180.3)
+
+    def test_pair_baseline_hk_marker_uses_baseline_net(self) -> None:
+        with self._db() as db:
+            service = LiveExitChallengerService(db)
+            self._register_hk(service)
+            self._open_hk_real_position(db)
+            assert service.prepare_open_position(
+                symbol=_HK_SYMBOL,
+                now=_ENTRY_AT + timedelta(seconds=30),
+            ) is True
+            row = db.query(LiveExitChallengerTrade).first()
+            assert row is not None
+            row.status = "CLOSED"
+            row.challenger_net_pnl = -50.0
+            baseline = self._close_hk_real_position(
+                db,
+                exit_at=_ENTRY_AT + timedelta(minutes=5),
+                exit_price=301.0,
+            )
+            baseline.config_snapshot = json.dumps(
+                {"accounting_fee_model": "us-sec98-v1"}
+            )
+            db.commit()
+            db.refresh(row)
+            db.refresh(baseline)
+
+            service._pair_baseline(
+                row,
+                baseline,
+                paired_at=_ENTRY_AT + timedelta(minutes=6),
+            )
+
+            # the pair uses the baseline's own net_pnl = 100 - 180.3
+            assert row.baseline_net_pnl == pytest.approx(100.0 - 180.3)
+            assert row.net_pnl_delta == pytest.approx(-50.0 - (100.0 - 180.3))

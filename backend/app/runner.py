@@ -23,6 +23,13 @@ from app.api.deps import init_audit_logger
 from app.api.ws import manager
 from app.config import settings
 from app.core.audit import AuditLogger
+from app.core.accounting_fees import (
+    ACCOUNTING_FEE_MODEL_US_SEC98,
+    allocated_entry_fee,
+    model_applies,
+    model_from_config_snapshot,
+    order_fee,
+)
 from app.core.board_lot import BoardLotCache
 from app.core.broker import BrokerGateway, Position, Quote
 from app.core.engine import EngineSnapshot, EngineState, StrategyEngine, StrategyParams, TriggerResult
@@ -3614,6 +3621,7 @@ class AppRunner:
                 ),
             },
             "buying_power_usage_mode": "GUARDED",
+            "accounting_fee_model": ACCOUNTING_FEE_MODEL_US_SEC98,
         }
         snapshot_json = json.dumps(
             snapshot,
@@ -3634,6 +3642,7 @@ class AppRunner:
             "quote_age_ms": self._quote_age_ms(quote.timestamp, now),
             "config_version": hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest(),
             "config_snapshot": snapshot_json,
+            "accounting_fee_model": ACCOUNTING_FEE_MODEL_US_SEC98,
             "exit_cause": (
                 decision.reduction_cause or "TARGET" if is_exit else ""
             ),
@@ -8644,7 +8653,31 @@ class AppRunner:
                 if side == "SELL"
                 else (cost_basis_price - fill_price) * fill_quantity
             )
-            entry_fee = cost_basis_price * fill_quantity * fee_rate
+            # Accounting-only fee model (PREREGISTRATION §9.8): orders whose
+            # config snapshot carries the marker use the measured US
+            # commission. Everything else keeps today's rate formula exactly.
+            fee_model = model_from_config_snapshot(
+                getattr(order, "config_snapshot", None)
+            )
+            market = (
+                "HK" if str(getattr(order, "symbol", "") or "").upper().endswith(".HK")
+                else "US"
+            )
+            if model_applies(fee_model, market):
+                entry_fee = float(
+                    allocated_entry_fee(
+                        model=fee_model,
+                        market=market,
+                        cost_basis_price=Decimal(str(cost_basis_price)),
+                        position_quantity_before=Decimal(
+                            str(position_quantity_before)
+                        ),
+                        fill_quantity=Decimal(str(fill_quantity)),
+                        legacy_rate=Decimal(str(fee_rate)),
+                    )
+                )
+            else:
+                entry_fee = cost_basis_price * fill_quantity * fee_rate
             actual_fee = (
                 None if order.actual_fee is None else max(0.0, float(order.actual_fee))
             )
@@ -8654,6 +8687,19 @@ class AppRunner:
             ):
                 exit_fee = actual_fee
                 pnl_fee_source = "MIXED"
+            elif model_applies(fee_model, market):
+                # Like the settlement path: the fill price, not the frozen
+                # estimated_fee (which was computed at the limit price).
+                exit_fee = float(
+                    order_fee(
+                        model=fee_model,
+                        market=market,
+                        price=Decimal(str(fill_price)),
+                        quantity=Decimal(str(fill_quantity)),
+                        legacy_rate=Decimal(str(fee_rate)),
+                    )
+                )
+                pnl_fee_source = "ESTIMATED"
             else:
                 # A broker 0.00 charge (paper accounts report it with no fee
                 # items) is not proof of free execution; charge the frozen
@@ -8864,6 +8910,12 @@ class AppRunner:
                         else self._live_fee_rate_for_market(
                             "HK" if str(row.symbol).upper().endswith(".HK") else "US"
                         )
+                    ),
+                    fee_model=(
+                        model_from_config_snapshot(
+                            getattr(row, "config_snapshot", None)
+                        )
+                        or ""
                     ),
                     next_status_check_at=0.0,
                     submitted_at=now - submitted_age_seconds,

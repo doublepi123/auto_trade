@@ -10,6 +10,12 @@ from enum import Enum
 from threading import Lock
 from typing import Any, Callable
 
+from app.core.accounting_fees import (
+    model_applies,
+    model_from_config_snapshot,
+    order_fee,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -171,6 +177,7 @@ class _Fill:
     pnl_fee: Decimal | None = None
     pnl_fee_source: str = "UNKNOWN"
     pnl_fee_rate: Decimal | None = None
+    fee_model: str | None = None
 
 
 @dataclass
@@ -740,17 +747,79 @@ class DailyPnlService:
                 synthetic_quantity = exit_fill.quantity
             opened_at = exit_fill.cost_basis_opened_at or exit_fill.filled_at
             fee_rate = exit_fill.pnl_fee_rate or _ZERO
+            market = "HK" if exit_fill.symbol.endswith(".HK") else "US"
+            if model_applies(exit_fill.fee_model, market):
+                # §9.8 accounting on the marker-carrying exit: the synthetic
+                # lot stands for the entry order, so it carries that order's
+                # own fee. The FIFO proportional allocation in this loop then
+                # matches allocated_entry_fee exactly, and a remainder closed
+                # by an external (marker-less) order still receives the rest
+                # of the entry commission through the same lot.
+                synthetic_fee = (
+                    order_fee(
+                        model=exit_fill.fee_model,
+                        market=market,
+                        price=basis_price,
+                        quantity=synthetic_quantity,
+                        legacy_rate=fee_rate,
+                    )
+                    if synthetic_quantity > 0
+                    else _ZERO
+                )
+            else:
+                synthetic_fee = basis_price * synthetic_quantity * fee_rate
             lot_queue[:] = [
                 _Lot(
                     order_id=0,
                     quantity=synthetic_quantity,
                     price=basis_price,
                     filled_at=opened_at,
-                    fee_remaining=basis_price * synthetic_quantity * fee_rate,
+                    fee_remaining=synthetic_fee,
                     fee_source="ESTIMATED",
                     strategy_source=TradeStrategySource.EXTERNAL_POSITION.value,
                 )
             ]
+
+        # Unified rule R (stateless): for a US-marker position of quantity Q
+        # at basis B, the entry fee pool at each authoritative US-marker exit
+        # is order_fee(B, Q); the exit is allocated pool * fill / Q and the
+        # remainder carries to later exits, including external ones. Real
+        # lots therefore re-derive their pools here exactly like the
+        # synthetic lot above and the position rebase in calculate(),
+        # instead of continuing to consume the original entry fee_remaining
+        # (which diverged once a marker exit rebased the pool).
+        if (
+            authoritative
+            and not cost_basis_conflict
+            and model_applies(
+                exit_fill.fee_model,
+                "HK" if exit_fill.symbol.endswith(".HK") else "US",
+            )
+        ):
+            real_lots = [lot for lot in lot_queue if lot.quantity > 0]
+            total_open = sum(
+                (lot.quantity for lot in real_lots),
+                start=_ZERO,
+            )
+            if (
+                total_open > 0
+                and total_open == declared_position_quantity
+            ):
+                basis_price = exit_fill.cost_basis_price or _ZERO
+                fee_rate = exit_fill.pnl_fee_rate or _ZERO
+                market = "HK" if exit_fill.symbol.endswith(".HK") else "US"
+                pool = order_fee(
+                    model=exit_fill.fee_model,
+                    market=market,
+                    price=basis_price,
+                    quantity=total_open,
+                    legacy_rate=fee_rate,
+                )
+                for lot in real_lots:
+                    lot.fee_remaining = pool * lot.quantity / total_open
+                    # The pool is now the §9.8 model, not a broker charge,
+                    # even if the entry itself carried a settled fee.
+                    lot.fee_source = "ESTIMATED"
 
         remaining = exit_fill.quantity
         matched_quantity = _ZERO
@@ -1209,6 +1278,29 @@ class DailyPnlService:
             estimated_fee,
             reported_fee_source,
         )
+        fill_fee_model = model_from_config_snapshot(
+            getattr(order, "config_snapshot", None)
+        )
+        if (
+            fee_source == "ESTIMATED"
+            and model_applies(
+                fill_fee_model,
+                "HK" if symbol.endswith(".HK") else "US",
+            )
+        ):
+            # §9.8 marker on US and the frozen estimate was selected (no
+            # positive actual fee): the estimate was frozen for the
+            # SUBMITTED quantity and scaled above by executed/submitted,
+            # which also scales the fixed commission. The measured
+            # commission is fixed-plus-notional per order side, so the
+            # fill's fee is recomputed from the executed quantity instead.
+            fee = order_fee(
+                model=fill_fee_model,
+                market="HK" if symbol.endswith(".HK") else "US",
+                price=price,
+                quantity=quantity,
+                legacy_rate=_ZERO,
+            )
         (
             strategy_source,
             strategy_config_version,
@@ -1258,6 +1350,7 @@ class DailyPnlService:
             pnl_fee_rate=self._optional_decimal(
                 getattr(order, "pnl_fee_rate", None)
             ),
+            fee_model=fill_fee_model,
         )
 
     @staticmethod
@@ -1823,14 +1916,37 @@ class DailyPnlService:
             else fill.position_quantity_before or _ZERO
         )
         fee_rate = fill.pnl_fee_rate or _ZERO
+        market = "HK" if fill.symbol.endswith(".HK") else "US"
+        if model_applies(fill.fee_model, market):
+            # §9.8 accounting: the fee pool is the entry order's own fee for
+            # the whole declared position, so the proportional close in
+            # _apply_fill_net leaves exactly order_fee(basis, position_before)
+            # * remaining / position_before — allocated + remaining ==
+            # order_fee(basis, position_before), matching the FIFO lot
+            # allocation used by allocated_entry_fee. A remainder closed by
+            # an external (marker-less) order then still carries the rest of
+            # the entry commission through its lot.
+            position_fee = (
+                order_fee(
+                    model=fill.fee_model,
+                    market=market,
+                    price=basis_price,
+                    quantity=quantity,
+                    legacy_rate=fee_rate,
+                )
+                if quantity > 0
+                else _ZERO
+            )
+        else:
+            position_fee = basis_price * quantity * fee_rate
         if fill.side == "SELL":
             position.long_quantity = quantity
             position.long_cost = basis_price * quantity
-            position.long_fees = basis_price * quantity * fee_rate
+            position.long_fees = position_fee
         else:
             position.short_quantity = quantity
             position.short_proceeds = basis_price * quantity
-            position.short_fees = basis_price * quantity * fee_rate
+            position.short_fees = position_fee
 
     @staticmethod
     def _apply_fill_net(
