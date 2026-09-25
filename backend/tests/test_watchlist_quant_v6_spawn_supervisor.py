@@ -1768,6 +1768,29 @@ def test_oversized_work_frame_fails_closed_without_process_leak() -> None:
         )
 
 
+def test_rss_budget_skips_a_worker_already_reaped_by_another_thread() -> None:
+    # A worker reaped by the main thread can still look alive to the watchdog
+    # thread for an instant (its returncode is not stored yet), and by then
+    # /proc/<pid> is gone. A reaped process holds no memory, so the fence must
+    # skip it instead of failing the whole pipeline (CI run 36107814036:
+    # "cannot inspect resident memory for pid 2582").
+    context = multiprocessing.get_context("spawn")
+    process = context.Process(target=os._exit, args=(0,))
+    process.start()
+    process.join(10)
+    reaped_pid = process.pid
+    assert reaped_pid is not None and not os.path.exists(f"/proc/{reaped_pid}")
+    state = SimpleNamespace(
+        process=SimpleNamespace(pid=reaped_pid, is_alive=lambda: True)
+    )
+
+    supervisor._check_memory_budget(
+        cast(list[supervisor._WorkerState], [state]),
+        parent_baseline_bytes=supervisor._resident_bytes(os.getpid()),
+        memory_limit_bytes=8 * 1024 * 1024 * 1024,
+    )
+
+
 def test_rss_budget_accepts_exact_boundary_and_rejects_one_byte_over(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

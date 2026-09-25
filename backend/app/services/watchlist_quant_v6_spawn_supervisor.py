@@ -751,6 +751,12 @@ def _check_memory_budget(
             # lifecycle pass classify that exit with its candidate ordinal.
             if not state.process.is_alive():
                 continue
+            # ``is_alive`` still reports True for a child another thread has
+            # already reaped but not yet recorded (its waitpid gets ECHILD).
+            # With no /proc entry the process no longer exists and holds no
+            # memory. Any other inspection failure still fails closed.
+            if not os.path.exists(f"/proc/{pid}"):
+                continue
             raise
     if parent_increment + worker_bytes > memory_limit_bytes:
         raise QuantV6SpawnResourceLimitError(

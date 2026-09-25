@@ -216,13 +216,14 @@ def test_historical_evaluator_manifest_golden_digest() -> None:
     source, and say in the message what moved. It is emphatically not the
     preregistration hash, which must never be updated to silence a failure.
 
-    The value below was last moved by d04b927d, which added
-    ``QuantV6DatabaseSizeFence`` to ``watchlist_quant_v6_spawn_supervisor``.
-    That commit changed the closure but kept the old constant, so `main` CI
-    stayed red for nine commits -- the gate fired correctly and was ignored.
+    The value below was last moved when the spawn supervisor's RSS fence
+    learned to skip a worker another thread had already reaped (a CI race).
+    Earlier, d04b927d added ``QuantV6DatabaseSizeFence`` to that module but
+    kept the old constant, so `main` CI stayed red for nine commits -- the
+    gate fired correctly and was ignored.
     """
     assert quant_v6_historical_evaluator_digest_sha256() == (
-        "11538e940e10470e2cf87c6c1defaccfaf913bb562b924bc65d9bd93c15e9404"
+        "030d4b69828a68a2a272d5493d5027739c29058f0c1bb50715e7dbb29ffd6bd4"
     )
 
 
