@@ -31,6 +31,22 @@ def _clean_credentials() -> None:
         db.commit()
 
 
+@pytest.fixture(autouse=True)
+def _leave_no_credentials_behind():
+    """This module shares the worker's database with later modules.
+
+    Its fixtures (for example ``legacy-sct``, which ServerChan rejects as a
+    key) used to survive the module and break whichever later test built a
+    notifier from stored credentials.
+    """
+    yield
+    _clean_credentials()
+    with SessionLocal() as db:
+        for legacy in db.query(StrategyConfig).filter(StrategyConfig.sct_key != ""):
+            legacy.sct_key = ""
+        db.commit()
+
+
 def _clean_audit_logs() -> None:
     with SessionLocal() as db:
         db.query(AuditLog).delete()
