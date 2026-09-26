@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.broker import BrokerCandle
+from app.core.log_throttle import RepeatedLogThrottle
 from app.core.market_calendar import trade_day_for
 from app.domain.strategy_v2 import RISK_GROUP_RELATIVE_MIN_PEERS
 from app.domain.universe_selection import (
@@ -88,6 +89,25 @@ _ROTATION_EVALUATION_VALIDATION_PERIODS = 12
 _ROTATION_EXPANDING_MIN_TRAINING_PERIODS = 12
 _ROTATION_EXPANDING_FOLD_PERIODS = 12
 _LIVE_ORDER_STATUSES = ("SUBMITTED", "PARTIAL_FILLED")
+_INVALID_SYMBOL_LOG_WINDOW_SECONDS = 24 * 3600.0
+_INVALID_SYMBOL_LOG_THROTTLE = RepeatedLogThrottle(
+    window_seconds=_INVALID_SYMBOL_LOG_WINDOW_SECONDS,
+)
+
+
+def _is_provider_invalid_symbol(exc: BaseException) -> bool:
+    """Classify the provider's permanent "does not recognise this symbol"
+    answer (longport ``OpenApiException`` code 301600).
+
+    Delisted historical index members always draw this reply; it is an
+    expected research-data outcome, not a defect, so it must not produce
+    a traceback.  Matched on ``str(exc)`` so tests stay SDK-free.
+    """
+
+    message = str(exc).lower()
+    return "code=301600" in message or "invalid symbol" in message
+
+
 _REFRESH_LOCK = threading.Lock()
 _RUN_WAIT_POLL_SECONDS = 0.05
 _RUN_CLAIM_LEASE_SECONDS = 300.0
@@ -1804,12 +1824,28 @@ class UniverseSelectionService:
                 data_errors.append(
                     f"DATA_DAILY_BARS_{type(exc).__name__.upper()}"
                 )
-                logger.warning(
-                    "universe daily bars failed for %s: %s",
-                    candidate.symbol,
-                    exc,
-                    exc_info=True,
-                )
+                if _is_provider_invalid_symbol(exc):
+                    # Permanent, non-retryable provider answer for a
+                    # delisted research-only symbol: log without a
+                    # traceback, throttled per symbol.
+                    if _INVALID_SYMBOL_LOG_THROTTLE.should_log(
+                        candidate.symbol
+                    ):
+                        logger.warning(
+                            "universe daily bars unavailable for %s: "
+                            "provider rejected symbol (301600); "
+                            "research-only history skipped "
+                            "(suppressed=%d)",
+                            candidate.symbol,
+                            _INVALID_SYMBOL_LOG_THROTTLE.take_suppressed_count(),
+                        )
+                else:
+                    logger.warning(
+                        "universe daily bars failed for %s: %s",
+                        candidate.symbol,
+                        exc,
+                        exc_info=True,
+                    )
             complete_by_symbol[candidate.symbol] = bars
             errors_by_symbol[candidate.symbol] = data_errors
         self._checkpoint_lease(lease_guard)

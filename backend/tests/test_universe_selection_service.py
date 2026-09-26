@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import Counter
+from collections.abc import Iterator
 from datetime import date, datetime, timedelta, timezone
 from multiprocessing import get_context
 from pathlib import Path
@@ -13,6 +15,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.broker import BrokerCandle, Quote
 from app.core.holiday_calendar import is_market_closed
+from app.core.log_throttle import RepeatedLogThrottle
 from app.domain.universe_selection import (
     DIVERSIFIED_INVERSE_VOLATILITY_VARIANT,
     DIVERSIFIED_SHRINKAGE_ROTATION_VARIANT,
@@ -33,6 +36,7 @@ from app.models import (
     WatchlistItem,
 )
 from app.schemas import StrategyV2ShadowConfigUpdate
+from app.services import universe_selection_service as _universe_service_module
 from app.services.universe_selection_service import (
     _HISTORICAL_RESEARCH_BARS_CACHE,
     UniverseSelectionLeaseBusyError,
@@ -55,6 +59,26 @@ from app.services.durable_job_lease_service import (
 )
 
 _NOW = datetime(2026, 7, 24, 18, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture(autouse=True)
+def _reset_invalid_symbol_log_throttle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[None]:
+    """Give each test a pristine module-level throttle.
+
+    The production throttle is keyed by symbol over a 24h window; without
+    a reset, one test's emission would suppress the next test's warning.
+    ``raising=False`` keeps this valid before the symbol exists (RED).
+    """
+
+    monkeypatch.setattr(
+        _universe_service_module,
+        "_INVALID_SYMBOL_LOG_THROTTLE",
+        RepeatedLogThrottle(window_seconds=24 * 3600.0),
+        raising=False,
+    )
+    yield
 _CATALOG = (
     IndexCandidate(
         "AAPL.US",
@@ -3482,5 +3506,314 @@ def test_fenced_shadow_enable_failure_releases_new_config_ownership(
         assert failures == ["enable:AAPL.US"]
         assert config.enabled is False
         assert config.universe_managed is False
+    finally:
+        db.close()
+
+
+class _InvalidSymbolHistoryBroker(_FakeBroker):
+    """Historical reader answering the broker's permanent 301600 reply."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.history_calls = 0
+
+    def get_forward_adjusted_history_candlesticks_before(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+        before: datetime,
+    ) -> list[BrokerCandle]:
+        self.history_calls += 1
+        raise RuntimeError(
+            "OpenApiException: (kind=ErrorKind.OpenApi, "
+            "code=301600, trace_id=) invalid symbol"
+        )
+
+
+class _InvalidSymbolRecentBroker(_FakeBroker):
+    """Recent-candles reader raising the same provider rejection."""
+
+    def get_candlesticks(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+    ) -> list[BrokerCandle]:
+        if symbol == "ATVI.US":
+            raise RuntimeError(
+                "OpenApiException: (kind=ErrorKind.OpenApi, "
+                "code=301600, trace_id=) invalid symbol"
+            )
+        return super().get_candlesticks(symbol, period, count)
+
+
+class _GenericFailureRecentBroker(_FakeBroker):
+    """Recent-candles reader failing with an unexpected error."""
+
+    def get_candlesticks(
+        self,
+        symbol: str,
+        period: str,
+        count: int,
+    ) -> list[BrokerCandle]:
+        if symbol == "ATVI.US":
+            raise RuntimeError("daily bars unavailable")
+        return super().get_candlesticks(symbol, period, count)
+
+
+def _historical_candidate(symbol: str) -> IndexCandidate:
+    return next(
+        row
+        for row in HISTORICAL_INDEX_CANDIDATE_CATALOG
+        if row.symbol == symbol
+    )
+
+
+def _service_with_research_only_history_member(
+    db: Session,
+    broker: _FakeBroker,
+) -> UniverseSelectionService:
+    """Production topology: delisted member only in the research catalog."""
+
+    return UniverseSelectionService(
+        db,
+        broker,
+        catalog=_CATALOG,
+        rotation_research_catalog=(
+            *_CATALOG,
+            _historical_candidate("ATVI.US"),
+        ),
+        config=_config(),
+        minimum_evaluable_ratio=0.5,
+        minimum_residency_days=1,
+        apply_to_watchlist=False,
+        enable_shadow=False,
+        now=_NOW,
+    )
+
+
+def _service_with_failing_catalog_member(
+    db: Session,
+    broker: _FakeBroker,
+) -> UniverseSelectionService:
+    """The failing symbol sits in the live catalog, so its data error
+    code is observable in the returned selections."""
+
+    atvi = _historical_candidate("ATVI.US")
+    return UniverseSelectionService(
+        db,
+        broker,
+        catalog=(*_CATALOG, atvi),
+        rotation_research_catalog=(*_CATALOG, atvi),
+        config=_config(),
+        minimum_evaluable_ratio=0.5,
+        minimum_residency_days=1,
+        apply_to_watchlist=False,
+        enable_shadow=False,
+        now=_NOW,
+    )
+
+
+def _invalid_symbol_warnings(
+    caplog: pytest.LogCaptureFixture,
+) -> list[logging.LogRecord]:
+    return [
+        record
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+        and "universe daily bars unavailable" in record.getMessage()
+    ]
+
+
+def test_provider_invalid_symbol_classification() -> None:
+    assert (
+        _universe_service_module._is_provider_invalid_symbol(
+            RuntimeError(
+                "OpenApiException: (kind=ErrorKind.OpenApi, "
+                "code=301600, trace_id=) invalid symbol"
+            )
+        )
+        is True
+    )
+    assert (
+        _universe_service_module._is_provider_invalid_symbol(
+            RuntimeError("INVALID SYMBOL")
+        )
+        is True
+    )
+    assert (
+        _universe_service_module._is_provider_invalid_symbol(
+            RuntimeError("daily bars unavailable")
+        )
+        is False
+    )
+
+
+def test_evaluate_catalog_invalid_symbol_history_member_warning_without_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    db = _db()
+    broker = _InvalidSymbolHistoryBroker()
+    service = _service_with_research_only_history_member(db, broker)
+    _HISTORICAL_RESEARCH_BARS_CACHE.clear()
+    try:
+        with caplog.at_level(
+            logging.WARNING,
+            logger="auto_trade.universe_selection_service",
+        ):
+            selections, _, _ = service._evaluate_catalog(
+                expected_as_of_date=date(2026, 7, 23),
+            )
+
+            assert set(
+                row.candidate.symbol for row in selections
+            ) == {"AAPL.US", "JPM.US"}
+
+            warnings = _invalid_symbol_warnings(caplog)
+            assert len(warnings) == 1
+            assert "ATVI.US" in warnings[0].getMessage()
+            assert warnings[0].exc_info is None
+            assert (
+                "provider rejected symbol" in warnings[0].getMessage()
+            )
+
+            # Second occurrence inside the 24h window is suppressed,
+            # while the data fetch (and its error handling) still runs.
+            caplog.clear()
+            service._evaluate_catalog(
+                expected_as_of_date=date(2026, 7, 23),
+            )
+            assert broker.history_calls == 2
+            assert _invalid_symbol_warnings(caplog) == []
+    finally:
+        db.close()
+
+
+def test_evaluate_catalog_invalid_symbol_reports_suppressed_count(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class _FakeClock:
+        def __init__(self) -> None:
+            self.now = 1_000.0
+
+        def __call__(self) -> float:
+            return self.now
+
+    clock = _FakeClock()
+    monkeypatch.setattr(
+        _universe_service_module,
+        "_INVALID_SYMBOL_LOG_THROTTLE",
+        RepeatedLogThrottle(
+            window_seconds=24 * 3600.0,
+            clock=clock,
+        ),
+        raising=False,
+    )
+    db = _db()
+    service = _service_with_research_only_history_member(
+        db,
+        _InvalidSymbolHistoryBroker(),
+    )
+    _HISTORICAL_RESEARCH_BARS_CACHE.clear()
+    try:
+        with caplog.at_level(
+            logging.WARNING,
+            logger="auto_trade.universe_selection_service",
+        ):
+            service._evaluate_catalog(
+                expected_as_of_date=date(2026, 7, 23),
+            )
+            caplog.clear()
+            service._evaluate_catalog(
+                expected_as_of_date=date(2026, 7, 23),
+            )
+            assert _invalid_symbol_warnings(caplog) == []
+
+            clock.now += 24 * 3600.0 + 1.0
+            service._evaluate_catalog(
+                expected_as_of_date=date(2026, 7, 23),
+            )
+            warnings = _invalid_symbol_warnings(caplog)
+            assert len(warnings) == 1
+            assert "suppressed=1" in warnings[0].getMessage()
+    finally:
+        db.close()
+
+
+def test_evaluate_catalog_invalid_symbol_error_code_unchanged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    db = _db()
+    service = _service_with_failing_catalog_member(
+        db,
+        _InvalidSymbolRecentBroker(),
+    )
+    try:
+        with caplog.at_level(
+            logging.WARNING,
+            logger="auto_trade.universe_selection_service",
+        ):
+            selections, _, _ = service._evaluate_catalog(
+                expected_as_of_date=date(2026, 7, 23),
+            )
+
+            atvi = next(
+                row
+                for row in selections
+                if row.candidate.symbol == "ATVI.US"
+            )
+            assert atvi.exclusion_reasons == (
+                "DATA_DAILY_BARS_RUNTIMEERROR",
+            )
+            assert atvi.evaluable is False
+
+            warnings = _invalid_symbol_warnings(caplog)
+            assert len(warnings) == 1
+            assert warnings[0].exc_info is None
+    finally:
+        db.close()
+
+
+def test_evaluate_catalog_generic_failure_keeps_traceback(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    db = _db()
+    service = _service_with_failing_catalog_member(
+        db,
+        _GenericFailureRecentBroker(),
+    )
+    try:
+        with caplog.at_level(
+            logging.WARNING,
+            logger="auto_trade.universe_selection_service",
+        ):
+            service._evaluate_catalog(
+                expected_as_of_date=date(2026, 7, 23),
+            )
+
+            failures = [
+                record
+                for record in caplog.records
+                if record.levelno == logging.WARNING
+                and "universe daily bars failed" in record.getMessage()
+                and "ATVI.US" in record.getMessage()
+            ]
+            assert len(failures) == 1
+            assert failures[0].exc_info is not None
+
+            # Unexpected failures are never throttled.
+            service._evaluate_catalog(
+                expected_as_of_date=date(2026, 7, 23),
+            )
+            failures = [
+                record
+                for record in caplog.records
+                if record.levelno == logging.WARNING
+                and "universe daily bars failed" in record.getMessage()
+                and "ATVI.US" in record.getMessage()
+            ]
+            assert len(failures) == 2
     finally:
         db.close()
