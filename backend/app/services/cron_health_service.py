@@ -20,10 +20,17 @@ Scheduler-loop health semantics (documented explicitly):
   ``failing``/unhealthy. A failure→success transition becomes ``healthy``. No
   historical success may mask the latest failure.
 * A job is **stale** when it is enabled, has a known expected interval, has
-  been activated, and ``monotonic_now - last_tick_at > interval *
-  stale_multiplier`` (default 2.0 — one missed tick is a warning, two is
-  stale). Staleness uses a monotonic clock so wall-clock jumps cannot affect
-  classification.
+  been activated, and has stopped making progress: either the last completed
+  tick is older than ``interval * stale_multiplier`` (default 2.0 — one
+  missed tick is a warning, two is stale), or — when no completed tick
+  exists yet — the job never ticked within the grace period. A tick that
+  **started** recently (``record_start``) is progress: while its age is
+  within ``inflight_multiplier`` × interval (default 4.0) the job is never
+  stale, because many loops sleep a short interval and then run a tick
+  several times longer than the sleep. The protection is bounded — an
+  in-flight tick older than the horizon is hung, and the job goes stale by
+  the last-tick rule. Staleness uses a monotonic clock so wall-clock jumps
+  cannot affect classification.
 * A job is **pending** when it has been registered/activated but has not yet
   completed its first tick within the grace period. A job that is registered
   but not yet activated (e.g. during delayed pre-start/import time) is
@@ -62,6 +69,15 @@ logger = logging.getLogger("auto_trade.cron_health")
 #: two missed ticks (elapsed > 2*interval) is stale.
 DEFAULT_STALE_MULTIPLIER: Final[float] = 2.0
 
+#: Multiplier applied to the expected interval before an in-flight tick
+#: (started but not yet completed) is itself considered hung. While a tick's
+#: age is within this horizon the job is never stale — the loop demonstrably
+#: woke and started work. Production ticks can far exceed the sleep between
+#: them (``strategy_v2_shadow``: 15s sleep, ~35s tick ≈ 2.3x), so this
+#: horizon is deliberately larger than ``DEFAULT_STALE_MULTIPLIER``; a tick
+#: still running past it is stale, so a hung tick cannot hide forever.
+DEFAULT_INFLIGHT_MULTIPLIER: Final[float] = 4.0
+
 #: Maximum length of the sanitized failure code string. Exception class names
 #: are truncated to this length so a pathological exception type cannot bloat
 #: the process-local state.
@@ -98,6 +114,7 @@ class JobHealth:
     enabled_provider: Callable[[], bool | None] | None
     # Monotonic timestamps for staleness (immune to wall-clock jumps).
     last_tick_at: float | None = None
+    last_start_at: float | None = None
     last_success_at: float | None = None
     last_failure_at: float | None = None
     # Wall-clock timestamps for response display only.
@@ -165,10 +182,14 @@ class CronHealthService:
         now_monotonic: Callable[[], float] = _monotonic_now,
         now_wall: Callable[[], datetime] = _utc_now,
         stale_multiplier: float = DEFAULT_STALE_MULTIPLIER,
+        inflight_multiplier: float = DEFAULT_INFLIGHT_MULTIPLIER,
     ) -> None:
         self._now_monotonic = now_monotonic
         self._now_wall = now_wall
         self._stale_multiplier = max(1.0, float(stale_multiplier))
+        self._inflight_multiplier = max(
+            self._stale_multiplier, float(inflight_multiplier)
+        )
         self._lock = threading.Lock()
         self._jobs: dict[str, JobHealth] = {}
 
@@ -239,6 +260,28 @@ class CronHealthService:
             self._jobs.clear()
 
     # --- mutators (best-effort, never raise; ordinary Exception only) ----
+
+    def record_start(self, name: str) -> None:
+        """Record that a tick has started (before its work runs).
+
+        A recently-started tick is evidence the loop is alive even though
+        the previous *completed* tick is aging: many cron loops sleep a
+        short interval and then run a tick several times longer than the
+        sleep (``strategy_v2_shadow``: 15s sleep, ~35s tick), which made
+        the last-tick-only staleness rule report false "stale" on healthy
+        jobs. The protection is bounded — see ``_stale_if_overdue_locked``:
+        an in-flight tick older than ``inflight_multiplier`` intervals is
+        treated as hung and the job goes stale.
+        """
+        try:
+            now_mono = self._now_monotonic()
+            with self._lock:
+                job = self._jobs.get(name)
+                if job is None:
+                    return
+                job.last_start_at = now_mono
+        except Exception:
+            logger.debug("cron-health record_start failed", exc_info=True)
 
     def record_success(self, name: str) -> None:
         try:
@@ -349,11 +392,18 @@ class CronHealthService:
         if job.last_outcome == "success":
             stale = self._stale_if_overdue_locked(job, now_mono, interval)
             return stale, ("stale" if stale else "healthy")
-        # Never ticked yet. Decide pending vs stale by activation time.
+        # Never ticked yet. Decide pending vs stale by activation time; a
+        # recently-started first tick is in-flight progress and stays
+        # pending until it ages past the in-flight horizon (hung first tick).
         if job.activated_at_mono is not None:
             elapsed_since_activation = now_mono - job.activated_at_mono
             if elapsed_since_activation > interval * self._stale_multiplier:
-                return True, "stale"
+                started = job.last_start_at
+                if (
+                    started is None
+                    or (now_mono - started) > interval * self._inflight_multiplier
+                ):
+                    return True, "stale"
         # Registered but not activated, or within grace period -> pending.
         return False, "pending"
 
@@ -363,12 +413,35 @@ class CronHealthService:
         now_mono: float,
         interval: float,
     ) -> bool:
-        """True when the last tick is older than interval * multiplier."""
+        """True when the job has stopped making progress.
+
+        Two bounded rules, in order:
+
+        1. **In-flight protection.** A tick that started within
+           ``inflight_multiplier`` × interval is live progress: not stale,
+           no matter how old the last *completed* tick is. Without this,
+           any loop whose tick duration is a large fraction of its sleep
+           reads stale during every long tick (the 2026-09-27 live
+           false-stale on ``strategy_v2_shadow``: 15s sleep + ~35s tick
+           vs a 30s threshold).
+        2. **Last-tick rule.** Otherwise the job is stale when the last
+           completed tick is older than ``stale_multiplier`` × interval.
+           A hung tick falls through here as soon as its start ages past
+           the in-flight horizon (``last_start_at`` ≥ ``last_tick_at`` in
+           a serial loop), so in-flight protection can never make a hung
+           or dead loop permanently fresh.
+        """
+        started = job.last_start_at
+        if started is not None:
+            if (now_mono - started) <= interval * self._inflight_multiplier:
+                return False
         last = job.last_tick_at
         if last is None:
-            # No tick yet; fall back to activation time if available.
-            if job.activated_at_mono is not None:
-                return (now_mono - job.activated_at_mono) > interval * self._stale_multiplier
+            # No tick completed yet; fall back to the first start (a hung
+            # first tick) or the activation time.
+            reference = started if started is not None else job.activated_at_mono
+            if reference is not None:
+                return (now_mono - reference) > interval * self._stale_multiplier
             return False
         return (now_mono - last) > interval * self._stale_multiplier
 

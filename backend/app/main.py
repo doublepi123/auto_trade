@@ -342,6 +342,24 @@ def _cron_record_success(name: str) -> None:
         logger.debug("cron-health record_success failed", exc_info=True)
 
 
+def _cron_record_start(name: str) -> None:
+    """Narrow no-throw observer helper: record that a cron tick started.
+
+    Same swallow-everything contract as ``_cron_record_success``. Marking
+    the start keeps cron-health from reporting a healthy long-running tick
+    as stale: several loops sleep a short interval and then run a tick
+    several times longer than that sleep (strategy v2 shadow polls minute
+    bars for every shadow symbol, ~35s against a 15s sleep), so measuring
+    staleness from the last *completed* tick alone flipped ``stale`` on
+    20 of 45 live samples (2026-09-27). The in-flight marker itself is
+    bounded in ``CronHealthService`` — a hung tick still goes stale.
+    """
+    try:
+        get_cron_health_service().record_start(name)
+    except Exception:
+        logger.debug("cron-health record_start failed", exc_info=True)
+
+
 def _cron_record_failure(name: str, exc: BaseException) -> None:
     """Narrow no-throw observer helper: record a cron tick failure.
 
@@ -1079,6 +1097,7 @@ async def _llm_analysis_cron() -> None:
     while True:
         await asyncio.sleep(60)
         async with _llm_analysis_lock:
+            _cron_record_start(_CRON_LLM_ANALYSIS)
             try:
                 await _llm_analysis_tick()
                 _cron_record_success(_CRON_LLM_ANALYSIS)
@@ -1127,6 +1146,7 @@ async def _alert_rules_cron() -> None:
     while True:
         await asyncio.sleep(60)
         async with _alert_rules_lock:
+            _cron_record_start(_CRON_ALERT_RULES)
             try:
                 runner = get_runner()
 
@@ -1591,6 +1611,7 @@ async def _strategy_v2_shadow_cron() -> None:
     while True:
         await asyncio.sleep(15)
         async with _strategy_v2_shadow_lock:
+            _cron_record_start(_CRON_STRATEGY_V2_SHADOW)
             try:
                 await asyncio.to_thread(_strategy_v2_shadow_tick_sync)
                 _cron_record_success(_CRON_STRATEGY_V2_SHADOW)
@@ -1637,6 +1658,7 @@ async def _opening_momentum_shadow_cron() -> None:
     while True:
         await asyncio.sleep(_opening_momentum_poll_seconds())
         async with _opening_momentum_shadow_lock:
+            _cron_record_start(_CRON_OPENING_MOMENTUM_SHADOW)
             try:
                 await asyncio.to_thread(
                     _opening_momentum_shadow_tick_sync
@@ -1726,6 +1748,7 @@ async def _watchlist_quant_cron() -> None:
     await asyncio.sleep(45)
     while True:
         async with _watchlist_quant_lock:
+            _cron_record_start(_CRON_WATCHLIST_QUANT)
             try:
                 await _run_watchlist_quant_tick()
                 _cron_record_success(_CRON_WATCHLIST_QUANT)
