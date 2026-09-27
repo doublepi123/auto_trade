@@ -225,6 +225,24 @@ def config_payload(
                 "p1a-2: canonical decimal strings from as_tuple() with no "
                 "Decimal arithmetic; precision-independent"
             ),
+            "evaluator": (
+                "p3a-8: argument-contracts+config-digest-binding"
+                "+version-pin+notional-cap+trigger+resolved"
+                "+gap-entry-side-validation+cost-column-cross-check"
+                "+resolved-trigger-required+decimal-recompute-finite"
+                "+gross-cross-check+date-only-trade-day+exact-dsr-moments"
+                "+strict-bool-ands+and-status-mapping+validated-inputs"
+                "+exact-cr1+stable-cp+not-evaluated-interim+trial-family"
+                "+day-budget"
+            ),
+            "futility": (
+                "p3a-7: argument-contracts+config-digest-binding"
+                "+version-pin+notional-cap+shared-full-validation"
+                "+validate-then-encode+order-independent-digest"
+                "+exact-dispersion+exact-cr1-upper-bound"
+                "+gap-and-degenerate-fail-closed+day-budget"
+                "+resolved-trigger-required+decimal-recompute-finite"
+            ),
         },
         "universe": {
             "indices": sorted(config.universe_indices),
@@ -406,6 +424,228 @@ def config_payload(
             "mde_sigma_day_bps": _dec(config.mde_sigma_day_bps),
             "mde_z_alpha": config.mde_z_alpha,
             "mde_z_power": config.mde_z_power,
+            "evaluator_semantics": {
+                "cohort_isolation": (
+                    "every record must match the evaluated algorithm_version "
+                    "AND config_digest; a mismatch raises ValueError "
+                    "(fail-closed, never silently filtered) in BOTH "
+                    "evaluate_cohort and assess_guidance_futility via one "
+                    "shared helper; unresolved exit gaps BLOCK with the "
+                    "distinct verdict BLOCKED_EXIT_GAP in both evaluators "
+                    "and records are never dropped (§10.8 L643-656, "
+                    "§10.6 L598-600)"
+                ),
+                "input_validation": (
+                    "RESOLVED records validate fully: gross_return_bps, "
+                    "net_baseline_bps and net_confirmatory_bps all real "
+                    "finite numbers (bool rejected, int and float both "
+                    "legal); entry_notional and exit_notional finite "
+                    "positive Decimals; trade_day a PLAIN datetime.date (a "
+                    "datetime is a date subclass and is invalid, rejected "
+                    "before any day counting, budget check or clustering, "
+                    "never coerced); exit_trigger one of exactly "
+                    "PRICE_STOP/PROFIT_TARGET/MAX_HOLD/EOD_FLATTEN "
+                    "(imported from the exit state machine) and NEVER None "
+                    "on a resolved record (None is legal only on an "
+                    "unresolved gap; a resolved None previously vanished "
+                    "into the first-passage denominator as a time exit); "
+                    "resolved a real bool; and ALL THREE precomputed "
+                    "columns (gross and both nets) cross-checked against "
+                    "a costs.cost_columns recomputation performed ENTIRELY "
+                    "in exact Decimal arithmetic "
+                    "(gross=(exit-entry)/entry*1e4; net = gross - "
+                    "column_usd/entry*1e4) within 1e-9 bps absolute — a "
+                    "float round-trip bound — naming the offending column. "
+                    "The Decimal recomputation is finite-checked at BOTH "
+                    "stages (Decimal is_finite, then math.isfinite on the "
+                    "float conversion); any non-finite result or "
+                    "arithmetic exception (InvalidOperation, Overflow, "
+                    "DivisionByZero) is invalid input naming the notional, "
+                    "and the column comparison itself returns False on any "
+                    "non-finite operand so a NaN can never pass. "
+                    "UNRESOLVED (exit-gap) records validate on the ENTRY "
+                    "side only: plain date, finite positive entry_notional, "
+                    "valid version/digest, exit_trigger None or a valid "
+                    "trigger; return fields and exit_notional may be None "
+                    "or NaN.  Precedence in both evaluators: any invalid "
+                    "record gives BLOCKED_INVALID_INPUT first, else any gap "
+                    "gives BLOCKED_EXIT_GAP, with BOTH counts reported on "
+                    "both paths; records never dropped, never counted "
+                    "toward floors.  Validation runs BEFORE any encoding: "
+                    "valid records are encoded canonically (single "
+                    "comparable string-tuple sort key; bps as float repr "
+                    "so int 5 and float 5.0 agree; Decimals via _dec with "
+                    "non-finite gap-side values as typed reprs; dates "
+                    "isoformat); invalid cohorts use a separate "
+                    "never-raising DIAGNOSTIC encoding (typed repr per "
+                    "field) for their digest"
+                ),
+                "estimator_basis": (
+                    "EXACT rational CR1: floats converted to Fraction, "
+                    "trade mean, per-day residual sums and variance = "
+                    "G/(G-1)*sum_day(sum residual)^2/n^2 computed exactly; "
+                    "variance == 0 exactly is degenerate and fails closed; "
+                    "SE = sqrt(float(variance)); used by AND #1 AND the "
+                    "futility SE so the two cannot drift (§10.9 L716); "
+                    "frozen t critical from day_cluster_t_critical at "
+                    "df = D-1"
+                ),
+                "clopper_pearson_tail": (
+                    "numerically stable log-space binomial upper tail "
+                    "(math.lgamma terms with an fsum log-sum-exp) so large "
+                    "n never overflows; bisection to the alpha=0.05 "
+                    "defining equation; k=n equals alpha^(1/n)"
+                ),
+                "dsr_moments": (
+                    "frozen estimator, computed EXACTLY: per-day means and "
+                    "central moments m_r=(1/T)*sum(x-mean)^r as rationals "
+                    "(fractions.Fraction), so float residue can never "
+                    "masquerade as variance; m2 == 0 exactly fails closed; "
+                    "g3=m3/m2^1.5; g4=m4/m2^2 (RAW, Normal=3); "
+                    "SR=mean/sample SD (T-1 denominator); conversion to "
+                    "float only for the final SR/g3/g4/z; N=1 benchmark 0"
+                ),
+                "interim_semantics": (
+                    "terminal=False computes NO promotion AND at all: the "
+                    "four and_*_pass fields are strictly bool and are "
+                    "False on every non-evaluated path (interim, gap, "
+                    "invalid input, floors not met) — never a truthy "
+                    "sentinel; the reason lives in the immutable and_status "
+                    "mapping (PASS/FAIL/NOT_EVALUATED keyed by net/"
+                    "first_passage/sample_size/dsr), ands_evaluated is "
+                    "False, reports are empty and failed_ands=(); only "
+                    "floors, day/bracket counts, exit-gap and "
+                    "invalid-input status are returned; the verdict stays "
+                    "INTERIM_NO_CERTIFICATION (§10.9 L707)"
+                ),
+                "argument_contracts": (
+                    "evaluate_cohort and assess_guidance_futility raise "
+                    "ValueError unless: terminal is a real bool (a truthy "
+                    "'False' string must not certify); trial_family_status "
+                    "is one of the three §10.8 constants; the evaluated "
+                    "algorithm_version equals this package's "
+                    "ALGORITHM_VERSION constant (§10.8 L645 — a v5 label "
+                    "is a different study); and config_digest(config) "
+                    "equals the claimed config_digest argument, so a "
+                    "loosened config cannot ride the frozen label.  "
+                    "terminal_due requires as_of to be a plain "
+                    "datetime.date (type(x) is date) and "
+                    "evidence_start_at_et to be tz-aware"
+                ),
+                "notional_cap": (
+                    "entry_notional above config.notional_cap_usd "
+                    "(25,000 USD) is invalid input for resolved AND gap "
+                    "records (§10.5); share-cap and risk-cap enforcement "
+                    "belongs to the sizing layer and P3b (quantity is not "
+                    "on the record); the exit notional is NOT capped "
+                    "because price can move"
+                ),
+                "trial_family_gate": (
+                    "required keyword trial_family_status with values "
+                    "VALID_SINGLE_CONFIRMATORY / INVALIDATED / UNKNOWN; "
+                    "AND #4 passes only on VALID_SINGLE_CONFIRMATORY with "
+                    "DSR >= 0.95; any other status fails closed with the "
+                    "reason recorded (§10.8 L680-689)"
+                ),
+                "day_budget": (
+                    "distinct confirmatory days above "
+                    "final_traded_days_budget (100) raise ValueError in "
+                    "both evaluators: the terminal check must have run at "
+                    "or before day 100; never truncate, never extend the "
+                    "t table (§10.9 L698-705)"
+                ),
+                "and_1_net": (
+                    "exact-rational CR1 on net_confirmatory_bps "
+                    "(_exact_cr1): trade-weighted per-trade mean, exact "
+                    "day-clustered SE, two-sided 95% CI with the frozen "
+                    "Student-t critical at df=D-1; degenerate exact "
+                    "variance (zero) fails closed; pass requires CI lower "
+                    "> 0; gross and baseline-net CIs disclosed only "
+                    "(§10.8 L664-666)"
+                ),
+                "and_2_first_passage": (
+                    "over PRICE_STOP/PROFIT_TARGET only; k=targets, "
+                    "n=resolved price brackets (time exits excluded from the "
+                    "denominator); one-sided 95% exact Clopper-Pearson lower "
+                    "bound by bisection on the exact binomial tail; pass "
+                    "requires lower > 0.45/1.25 = 0.36; count, share and "
+                    "extreme-classification sensitivity of time exits "
+                    "disclosed (§10.8 L667-671)"
+                ),
+                "and_3_sample": (
+                    "at least 60 distinct trading days and 180 resolved "
+                    "price brackets; same-day cross-symbol trades are not "
+                    "distinct days (§10.8 L672-674)"
+                ),
+                "and_4_dsr": (
+                    "per-day equal-weight means of net_confirmatory_bps; "
+                    "T=distinct days; frozen moments m_r=(1/T)sum(x-mean)^r "
+                    "with g3=m3/m2^1.5 and RAW g4=m4/m2^2; SR=mean/sample "
+                    "SD (T-1); sharpe_std=sqrt((1-g3*SR+(g4-1)/4*SR^2)/"
+                    "(T-1)); z=SR/sharpe_std; dsr_probability=Phi(z) via "
+                    "math.erf; distinguishable_from_luck disclosed; N=1 so "
+                    "the benchmark is exactly 0; gated by "
+                    "trial_family_status; pass requires >= 0.95; missing "
+                    "data, zero variance, T<2, non-positive variance "
+                    "bracket or an invalid family FAIL closed "
+                    "(§10.8 L675-689)"
+                ),
+                "overall_verdict": (
+                    "INSUFFICIENT_DATA is reserved for unmet evidence "
+                    "floors (§10.9 L703); floors met but any AND failing "
+                    "gives NOT_CERTIFIED with a failed_ands tuple naming "
+                    "which ANDs failed — not a claim of negativity or "
+                    "futility (§10.9 L704); the required keyword terminal "
+                    "gates certification: terminal=False can never yield "
+                    "ELIGIBLE_FOR_HUMAN_REVIEW and returns "
+                    "INTERIM_NO_CERTIFICATION with the ANDs still reported "
+                    "for data-quality purposes (§10.9 L707); PASS (all four "
+                    "ANDs, terminal) is named ELIGIBLE_FOR_HUMAN_REVIEW — "
+                    "never automatic promotion (§10.8 L691)"
+                ),
+                "terminal_rule": (
+                    "due at the 100th distinct confirmatory trading day or "
+                    "24 calendar months after evidence_start_at (same "
+                    "day-of-month clamped at month end, America/New_York), "
+                    "whichever comes first; never extended (§10.9 L696-705)"
+                ),
+                "futility_rule": (
+                    "input validation and cohort isolation identical to "
+                    "evaluate_cohort (shared helpers): invalid inputs give "
+                    "BLOCKED_INVALID_INPUT, version/digest mismatch "
+                    "raises, distinct days above the 100 budget raise; any "
+                    "unresolved exit gap gives BLOCKED_EXIT_GAP with the "
+                    "gap count in machine_inputs — never FUTILE or ALIVE; "
+                    "the machine digest binds a canonical record manifest "
+                    "(every field, deterministically sorted, one "
+                    "comparable string-tuple sort key) plus "
+                    "algorithm_version, config_digest, first/last trade "
+                    "day and the explicit tz-aware as_of instant; EVERY "
+                    "quantity bound into the digest is order-independent "
+                    "(day means and the measured dispersion computed in "
+                    "exact rationals, converted to float at the end); the "
+                    "checkpoint label is set only when distinct_days "
+                    "EQUALS 20/40/60/80; the SE is the EXACT rational CR1 "
+                    "(same basis as AND #1, §10.9 L716) so float residue "
+                    "can never masquerade as a tight bound — degenerate "
+                    "exact variance fails closed; "
+                    "mu_net=mean net_confirmatory_bps; SE_net=same-basis "
+                    "day-clustered SE; U=mu+2.0*SE; required=max(0,-mu); "
+                    "MDE=(z0.95+z0.80)*20.0/sqrt(D); a degenerate estimate "
+                    "(no naive_mean, or clustered SE undefined or <= 0) "
+                    "fails closed to INSUFFICIENT_DATA with "
+                    "fail_closed_reason recorded — no zero substitution, "
+                    "abandonment never reachable; floors unmet→"
+                    "INSUFFICIENT_DATA; U>=0→ALIVE; U<0 and MDE<=required→"
+                    "FUTILE; otherwise INSUFFICIENT_DATA; measured day "
+                    "dispersion disclosed and above 20 bps also reports MDE "
+                    "at the measured dispersion with "
+                    "requires_measured_dispersion_ratification, which may "
+                    "only block abandonment; checkpoints at 20/40/60/80 "
+                    "traded days; INSUFFICIENT_DATA, BUDGET_EXHAUSTED and "
+                    "FUTILE stay distinct (§10.9 L707-742)"
+                ),
+            },
         },
     }
 

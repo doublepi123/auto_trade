@@ -22,12 +22,16 @@ from app.domain.guidance_continuation.config import (
 
 # Never update this hash to silence the test; a rule change needs a new
 # algorithm_version per PREREGISTRATION §4/§10.8.
-# P1a draft digest.  History: b17a4b8c…9e3a2b (initial P1a) → badfec43…
-# c4ae98 (Gate-1 B1-B8) → 444e9c2d…5d9d31 (B3 residual: per-index
-# coverage) → current (R1-R3: order-independent conflicts, coverage
-# ANY-rule, precision-independent canonical decimals).  P2/P3 must
-# extend the payload before REGISTRATION.
-_FROZEN_DIGEST = "514f679e940b2ea88715f67a87b3b0a989f86351060f64651f91d827a65d8928"
+# P1a draft digest.  History: b17a4b8c…9e3a2b → badfec43…c4ae98 →
+# 444e9c2d…5d9d31 → 514f679e…d8928 → 35019937…0ee45 (P3a) → 4e126476…
+# 0686 (D1-D4) → f20c1dc8…9e103 (G1-G7) → affc64eb…84f9 (strict-bool
+# ANDs) → 43764697…4b06 (R1-R4) → f8723adc…c1ff (V1-V4) → 0abb3772…
+# 96be (final-Gate W1-W4: argument contracts, config-digest binding,
+# version pin, §10.5 notional cap) → current (Gate 3a MUST-FIX: M1
+# resolved-trigger-required, M2 all-Decimal finite-checked cost
+# recomputation, H1 gross cross-check).  P2/P3 must extend the payload
+# before REGISTRATION.
+_FROZEN_DIGEST = "326a28ef69a630239257cc5d760ddbf1ce217a173f22b16521aec94c85803075"
 
 
 class TestDigestSensitivity:
