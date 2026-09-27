@@ -17,6 +17,7 @@ from __future__ import annotations
 import gzip
 import json
 import math
+import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta, timezone
@@ -63,6 +64,7 @@ from app.cli.opening_momentum_historical_replay import (
     MemberDayFacts,
     UNVERIFIABLE_INVALID_BAR,
     UNVERIFIABLE_INSUFFICIENT_WINDOW,
+    WINDOW_END,
     WINDOW_START,
     assemble_member_day_audit,
     session_is_auditable,
@@ -4096,11 +4098,20 @@ def test_gate_b_former_member_permanent_gap_counts_share_only(
 
 def test_v2_plan_import_accepts_running_plan(tmp_path: Path) -> None:
     # The ORIGINAL running plan is accepted; its bytes and analysis_id
-    # are never rewritten; every other field equals the v3 plan.
-    original = json.loads(
-        Path("/tmp/opencode/replay_plan_v2.json").read_text(encoding="utf-8")
+    # are never rewritten; every other field equals the v3 plan.  The v2
+    # plan is reconstructed from the v3 builder (the fields the import
+    # compares are exactly the v3 plan's), so the test does not depend on
+    # a host-local file (CI run 36339384603 had no /tmp/opencode plan).
+    original = build_plan_payload(
+        window_start=WINDOW_START, window_end=WINDOW_END
     )
+    original["analysis_id"] = "opening-momentum-top10-pit-historical-v2"
+    original["cli_version"] = (
+        "opening-momentum-top10-pit-historical-replay-cli-v1"
+    )
+    original_bytes = json.dumps(original, sort_keys=True)
     imported = import_v2_plan(original)
+    assert json.dumps(original, sort_keys=True) == original_bytes
     assert imported["original_analysis_id"] == (
         "opening-momentum-top10-pit-historical-v2"
     )
@@ -4111,6 +4122,62 @@ def test_v2_plan_import_accepts_running_plan(tmp_path: Path) -> None:
     mutated["distinct_symbols"] = original["distinct_symbols"] + 1
     with pytest.raises(HistoricalReplayError, match="differs"):
         import_v2_plan(mutated)
+    # A plan that is neither v2 nor v3 is refused outright.
+    foreign = dict(original)
+    foreign["analysis_id"] = "some-other-analysis"
+    with pytest.raises(HistoricalReplayError, match="refusing to import"):
+        import_v2_plan(foreign)
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(
+        ("git", "-C", str(repo), *args),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_require_clean_worktree_refuses_dirty_and_accepts_clean(
+    tmp_path: Path,
+) -> None:
+    from app.cli import opening_momentum_historical_replay as replay_mod
+
+    # The REAL check, not the neutralised alias, run against a private
+    # throw-away repository so the verdict never depends on whether the
+    # CI checkout or the developer tree happens to be clean.
+    real_check = getattr(
+        replay_mod,
+        "__wrapped_require_clean_worktree",
+        replay_mod._require_clean_worktree,
+    )
+    repo = tmp_path / "repo"
+    (repo / "backend" / "app").mkdir(parents=True)
+    (repo / "backend" / "tests").mkdir(parents=True)
+    (repo / "backend" / "app" / "mod.py").write_text("x = 1\n")
+    (repo / "backend" / "tests" / "test_mod.py").write_text("y = 1\n")
+    (repo / "notes.txt").write_text("outside the checked paths\n")
+    _git(repo, "init", "-q")
+    _git(repo, "add", "-A")
+    _git(
+        repo,
+        "-c", "user.email=t@example.invalid",
+        "-c", "user.name=t",
+        "commit", "-q", "-m", "init",
+    )
+    real_check(repo)  # clean: accepted
+
+    (repo / "notes.txt").write_text("changed outside backend\n")
+    real_check(repo)  # changes outside backend/app|tests do not count
+
+    (repo / "backend" / "app" / "mod.py").write_text("x = 2\n")
+    with pytest.raises(HistoricalReplayError, match="dirty"):
+        real_check(repo)
+    _git(repo, "checkout", "--", "backend/app/mod.py")
+
+    (repo / "backend" / "tests" / "new_test.py").write_text("z = 1\n")
+    with pytest.raises(HistoricalReplayError, match="dirty"):
+        real_check(repo)
 
 
 def test_evaluate_refuses_dirty_worktree(
@@ -4121,19 +4188,26 @@ def test_evaluate_refuses_dirty_worktree(
 
     _no_live_fetch(monkeypatch)
     _sealed_full_cache(tmp_path)
-    # Restore the REAL clean-worktree requirement (neutralised by
-    # _no_live_fetch) and prove evaluate fires on the currently dirty
-    # tree: these four files ARE modified right now.
-    monkeypatch.setattr(
-        replay_mod,
-        "_require_clean_worktree",
-        cast(Any, replay_mod).__wrapped_require_clean_worktree,
-        raising=False,
-    )
+    # evaluate must call the worktree check and propagate its refusal
+    # BEFORE any attempt is claimed.  The check itself is proven against a
+    # real git repository in the test above; here it is forced to report
+    # a dirty tree so the result does not depend on the checkout state.
+    calls: list[Path] = []
+
+    def _dirty(repo: Path) -> None:
+        calls.append(repo)
+        raise HistoricalReplayError(
+            "evaluate refused: the working tree is dirty (test)"
+        )
+
+    monkeypatch.setattr(replay_mod, "_require_clean_worktree", _dirty)
     with pytest.raises(HistoricalReplayError, match="dirty"):
         run_evaluate(
             cache_dir=tmp_path, output_path=_output_path(tmp_path)
         )
+    assert calls, "evaluate never ran the clean-worktree check"
+    assert not (tmp_path / "attempts").exists()
+    assert not (tmp_path / "attempt.json").exists()
 
 
 def test_evaluate_output_required_and_receipt_written(
