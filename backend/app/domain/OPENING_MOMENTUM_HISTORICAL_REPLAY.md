@@ -127,6 +127,12 @@
 
 6. **同一提交。** 本决定、更新的 pin 与代码在同一提交内（第 10 节第 3 步）。
 
+## 8.6 执行记录（非规则变更）
+
+- **尝试 1（v1，2026-09-27 约 10:29Z）**：第一个请求 `trading_days`（400 天分块）即被拒绝：`code=301600 too many query days`。未取得任何行情数据，无任何结果。处置见第 8.5 节变更决定 1。
+- **尝试 2（v2，2026-09-27 11:36Z，commit `39a06340`）**：基准 ETF 日线拉取在进入 SDK 之前就失败了。适配器向 SDK 请求 `Period.DAY`，而 SDK 的枚举成员名是 `Period.Day` / `Period.Min_1`（`AttributeError: type object 'builtins.Period' has no attribute 'DAY'`；被归为 TRANSIENT，重试 3 次后干净失败；`status.json` 保留该错误条目，未写 global_stop）。**没有任何请求到达 provider，未取得任何行情数据，无任何结果。**
+- **修复**：只改动未被 pin 的 SDK 适配层 `_LongportQuoteProvider._period`，新增私有映射 `_SDK_PERIOD_NAMES = {"DAY": "Day", "MIN_1": "Min_1"}`，未映射的周期在发出请求之前即被拒绝；并补充按真实 SDK 枚举名驱动适配器的测试。第 9 节 manifest、全部冻结常量与分析语义都没有改变，因此**不分配新的 analysis_id**。由于任何结果都尚未产生，修复后的运行仍是第一次 OOS。
+
 ## 9. Code manifest（CLI 适配层 pin 清单）
 
 以下清单与 `backend/tests/test_opening_momentum_historical_replay_preregistration.py` 的 `_MANIFEST` 逐项一致（doc-agreement 断言双向同步）。哈希为 `ast.dump`（无属性）SHA-256，冻结于 2026-09-27。适配层只提供实盘 `_observe_variants` 为**这一个**变体提供的胶水：信号 bar、活跃度比值、区间高低点；**永不**调用 `tick`、`_observe_variants`、`_close_if_due`。

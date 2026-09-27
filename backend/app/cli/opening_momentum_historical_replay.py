@@ -133,6 +133,9 @@ _CONVENTIONAL_2023_EARLY_CLOSES: tuple[date, ...] = (
 DEFAULT_REQUESTS_PER_SECOND = 0.5
 DEFAULT_MAX_TRANSIENT_RETRIES = 3
 PAGE_SIZE = 1000
+
+#: Replay period names → LongPort SDK ``Period`` enum member names.
+_SDK_PERIOD_NAMES: dict[str, str] = {"DAY": "Day", "MIN_1": "Min_1"}
 QUOTA_ERROR_MARKERS = ("code=301607",)
 PERMISSION_ERROR_MARKERS = ("code=301604", "no permission")
 # A 301600 answer is a per-symbol permanent failure ONLY when it names the
@@ -2137,7 +2140,15 @@ class _LongportQuoteProvider:
         self._openapi = openapi
 
     def _period(self, period: str) -> Any:
-        return getattr(self._openapi.Period, period)
+        # The replay speaks "DAY" / "MIN_1"; the SDK enum members are
+        # ``Period.Day`` / ``Period.Min_1`` (v2's first fetch failed on
+        # ``Period.DAY``).  Anything else is refused before any request.
+        name = _SDK_PERIOD_NAMES.get(period)
+        if name is None:
+            raise HistoricalReplayError(
+                f"unsupported candlestick period for the replay: {period}"
+            )
+        return getattr(self._openapi.Period, name)
 
     def history_candlesticks_by_offset(
         self,

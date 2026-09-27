@@ -40,6 +40,7 @@ from app.cli.opening_momentum_historical_replay import (
     MIN_WEEKS,
     WeekClusteredStat,
     _CandleView,
+    _LongportQuoteProvider,
     _atomic_write_json,
     _load_status,
     _symbol_state,
@@ -2025,3 +2026,88 @@ def test_fetch_fails_cleanly_on_benchmark_failure(
     assert "connection reset" in entry["detail"]
     assert status.get("global_stop") is None
     assert status.get("symbols") == {}
+
+
+# ---------------------------------------------------------------------------
+# Real SDK adapter surface (2026-09-27: the v2 fetch failed on its first call
+# because the adapter asked the SDK for ``Period.DAY``; the SDK only exposes
+# ``Period.Day`` / ``Period.Min_1``).  The adapter is built without its
+# network constructor and driven against a fake SDK namespace whose enum
+# members carry the REAL SDK names.
+# ---------------------------------------------------------------------------
+
+
+class _FakeSdkPeriod:
+    Day = "SDK_PERIOD_DAY"
+    Min_1 = "SDK_PERIOD_MIN_1"
+
+
+class _FakeSdkAdjustType:
+    NoAdjust = "SDK_ADJUST_NONE"
+    ForwardAdjust = "SDK_ADJUST_FORWARD"
+
+
+class _FakeSdkNamespace:
+    Period = _FakeSdkPeriod
+    AdjustType = _FakeSdkAdjustType
+
+
+class _FakeSdkQuoteContext:
+    def __init__(self) -> None:
+        self.calls: list[tuple[Any, ...]] = []
+
+    def history_candlesticks_by_offset(self, *args: Any) -> list[Any]:
+        self.calls.append(args)
+        return []
+
+
+def _sdk_adapter() -> tuple[_LongportQuoteProvider, _FakeSdkQuoteContext]:
+    provider = object.__new__(_LongportQuoteProvider)
+    context = _FakeSdkQuoteContext()
+    setattr(provider, "_quote_ctx", context)
+    setattr(provider, "_openapi", _FakeSdkNamespace())
+    return provider, context
+
+
+def test_real_adapter_requests_sdk_period_enum_members() -> None:
+    provider, context = _sdk_adapter()
+    boundary = datetime(2023, 9, 5, 13, 30, tzinfo=timezone.utc)
+
+    for period in ("DAY", "MIN_1"):
+        provider.history_candlesticks_by_offset(
+            "AAPL.US",
+            period,
+            count=1000,
+            after=boundary,
+            forward=True,
+            adjustment="NoAdjust",
+        )
+
+    assert [call[1] for call in context.calls] == [
+        "SDK_PERIOD_DAY",
+        "SDK_PERIOD_MIN_1",
+    ]
+    for call in context.calls:
+        symbol, _, adjust_type, forward, count, sdk_boundary = call
+        assert symbol == "AAPL.US"
+        assert adjust_type == "SDK_ADJUST_NONE"
+        assert forward is True
+        assert count == 1000
+        # Exchange wall clock: 13:30 UTC on 2023-09-05 is 09:30 EDT.
+        assert (sdk_boundary.hour, sdk_boundary.minute) == (9, 30)
+        assert sdk_boundary.utcoffset() == timedelta(hours=-4)
+
+
+def test_real_adapter_rejects_an_unmapped_period() -> None:
+    provider, context = _sdk_adapter()
+
+    with pytest.raises(HistoricalReplayError, match="WEEK"):
+        provider.history_candlesticks_by_offset(
+            "AAPL.US",
+            "WEEK",
+            count=10,
+            after=datetime(2023, 9, 5, 13, 30, tzinfo=timezone.utc),
+            forward=True,
+            adjustment="NoAdjust",
+        )
+    assert context.calls == []
