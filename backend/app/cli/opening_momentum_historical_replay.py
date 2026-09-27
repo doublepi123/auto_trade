@@ -41,11 +41,12 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 from zoneinfo import ZoneInfo
 
 from app.config import Settings, settings
-from app.core.holiday_calendar import is_market_closed
+from app.core import holiday_calendar
+from app.core.holiday_calendar import is_half_day, is_market_closed
 from app.core.market_calendar import get_session
 from app.domain.opening_momentum import (
     OpeningMomentumConfig,
@@ -79,7 +80,7 @@ from app.services.opening_momentum_shadow_service import (
 
 # ---------------------------------------------------------------- frozen plan
 
-ANALYSIS_ID = "opening-momentum-top10-pit-historical-v1"
+ANALYSIS_ID = "opening-momentum-top10-pit-historical-v2"
 REPLAY_CLI_VERSION = "opening-momentum-top10-pit-historical-replay-cli-v1"
 WINDOW_START = date(2023, 9, 1)
 WINDOW_END = date(2026, 4, 30)
@@ -111,13 +112,37 @@ FROZEN_CONFIG_VERSION = (
 _GOOGLE_CLASS_A = "GOOGL.US"
 _GOOGLE_CLASS_C = "GOOG.US"
 
+# Decision 1: the provider trading_days API is infeasible for the
+# registered window (interval must be under one month, only the most
+# recent year supported; the first real fetch failed with
+# ``code=301600 too many query days`` before any market data was
+# fetched).  The session list is now derived returns-blind from the
+# benchmark ETFs' daily bars.
+BENCHMARK_ETFS: tuple[str, str] = ("QQQ.US", "DIA.US")
+
+# Conventional NYSE early-close dates in 2023 (before the local half-day
+# table's coverage starts 2024-01-01).  They are recorded as UNVERIFIED:
+# the local calendar cannot confirm them.
+_CONVENTIONAL_2023_EARLY_CLOSES: tuple[date, ...] = (
+    date(2023, 7, 3),
+    date(2023, 11, 24),
+    date(2023, 12, 22),
+)
+
 # Connection / quota safety.
 DEFAULT_REQUESTS_PER_SECOND = 0.5
 DEFAULT_MAX_TRANSIENT_RETRIES = 3
 PAGE_SIZE = 1000
 QUOTA_ERROR_MARKERS = ("code=301607",)
 PERMISSION_ERROR_MARKERS = ("code=301604", "no permission")
-INVALID_SYMBOL_MARKERS = ("code=301600", "invalid symbol")
+# A 301600 answer is a per-symbol permanent failure ONLY when it names the
+# symbol; the same code with "too many query days" is a request-shape
+# error about the query, never about the symbol.
+INVALID_SYMBOL_MARKERS = ("invalid symbol", "unknown symbol")
+REQUEST_SHAPE_MARKERS = (
+    "code=301600",
+    "too many query days",
+)
 PAUSE_WINDOW_START_UTC = time(13, 0)
 PAUSE_WINDOW_END_UTC = time(22, 0)
 
@@ -125,7 +150,11 @@ _CACHE_DIR_NAME = Path("data/research/opening_momentum_historical_replay_v1")
 _PLAN_DOC_RELATIVE_PATH = Path("app/domain/OPENING_MOMENTUM_HISTORICAL_REPLAY.md")
 _MINUTE_RETAINED_MINUTES = MINUTE_RETAINED_LAST_OFFSET + 1
 _MARKET_SESSION = get_session("US")
-_TRADING_DAYS_CHUNK_DAYS = 400
+# The optional provider trading_days cross-check: the SDK supports only the
+# most recent year and intervals under one month, so it is chunked to 28
+# days and restricted to the recent year; its failure never aborts.
+_TRADING_DAYS_CHUNK_DAYS = 28
+_TRADING_DAYS_CROSS_CHECK_MAX_CHUNKS = 16
 _BAR_DURATION = timedelta(minutes=1)
 
 
@@ -137,6 +166,7 @@ class ErrorClass(str, Enum):
     GLOBAL_STOP_QUOTA = "GLOBAL_STOP_QUOTA"
     GLOBAL_STOP_PERMISSION = "GLOBAL_STOP_PERMISSION"
     PERMANENT_SYMBOL = "PERMANENT_SYMBOL"
+    REQUEST_SHAPE = "REQUEST_SHAPE"
     TRANSIENT = "TRANSIENT"
 
 
@@ -1052,7 +1082,14 @@ def _seconds_until_window_opens(now: datetime) -> float:
 
 
 def classify_provider_error(message: str) -> str:
-    """Classify a provider error string into the frozen safety policy."""
+    """Classify a provider error string into the frozen safety policy.
+
+    Order matters: quota and permission markers win first.  A ``301600``
+    code alone is NOT a symbol verdict - the same code is used for
+    request-shape refusals such as ``too many query days`` - so
+    ``code=301600`` maps to REQUEST_SHAPE and only an explicit
+    invalid/unknown-symbol message maps to PERMANENT_SYMBOL.
+    """
 
     text = message.lower()
     if any(marker in text for marker in QUOTA_ERROR_MARKERS):
@@ -1061,6 +1098,8 @@ def classify_provider_error(message: str) -> str:
         return ErrorClass.GLOBAL_STOP_PERMISSION.value
     if any(marker in text for marker in INVALID_SYMBOL_MARKERS):
         return ErrorClass.PERMANENT_SYMBOL.value
+    if any(marker in text for marker in REQUEST_SHAPE_MARKERS):
+        return ErrorClass.REQUEST_SHAPE.value
     return ErrorClass.TRANSIENT.value
 
 
@@ -1181,7 +1220,13 @@ class _RetryableProvider:
                     ErrorClass.GLOBAL_STOP_PERMISSION.value,
                 ):
                     raise _ProviderCallFailure(error_class, str(exc)) from exc
-                if error_class == ErrorClass.PERMANENT_SYMBOL.value:
+                if error_class in (
+                    ErrorClass.PERMANENT_SYMBOL.value,
+                    ErrorClass.REQUEST_SHAPE.value,
+                ):
+                    # Permanent answers about the symbol or the request
+                    # shape are never retried: retrying an unchanged
+                    # request cannot change the provider's answer.
                     raise _ProviderCallFailure(error_class, str(exc)) from exc
                 if attempt >= self._max_transient_retries:
                     raise _ProviderCallFailure(
@@ -1233,6 +1278,52 @@ def _page_forward(
             cursor = latest
         if latest >= stop_boundary:
             break
+    return [retained[timestamp] for timestamp in sorted(retained)]
+
+
+def _page_forward_daily(
+    retryable: _RetryableProvider,
+    *,
+    symbol: str,
+    adjustment: str,
+    first_boundary: datetime,
+    stop_boundary: datetime,
+    chunk_days: int = 900,
+) -> list[_CandleView]:
+    """Forward daily pagination that tolerates empty spans between chunks.
+
+    Unlike minute pagination, a daily cursor can sit far before the first
+    available bar (warm-up padding) or cross delisting gaps; two empty
+    pages there are NOT end-of-data.  The range is walked in fixed day
+    chunks until the stop boundary; a completely empty walk yields no
+    bars without aborting early.
+    """
+
+    retained: dict[datetime, _CandleView] = {}
+    cursor = first_boundary
+    while cursor < stop_boundary:
+        page = retryable.call(
+            lambda: retryable._provider.history_candlesticks_by_offset(
+                symbol,
+                "DAY",
+                count=PAGE_SIZE,
+                after=cursor,
+                forward=True,
+                adjustment=adjustment,
+            )
+        )
+        if not page:
+            cursor += timedelta(days=chunk_days)
+            continue
+        for bar in page:
+            retained[bar.timestamp] = bar
+        latest = max(bar.timestamp for bar in page)
+        if latest >= stop_boundary:
+            break
+        if latest <= cursor:
+            cursor += timedelta(days=1)
+        else:
+            cursor = latest + timedelta(days=1)
     return [retained[timestamp] for timestamp in sorted(retained)]
 
 
@@ -1497,43 +1588,240 @@ def _load_plan(plan_path: Path) -> dict[str, Any]:
     return raw
 
 
-def _fetch_trading_days(
+def _plan_warmup_start(plan_payload: dict[str, Any]) -> date:
+    """Earliest warm-up start declared by the pre-declared fetch plan."""
+
+    starts = [
+        date.fromisoformat(str(entry["daily_start"]))
+        for entry in plan_payload["symbols"]
+    ]
+    if not starts:
+        raise HistoricalReplayError(
+            "fetch plan declares no symbols; warm-up start is undefined"
+        )
+    return min(starts)
+
+
+def derive_trading_days_from_benchmarks(
+    *,
+    qqq_dates: Sequence[date],
+    dia_dates: Sequence[date],
+    start: date,
+    end: date,
+) -> dict[str, object]:
+    """Derive the expected US session list returns-blind from QQQ/DIA bars.
+
+    Decision 1 (2026-09-27, before any outcome) replaced the infeasible
+    provider ``trading_days`` source (interval < 1 month, most recent year
+    only).  A date is an expected session iff BOTH benchmark ETFs have a
+    regular-session daily bar that day inside [start, end].  One-sided
+    dates are excluded and reported.  Only dates matter, so the daily bars
+    are fetched unadjusted.
+
+    The local-calendar cross-check reports every mismatch (both-ETF-bar on
+    a locally-closed day, and vice versa where covered) but never gates.
+    Half days are recorded where knowable; 2023 half-days are marked
+    unverified because the local calendar starts 2024-01-01.  The 09:36
+    entry and the 60-minute hold both end before 13:00, so half days do
+    not change the rule.
+    """
+
+    qqq = {
+        value
+        for value in qqq_dates
+        if start <= value <= end
+    }
+    dia = {
+        value
+        for value in dia_dates
+        if start <= value <= end
+    }
+    sessions = sorted(qqq & dia)
+    one_sided = sorted((qqq ^ dia))
+    mismatches = [
+        {
+            "date": value.isoformat(),
+            "in_qqq": value in qqq,
+            "in_dia": value in dia,
+            "reason": "benchmark daily bar present in only one ETF",
+        }
+        for value in one_sided
+    ]
+    both_bar_local_closed: list[str] = []
+    local_coverage_starts = date(2024, 1, 1)
+    for value in sessions:
+        if value < local_coverage_starts:
+            continue
+        if value.weekday() >= 5 or is_market_closed("US", value):
+            both_bar_local_closed.append(value.isoformat())
+    half_days: dict[str, dict[str, object]] = {}
+    for value in sessions:
+        if value in _CONVENTIONAL_2023_EARLY_CLOSES:
+            half_days[value.isoformat()] = {
+                "label": "conventional NYSE early close (2023)",
+                "verified": False,
+            }
+            continue
+        if not is_half_day("US", value):
+            continue
+        # Best-effort label from the same static table the boolean comes
+        # from (sibling app.core module, read-only index access).
+        half_day_index = holiday_calendar._HALF_DAY_INDEX  # noqa: SLF001
+        label = (
+            half_day_index.get((value, "US"))
+            if half_day_index is not None
+            else None
+        )
+        half_days[value.isoformat()] = {
+            "label": label,
+            "verified": value >= local_coverage_starts,
+        }
+    return {
+        "trading_days": [value.isoformat() for value in sessions],
+        "one_sided_dates": mismatches,
+        "local_calendar_cross_check": {
+            "local_coverage_starts": local_coverage_starts.isoformat(),
+            "both_etf_bar_local_closed": both_bar_local_closed,
+            "note": (
+                "the cross-check lists mismatches and never gates; "
+                "sessions before local coverage are unchecked, not assumed"
+            ),
+        },
+        "half_trading_days": half_days,
+        "half_day_note": (
+            "2023 half-days are unverified (local calendar starts "
+            "2024-01-01); the 09:36 entry and 60-minute hold both end "
+            "before 13:00, so half days do not change the rule"
+        ),
+    }
+
+
+def _optional_provider_trading_days_cross_check(
     throttle: _Throttle,
     provider: ReplayQuoteProvider,
     *,
-    window_start: date,
-    window_end: date,
+    benchmark_days: Sequence[date],
+    clock: Callable[[], datetime],
 ) -> dict[str, object]:
+    """Extra-only provider cross-check; its failure never aborts the fetch.
+
+    The SDK supports only the most recent year and intervals under one
+    month, so the check is chunked to 28 days over at most the recent year
+    and every failure (including ``301600 too many query days``) is
+    recorded as SKIPPED_ERROR and swallowed.
+    """
+
+    now = clock()
+    recent_start = date(now.year - 1, now.month, now.day)
+    span_start = max(recent_start, benchmark_days[0])
+    span_end = min(
+        date(now.year, now.month, now.day), benchmark_days[-1]
+    )
+    if span_end < span_start:
+        return {
+            "status": "SKIPPED_OUT_OF_RANGE",
+            "provider_days": [],
+        }
     days: list[date] = []
-    half_days: list[date] = []
-    cursor = window_start
-    while cursor <= window_end:
+    half: list[date] = []
+    cursor = span_start
+    chunks = 0
+    while cursor <= span_end and chunks < _TRADING_DAYS_CROSS_CHECK_MAX_CHUNKS:
         chunk_end = min(
-            window_end, cursor + timedelta(days=_TRADING_DAYS_CHUNK_DAYS)
+            span_end,
+            cursor + timedelta(days=_TRADING_DAYS_CHUNK_DAYS - 1),
         )
         throttle.wait_for_slot()
         try:
             chunk_days, chunk_half = provider.trading_days(
                 begin=cursor, end=chunk_end
             )
-        except Exception as exc:  # noqa: BLE001 - classified below
-            error_class = classify_provider_error(str(exc))
-            if error_class in (
-                ErrorClass.GLOBAL_STOP_QUOTA.value,
-                ErrorClass.GLOBAL_STOP_PERMISSION.value,
-            ):
-                raise _ProviderCallFailure(error_class, str(exc)) from exc
-            raise
+        except Exception as exc:  # noqa: BLE001 - extra cross-check only
+            return {
+                "status": "SKIPPED_ERROR",
+                "error": str(exc)[:400],
+                "chunks_completed": chunks,
+            }
         days.extend(chunk_days)
-        half_days.extend(chunk_half)
+        half.extend(chunk_half)
+        chunks += 1
         cursor = chunk_end + timedelta(days=1)
+    benchmark_set = set(benchmark_days)
+    provider_set = {
+        value for value in days if benchmark_days[0] <= value <= benchmark_days[-1]
+    }
     return {
-        "source": "longport QuoteContext.trading_days (US)",
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
-        "trading_days": sorted({value.isoformat() for value in days}),
-        "half_trading_days": sorted(
-            {value.isoformat() for value in half_days}
+        "status": "RECORDED",
+        "chunks": chunks,
+        "provider_days": [value.isoformat() for value in sorted(provider_set)],
+        "provider_half_days": [
+            value.isoformat() for value in sorted(set(half))
+        ],
+        "provider_only_dates": [
+            value.isoformat() for value in sorted(provider_set - benchmark_set)
+        ],
+        "benchmark_only_dates": [
+            value.isoformat() for value in sorted(benchmark_set - provider_set)
+        ],
+    }
+
+
+def _fetch_trading_days(
+    throttle: _Throttle,
+    retryable: _RetryableProvider,
+    provider: ReplayQuoteProvider,
+    *,
+    window_start: date,
+    window_end: date,
+    warmup_start: date,
+    clock: Callable[[], datetime],
+) -> dict[str, object]:
+    """Fetch QQQ/DIA daily bars and derive the expected session list."""
+
+    benchmark_dates: dict[str, set[date]] = {}
+    for symbol in BENCHMARK_ETFS:
+        bars = _page_forward_daily(
+            retryable,
+            symbol=symbol,
+            # Only dates matter, so no adjustment is needed.
+            adjustment="NoAdjust",
+            first_boundary=_session_open_utc(warmup_start) - timedelta(days=2),
+            stop_boundary=(
+                _session_open_utc(window_end) + timedelta(days=2)
+            ),
+        )
+        benchmark_dates[symbol] = {
+            _MARKET_SESSION.local(bar.timestamp).date() for bar in bars
+        }
+    qqq_dates, dia_dates = (
+        benchmark_dates[BENCHMARK_ETFS[0]],
+        benchmark_dates[BENCHMARK_ETFS[1]],
+    )
+    derived = derive_trading_days_from_benchmarks(
+        qqq_dates=sorted(qqq_dates),
+        dia_dates=sorted(dia_dates),
+        start=window_start,
+        end=window_end,
+    )
+    benchmark_days = [
+        date.fromisoformat(value)
+        for value in cast(list[str], derived["trading_days"])
+    ]
+    cross_check = _optional_provider_trading_days_cross_check(
+        throttle,
+        provider,
+        benchmark_days=benchmark_days,
+        clock=clock,
+    )
+    return {
+        "source": (
+            "benchmark daily-bar intersection (QQQ.US ∩ DIA.US, DAY bars, "
+            "NoAdjust; dates only) - decision 1, 2026-09-27"
         ),
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "warmup_start": warmup_start.isoformat(),
+        "provider_trading_days_cross_check": cross_check,
+        **derived,
     }
 
 
@@ -1578,6 +1866,7 @@ def run_fetch(
         try:
             payload = _fetch_trading_days(
                 throttle,
+                retryable,
                 provider,
                 window_start=date.fromisoformat(
                     plan_payload["window_start"]
@@ -1585,8 +1874,14 @@ def run_fetch(
                 window_end=date.fromisoformat(
                     plan_payload["window_end"]
                 ),
+                warmup_start=_plan_warmup_start(plan_payload),
+                clock=clock,
             )
         except _ProviderCallFailure as exc:
+            status["requests_total"] = (
+                status.get("requests_total", 0)
+                + throttle.total_requests
+            )
             if exc.error_class in (
                 ErrorClass.GLOBAL_STOP_QUOTA.value,
                 ErrorClass.GLOBAL_STOP_PERMISSION.value,
@@ -1596,16 +1891,32 @@ def run_fetch(
                     "detail": exc.message[:400],
                     "at": clock().isoformat(),
                 }
-                status["requests_total"] = (
-                    status.get("requests_total", 0)
-                    + throttle.total_requests
-                )
+                status.setdefault("errors", []).append({
+                    "stage": "TRADING_DAYS",
+                    "error_class": exc.error_class,
+                    "detail": exc.message[:400],
+                    "at": clock().isoformat(),
+                })
                 _save_status(cache_dir, status)
                 raise HistoricalReplayError(
                     f"GLOBAL STOP ({exc.error_class}); no retry: "
                     f"{exc.message}"
                 ) from exc
-            raise
+            # Any other trading-day failure (benchmark bars exhausted their
+            # bounded retries, request-shape refusal, ...) fails CLEANLY:
+            # a status.json error entry, never a raw traceback, never a
+            # per-symbol permanent failure, and no global stop.
+            status.setdefault("errors", []).append({
+                "stage": "TRADING_DAYS",
+                "error_class": exc.error_class,
+                "detail": exc.message[:400],
+                "at": clock().isoformat(),
+            })
+            _save_status(cache_dir, status)
+            raise HistoricalReplayError(
+                "benchmark trading-day derivation failed ("
+                f"{exc.error_class}): {exc.message}"
+            ) from exc
         _atomic_write_json(trading_days_path, payload)
     sealed_days = [
         date.fromisoformat(value)
@@ -1636,10 +1947,9 @@ def run_fetch(
         try:
             if state["daily"]["state"] != "COMPLETE":
                 if state["daily"]["state"] != "PERMANENT_FAILURE":
-                    bars = _page_forward(
+                    bars = _page_forward_daily(
                         retryable,
                         symbol=symbol,
-                        period="DAY",
                         adjustment="ForwardAdjust",
                         first_boundary=(
                             _session_open_utc(daily_start) - timedelta(days=2)
@@ -1732,6 +2042,29 @@ def run_fetch(
                     "state": "PERMANENT_FAILURE",
                     "error": exc.message[:200],
                 }
+            elif exc.error_class == ErrorClass.REQUEST_SHAPE.value:
+                # A request-shape refusal is about the QUERY, never about
+                # the symbol: it must not be persisted as a symbol
+                # permanent failure.  It fails the fetch cleanly for
+                # review instead.
+                status.setdefault("errors", []).append({
+                    "stage": "SYMBOL_FETCH",
+                    "symbol": symbol,
+                    "error_class": exc.error_class,
+                    "detail": exc.message[:400],
+                    "at": clock().isoformat(),
+                })
+                status["requests_total"] = (
+                    status.get("requests_total", 0)
+                    + throttle.total_requests
+                )
+                throttle.total_requests = 0
+                _save_status(cache_dir, status)
+                raise HistoricalReplayError(
+                    "request-shape refusal while fetching "
+                    f"{symbol} ({exc.message}); the request must be "
+                    "corrected, not retried or persisted"
+                ) from exc
             else:
                 failures[symbol] = exc.message[:200]
                 state["daily"]["state"] = "FAILED_TRANSIENT"

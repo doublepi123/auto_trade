@@ -5,7 +5,9 @@ Implements the mechanical half of
 retrospective validation of the frozen forward rule
 ``INDEX_CATALOG_STOCKS_IN_PLAY_ORB_TOP10_CHALLENGER`` (config
 ``44e3c377...def9``) on 2023-09-01..2026-04-30 under
-``analysis_id = opening-momentum-top10-pit-historical-v1``.
+``analysis_id = opening-momentum-top10-pit-historical-v2`` (decision 1:
+v1 was registered, never executed - the provider trading-day source was
+infeasible and failed before any market data was fetched).
 
 This module pins:
 
@@ -74,7 +76,7 @@ _CLI_PATH = (
 )
 
 _FROZEN_COMBINED_PIN = (
-    "b2e9eef58025ef4d4259bdb9d2e26a1ffe1e49c76418ecf4c56ff90e09a408aa"
+    "656cad6fe15e028c74bef875f569ae5fe996b649f34adf6668bc7f11a20cb60d"
 )
 
 # The CLI adapter manifest: (display name, kind, definition name).  The
@@ -89,6 +91,11 @@ _MANIFEST: list[tuple[str, str, str]] = [
     ("compute_descriptives", "func", "compute_descriptives"),
     ("cross_check_trading_days", "func", "cross_check_trading_days"),
     ("decide_verdict", "func", "decide_verdict"),
+    (
+        "derive_trading_days_from_benchmarks",
+        "func",
+        "derive_trading_days_from_benchmarks",
+    ),
     (
         "evaluate_session_decision",
         "func",
@@ -115,6 +122,7 @@ _MANIFEST: list[tuple[str, str, str]] = [
     ),
     ("ADV_LOOKBACK_BARS", "const", "ADV_LOOKBACK_BARS"),
     ("ANALYSIS_ID", "const", "ANALYSIS_ID"),
+    ("BENCHMARK_ETFS", "const", "BENCHMARK_ETFS"),
     ("ENTRY_OFFSET", "const", "ENTRY_OFFSET"),
     ("EXIT_OFFSET", "const", "EXIT_OFFSET"),
     ("FROZEN_CONFIG_VERSION", "const", "FROZEN_CONFIG_VERSION"),
@@ -231,7 +239,7 @@ def _freeze_failure_message(actual: str) -> str:
 
 
 def test_frozen_plan_constants() -> None:
-    assert ANALYSIS_ID == "opening-momentum-top10-pit-historical-v1"
+    assert ANALYSIS_ID == "opening-momentum-top10-pit-historical-v2"
     assert WINDOW_START == date(2023, 9, 1)
     assert WINDOW_END == date(2026, 4, 30)
     assert WARMUP_SESSIONS == 21
@@ -360,3 +368,33 @@ def test_one_sided_t_table_is_monotone_and_anchored() -> None:
     assert table[29] == pytest.approx(1.6972609, abs=1e-6)
     assert table[119] == pytest.approx(1.6576514, abs=1e-6)
     assert table[149] == pytest.approx(1.6550755, abs=1e-6)
+
+
+def test_decision_record_1_is_present_in_the_doc() -> None:
+    # Change decision 1 (2026-09-27, before any outcome) must be recorded
+    # in the doc per its own section 10 process: same commit, updated
+    # pins, decision recorded, v1 kept as "registered, not executed".
+    doc = _DOC_PATH.read_text(encoding="utf-8")
+    assert "变更决定 1（2026-09-27，任何结果之前）" in doc
+    # The record states v1 was never executed and no outcome exists.
+    assert "code=301600) too many query days" in doc
+    assert "未执行" in doc
+    # v1 is kept described as registered, not executed.
+    assert "已注册、未执行" in doc
+    # The analysis_id moves to v2.
+    assert "opening-momentum-top10-pit-historical-v2" in doc
+    assert "opening-momentum-top10-pit-historical-v1" in doc
+    # The new trading-day source is named.
+    assert "QQQ" in doc and "DIA" in doc
+    # The decision section sits BEFORE the code manifest section.
+    decision_index = doc.index("变更决定 1（2026-09-27，任何结果之前）")
+    manifest_index = doc.index("## 9. Code manifest")
+    assert decision_index < manifest_index
+
+
+def test_benchmark_etf_constant_is_pinned() -> None:
+    from app.cli.opening_momentum_historical_replay import (
+        BENCHMARK_ETFS,
+    )
+
+    assert BENCHMARK_ETFS == ("QQQ.US", "DIA.US")

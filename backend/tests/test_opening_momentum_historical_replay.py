@@ -51,6 +51,7 @@ from app.cli.opening_momentum_historical_replay import (
     compute_descriptives,
     cross_check_trading_days,
     decide_verdict,
+    derive_trading_days_from_benchmarks,
     evaluate_session_decision,
     frozen_config_version,
     is_fetch_window_open,
@@ -65,6 +66,7 @@ from app.cli.opening_momentum_historical_replay import (
 )
 from app.config import settings
 from app.core.broker import BrokerCandle
+from app.core.holiday_calendar import is_market_closed
 from app.core.market_calendar import get_session
 from app.models import (
     Base,
@@ -218,6 +220,7 @@ class _FakePlanProvider:
         trading_days: tuple[date, ...],
         fail_symbols_permanently: set[str] | None = None,
         quota_fail_after: int | None = None,
+        include_benchmark_bars: bool = True,
     ) -> None:
         self.daily_bars = daily_bars
         self.minute_bars = minute_bars
@@ -226,6 +229,21 @@ class _FakePlanProvider:
         self.quota_fail_after = quota_fail_after
         self.calls: list[tuple[str, str, datetime]] = []
         self.request_count = 0
+        if include_benchmark_bars:
+            # Serve QQQ/DIA daily bars exactly on the declared trading
+            # days so the benchmark-derived session list reproduces the
+            # declared sessions exactly.
+            benchmark_dates = [
+                value
+                for value in trading_days
+                if value.weekday() < 5 and not is_market_closed("US", value)
+            ]
+            benchmark_bars = _benchmark_bars(tuple(benchmark_dates))
+            self.daily_bars = {
+                **self.daily_bars,
+                "QQQ.US": benchmark_bars,
+                "DIA.US": benchmark_bars,
+            }
 
     def _maybe_fail(self, symbol: str) -> None:
         self.request_count += 1
@@ -1678,3 +1696,332 @@ def test_settle_exit_missing_exit_bar_is_unresolved() -> None:
         )
         is None
     )
+
+
+# ============================================ DECISION 1 (pre-outcome) tests
+#
+# Change decision 1 (2026-09-27, before any outcome): v1 was registered but
+# never executed - the first real fetch failed immediately at the
+# trading-day source because the provider rejects windows > 1 month
+# (``code=301600 too many query days``) and supports only the most recent
+# year.  The registered trading-day source is replaced by a returns-blind
+# QQQ/DIA daily-bar intersection; analysis_id moves to
+# ``...-pit-historical-v2``.
+
+
+def _benchmark_daily_bar(session_date: date) -> BrokerCandle:
+    return BrokerCandle(
+        timestamp=_session_open(session_date),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.0,
+        volume=1_000.0,
+        turnover=100_000.0,
+    )
+
+
+def _benchmark_bars(
+    dates: tuple[date, ...],
+) -> list[BrokerCandle]:
+    return [_benchmark_daily_bar(value) for value in dates]
+
+
+class _BenchmarkPlanProvider(_FakePlanProvider):
+    """Serves QQQ/DIA daily bars plus optional provider trading_days."""
+
+    def __init__(
+        self,
+        *,
+        qqq_dates: tuple[date, ...],
+        dia_dates: tuple[date, ...],
+        provider_trading_days: tuple[date, ...] = (),
+        trading_days_error: str | None = None,
+    ) -> None:
+        super().__init__(
+            daily_bars={},
+            minute_bars={},
+            trading_days=provider_trading_days,
+        )
+        self.daily_bars = {
+            "QQQ.US": _benchmark_bars(qqq_dates),
+            "DIA.US": _benchmark_bars(dia_dates),
+        }
+        self.trading_days_error = trading_days_error
+        self.trading_days_calls = 0
+
+    def trading_days(
+        self, *, begin: date, end: date
+    ) -> tuple[tuple[date, ...], tuple[date, ...]]:
+        self.trading_days_calls += 1
+        if self.trading_days_error is not None:
+            raise RuntimeError(self.trading_days_error)
+        return super().trading_days(begin=begin, end=end)
+
+
+def test_benchmark_intersection_excludes_one_sided_dates() -> None:
+    qqq = (date(2024, 1, 2), date(2024, 1, 3), date(2024, 1, 4))
+    dia = (date(2024, 1, 2), date(2024, 1, 3))
+    result = derive_trading_days_from_benchmarks(
+        qqq_dates=qqq,
+        dia_dates=dia,
+        start=date(2024, 1, 1),
+        end=date(2024, 1, 31),
+    )
+    # 2024-01-04 has a QQQ bar but no DIA bar: excluded from expected
+    # sessions and reported as a mismatch with the reason recorded.
+    assert result["trading_days"] == ["2024-01-02", "2024-01-03"]
+    mismatches = result["one_sided_dates"]
+    assert mismatches == [
+        {
+            "date": "2024-01-04",
+            "in_qqq": True,
+            "in_dia": False,
+            "reason": "benchmark daily bar present in only one ETF",
+        }
+    ]
+
+
+def test_benchmark_intersection_respects_window_bounds() -> None:
+    qqq = (
+        date(2023, 8, 15),  # before the window: warm-up only, not expected
+        date(2024, 1, 2),
+        date(2026, 5, 5),  # after the window: excluded
+    )
+    result = derive_trading_days_from_benchmarks(
+        qqq_dates=qqq,
+        dia_dates=qqq,
+        start=date(2023, 9, 1),
+        end=date(2026, 4, 30),
+    )
+    assert result["trading_days"] == ["2024-01-02"]
+
+
+def test_local_calendar_mismatch_is_listed_not_gating() -> None:
+    # 2024-11-28 is a local NYSE closure (Thanksgiving): if both ETFs have
+    # a bar that day, the cross-check must LIST it, not resolve it.
+    qqq = dia = (date(2024, 11, 27), date(2024, 11, 28), date(2024, 11, 29))
+    result = derive_trading_days_from_benchmarks(
+        qqq_dates=qqq,
+        dia_dates=dia,
+        start=date(2024, 11, 1),
+        end=date(2024, 11, 30),
+    )
+    cross_check = cast(
+        dict[str, object], result["local_calendar_cross_check"]
+    )
+    assert cross_check["both_etf_bar_local_closed"] == ["2024-11-28"]
+    # The day remains an expected session: the cross-check does not gate.
+    assert "2024-11-28" in cast(list[str], result["trading_days"])
+    # A weekend bar would be flagged the same way.
+    saturday = date(2024, 11, 30)
+    qqq2 = dia2 = (*qqq, saturday)
+    result2 = derive_trading_days_from_benchmarks(
+        qqq_dates=qqq2,
+        dia_dates=dia2,
+        start=date(2024, 11, 1),
+        end=date(2024, 11, 30),
+    )
+    cross_check2 = cast(
+        dict[str, object], result2["local_calendar_cross_check"]
+    )
+    assert cross_check2["both_etf_bar_local_closed"] == [
+        "2024-11-28",
+        "2024-11-30",
+    ]
+
+
+def test_half_days_recorded_with_2023_unverified() -> None:
+    from app.core.holiday_calendar import is_half_day
+
+    qqq = dia = (
+        date(2023, 7, 3),  # 2023: outside local half-day knowledge
+        date(2024, 7, 3),  # known local US half day
+    )
+    result = derive_trading_days_from_benchmarks(
+        qqq_dates=qqq,
+        dia_dates=dia,
+        start=date(2023, 7, 1),
+        end=date(2024, 7, 31),
+    )
+    half_days = cast(
+        dict[str, dict[str, object]], result["half_trading_days"]
+    )
+    assert half_days["2024-07-03"] == {
+        "label": (
+            "Day before Independence Day"
+            if is_half_day("US", date(2024, 7, 3))
+            else None
+        ),
+        "verified": True,
+    }
+    # 2023 half-days are unknown to the local calendar: recorded from the
+    # conventional schedule and explicitly marked UNVERIFIED.
+    assert half_days["2023-07-03"] == {
+        "label": "conventional NYSE early close (2023)",
+        "verified": False,
+    }
+    assert result["half_day_note"] == (
+        "2023 half-days are unverified (local calendar starts 2024-01-01); "
+        "the 09:36 entry and 60-minute hold both end before 13:00, so "
+        "half days do not change the rule"
+    )
+
+
+def test_301600_too_many_query_days_is_request_shape_not_symbol() -> None:
+    # Regression for the v1 failure: the provider returns code=301600 with
+    # "too many query days" for the trading-day window.  That is a request
+    # SHAPE error, never a per-symbol permanent failure.
+    assert (
+        classify_provider_error(
+            "OpenApiException: (code=301600) too many query days"
+        )
+        == "REQUEST_SHAPE"
+    )
+    # A genuine invalid-symbol 301600 is still a symbol failure.
+    assert (
+        classify_provider_error(
+            "OpenApiException: (code=301600) invalid symbol ATVI.US"
+        )
+        == "PERMANENT_SYMBOL"
+    )
+    assert classify_provider_error("connection reset") == "TRANSIENT"
+
+
+def test_trading_days_cross_check_failure_does_not_abort(
+    tmp_path: Path,
+) -> None:
+    # The optional provider trading_days cross-check raises (the exact v1
+    # failure mode); the fetch must still complete from the
+    # benchmark-derived session list.
+    qqq = dia = (date(2026, 2, 2), date(2026, 2, 3))
+    provider = _BenchmarkPlanProvider(
+        qqq_dates=qqq,
+        dia_dates=dia,
+        trading_days_error=(
+            "OpenApiException: (code=301600) too many query days"
+        ),
+    )
+    clock = _FakeClock(datetime(2026, 3, 7, 2, 0, tzinfo=timezone.utc))
+    plan = _minimal_plan(
+        symbols=("AAA.US",),
+        first=date(2026, 2, 2),
+        last=date(2026, 2, 3),
+        daily_start=date(2025, 12, 15),
+    )
+    report = run_fetch(
+        cache_dir=tmp_path,
+        plan_payload=plan,
+        provider=provider,
+        clock=clock,
+        sleep=lambda seconds: None,
+    )
+    assert report["coverage"]["symbols_total"] == 1
+    trading_payload = json.loads(
+        (tmp_path / "trading_days.json").read_text(encoding="utf-8")
+    )
+    assert trading_payload["trading_days"] == ["2026-02-02", "2026-02-03"]
+    assert trading_payload["source"].startswith(
+        "benchmark daily-bar intersection"
+    )
+    cross_checks = trading_payload["provider_trading_days_cross_check"]
+    assert cross_checks["status"] == "SKIPPED_ERROR"
+    assert "too many query days" in cross_checks["error"]
+    # No global stop was written for a request-shape error.
+    status = _load_status(tmp_path)
+    assert status.get("global_stop") is None
+
+
+def test_trading_days_cross_check_success_is_extra_only(
+    tmp_path: Path,
+) -> None:
+    # When the provider call succeeds (within the recent-year window of
+    # the injected clock), its result is recorded as an EXTRA cross-check
+    # and never replaces the benchmark list.
+    qqq = dia = (date(2026, 2, 2), date(2026, 2, 3))
+    provider = _BenchmarkPlanProvider(
+        qqq_dates=qqq,
+        dia_dates=dia,
+        provider_trading_days=(date(2026, 2, 2),),
+    )
+    clock = _FakeClock(datetime(2026, 3, 7, 2, 0, tzinfo=timezone.utc))
+    plan = _minimal_plan(
+        symbols=("AAA.US",),
+        first=date(2026, 2, 2),
+        last=date(2026, 2, 3),
+        daily_start=date(2025, 12, 15),
+    )
+    report = run_fetch(
+        cache_dir=tmp_path,
+        plan_payload=plan,
+        provider=provider,
+        clock=clock,
+        sleep=lambda seconds: None,
+    )
+    assert report["coverage"]["symbols_total"] == 1
+    trading_payload = json.loads(
+        (tmp_path / "trading_days.json").read_text(encoding="utf-8")
+    )
+    # The derived window list keeps only the benchmark sessions inside
+    # [window_start, window_end] of the plan, which are exactly these.
+    assert trading_payload["trading_days"] == [
+        "2026-02-02",
+        "2026-02-03",
+    ]
+    cross_checks = trading_payload["provider_trading_days_cross_check"]
+    assert cross_checks["status"] == "RECORDED"
+    assert cross_checks["provider_only_dates"] == []
+    assert cross_checks["benchmark_only_dates"] == ["2026-02-03"]
+
+
+def test_fetch_fails_cleanly_on_benchmark_failure(
+    tmp_path: Path,
+) -> None:
+    # If the benchmark bars themselves fail transiently beyond retries, the
+    # fetch writes a status.json error entry (never a raw traceback, never
+    # a per-symbol permanent failure) and fails cleanly.
+    class _BrokenBenchmarkProvider(_BenchmarkPlanProvider):
+        def history_candlesticks_by_offset(
+            self,
+            symbol: str,
+            period: str,
+            *,
+            count: int,
+            after: datetime,
+            forward: bool,
+            adjustment: str,
+        ) -> list[_CandleView]:
+            if symbol in ("QQQ.US", "DIA.US"):
+                raise RuntimeError("connection reset by peer")
+            return super().history_candlesticks_by_offset(
+                symbol,
+                period,
+                count=count,
+                after=after,
+                forward=forward,
+                adjustment=adjustment,
+            )
+
+    provider = _BrokenBenchmarkProvider(
+        qqq_dates=(date(2024, 1, 2),),
+        dia_dates=(date(2024, 1, 2),),
+    )
+    clock = _FakeClock(datetime(2026, 3, 7, 2, 0, tzinfo=timezone.utc))
+    with pytest.raises(HistoricalReplayError, match="benchmark"):
+        run_fetch(
+            cache_dir=tmp_path,
+            plan_payload=_minimal_plan(),
+            provider=provider,
+            clock=clock,
+            sleep=lambda seconds: None,
+        )
+    status = _load_status(tmp_path)
+    errors = status.get("errors", [])
+    assert isinstance(errors, list) and errors, (
+        "a clean status.json error entry must be written"
+    )
+    entry = errors[-1]
+    assert entry["stage"] == "TRADING_DAYS"
+    assert "connection reset" in entry["detail"]
+    assert status.get("global_stop") is None
+    assert status.get("symbols") == {}

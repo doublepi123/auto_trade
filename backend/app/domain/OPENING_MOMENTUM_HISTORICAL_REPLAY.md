@@ -1,7 +1,7 @@
 # 开盘动量冻结规则历史迁移验证合同（OPENING_MOMENTUM_HISTORICAL_REPLAY）
 
 > 版本：v1（2026-09-27 冻结，先于任何结果 commit）。本文件与 `backend/tests/test_opening_momentum_historical_replay_preregistration.py` 配套。
-> `analysis_id = opening-momentum-top10-pit-historical-v1`。实施 CLI：`backend/app/cli/opening_momentum_historical_replay.py`（子命令 `plan | fetch | seal | evaluate`）。
+> `analysis_id = opening-momentum-top10-pit-historical-v2`（v1 见第 8.5 节变更决定 1：已注册、未执行）。实施 CLI：`backend/app/cli/opening_momentum_historical_replay.py`（子命令 `plan | fetch | seal | evaluate`）。
 >
 > **注册状态：只读历史研究。本合同不授权任何订单，不授权任何 shadow→live 晋级，也不修改前向合同（`OPENING_MOMENTUM_PREREGISTRATION.md`）的任何内容。**
 
@@ -78,7 +78,7 @@
   - 其余（含样本不足 n<125 或 W<26、门未过、界跨零）→ `INCONCLUSIVE`。
   - 明示：**这不是前向 PASS**；名义 p 不是严格独立错误率（文献重叠 + 规则选择本身消耗了统计资格）。
 - **描述性切片（永不判定、永不作为丢弃区间的理由）**：日历半年（首尾标注 partial）、月度交易数、等名义月度净 bps 和、最差月、回撤、收益集中度。明示：**正的每笔均值不是稳定月收益**。
-- **交易日历**：一次性从 LongPort `QuoteContext.trading_days`（US 市场）拉取，窗口超限时分块。该列表**封入输入 manifest**。与本地 holiday calendar（2024-01-01 起）重叠区间交叉核对，mismatch 逐日报告；本地日历无 2023 数据，2023 会话标注为未核对。
+- **交易日历（变更决定 1 后的现行来源）**：以基准 ETF 日线交集**盲推**会话列表——QQQ.US 与 DIA.US 在 [warm-up 起, 窗口末] 每个有常规时段日线 bar 的日期取交集（`history_candlesticks_by_offset`，DAY，前向翻页，NoAdjust——只有日期起作用）。仅一侧有 bar 的日期作为 mismatch 报告并**从预期会话中剔除**（原因记录）。与本地 holiday calendar（2024-01-01 起）重叠区间交叉核对：本地标记休市但双 ETF 有 bar、或反之的日期逐日列出，**不作为门槛**。半日（early close）在可知处记录；本地半日表 2024 年起才覆盖，2023 半日按惯例日程记录并标注 unverified；09:36 入场与 60 分钟持有均在 13:00 前结束，**半日不改变规则**。可选的 provider `trading_days`（≤28 天分块、仅最近一年）作为**额外**交叉核对，其失败永不中止 fetch。该列表**封入输入 manifest**。
 
 ## 6. 无偷看协议（顺序不可换）
 
@@ -104,6 +104,29 @@
 
 `CORROBORATES` 授权的唯一动作是：把「值得继续前向确认」写进研究优先级记录。`DOES_NOT_CORROBORATE` 授权的唯一动作是：考虑提交书面弃置决定的材料之一。两者都不改动前向合同任何数字，都不授权订单，都不构成稳定月收益的证据。
 
+## 8.5 变更决定 1（2026-09-27，任何结果之前）
+
+按第 10 节流程记录的书面决定：
+
+1. **发生了什么。** v1（`analysis_id = opening-momentum-top10-pit-historical-v1`）**已注册、未执行**。首次真实 `fetch` 在拉取交易日历时立即失败，早于任何行情数据的抓取，未创建缓存目录，不存在任何结果。原始错误：
+
+   ```
+   _fetch_trading_days → provider.trading_days(begin, end) with _TRADING_DAYS_CHUNK_DAYS = 400
+   longport.OpenApiException: (code=301600) too many query days
+   ```
+
+   SDK 对 `QuoteContext.trading_days` 的说明是「区间必须小于一个月，且仅支持最近一年」。因此 v1 注册的交易日来源（provider `trading_days` 覆盖 2023-09..2026-04）**不可行**，属于注册时的请求形状错误，不是数据问题。
+
+2. **无偷看状态。** 因任何结果都未产生（fetch 在交易日一步即失败），本次修正后的运行**仍是第一次 OOS**；此事实在此如实记录，不作为后续任何重跑的先例。
+
+3. **新交易日来源**（盲收益，只看日期不看价格，见第 5 节更新后的表述）：QQQ.US ∩ DIA.US 日线 bar 交集；单边日期剔除并报告；本地日历交叉核对不设门槛；2023 半日 unverified；半日不改规则；可选 provider `trading_days` 仅作额外核对且失败不中止。
+
+4. **错误分类修正。** `code=301600` 不再单独构成 per-symbol 永久失败：同一代码也用于「too many query days」这类请求形状拒绝。现分类为 `REQUEST_SHAPE`（不重试、不落 symbol 永久失败、fetch 干净失败并写 `status.json` 错误条目，非配额/权限不写 global_stop）；只有明确的 invalid/unknown symbol 语义仍是 `PERMANENT_SYMBOL`。
+
+5. **新 analysis_id。** `opening-momentum-top10-pit-historical-v2`。其余一切冻结元素（窗口、universe 规则、门、判定、统计量、安全规则、无 DB 规则）**不变**。
+
+6. **同一提交。** 本决定、更新的 pin 与代码在同一提交内（第 10 节第 3 步）。
+
 ## 9. Code manifest（CLI 适配层 pin 清单）
 
 以下清单与 `backend/tests/test_opening_momentum_historical_replay_preregistration.py` 的 `_MANIFEST` 逐项一致（doc-agreement 断言双向同步）。哈希为 `ast.dump`（无属性）SHA-256，冻结于 2026-09-27。适配层只提供实盘 `_observe_variants` 为**这一个**变体提供的胶水：信号 bar、活跃度比值、区间高低点；**永不**调用 `tick`、`_observe_variants`、`_close_if_due`。
@@ -111,11 +134,12 @@
 ```
 app.cli.opening_momentum_historical_replay.build_plan_payload = b01f0c75c03437f5dd05b3df664aacce9f8a4dda242c3f162321f10807e2a684
 app.cli.opening_momentum_historical_replay.build_session_observation = 7de3a869d20df85a9e014eaa7dd3347ea035d21443102e6f398a7e0716e06cf2
-app.cli.opening_momentum_historical_replay.classify_provider_error = 3e6fb15f63704bb236f03127bcdcc74bbdbffd66d55d7c568c9aacdb08d5b876
+app.cli.opening_momentum_historical_replay.classify_provider_error = daed59f8bc79923398f1215527daf8ee66aec667d453b19da27fccab084962db
 app.cli.opening_momentum_historical_replay.company_dedupe = f4937543bcf9e73f4ca0261c33788080ce0365e6d84824b86830554ab858b3ed
 app.cli.opening_momentum_historical_replay.compute_descriptives = a6bc2d950b0a4d07fa05e55a8e4302db402a6e0b1a7d49a73bebabbff228ce7f
 app.cli.opening_momentum_historical_replay.cross_check_trading_days = 373b2035be134ae15db1dce15857adb80ad887b6846fda18fc1bc318f8602199
 app.cli.opening_momentum_historical_replay.decide_verdict = dd8809ae61a4ff3703dbf972f5b5f5a98e0bc5df4269efbd46a72e3a6a7e84fa
+app.cli.opening_momentum_historical_replay.derive_trading_days_from_benchmarks = d356070cfdcb976c4927381f7230b093bc7d4b4a716b8bb0d0b3721a9820b901
 app.cli.opening_momentum_historical_replay.evaluate_session_decision = 3603499a2414be4eae5588cd389d1b2aac66d1edb75d98c961d97c56c647c86e
 app.cli.opening_momentum_historical_replay.frozen_config_version = 5faafab72903ab4c5efddcc18f06fd740c3dbc0cdd27162de7d03348ab73e8f7
 app.cli.opening_momentum_historical_replay.frozen_decision_config = 052adc8214416f6b37093f7f386b9300a07e5904d1a2c2e7228260b9a5cec1af
@@ -124,12 +148,13 @@ app.cli.opening_momentum_historical_replay.one_sided_t95 = d2b55ab0623aaf8d4b5e0
 app.cli.opening_momentum_historical_replay.pit_universe_for_session = 5f0fbe0a81638a39e8b5ef5413b0869a0da16f4fe7088619ec69d69dd1707733
 app.cli.opening_momentum_historical_replay.rebuild_session_adv = 884e4e37261722b12a26f1d1ba5186def491e0aa05720b53e2df6d7f2d283c29
 app.cli.opening_momentum_historical_replay.run_evaluate = 1f6fe70189d79c046870887e6b0b7fec6cd42eca86f49cb29f572b0b0f9c5e5c
-app.cli.opening_momentum_historical_replay.run_fetch = d4b0f1e005a55604b34cfbe7b13f157ee06d29954c2d0c2c9187f6555cd94bf5
+app.cli.opening_momentum_historical_replay.run_fetch = 17bbb2afb9e4ea05ef752bef59344875b8154ece9fcc3dd73efe9c13d2e57f48
 app.cli.opening_momentum_historical_replay.run_seal = b460e6cce851da157ae0272de3510ef08132cf40925f58af18db3e532326c282
 app.cli.opening_momentum_historical_replay.settle_session_exit = 61b9f07a802016b756e653dca28dedd4c5a0385a27c3ce526b47e0c2177c1d41
 app.cli.opening_momentum_historical_replay.week_clustered_statistic = 88bc68155fa9b44429f0e02fc5b4fe96a349725cdfbfe8f97391e9c30239a683
 app.cli.opening_momentum_historical_replay:ADV_LOOKBACK_BARS = f3ce26c20bd6b921e7619a32503d5b3781316ca759fd1fb94df25c9dae9a98d2
-app.cli.opening_momentum_historical_replay:ANALYSIS_ID = 716a57ada1a45190521f61a0b7c3d9edb911344e3d82d3f3b4d2c3c9d1f23c7f
+app.cli.opening_momentum_historical_replay:ANALYSIS_ID = 814a2e6c6e13f22f579a3e52e2f7afc33206e5c82ae5533d9c9d533bbc7cc796
+app.cli.opening_momentum_historical_replay:BENCHMARK_ETFS = 5d3f013aa602c3e9699762d78cf2d0bf91044f9a20eb1bd4043e102de90c9a41
 app.cli.opening_momentum_historical_replay:ENTRY_OFFSET = ae44f7a0814040a53d6d354ddd42d5c292605a3586c09374a4fbcddccb1b0749
 app.cli.opening_momentum_historical_replay:EXIT_OFFSET = 48cc21900d6eff480e321fa95788dd9bb8cb9de485538531df57cc2fe7ac7c68
 app.cli.opening_momentum_historical_replay:FROZEN_CONFIG_VERSION = 5da1a89f78d2a7d610c8f649687910df3afc4043a9e83e9e090da381a8405d04
@@ -147,7 +172,7 @@ app.cli.opening_momentum_historical_replay:STRESS_COST_BPS = 7cbc3dc478820865c75
 app.cli.opening_momentum_historical_replay:WARMUP_SESSIONS = 1b37c1c530d30746a4936c6314adeaed2f0ef1f757378020adab54189c05a18a
 app.cli.opening_momentum_historical_replay:WINDOW_END = b763b1f0f35d4a280dd2decc877bb949c28969767b038f6bf49969d6a4d052b7
 app.cli.opening_momentum_historical_replay:WINDOW_START = bf7271237f87d8bf4d9925ed9006efc41d0d9c3a4a21c8147a2c5f568cb15a66
-combined = b2e9eef58025ef4d4259bdb9d2e26a1ffe1e49c76418ecf4c56ff90e09a408aa
+combined = 656cad6fe15e028c74bef875f569ae5fe996b649f34adf6668bc7f11a20cb60d
 ```
 
 **禁止为消红而改哈希。** 任何 pin 失配都要求：先在本文档记录书面决定（动机、处置、对已完成结果的影响），再在**同一提交**里更新哈希与本文档；在结果已存在之后改哈希使既有结果作废，且新的运行**不得**称为第一次 OOS。
