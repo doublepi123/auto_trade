@@ -76,7 +76,7 @@ _CLI_PATH = (
 )
 
 _FROZEN_COMBINED_PIN = (
-    "656cad6fe15e028c74bef875f569ae5fe996b649f34adf6668bc7f11a20cb60d"
+    "a4672c6c2c12203a487614f9ef4a30190b35de92717cd286062443bc694e8e34"
 )
 
 # The CLI adapter manifest: (display name, kind, definition name).  The
@@ -84,78 +84,102 @@ _FROZEN_COMBINED_PIN = (
 # assignments.  This list is duplicated in the doc's "code manifest"
 # section; the doc-agreement test asserts the two stay in sync.
 _MANIFEST: list[tuple[str, str, str]] = [
-    ("build_plan_payload", "func", "build_plan_payload"),
-    ("build_session_observation", "func", "build_session_observation"),
-    ("classify_provider_error", "func", "classify_provider_error"),
     ("company_dedupe", "func", "company_dedupe"),
+    ("pit_universe_for_session", "func", "pit_universe_for_session"),
+    ("rebuild_session_adv", "func", "rebuild_session_adv"),
+    ("build_session_observation", "func", "build_session_observation"),
+    ("evaluate_session_decision", "func", "evaluate_session_decision"),
+    ("settle_session_exit", "func", "settle_session_exit"),
+    ("week_clustered_statistic", "func", "week_clustered_statistic"),
+    ("decide_verdict", "func", "decide_verdict"),
     ("compute_descriptives", "func", "compute_descriptives"),
     ("cross_check_trading_days", "func", "cross_check_trading_days"),
-    ("decide_verdict", "func", "decide_verdict"),
-    (
-        "derive_trading_days_from_benchmarks",
-        "func",
-        "derive_trading_days_from_benchmarks",
-    ),
-    (
-        "evaluate_session_decision",
-        "func",
-        "evaluate_session_decision",
-    ),
-    ("frozen_config_version", "func", "frozen_config_version"),
-    ("frozen_decision_config", "func", "frozen_decision_config"),
     ("is_fetch_window_open", "func", "is_fetch_window_open"),
-    ("one_sided_t95", "func", "one_sided_t95"),
-    (
-        "pit_universe_for_session",
-        "func",
-        "pit_universe_for_session",
-    ),
-    ("rebuild_session_adv", "func", "rebuild_session_adv"),
-    ("run_evaluate", "func", "run_evaluate"),
+    ("classify_provider_error", "func", "classify_provider_error"),
     ("run_fetch", "func", "run_fetch"),
     ("run_seal", "func", "run_seal"),
-    ("settle_session_exit", "func", "settle_session_exit"),
-    (
-        "week_clustered_statistic",
-        "func",
-        "week_clustered_statistic",
-    ),
-    ("ADV_LOOKBACK_BARS", "const", "ADV_LOOKBACK_BARS"),
+    ("run_evaluate", "func", "run_evaluate"),
+    ("build_plan_payload", "func", "build_plan_payload"),
+    ("frozen_decision_config", "func", "frozen_decision_config"),
+    ("frozen_config_version", "func", "frozen_config_version"),
+    ("one_sided_t95", "func", "one_sided_t95"),
+    ("derive_trading_days_from_benchmarks", "func", "derive_trading_days_from_benchmarks"),
+    ("classify_session_adv", "func", "classify_session_adv"),
+    ("_frozen_selector_avg_dollar_volume", "func", "_frozen_selector_avg_dollar_volume"),
+    ("_safe_spread_proxy", "func", "_safe_spread_proxy"),
+    ("_last_n_sealed_sessions_before", "func", "_last_n_sealed_sessions_before"),
+    ("assemble_member_day_audit", "func", "assemble_member_day_audit"),
+    ("session_is_auditable", "func", "session_is_auditable"),
+    ("_collect_member_day_facts", "func", "_collect_member_day_facts"),
+    ("raw_stop_path_is_valid", "func", "raw_stop_path_is_valid"),
+    ("_cache_preflight", "func", "_cache_preflight"),
+    ("_proc_cmdline", "func", "_proc_cmdline"),
+    ("_fetch_process_alive", "func", "_fetch_process_alive"),
+    ("_attempt_receipt_path", "func", "_attempt_receipt_path"),
+    ("_write_attempt_receipt", "func", "_write_attempt_receipt"),
+    ("_load_attempt_receipt", "func", "_load_attempt_receipt"),
+    ("_claim_next_attempt", "func", "_claim_next_attempt"),
+    ("_verify_sealed_file", "func", "_verify_sealed_file"),
+    ("_compute_descriptives_window", "func", "_compute_descriptives_window"),
+    ("_sealed_plan_digest", "func", "_sealed_plan_digest"),
+    ("_source_provenance_hashes", "func", "_source_provenance_hashes"),
+    ("_require_clean_worktree", "func", "_require_clean_worktree"),
+    ("import_v2_plan", "func", "import_v2_plan"),
+    ("run_fetch_calendar_warmup", "func", "run_fetch_calendar_warmup"),
+    ("_evaluate_computation", "func", "_evaluate_computation"),
+    ("_load_minute_bars", "func", "_load_minute_bars"),
+    ("_load_daily_bars", "func", "_load_daily_bars"),
+    ("_read_gzip_json", "func", "_read_gzip_json"),
+    ("_file_sha256", "func", "_file_sha256"),
+    ("_load_status", "func", "_load_status"),
+    ("_daily_bar_rows", "func", "_daily_bar_rows"),
+    ("_bar_is_valid", "func", "_bar_is_valid"),
+    ("_raw_bars_valid_ohlc", "func", "_raw_bars_valid_ohlc"),
     ("ANALYSIS_ID", "const", "ANALYSIS_ID"),
-    ("BENCHMARK_ETFS", "const", "BENCHMARK_ETFS"),
-    ("ENTRY_OFFSET", "const", "ENTRY_OFFSET"),
-    ("EXIT_OFFSET", "const", "EXIT_OFFSET"),
-    ("FROZEN_CONFIG_VERSION", "const", "FROZEN_CONFIG_VERSION"),
-    (
-        "GATE_MEMBER_DATA_MISSING_MAX_SHARE",
-        "const",
-        "GATE_MEMBER_DATA_MISSING_MAX_SHARE",
-    ),
-    (
-        "GATE_SESSION_INPUT_COVERAGE",
-        "const",
-        "GATE_SESSION_INPUT_COVERAGE",
-    ),
-    (
-        "GATE_STILL_LISTED_MISSING_MAX_MEMBER_DAYS",
-        "const",
-        "GATE_STILL_LISTED_MISSING_MAX_MEMBER_DAYS",
-    ),
-    ("HOLDING_MINUTES", "const", "HOLDING_MINUTES"),
+    ("WINDOW_START", "const", "WINDOW_START"),
+    ("WINDOW_END", "const", "WINDOW_END"),
+    ("WARMUP_SESSIONS", "const", "WARMUP_SESSIONS"),
+    ("ADV_LOOKBACK_BARS", "const", "ADV_LOOKBACK_BARS"),
     ("MIN_COMPLETED_BARS", "const", "MIN_COMPLETED_BARS"),
+    ("OPENING_ACTIVITY_TOP_N", "const", "OPENING_ACTIVITY_TOP_N"),
+    ("STOP_LOSS_CAP_PCT", "const", "STOP_LOSS_CAP_PCT"),
+    ("HOLDING_MINUTES", "const", "HOLDING_MINUTES"),
+    ("STRESS_COST_BPS", "const", "STRESS_COST_BPS"),
     ("MIN_TRADES", "const", "MIN_TRADES"),
     ("MIN_WEEKS", "const", "MIN_WEEKS"),
-    ("ONE_SIDED_T95_BY_DF", "const", "ONE_SIDED_T95_BY_DF"),
     (
-        "OPENING_ACTIVITY_TOP_N",
+        "GATE_SESSION_INPUT_COVERAGE",
         "const",
-        "OPENING_ACTIVITY_TOP_N",
+        "GATE_SESSION_INPUT_COVERAGE",
     ),
-    ("STOP_LOSS_CAP_PCT", "const", "STOP_LOSS_CAP_PCT"),
-    ("STRESS_COST_BPS", "const", "STRESS_COST_BPS"),
-    ("WARMUP_SESSIONS", "const", "WARMUP_SESSIONS"),
-    ("WINDOW_END", "const", "WINDOW_END"),
-    ("WINDOW_START", "const", "WINDOW_START"),
+    (
+        "GATE_MEMBER_DATA_MISSING_MAX_SHARE",
+        "const",
+        "GATE_MEMBER_DATA_MISSING_MAX_SHARE",
+    ),
+    (
+        "GATE_STILL_LISTED_MISSING_MAX_MEMBER_DAYS",
+        "const",
+        "GATE_STILL_LISTED_MISSING_MAX_MEMBER_DAYS",
+    ),
+    ("FROZEN_CONFIG_VERSION", "const", "FROZEN_CONFIG_VERSION"),
+    ("ONE_SIDED_T95_BY_DF", "const", "ONE_SIDED_T95_BY_DF"),
+    ("ENTRY_OFFSET", "const", "ENTRY_OFFSET"),
+    ("EXIT_OFFSET", "const", "EXIT_OFFSET"),
+    ("BENCHMARK_ETFS", "const", "BENCHMARK_ETFS"),
+    ("GATE_B_MISSING_KINDS", "const", "GATE_B_MISSING_KINDS"),
+    ("WARMUP_START", "const", "WARMUP_START"),
+    ("WARMUP_END", "const", "WARMUP_END"),
+    ("KNOWN_INELIGIBLE_ADV", "const", "KNOWN_INELIGIBLE_ADV"),
+    ("UNVERIFIABLE_DAILY_GAP", "const", "UNVERIFIABLE_DAILY_GAP"),
+    ("UNVERIFIABLE_INVALID_BAR", "const", "UNVERIFIABLE_INVALID_BAR"),
+    ("UNVERIFIABLE_FRESHNESS", "const", "UNVERIFIABLE_FRESHNESS"),
+    ("UNVERIFIABLE_NO_DAILY", "const", "UNVERIFIABLE_NO_DAILY"),
+    (
+        "UNVERIFIABLE_INSUFFICIENT_WINDOW",
+        "const",
+        "UNVERIFIABLE_INSUFFICIENT_WINDOW",
+    ),
 ]
 
 
@@ -239,7 +263,7 @@ def _freeze_failure_message(actual: str) -> str:
 
 
 def test_frozen_plan_constants() -> None:
-    assert ANALYSIS_ID == "opening-momentum-top10-pit-historical-v2"
+    assert ANALYSIS_ID == "opening-momentum-top10-pit-historical-v3"
     assert WINDOW_START == date(2023, 9, 1)
     assert WINDOW_END == date(2026, 4, 30)
     assert WARMUP_SESSIONS == 21
@@ -398,3 +422,131 @@ def test_benchmark_etf_constant_is_pinned() -> None:
     )
 
     assert BENCHMARK_ETFS == ("QQQ.US", "DIA.US")
+
+
+def test_decision_record_2_is_present_in_the_doc() -> None:
+    # Change decision 2 (2026-09-27, before any outcome) records the six
+    # pre-outcome review MUST-FIX items, bumps the analysis_id to v3 and
+    # states that the v2 raw inputs are reused after a compatibility check.
+    doc = _DOC_PATH.read_text(encoding="utf-8")
+    assert "变更决定 2（2026-09-27，任何结果之前）" in doc
+    # The section sits after 8.6 and before the code manifest.
+    exec_record_index = doc.index("## 8.6 执行记录")
+    decision_index = doc.index("变更决定 2（2026-09-27，任何结果之前）")
+    manifest_index = doc.index("## 9. Code manifest")
+    assert exec_record_index < decision_index < manifest_index
+    # Every MUST-FIX is listed.
+    for token in (
+        "未完成的 fetch",
+        "成员-日",
+        "ADV",
+        "等价",
+        "封闭输入集",
+        "只运行一次",
+    ):
+        assert token in doc, f"decision 2 lost the fix keyword {token}"
+    # No outcome exists and no price file was opened.
+    assert "没有任何结果" in doc or "无任何结果" in doc
+    assert "未打开任何价格文件" in doc or "未读取任何价格文件" in doc
+    # The analysis_id moves to v3 and v2 inputs are reused after a
+    # compatibility check.
+    assert "opening-momentum-top10-pit-historical-v3" in doc
+    assert "兼容性检查" in doc
+    # The window, estimand, statistic and verdict mapping are unchanged.
+    assert "窗口" in doc and "估计量" in doc
+
+
+def test_loaders_and_input_checks_are_pinned() -> None:
+    # Decision 2 (and its pre-outcome ruling) brings the previously
+    # unpinned loaders, input checks, audit helpers and receipt machinery
+    # into the manifest.
+    names = {name for _, kind, name in _MANIFEST if kind == "func"}
+    for required in (
+        "_load_minute_bars",
+        "_load_daily_bars",
+        "_read_gzip_json",
+        "_file_sha256",
+        "_load_status",
+        "_daily_bar_rows",
+        "_bar_is_valid",
+        "_raw_bars_valid_ohlc",
+        "classify_session_adv",
+        "_frozen_selector_avg_dollar_volume",
+        "assemble_member_day_audit",
+        "session_is_auditable",
+        "_collect_member_day_facts",
+        "_cache_preflight",
+        "_fetch_process_alive",
+        "_write_attempt_receipt",
+        "_load_attempt_receipt",
+        "_claim_next_attempt",
+        "_verify_sealed_file",
+        "_source_provenance_hashes",
+        "_require_clean_worktree",
+        "import_v2_plan",
+        "run_fetch_calendar_warmup",
+        "_evaluate_computation",
+    ):
+        assert required in names, f"manifest lost the helper {required}"
+    consts = {name for _, kind, name in _MANIFEST if kind == "const"}
+    for required_const in ("GATE_B_MISSING_KINDS",):
+        assert required_const in consts, (
+            f"manifest lost the constant {required_const}"
+        )
+    # Removed helpers must NOT stay pinned (ruling D).
+    assert "_member_decision_status" not in names
+
+
+def test_decision2_ruling_corrections_are_recorded() -> None:
+    # The pre-outcome ruling's four verdict-deciding corrections plus the
+    # A-D items are recorded in section 8.7, each stated as ruled
+    # pre-outcome, with the no-outcome/no-price-file statement.
+    doc = _DOC_PATH.read_text(encoding="utf-8")
+    assert "结果前裁决补充修正" in doc
+    for token in (
+        "三个独立维度",  # core principle
+        "ELIGIBLE",  # item 1 four-way classification
+        "KNOWN_INELIGIBLE",
+        "UNVERIFIABLE",
+        "PERMANENT_GAP",
+        "fetch-calendar-warmup",  # item 2
+        "NO_MINUTE_DATA",  # item 3
+        "可审计会话",  # item 4
+        "绝不丢弃",  # item A
+        "_signal_turnover",  # item B
+        "v2→v3 计划兼容导入",  # item C
+        "O_CREAT|O_EXCL",  # item D exclusive claim
+    ):
+        assert token in doc, f"decision 2 ruling lost {token}"
+    # Thresholds unchanged and explicitly so.
+    assert "阈值无一放宽" in doc
+    # Conservative-addition disclaimer for the coverage denominator.
+    assert "保守加项" in doc
+    # Warm-up never becomes scoring sessions.
+    assert "永不成为计分会话" in doc
+
+
+def test_final_pre_outcome_check_recorded() -> None:
+    # The final pre-outcome check (2026-09-28, still no outcome) records
+    # every correction in section 8.7, including the removal of the
+    # NEW_LISTING path, the exact August warm-up proof obligations and
+    # the raw stop-path UNRESOLVED semantics.
+    doc = _DOC_PATH.read_text(encoding="utf-8")
+    assert "最终结果前检查" in doc
+    for token in (
+        "PERMANENT_GAP",  # item 1: never blocks gate (a)
+        "原始止损路径",  # item 2: validated BEFORE settlement
+        "UNRESOLVED",  # item 2: invalid raw stop path
+        "中性报价重试",  # item 3b: removed
+        "DATA_INVALID_SPREAD_PROXY",  # item 3b: live shape
+        "NEW_LISTING 路径",  # item 4: removed
+        "2023-08-31",  # item 5: registered predecessor
+        "2023-08-03",  # item 5: 21-session coverage
+        "先于 QuoteContext 构造",  # execution safety
+    ):
+        assert token in doc, f"final check lost {token}"
+    # The wrong "equivalent to BrokerCandle default" RULE sentence is
+    # gone from section 5 (the decision record still cites its removal).
+    section5 = doc[doc.index("## 5."):doc.index("## 6.")]
+    assert "BrokerCandle 默认" not in section5
+    assert "输入异常" in section5

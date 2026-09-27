@@ -65,11 +65,17 @@ from app.domain.universe_selection import (
 from app.domain.universe_selection.catalog import (
     HISTORICAL_INDEX_CANDIDATE_CATALOG,
     INDEX_CANDIDATE_CATALOG,
+    IndexCandidate,
 )
 from app.domain.universe_selection.membership_history import (
     INDEX_MEMBERSHIP_HISTORY,
 )
-from app.domain.universe_selection.selector import _dollar_volume
+from app.domain.universe_selection.selector import (
+    CandidateInput,
+    UniverseSelectionConfig,
+    _candidate_metrics,
+    liquidity_spread_proxy_bps,
+)
 from app.services.opening_momentum_shadow_service import (
     OpeningMomentumShadowService,
     _EARLY_BROAD_MINIMUM_COVERAGE,
@@ -80,7 +86,7 @@ from app.services.opening_momentum_shadow_service import (
 
 # ---------------------------------------------------------------- frozen plan
 
-ANALYSIS_ID = "opening-momentum-top10-pit-historical-v2"
+ANALYSIS_ID = "opening-momentum-top10-pit-historical-v3"
 REPLAY_CLI_VERSION = "opening-momentum-top10-pit-historical-replay-cli-v1"
 WINDOW_START = date(2023, 9, 1)
 WINDOW_END = date(2026, 4, 30)
@@ -122,11 +128,12 @@ BENCHMARK_ETFS: tuple[str, str] = ("QQQ.US", "DIA.US")
 
 # Conventional NYSE early-close dates in 2023 (before the local half-day
 # table's coverage starts 2024-01-01).  They are recorded as UNVERIFIED:
-# the local calendar cannot confirm them.
+# the local calendar cannot confirm them.  2023-12-22 is deliberately NOT
+# listed: Christmas Eve fell on a Sunday, so Friday 2023-12-22 was a full
+# session.
 _CONVENTIONAL_2023_EARLY_CLOSES: tuple[date, ...] = (
     date(2023, 7, 3),
     date(2023, 11, 24),
-    date(2023, 12, 22),
 )
 
 # Connection / quota safety.
@@ -346,13 +353,17 @@ class DailyBarLike(Protocol):
     def close(self) -> float: ...
 
     @property
-    def volume(self) -> float: ...
+    def volume(self) -> float | None: ...
 
     @property
-    def turnover(self) -> float: ...
+    def turnover(self) -> float | None: ...
 
 
 def _bar_is_valid(bar: DailyBarLike) -> bool:
+    # A missing volume is an INVALID bar (decision 2 ruling, item A): the
+    # row is never dropped and older bars never fill in.
+    if bar.volume is None:
+        return False
     values = (bar.open, bar.high, bar.low, bar.close, bar.volume)
     if any(not math.isfinite(float(value)) for value in values):
         return False
@@ -367,77 +378,328 @@ def _bar_is_valid(bar: DailyBarLike) -> bool:
 
 @dataclass(frozen=True)
 class _DailyBarRow:
-    """Concrete daily bar satisfying both ``DailyBarLike`` and the frozen
-    selector's ``DailyBar`` protocols (non-optional numeric fields)."""
+    """Concrete daily bar for the frozen selector protocols.
+
+    ``volume`` is optional: a missing volume invalidates the bar (and the
+    ADV window) rather than being fabricated as 0.0 (decision 2 ruling,
+    item A).  ``turnover`` defaults to 0.0 exactly like the live
+    ``BrokerCandle`` so the frozen fallback applies by construction.
+    """
 
     timestamp: datetime
     open: float
     high: float
     low: float
     close: float
-    volume: float
-    turnover: float
+    volume: float | None
+    turnover: float | None
 
 
 def _daily_bar_rows(
     candles: Sequence[_CandleView],
 ) -> list[_DailyBarRow]:
-    return [
-        _DailyBarRow(
-            timestamp=candle.timestamp,
-            open=float(candle.open),
-            high=float(candle.high),
-            low=float(candle.low),
-            close=float(candle.close),
-            volume=(
-                float(candle.volume)
-                if candle.volume is not None
-                else 0.0
-            ),
-            turnover=(
-                float(candle.turnover)
-                if candle.turnover is not None
-                else 0.0
-            ),
+    """Adapt cached candle views to selector-shaped daily bars.
+
+    Date rows are NEVER dropped (final check, item 3a).  A ``None``
+    turnover stays ``None``: the live normalizer (``broker.py``
+    ``_normalize_candlestick_response``) does ``float(getattr(item,
+    "turnover", 0))`` - a MISSING attribute becomes 0.0 and the frozen
+    fallback applies, but an attribute PRESENT with value ``None`` fails
+    the conversion and the bar is dropped upstream.  Since the cached row
+    cannot distinguish "attribute absent" from "explicit null", ``None``
+    is treated as the broker-visible anomaly it is: an input anomaly that
+    invalidates the bar (and the window).  Only a legal 0.0 flows to the
+    frozen ``_dollar_volume`` fallback.
+    """
+
+    rows: list[_DailyBarRow] = []
+    for candle in candles:
+        rows.append(
+            _DailyBarRow(
+                timestamp=candle.timestamp,
+                open=float(candle.open),
+                high=float(candle.high),
+                low=float(candle.low),
+                close=float(candle.close),
+                volume=(
+                    float(candle.volume)
+                    if candle.volume is not None
+                    else None
+                ),
+                turnover=(
+                    float(candle.turnover)
+                    if candle.turnover is not None
+                    else None
+                ),
+            )
         )
-        for candle in candles
-    ]
+    return rows
 
 
 def rebuild_session_adv(
     daily_bars: Sequence[DailyBarLike],
     *,
     as_of: date,
+    previous_sealed_session: date | None = None,
 ) -> float | None:
-    """Rebuild the selector's ``avg_dollar_volume`` from bars before ``as_of``.
+    """Rebuild the selector's ``avg_dollar_volume`` exactly like live.
 
-    Mirrors ``selector._candidate_metrics``: requires >= 21 valid completed
-    bars strictly before ``as_of`` and averages the frozen ``_dollar_volume``
-    over the last 20 of them.
+    Mirrors ``selector._candidate_metrics``: sort the bars strictly before
+    ``as_of`` by date, require >= 21 of them, take the LAST 21, validate
+    the whole 21-bar window, then average the frozen ``_dollar_volume``
+    over the last 20.  A bad bar inside the window disqualifies; it is
+    never replaced by an older bar.
     """
 
-    completed = sorted(
+    classified = classify_session_adv(
+        daily_bars,
+        as_of=as_of,
+        previous_sealed_session=previous_sealed_session,
+    )
+    return classified.adv
+
+
+@dataclass(frozen=True)
+class SessionAdvClassification:
+    """Decision-eligibility outcome for one (member, session).
+
+    Decision 2 ruling, item 1: eligibility is its own dimension, never a
+    single ``OK`` that also decides data presence and auditability.
+    """
+
+    kind: Literal[
+        "ELIGIBLE",
+        "KNOWN_INELIGIBLE",
+        "UNVERIFIABLE",
+        "PERMANENT_GAP",
+    ]
+    adv: float | None = None
+    reason: str | None = None
+
+    @property
+    def coverage_only(self) -> bool:
+        return self.kind in ("UNVERIFIABLE", "PERMANENT_GAP")
+
+
+#: Why a KNOWN_INELIGIBLE member is excluded (live does the same).  The
+#: NEW_LISTING path was REMOVED by the final pre-outcome check (item 4):
+#: "fewer than 21 bars since the first cached date" is not a listing
+#: proof because the cache starts at the fetch boundary, and no
+#: independent sealed listing-date evidence exists.
+KNOWN_INELIGIBLE_ADV = "ADV_NOT_FINITE_POSITIVE"
+
+#: Why an UNVERIFIABLE member's eligibility cannot be established.
+UNVERIFIABLE_DAILY_GAP = "DAILY_BARS_MISSING_ON_SEALED_SESSIONS"
+UNVERIFIABLE_INVALID_BAR = "INVALID_DAILY_BAR_IN_LAST_21"
+UNVERIFIABLE_FRESHNESS = "FRESHNESS_GAP_LATEST_NOT_PREVIOUS_SESSION"
+UNVERIFIABLE_NO_DAILY = "NO_DAILY_DATA_DESPITE_COMPLETE_FETCH"
+#: Fewer than 21 bars with no independent listing-date proof (the cache
+#: starts at the fetch boundary; the NEW_LISTING path is removed).
+UNVERIFIABLE_INSUFFICIENT_WINDOW = (
+    "INSUFFICIENT_21_SESSION_WINDOW_NO_LISTING_PROOF"
+)
+
+
+def _frozen_selector_avg_dollar_volume(
+    window_bars: Sequence[DailyBarLike],
+) -> tuple[float | None, str | None]:
+    """Call the frozen selector metrics for a PRE-VALIDATED 21-bar window.
+
+    ``selector._candidate_metrics`` is the exact function live uses to
+    compute ``avg_dollar_volume`` (selector.py L236-266).  Calling it
+    makes the replay equivalent by construction.  The spread input
+    mirrors the live service exactly (service ~L1817-1821):
+    ``liquidity_spread_proxy_bars(bars)`` and, when that is unavailable,
+    the live ``data_errors`` gain ``DATA_INVALID_SPREAD_PROXY`` - which
+    empties the metrics (selector ~L240-241).  The replay reproduces
+    that shape verbatim and NEVER fabricates a quote (final check,
+    item 3b): any DATA_ defect => UNVERIFIABLE.  The selector's
+    non-DATA LIQUIDITY exclusion reasons (price, dollar volume,
+    volatility, ...) do NOT remove a candidate's ADV in live -
+    ``index_catalog_symbols`` reads the stored metric value directly -
+    so they do not block pool entry here either.
+
+    Returns ``(adv, data_error)``.
+    """
+
+    spread_proxy = _safe_spread_proxy(window_bars)
+    data_errors: tuple[str, ...] = (
+        () if spread_proxy is not None else ("DATA_INVALID_SPREAD_PROXY",)
+    )
+    metrics, reasons = _candidate_metrics(
+        CandidateInput(
+            candidate=_ADV_PROBE_CANDIDATE,
+            completed_daily_bars=cast(Any, list(window_bars)),
+            bid=None,
+            ask=None,
+            estimated_spread_bps=spread_proxy,
+            data_errors=data_errors,
+        ),
+        UniverseSelectionConfig(),
+    )
+    all_reasons = (*data_errors, *reasons)
+    data_defects = [
+        reason for reason in all_reasons if reason.startswith("DATA_")
+    ]
+    if data_defects:
+        return None, data_defects[0]
+    value = metrics.avg_dollar_volume
+    if value is None or not math.isfinite(value) or value <= 0:
+        return None, None
+    return float(value), None
+
+
+def _safe_spread_proxy(
+    bars: Sequence[DailyBarLike],
+) -> float | None:
+    """Frozen ``liquidity_spread_proxy_bps`` with None-field safety.
+
+    Returns None exactly when the live service would append
+    ``DATA_INVALID_SPREAD_PROXY`` (bars empty or any dollar volume not
+    finite-positive)."""
+
+    try:
+        return liquidity_spread_proxy_bps(cast(Any, list(bars)))
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+#: A minimal catalog candidate for the frozen metrics call: the metrics
+#: function never reads the candidate identity for avg_dollar_volume.
+_ADV_PROBE_CANDIDATE = IndexCandidate(
+    symbol="ADVPROBE.US",
+    alias="adv probe",
+    sector="Software",
+    memberships=(),
+)
+
+
+def classify_session_adv(
+    daily_bars: Sequence[DailyBarLike],
+    *,
+    as_of: date,
+    previous_sealed_session: date | None = None,
+    sealed_sessions: Sequence[date] = (),
+    daily_fetch_complete: bool = True,
+    permanent_absence: bool = False,
+) -> SessionAdvClassification:
+    """Classify one member's ADV decision-eligibility for ``as_of``.
+
+    Four outcomes (decision 2 ruling, item 1):
+
+    - ``ELIGIBLE(adv)``: a complete valid 21-bar window, finite-positive
+      ADV through the frozen selector, and the latest bar is the previous
+      sealed session;
+    - ``KNOWN_INELIGIBLE``: (a) NEW_LISTING - fewer than 21 completed
+      sealed sessions since the first available daily bar, with no gaps
+      (live would exclude the same member), or (b) a complete valid window
+      whose ADV is not finite-positive;
+    - ``UNVERIFIABLE``: daily bars missing on sealed sessions inside the
+      needed window, an invalid bar inside the last-21 window, a freshness
+      gap, or no daily data although the daily fetch is COMPLETE and not
+      permanent;
+    - ``PERMANENT_GAP``: the provider permanently refused the symbol.
+    """
+
+    if permanent_absence:
+        return SessionAdvClassification(kind="PERMANENT_GAP")
+
+    def unverifiable(reason: str) -> SessionAdvClassification:
+        return SessionAdvClassification(
+            kind="UNVERIFIABLE", adv=None, reason=reason
+        )
+
+    bars_before = sorted(
         (
             bar
             for bar in daily_bars
             if _MARKET_SESSION.local(bar.timestamp).date() < as_of
-            and _bar_is_valid(bar)
         ),
         key=lambda bar: bar.timestamp,
     )
-    if len(completed) < MIN_COMPLETED_BARS:
-        return None
-    dollar_volumes = [
-        _dollar_volume(bar) for bar in completed[-ADV_LOOKBACK_BARS:]
+    if not bars_before:
+        if daily_fetch_complete:
+            return unverifiable(UNVERIFIABLE_NO_DAILY)
+        return unverifiable(UNVERIFIABLE_DAILY_GAP)
+    dates = [
+        _MARKET_SESSION.local(bar.timestamp).date() for bar in bars_before
     ]
-    if any(
-        not math.isfinite(value) or value <= 0 for value in dollar_volumes
-    ):
-        return None
-    adv = math.fsum(dollar_volumes) / len(dollar_volumes)
-    if not math.isfinite(adv) or adv <= 0:
-        return None
-    return adv
+    if len(dates) != len(set(dates)):
+        raise HistoricalReplayError(
+            "daily bars contain duplicate session dates for the ADV window"
+        )
+
+    # Freshness: the latest bar before D must BE the previous sealed
+    # session (when one exists).  With sealed sessions known, a missing
+    # bar on an intermediate sealed session is a data gap, not staleness.
+    latest = dates[-1]
+    if previous_sealed_session is None:
+        return unverifiable(UNVERIFIABLE_FRESHNESS)
+    if latest != previous_sealed_session:
+        # Either an intermediate sealed session has no bar (gap) or the
+        # latest bar is stale.  Both are unverifiable input states.
+        if sealed_sessions and previous_sealed_session in sealed_sessions:
+            return unverifiable(UNVERIFIABLE_DAILY_GAP)
+        return unverifiable(UNVERIFIABLE_FRESHNESS)
+
+    # Final check, item 4: "fewer than 21 bars from the first cached
+    # date" is NOT a listing proof - the cache starts at the fetch
+    # boundary and no independent sealed listing-date evidence exists.
+    # The NEW_LISTING path is therefore removed: every such member is
+    # UNVERIFIABLE (coverage-only, in the denominator).
+    if len(bars_before) < MIN_COMPLETED_BARS:
+        return unverifiable(UNVERIFIABLE_INSUFFICIENT_WINDOW)
+
+    # The member needs a valid daily bar on EACH of the last 21 SEALED
+    # sessions before D.  The required sessions come from the sealed
+    # calendar INCLUDING the warm-up dates; an older bar never fills in.
+    # A halted stock is therefore conservatively UNVERIFIABLE.
+    if sealed_sessions:
+        required = _last_n_sealed_sessions_before(
+            sealed_sessions, as_of, MIN_COMPLETED_BARS
+        )
+        if required:
+            bar_dates = set(dates)
+            missing_required = [
+                value for value in required if value not in bar_dates
+            ]
+            if missing_required:
+                return unverifiable(UNVERIFIABLE_DAILY_GAP)
+
+    window = bars_before[-MIN_COMPLETED_BARS:]
+    # Pre-validate the window (final check, items 3a/4): a None volume,
+    # a None turnover (an input anomaly the live normalizer would drop),
+    # a non-finite or negative turnover, or invalid OHLC in ANY of the
+    # last-21 bars makes the window unverifiable.  The row is never
+    # dropped, so older bars cannot fill in; a legal 0.0 turnover flows
+    # to the frozen fallback.
+    for bar in window:
+        volume = getattr(bar, "volume", None)
+        turnover = getattr(bar, "turnover", None)
+        if volume is None or not _bar_is_valid(bar):
+            return unverifiable(UNVERIFIABLE_INVALID_BAR)
+        if turnover is None or not math.isfinite(turnover) or turnover < 0:
+            return unverifiable(UNVERIFIABLE_INVALID_BAR)
+    adv, data_error = _frozen_selector_avg_dollar_volume(window)
+    if data_error is not None:
+        return unverifiable(UNVERIFIABLE_INVALID_BAR)
+    if adv is None:
+        return SessionAdvClassification(
+            kind="KNOWN_INELIGIBLE",
+            reason=KNOWN_INELIGIBLE_ADV,
+        )
+    return SessionAdvClassification(kind="ELIGIBLE", adv=adv)
+
+
+def _last_n_sealed_sessions_before(
+    sealed_sessions: Sequence[date],
+    as_of: date,
+    count: int,
+) -> list[date]:
+    """The last ``count`` sealed sessions strictly before ``as_of``."""
+
+    prior = [value for value in sealed_sessions if value < as_of]
+    return prior[-count:]
 
 
 # ------------------------------------------------------ session replay glue
@@ -554,14 +816,31 @@ def evaluate_session_decision(
     minute_bars_by_symbol: dict[str, dict[datetime, Any]],
     adv_by_symbol: dict[str, float],
     session_open: datetime,
+    coverage_only_symbols: Sequence[str] = (),
 ) -> SessionDecision:
-    """Reproduce the service's TOP10 ORB decision for one session."""
+    """Reproduce the service's TOP10 ORB decision for one session.
+
+    Decision 2 ruling, item 1: ``universe`` is the ELIGIBLE pool (ADV
+    decides pool membership exactly as live's ``index_catalog_symbols``
+    does) and is passed through with whatever minute bars each member
+    has - NEVER filtered by minute-data quality.  A missing signal bar
+    only reduces observations (live ~L1757-1783); a missing activity
+    ratio on an existing observation breaks completeness (live
+    ~L1868-1900, ~L2088-2095).  ``coverage_only_symbols`` (UNVERIFIABLE
+    and PERMANENT_GAP members) widen the coverage denominator only: they
+    never build an observation and never get a fabricated ADV - keeping
+    permanent gaps in the denominator is this contract's conservative
+    addition, not a claim of live identity.  KNOWN_INELIGIBLE members are
+    excluded entirely, as in live.
+    """
 
     config = frozen_decision_config()
+    eligible = tuple(universe)
+    coverage_members = set(eligible) | set(coverage_only_symbols)
     observations: list[OpeningMomentumObservation] = []
     members: dict[str, MemberObservation] = {}
     excluded: dict[str, str] = {}
-    for symbol in universe:
+    for symbol in eligible:
         bars = minute_bars_by_symbol.get(symbol)
         if not bars:
             excluded[symbol] = "NO_BARS"
@@ -585,14 +864,16 @@ def evaluate_session_decision(
     }
     required_observations = max(
         config.minimum_universe_size,
-        math.ceil(len(universe) * _EARLY_BROAD_MINIMUM_COVERAGE),
+        math.ceil(
+            len(coverage_members) * _EARLY_BROAD_MINIMUM_COVERAGE
+        ),
     )
     observation_symbols = {item.symbol for item in observations}
     opening_activity_data_complete = observation_symbols.issubset(
         ratio_by_symbol
     )
     data_complete = (
-        bool(universe)
+        bool(coverage_members)
         and len(observations) >= required_observations
         and opening_activity_data_complete
     )
@@ -653,7 +934,7 @@ def evaluate_session_decision(
             decision.entry_price if status == "OPEN" else None
         ),
         stop_loss_pct=stop_loss_pct if status == "OPEN" else None,
-        universe_size=len(universe),
+        universe_size=len(coverage_members),
         observed_symbols=len(observations),
         ratio_symbols=len(ratio_by_symbol),
         excluded=excluded,
@@ -719,6 +1000,7 @@ class WeekClusteredStat:
     upper_30: float | None
     lower_50: float | None
     upper_50: float | None
+    degenerate: bool = False
 
 
 def week_clustered_statistic(
@@ -732,6 +1014,10 @@ def week_clustered_statistic(
     """
 
     values = [float(value) for _, value in observations]
+    if any(not math.isfinite(value) for value in values):
+        raise HistoricalReplayError(
+            "week-clustered observations must be finite"
+        )
     if not values:
         return WeekClusteredStat(
             n=0,
@@ -769,6 +1055,10 @@ def week_clustered_statistic(
     )
     variance = weeks / (weeks - 1) * cluster_score_squares / (n * n)
     if variance <= 0:
+        # Degenerate sample (decision 2, SHOULD-FIX C): zero week
+        # variance yields no usable standard error, so no CI is reported
+        # and the verdict stays INCONCLUSIVE.  This is fixed BEFORE any
+        # outcome so it cannot be mistaken for a data-dependent choice.
         return WeekClusteredStat(
             n=n,
             weeks=weeks,
@@ -779,6 +1069,7 @@ def week_clustered_statistic(
             upper_30=None,
             lower_50=None,
             upper_50=None,
+            degenerate=True,
         )
     standard_error = math.sqrt(variance)
     critical = one_sided_t95(weeks - 1)
@@ -893,6 +1184,12 @@ def decide_verdict(
             f"SAMPLE_BELOW_MINIMUM(n={trade_count}<{MIN_TRADES} "
             f"or W={stat.weeks}<{MIN_WEEKS})"
         )
+    if stat.degenerate:
+        # Zero week variance: no CI exists, so no non-INCONCLUSIVE verdict
+        # is reachable regardless of the sample size.
+        reasons.append(
+            "DEGENERATE_SAMPLE(zero week variance; no CI reported)"
+        )
     upper_30_negative: bool | None = None
     if gates_passed and sample_sufficient and stat.lower_50 is not None:
         if stat.lower_50 > 0:
@@ -934,12 +1231,28 @@ def decide_verdict(
 
 def compute_descriptives(
     trades: Sequence[tuple[date, float]],
+    *,
+    window_start: date | None = None,
+    window_end: date | None = None,
 ) -> dict[str, object]:
     """Descriptive-only section: never gates, never grounds to drop a period.
 
     A positive per-trade mean is NOT stable monthly profit; these numbers
-    exist to characterise concentration and drawdown, not to select segments.
+    exist to characterise concentration and drawdown, not to select
+    segments.  When the registered window is supplied, months with zero
+    trades are included and first/last periods are marked partial by the
+    WINDOW, not by trade months.
     """
+
+    if not trades:
+        if window_start is not None and window_end is not None:
+            return _compute_descriptives_window(
+                [], window_start=window_start, window_end=window_end
+            )
+    if window_start is not None and window_end is not None:
+        return _compute_descriptives_window(
+            trades, window_start=window_start, window_end=window_end
+        )
 
     ordered = sorted(trades, key=lambda item: item[0])
     by_month: dict[tuple[int, int], list[float]] = {}
@@ -1401,9 +1714,24 @@ def _atomic_write_bytes(path: Path, payload: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
+    rendered = json.dumps(
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return (rendered + "\n").encode("utf-8")
+
+
 def _atomic_write_json(path: Path, payload: dict[str, object]) -> None:
     rendered = json.dumps(
-        payload, ensure_ascii=True, sort_keys=True, separators=(",", ":")
+        payload,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
     )
     _atomic_write_bytes(path, (rendered + "\n").encode("utf-8"))
 
@@ -1580,11 +1908,70 @@ def _default_cache_dir() -> Path:
     )
 
 
+_V3_PLAN_EXCLUDED_KEYS = frozenset({"analysis_id", "cli_version"})
+_V2_PLAN_ANALYSIS_ID = "opening-momentum-top10-pit-historical-v2"
+
+
+def import_v2_plan(plan_payload: dict[str, Any]) -> dict[str, Any]:
+    """Registered v2->v3 plan compatibility import (decision 2, item C).
+
+    The running fetch executes the ORIGINAL v2 plan at
+    ``/tmp/opencode/replay_plan_v2.json``; seal must accept it as-is.  The
+    original bytes and their hash stay unmodified and the analysis_id is
+    never rewritten.  Every other field must equal the v3
+    ``build_plan_payload`` output, so the import is a verified
+    equivalence, not a trust statement.
+    """
+
+    if plan_payload.get("analysis_id") != _V2_PLAN_ANALYSIS_ID:
+        raise HistoricalReplayError(
+            "plan file analysis_id is neither v3 nor the registered v2 "
+            f"({_V2_PLAN_ANALYSIS_ID}); refusing to import"
+        )
+    v3_plan = build_plan_payload(
+        window_start=WINDOW_START, window_end=WINDOW_END
+    )
+    left = {
+        key: value
+        for key, value in plan_payload.items()
+        if key not in _V3_PLAN_EXCLUDED_KEYS
+    }
+    right = {
+        key: value
+        for key, value in v3_plan.items()
+        if key not in _V3_PLAN_EXCLUDED_KEYS
+    }
+    if left != right:
+        differences = sorted(
+            key
+            for key in set(left) | set(right)
+            if left.get(key) != right.get(key)
+        )
+        raise HistoricalReplayError(
+            "v2 plan import refused: plan differs from the v3 plan in: "
+            + ", ".join(differences[:8])
+        )
+    return {
+        "imported_from_analysis_id": _V2_PLAN_ANALYSIS_ID,
+        "original_analysis_id": plan_payload["analysis_id"],
+        "v3_plan_sha256": _sealed_plan_digest(v3_plan),
+        "original_plan_sha256": _sealed_plan_digest(plan_payload),
+        "symbols": plan_payload["symbols"],
+        "window_start": plan_payload["window_start"],
+        "window_end": plan_payload["window_end"],
+        "estimated_requests_total": plan_payload[
+            "estimated_requests_total"
+        ],
+    }
+
+
 def _load_plan(plan_path: Path) -> dict[str, Any]:
     raw = json.loads(plan_path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise HistoricalReplayError("plan file is not an object")
     if raw.get("analysis_id") != ANALYSIS_ID:
+        if raw.get("analysis_id") == _V2_PLAN_ANALYSIS_ID:
+            return import_v2_plan(raw)
         raise HistoricalReplayError(
             "plan file analysis_id does not match the frozen replay"
         )
@@ -1611,6 +1998,7 @@ def derive_trading_days_from_benchmarks(
     dia_dates: Sequence[date],
     start: date,
     end: date,
+    local_open_no_bar_probe: Sequence[date] = (),
 ) -> dict[str, object]:
     """Derive the expected US session list returns-blind from QQQ/DIA bars.
 
@@ -1621,12 +2009,13 @@ def derive_trading_days_from_benchmarks(
     dates are excluded and reported.  Only dates matter, so the daily bars
     are fetched unadjusted.
 
-    The local-calendar cross-check reports every mismatch (both-ETF-bar on
-    a locally-closed day, and vice versa where covered) but never gates.
-    Half days are recorded where knowable; 2023 half-days are marked
-    unverified because the local calendar starts 2024-01-01.  The 09:36
-    entry and the 60-minute hold both end before 13:00, so half days do
-    not change the rule.
+    The local-calendar cross-check reports every mismatch in BOTH
+    directions - both-ETF-bar on a locally-closed day, and local-open days
+    where neither ETF has a bar (the probe covers the checked range) - but
+    never gates.  Half days are recorded where knowable; 2023 half-days
+    are marked unverified because the local calendar starts 2024-01-01.
+    The 09:36 entry and the 60-minute hold both end before 13:00, so half
+    days do not change the rule.
     """
 
     qqq = {
@@ -1651,12 +2040,29 @@ def derive_trading_days_from_benchmarks(
         for value in one_sided
     ]
     both_bar_local_closed: list[str] = []
+    local_open_no_bar: list[str] = []
     local_coverage_starts = date(2024, 1, 1)
-    for value in sessions:
+    both_bars = set(sessions)
+    probe_days = sorted(
+        {
+            value
+            for value in local_open_no_bar_probe
+            if start <= value <= end
+            and value >= local_coverage_starts
+        }
+    )
+    checked_days = sorted(both_bars | set(probe_days))
+    for value in checked_days:
         if value < local_coverage_starts:
             continue
-        if value.weekday() >= 5 or is_market_closed("US", value):
+        local_closed = (
+            value.weekday() >= 5 or is_market_closed("US", value)
+        )
+        has_both = value in both_bars
+        if local_closed and has_both:
             both_bar_local_closed.append(value.isoformat())
+        if not local_closed and not has_both:
+            local_open_no_bar.append(value.isoformat())
     half_days: dict[str, dict[str, object]] = {}
     for value in sessions:
         if value in _CONVENTIONAL_2023_EARLY_CLOSES:
@@ -1685,6 +2091,7 @@ def derive_trading_days_from_benchmarks(
         "local_calendar_cross_check": {
             "local_coverage_starts": local_coverage_starts.isoformat(),
             "both_etf_bar_local_closed": both_bar_local_closed,
+            "local_open_no_benchmark_bar": local_open_no_bar,
             "note": (
                 "the cross-check lists mismatches and never gates; "
                 "sessions before local coverage are unchecked, not assumed"
@@ -1714,6 +2121,8 @@ def _optional_provider_trading_days_cross_check(
     recorded as SKIPPED_ERROR and swallowed.
     """
 
+    if not benchmark_days:
+        return {"status": "SKIPPED_NO_BENCHMARK_DAYS", "provider_days": []}
     now = clock()
     recent_start = date(now.year - 1, now.month, now.day)
     span_start = max(recent_start, benchmark_days[0])
@@ -1800,11 +2209,22 @@ def _fetch_trading_days(
         benchmark_dates[BENCHMARK_ETFS[0]],
         benchmark_dates[BENCHMARK_ETFS[1]],
     )
+    # Every weekday in the checked range is probed so local-open days
+    # without a benchmark bar are listed (decision 2, SHOULD-FIX D).
+    probe_days: list[date] = []
+    cursor_day = max(min(window_start, warmup_start), date(2024, 1, 1))
+    while cursor_day <= window_end:
+        if cursor_day.weekday() < 5:
+            probe_days.append(cursor_day)
+        cursor_day += timedelta(days=1)
     derived = derive_trading_days_from_benchmarks(
         qqq_dates=sorted(qqq_dates),
         dia_dates=sorted(dia_dates),
-        start=window_start,
+        # Include the WARM-UP span: the sealed list must carry the session
+        # immediately before the first window session for ADV freshness.
+        start=min(window_start, warmup_start),
         end=window_end,
+        local_open_no_bar_probe=probe_days,
     )
     benchmark_days = [
         date.fromisoformat(value)
@@ -2110,6 +2530,138 @@ def run_fetch(
     }
 
 
+WARMUP_START = date(2023, 8, 1)
+WARMUP_END = date(2023, 8, 31)
+
+
+def run_fetch_calendar_warmup(
+    *,
+    cache_dir: Path,
+    provider_factory: Callable[[], ReplayQuoteProvider],
+    clock: Callable[[], datetime],
+    sleep: Callable[[float], None],
+    reason: str | None = None,
+    rate_per_second: float = DEFAULT_REQUESTS_PER_SECOND,
+    max_transient_retries: int = DEFAULT_MAX_TRANSIENT_RETRIES,
+) -> dict[str, Any]:
+    """Fetch the pre-window warm-up CALENDAR (dates only, no prices).
+
+    Decision 2 ruling, item 2: the running v2 fetch's trading-day list
+    starts at 2023-09-01 and threw the warm-up dates away, so the first
+    scoring session has no provable predecessor.  This subcommand fetches
+    QQQ/DIA DAILY bars (NoAdjust) over 2023-08-01..2023-08-31 and saves
+    the intersection DATES ONLY to ``trading_days_warmup.json``.  No
+    prices are stored or printed.  It refuses while any fetch process is
+    alive (one research QuoteContext at a time) and refuses to overwrite
+    an existing warm-up file without ``--reason``.
+    """
+
+    # Execution safety (final check): the alive-fetch and persisted
+    # global-stop refusals happen BEFORE the provider is constructed -
+    # the QuoteContext is only built once every guard has passed.
+    output_path = cache_dir / "trading_days_warmup.json"
+    if output_path.exists() and not reason:
+        raise HistoricalReplayError(
+            "fetch-calendar-warmup refused: trading_days_warmup.json "
+            "already exists; pass --reason to replace it"
+        )
+    status = _load_status(cache_dir)
+    if isinstance(status.get("global_stop"), dict):
+        raise HistoricalReplayError(
+            "fetch-calendar-warmup refused: GLOBAL STOP is active since "
+            f"{status['global_stop'].get('at')} "
+            f"({status['global_stop'].get('reason')}); manual review is "
+            "required before any further provider call"
+        )
+    live_pid = _fetch_process_alive(cache_dir)
+    if live_pid is not None:
+        raise HistoricalReplayError(
+            f"fetch-calendar-warmup refused: a fetch process is alive "
+            f"(pid {live_pid}); only one research QuoteContext at a time"
+        )
+    provider = provider_factory()
+    throttle = _Throttle(
+        rate_per_second=rate_per_second,
+        clock=clock,
+        sleep=sleep,
+    )
+    retryable = _RetryableProvider(
+        provider,
+        throttle=throttle,
+        max_transient_retries=max_transient_retries,
+    )
+    benchmark_dates: dict[str, set[date]] = {}
+    try:
+        for symbol in BENCHMARK_ETFS:
+            bars = _page_forward_daily(
+                retryable,
+                symbol=symbol,
+                # Only dates matter; no adjustment is needed.
+                adjustment="NoAdjust",
+                first_boundary=_session_open_utc(WARMUP_START)
+                - timedelta(days=2),
+                stop_boundary=_session_open_utc(WARMUP_END)
+                + timedelta(days=2),
+            )
+            benchmark_dates[symbol] = {
+                _MARKET_SESSION.local(bar.timestamp).date()
+                for bar in bars
+            }
+    except _ProviderCallFailure as exc:
+        # Reuse run_fetch's persisted global-stop handling exactly:
+        # quota/permission refusals write the persisted marker and abort
+        # with no retry.
+        if exc.error_class in (
+            ErrorClass.GLOBAL_STOP_QUOTA.value,
+            ErrorClass.GLOBAL_STOP_PERMISSION.value,
+        ):
+            status["global_stop"] = {
+                "reason": exc.error_class,
+                "detail": exc.message[:400],
+                "at": clock().isoformat(),
+            }
+            status["requests_total"] = (
+                status.get("requests_total", 0)
+                + throttle.total_requests
+            )
+            _save_status(cache_dir, status)
+            raise HistoricalReplayError(
+                f"GLOBAL STOP ({exc.error_class}); no retry: {exc.message}"
+            ) from exc
+        raise
+    qqq_dates, dia_dates = (
+        benchmark_dates[BENCHMARK_ETFS[0]],
+        benchmark_dates[BENCHMARK_ETFS[1]],
+    )
+    derived = derive_trading_days_from_benchmarks(
+        qqq_dates=sorted(qqq_dates),
+        dia_dates=sorted(dia_dates),
+        start=WARMUP_START,
+        end=WARMUP_END,
+    )
+    payload: dict[str, Any] = {
+        "source": (
+            "benchmark daily-bar intersection (QQQ.US ∩ DIA.US, DAY bars, "
+            "NoAdjust; dates only) - warm-up calendar, decision 2 item 2"
+        ),
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "warmup_start": WARMUP_START.isoformat(),
+        "warmup_end": WARMUP_END.isoformat(),
+        "request_count": throttle.total_requests,
+        "reason": reason,
+        "trading_days": derived["trading_days"],
+        "one_sided_dates": derived["one_sided_dates"],
+    }
+    _atomic_write_json(output_path, payload)
+    return {
+        "warmup_days": len(payload["trading_days"]),
+        "one_sided_dates": len(payload["one_sided_dates"]),
+        "request_count": payload["request_count"],
+        "path": str(output_path),
+        "sha256": _file_sha256(output_path),
+    }
+
+
 class _LongportQuoteProvider:
     """QuoteContext-only adapter (env credentials; never TradeContext)."""
 
@@ -2296,62 +2848,578 @@ def build_plan_payload(*, window_start: date, window_end: date) -> dict[str, Any
 # ------------------------------------------------------------------- seal
 
 
-def run_seal(cache_dir: Path) -> str:
-    """Seal the input manifest (files, trading days, universe) and hash it."""
+_TERMINAL_KIND_STATES = frozenset({"COMPLETE", "PERMANENT_FAILURE"})
+
+
+def _proc_cmdline(pid_path: Path) -> list[str]:
+    """Read a /proc cmdline file; empty list when it cannot be read."""
+
+    try:
+        return pid_path.read_bytes().decode("utf-8", "replace").split("\0")
+    except OSError:
+        return []
+
+
+def _fetch_process_alive(cache_dir: Path) -> int | None:
+    """Return the pid of a live fetch process for this replay, if any.
+
+    The currently running v2 fetch predates the lock-file guard, so
+    liveness is detected by scanning ``/proc`` for a process whose command
+    line runs this module with the ``fetch`` subcommand.  The scan is
+    best-effort and conservative: a pid whose cmdline cannot be read is
+    ignored, and the current process is excluded.
+    """
+
+    self_pid = os.getpid()
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid == self_pid:
+            continue
+        argv = _proc_cmdline(entry / "cmdline")
+        if not argv:
+            continue
+        runs_module = any(
+            "opening_momentum_historical_replay" in part for part in argv
+        )
+        if runs_module and "fetch" in argv:
+            return pid
+    # A lock file is the forward-looking mechanism for future runs.
+    lock_path = cache_dir / "fetch.lock"
+    if lock_path.exists():
+        raw = json.loads(lock_path.read_text(encoding="utf-8"))
+        pid = int(raw.get("pid", 0))
+        if pid > 0 and Path(f"/proc/{pid}").exists():
+            return pid
+    return None
+
+
+def _cache_preflight(
+    cache_dir: Path,
+    *,
+    plan_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Shared preflight for seal and evaluate (decision 2, MUST-FIX 1).
+
+    Requires that every plan symbol has a TERMINAL state for both data
+    kinds (COMPLETE, or a PERMANENT_FAILURE backed by recorded error
+    evidence), that every COMPLETE entry's file exists, and that no fetch
+    process is alive.  Binds the plan: the plan payload is stored with the
+    cache and its hash is returned for sealing.
+    """
 
     trading_days_path = cache_dir / "trading_days.json"
     if not trading_days_path.exists():
         raise HistoricalReplayError(
-            "seal refused: trading_days.json is missing (run fetch first)"
+            "preflight refused: trading_days.json is missing (run fetch "
+            "first)"
         )
+    plan_path = cache_dir / "plan.json"
+    original_plan_path = cache_dir / "plan_original.json"
+    bound_plan: dict[str, Any]
+    original_plan: dict[str, Any] | None = None
+    imported_view: dict[str, Any] | None = None
+    if plan_payload is None:
+        if not plan_path.exists():
+            raise HistoricalReplayError(
+                "preflight refused: no plan payload supplied and no "
+                "stored plan.json exists; seal must receive the plan the "
+                "fetch ran"
+            )
+        bound_plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        if original_plan_path.exists():
+            original_plan = json.loads(
+                original_plan_path.read_text(encoding="utf-8")
+            )
+            imported_view = bound_plan
+    else:
+        # The ORIGINAL plan bytes are preserved verbatim (a v2 plan is
+        # imported, never rewritten); the working copy is the imported or
+        # native view.
+        original_plan = plan_payload
+        if plan_payload.get("analysis_id") != ANALYSIS_ID:
+            imported_view = import_v2_plan(plan_payload)
+            bound_plan = dict(imported_view)
+            bound_plan["analysis_id"] = ANALYSIS_ID
+        else:
+            bound_plan = plan_payload
+        _atomic_write_bytes(original_plan_path, _canonical_json_bytes(plan_payload))
+        _atomic_write_json(plan_path, bound_plan)
+
     status = _load_status(cache_dir)
     if isinstance(status.get("global_stop"), dict):
         raise HistoricalReplayError(
-            "seal refused: a GLOBAL STOP marker is active"
+            "preflight refused: a GLOBAL STOP marker is active"
         )
+    plan_symbols = {
+        str(entry["symbol"]) for entry in bound_plan["symbols"]
+    }
+    stored: dict[str, Any] = status.get("symbols", {})
+
+    non_terminal: list[str] = []
+    missing_files: list[str] = []
+    permanent_without_evidence: list[str] = []
+    for symbol in sorted(plan_symbols):
+        entry = stored.get(symbol)
+        if entry is None:
+            non_terminal.append(f"{symbol}:MISSING_STATE")
+            continue
+        for kind in ("daily", "minute"):
+            kind_state = entry.get(kind, {})
+            state = kind_state.get("state")
+            if state == "COMPLETE":
+                path = cache_dir / kind / f"{symbol}.json.gz"
+                if not path.exists():
+                    missing_files.append(f"{symbol}:{kind}")
+            elif state == "PERMANENT_FAILURE":
+                if not kind_state.get("error"):
+                    permanent_without_evidence.append(
+                        f"{symbol}:{kind}"
+                    )
+            elif state in ("PENDING", "FAILED_TRANSIENT") or state is None:
+                non_terminal.append(f"{symbol}:{kind}:{state or 'PENDING'}")
+            else:
+                non_terminal.append(f"{symbol}:{kind}:{state}")
+    if non_terminal:
+        raise HistoricalReplayError(
+            "preflight refused: fetch is not terminal for: "
+            + ", ".join(non_terminal[:10])
+            + ("; a live fetch or an unfinished plan may not be sealed" )
+        )
+    if missing_files:
+        raise HistoricalReplayError(
+            "preflight refused: COMPLETE state but file missing: "
+            + ", ".join(missing_files[:10])
+        )
+    if permanent_without_evidence:
+        raise HistoricalReplayError(
+            "preflight refused: PERMANENT_FAILURE without recorded "
+            "error evidence: " + ", ".join(permanent_without_evidence[:10])
+        )
+    live_pid = _fetch_process_alive(cache_dir)
+    if live_pid is not None:
+        raise HistoricalReplayError(
+            f"preflight refused: a fetch process is alive (pid {live_pid});"
+            " seal/evaluate must wait for it to finish"
+        )
+    # Warm-up calendar (decision 2 ruling, item 2): the ORIGINAL
+    # trading_days.json starts at 2023-09-01, so the first scoring
+    # session's predecessor must come from the sealed warm-up file.  A
+    # missing or insufficient warm-up is a CONFIGURATION error refused
+    # here - before any attempt is STARTED.
+    warmup_path = cache_dir / "trading_days_warmup.json"
+    if not warmup_path.exists():
+        raise HistoricalReplayError(
+            "preflight refused: trading_days_warmup.json is missing "
+            "(run fetch-calendar-warmup); the first scoring session has "
+            "no provable predecessor without it"
+        )
+    warmup_payload = json.loads(warmup_path.read_text(encoding="utf-8"))
+    warmup_days = sorted(
+        date.fromisoformat(str(value))
+        for value in warmup_payload.get("trading_days", [])
+    )
+    trading_payload = json.loads(
+        (cache_dir / "trading_days.json").read_text(encoding="utf-8")
+    )
+    window_days = sorted(
+        date.fromisoformat(str(value))
+        for value in trading_payload.get("trading_days", [])
+        if WINDOW_START <= date.fromisoformat(str(value)) <= WINDOW_END
+    )
+    if window_days:
+        first_scoring = window_days[0]
+        # Final check, item 5: the warm-up evidence must prove the
+        # REGISTERED predecessor of the first scoring session and cover
+        # every sealed session the first day's 21-session ADV window
+        # needs.  For the registered window (first scoring 2023-09-01)
+        # that is exactly 2023-08-03..2023-08-31 - 21 NYSE sessions.
+        raw_warmup_list = [
+            str(value) for value in warmup_payload.get("trading_days", [])
+        ]
+        if len(set(raw_warmup_list)) != len(raw_warmup_list):
+            raise HistoricalReplayError(
+                "preflight refused: the warm-up calendar contains "
+                "duplicate dates"
+            )
+        if warmup_days and max(warmup_days) >= first_scoring:
+            raise HistoricalReplayError(
+                "preflight refused: the warm-up calendar must end "
+                "strictly before the first scoring date "
+                f"({first_scoring.isoformat()})"
+            )
+        # The REGISTERED window's first scoring day is 2023-09-01: its
+        # proof obligations are exact - the predecessor 2023-08-31 and
+        # the full 21-session window 2023-08-03..2023-08-31.
+        if first_scoring == WINDOW_START:
+            out_of_range = [
+                value
+                for value in warmup_days
+                if not WARMUP_START <= value <= WARMUP_END
+            ]
+            if out_of_range:
+                raise HistoricalReplayError(
+                    "preflight refused: warm-up dates outside the "
+                    "registered warm-up range "
+                    f"({WARMUP_START.isoformat()}.."
+                    f"{WARMUP_END.isoformat()}): "
+                    + ", ".join(
+                        value.isoformat()
+                        for value in out_of_range[:5]
+                    )
+                )
+            if max(warmup_days) != WARMUP_END:
+                raise HistoricalReplayError(
+                    "preflight refused: the registered predecessor of "
+                    f"{first_scoring.isoformat()} is "
+                    f"{WARMUP_END.isoformat()}, but the latest warm-up "
+                    f"day is {max(warmup_days).isoformat()}"
+                )
+            warmup_set = set(warmup_days)
+            required_sessions = _last_n_sealed_sessions_before(
+                sorted(warmup_days), first_scoring, MIN_COMPLETED_BARS
+            )
+            missing_required = [
+                value
+                for value in required_sessions
+                if value not in warmup_set
+            ]
+            if len(warmup_days) < MIN_COMPLETED_BARS or missing_required:
+                raise HistoricalReplayError(
+                    "preflight refused: the warm-up calendar does not "
+                    "cover the 21-session ADV window required by the "
+                    f"first scoring day ({first_scoring.isoformat()} "
+                    f"needs {WARMUP_START.isoformat()}.."
+                    f"{WARMUP_END.isoformat()}): got "
+                    f"{len(warmup_days)} days"
+                    + (
+                        ", missing "
+                        + ", ".join(
+                            value.isoformat()
+                            for value in missing_required[:5]
+                        )
+                        if missing_required
+                        else ""
+                    )
+                )
+        else:
+            # A synthetic/other first scoring day: the sealed calendar
+            # (warm-up + window days) must still cover the 21 sessions
+            # the first scoring day's ADV window needs; every session
+            # OTHER than the window days themselves must come from the
+            # warm-up file.
+            required_sessions = _last_n_sealed_sessions_before(
+                sorted([*warmup_days, *window_days]),
+                first_scoring,
+                MIN_COMPLETED_BARS,
+            )
+            window_set = set(window_days)
+            missing_required = [
+                value
+                for value in required_sessions
+                if value not in window_set and value not in set(warmup_days)
+            ]
+            if missing_required:
+                raise HistoricalReplayError(
+                    "preflight refused: the warm-up calendar is missing "
+                    "required sessions for the first scoring day's ADV "
+                    f"window ({first_scoring.isoformat()}): missing "
+                    + ", ".join(
+                        value.isoformat() for value in missing_required[:5]
+                    )
+                )
+    # Extra symbols on disk that the plan does not declare are recorded,
+    # not fatal here (seal decides whether to include them).
+    return {
+        "status": status,
+        "plan_payload": bound_plan,
+        "original_plan": original_plan,
+        "imported_view": imported_view,
+        "plan_path": plan_path,
+        "warmup_payload": warmup_payload,
+        "warmup_days": warmup_days,
+    }
+
+
+def _sealed_plan_digest(plan_payload: dict[str, Any]) -> str:
+    rendered = json.dumps(
+        plan_payload, ensure_ascii=True, sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def _source_manifest_hashes() -> dict[str, str]:
+    """Bind the membership JSON, both catalogs and both source manifests."""
+
+    repo = _repo_root()
+    paths = {
+        "membership_history_sha256": (
+            repo
+            / "backend"
+            / "app"
+            / "domain"
+            / "universe_selection"
+            / "data"
+            / "index_membership_history.json"
+        ),
+        "forward_manifest_sha256": (
+            repo / "backend" / "app" / "domain"
+            / "OPENING_MOMENTUM_PREREGISTRATION.md"
+        ),
+        "replay_manifest_sha256": (
+            repo / "backend" / "app" / "domain"
+            / "OPENING_MOMENTUM_HISTORICAL_REPLAY.md"
+        ),
+    }
+    catalog_payload = [
+        {
+            "symbol": candidate.symbol,
+            "alias": candidate.alias,
+            "sector": candidate.sector,
+            "memberships": list(candidate.memberships),
+        }
+        for candidate in (
+            *INDEX_CANDIDATE_CATALOG,
+            *HISTORICAL_INDEX_CANDIDATE_CATALOG,
+        )
+    ]
+    hashes = {
+        key: _file_sha256(path)
+        for key, path in paths.items()
+        if path.exists()
+    }
+    for key, path in paths.items():
+        if not path.exists():
+            raise HistoricalReplayError(
+                f"seal refused: bound source is missing: {key} ({path})"
+            )
+    hashes["catalog_sha256"] = hashlib.sha256(
+        json.dumps(
+            [
+                item
+                for item in catalog_payload
+                if item["symbol"] in {
+                    candidate.symbol
+                    for candidate in INDEX_CANDIDATE_CATALOG
+                }
+            ],
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    hashes["historical_catalog_sha256"] = hashlib.sha256(
+        json.dumps(
+            [
+                item
+                for item in catalog_payload
+                if item["symbol"] in {
+                    candidate.symbol
+                    for candidate in HISTORICAL_INDEX_CANDIDATE_CATALOG
+                }
+            ],
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return hashes
+
+
+def run_seal(
+    cache_dir: Path,
+    *,
+    plan_payload: dict[str, Any] | None = None,
+    reseal_reason: str | None = None,
+) -> str:
+    """Seal a CLOSED input set (decision 2, MUST-FIX 5).
+
+    - requires the shared preflight (terminal fetch, plan bound);
+    - records per-file sha256 checksums AT SEAL TIME (the running fetch
+      records state hashes in status.json, but the seal is the authority:
+      it recomputes and freezes them);
+    - records permanent absences explicitly;
+    - seals the window-end membership set for gate (b);
+    - binds the plan, membership JSON, both catalogs and both source
+      manifests;
+    - validates calendar date uniqueness, universe/plan coverage and file
+      metadata (symbol, period, adjustment);
+    - writes a seal receipt that cannot be silently overwritten: a re-seal
+      requires a reason and preserves the previous receipt.
+    """
+
+    receipt_path = cache_dir / "seal_receipt.json"
+    if receipt_path.exists() and not reseal_reason:
+        raise HistoricalReplayError(
+            "seal refused: a seal receipt already exists; pass a "
+            "reseal reason (the previous receipt is preserved)"
+        )
+    if receipt_path.exists() and reseal_reason:
+        receipts_dir = cache_dir / "seal_receipts"
+        receipts_dir.mkdir(parents=True, exist_ok=True)
+        previous = json.loads(receipt_path.read_text(encoding="utf-8"))
+        index = 1
+        while (receipts_dir / f"seal-{index}.json").exists():
+            index += 1
+        _atomic_write_json(
+            receipts_dir / f"seal-{index}.json", previous
+        )
+
+    preflight = _cache_preflight(cache_dir, plan_payload=plan_payload)
+    status = preflight["status"]
+    bound_plan: dict[str, Any] = preflight["plan_payload"]
+
+    trading_payload = json.loads(
+        (cache_dir / "trading_days.json").read_text(encoding="utf-8")
+    )
+    raw_days = trading_payload["trading_days"]
+    sealed_days = sorted(
+        date.fromisoformat(value)
+        for value in raw_days
+        if WINDOW_START <= date.fromisoformat(value) <= WINDOW_END
+    )
+    if len(set(raw_days)) != len(raw_days):
+        raise HistoricalReplayError(
+            "seal refused: trading-day list contains duplicate dates"
+        )
+
+    plan_symbols = {
+        str(entry["symbol"]): entry for entry in bound_plan["symbols"]
+    }
+    stored: dict[str, Any] = status.get("symbols", {})
+
     files: list[dict[str, object]] = []
+    permanent_absences: dict[str, dict[str, object]] = {}
+    included_symbols: set[str] = set()
     for path in sorted(cache_dir.rglob("*.json.gz")):
         relative = path.relative_to(cache_dir).as_posix()
+        kind, _, filename = relative.partition("/")
+        symbol = filename.removesuffix(".json.gz")
+        if symbol not in plan_symbols:
+            raise HistoricalReplayError(
+                f"seal refused: unsealed file {relative} is not in the "
+                "bound plan"
+            )
+        raw = _read_gzip_json(path)
+        if (
+            raw.get("symbol") != symbol
+            or raw.get("period") != ("DAY" if kind == "daily" else "MIN_1")
+            or raw.get("adjustment")
+            != ("ForwardAdjust" if kind == "daily" else "NoAdjust")
+        ):
+            raise HistoricalReplayError(
+                f"seal refused: file metadata mismatch for {relative}"
+            )
         files.append(
             {
                 "path": relative,
+                "kind": kind,
+                "symbol": symbol,
                 "sha256": _file_sha256(path),
                 "bytes": path.stat().st_size,
             }
         )
-    trading_payload = json.loads(
-        trading_days_path.read_text(encoding="utf-8")
-    )
-    sealed_days = sorted(
-        date.fromisoformat(value)
-        for value in trading_payload["trading_days"]
-        if WINDOW_START
-        <= date.fromisoformat(value)
-        <= WINDOW_END
-    )
+        included_symbols.add(symbol)
+    for symbol, entry in sorted(stored.items()):
+        if symbol not in plan_symbols:
+            continue
+        if (
+            entry.get("minute", {}).get("state")
+            == "PERMANENT_FAILURE"
+        ):
+            permanent_absences[symbol] = {
+                "state": "PERMANENT_FAILURE",
+                "evidence": entry["minute"].get("error", ""),
+                "daily_evidence": entry.get("daily", {}).get("error", ""),
+            }
+
+    # The universe must cover the plan: every plan symbol's session span
+    # must appear in the sealed day list.
+    for symbol, entry in plan_symbols.items():
+        first = date.fromisoformat(str(entry["first_session"]))
+        last = date.fromisoformat(str(entry["last_session"]))
+        in_range = [value for value in sealed_days if first <= value <= last]
+        if not in_range:
+            raise HistoricalReplayError(
+                f"seal refused: plan symbol {symbol} has no sealed "
+                "sessions in its declared span"
+            )
+
     universe: dict[str, list[str]] = {}
     member_days_total = 0
     for session_date in sealed_days:
         members = sorted(pit_universe_for_session(session_date))
         universe[session_date.isoformat()] = members
         member_days_total += len(members)
+    window_end_membership = {
+        symbol: INDEX_MEMBERSHIP_HISTORY.is_active(candidate, WINDOW_END)
+        for symbol, candidate in {
+            candidate.symbol: candidate
+            for candidate in (
+                *INDEX_CANDIDATE_CATALOG,
+                *HISTORICAL_INDEX_CANDIDATE_CATALOG,
+            )
+        }.items()
+    }
+
+    original_plan = preflight.get("original_plan")
+    imported_view = preflight.get("imported_view")
+    warmup_payload = preflight["warmup_payload"]
     manifest: dict[str, object] = {
         "analysis_id": ANALYSIS_ID,
         "created_at": datetime.now(timezone.utc).isoformat(),
+        "reseal_reason": reseal_reason,
         "window": {
             "start": WINDOW_START.isoformat(),
             "end": WINDOW_END.isoformat(),
         },
+        "plan": {
+            "sha256": _sealed_plan_digest(bound_plan),
+            "symbols": bound_plan["symbols"],
+            "window_start": bound_plan["window_start"],
+            "window_end": bound_plan["window_end"],
+            "original_sha256": (
+                _sealed_plan_digest(original_plan)
+                if original_plan is not None
+                else None
+            ),
+            "original_analysis_id": (
+                original_plan.get("analysis_id")
+                if original_plan is not None
+                else None
+            ),
+            "v2_import": imported_view is not None,
+        },
+        **_source_manifest_hashes(),
+        "trading_days_sha256": _file_sha256(
+            cache_dir / "trading_days.json"
+        ),
+        "trading_days_warmup": warmup_payload,
+        "trading_days_warmup_sha256": _file_sha256(
+            cache_dir / "trading_days_warmup.json"
+        ),
         "files": files,
+        "permanent_absences": permanent_absences,
         "trading_days": trading_payload,
         "universe": universe,
+        "window_end_membership": window_end_membership,
         "member_days_total": member_days_total,
         "fetch_status_snapshot": status,
         "calendar_cross_check": cross_check_trading_days(sealed_days),
     }
     manifest_path = cache_dir / "manifest.json"
     _atomic_write_json(manifest_path, manifest)
-    return _file_sha256(manifest_path)
+    manifest_sha256 = _file_sha256(manifest_path)
+    receipt = {
+        "sealed_at": datetime.now(timezone.utc).isoformat(),
+        "manifest_sha256": manifest_sha256,
+        "files": len(files),
+        "reseal_reason": reseal_reason,
+    }
+    _atomic_write_json(receipt_path, receipt)
+    return manifest_sha256
 
 
 # --------------------------------------------------------------- evaluate
@@ -2375,15 +3443,530 @@ def _git_head() -> str | None:
     return completed.stdout.strip()
 
 
-def _member_has_decision_inputs(
-    bars: dict[datetime, Any],
+def _raw_bars_valid_ohlc(raw_row: Sequence[object]) -> bool:
+    """Validate RAW OHLC (decision 2, SHOULD-FIX B): low <= min(open,
+    close) <= max(open, close) <= high, all finite and > 0."""
+
+    try:
+        open_price = float(cast(float, raw_row[1]))
+        high = float(cast(float, raw_row[2]))
+        low = float(cast(float, raw_row[3]))
+        close = float(cast(float, raw_row[4]))
+    except (TypeError, ValueError, IndexError):
+        return False
+    values = (open_price, high, low, close)
+    if any(not math.isfinite(value) or value <= 0 for value in values):
+        return False
+    return (
+        low <= min(open_price, close)
+        and max(open_price, close) <= high
+    )
+
+
+_MEMBER_DAY_FACT_FIELDS = (
+    "adv_kind",
+    "adv_reason",
+    "minute_fetch_state",
+    "has_any_minute_bar",
+    "signal_bars_complete",
+    "first_five_turnover_sum",
+    "raw_ohlc_invalid_offsets",
+    "stop_path_ohlc_invalid",
+)
+
+
+@dataclass(frozen=True)
+class MemberDayFacts:
+    """Per-(member, session) facts - decision 2 ruling core principle.
+
+    Decision eligibility, data presence and auditability are THREE
+    independent dimensions; no single status may decide them all.  These
+    facts are recorded, and classification happens in the pure helper
+    ``assemble_member_day_audit``.
+    """
+
+    symbol: str
+    session_date: date
+    adv_kind: str  # ELIGIBLE / KNOWN_INELIGIBLE / UNVERIFIABLE / PERMANENT_GAP
+    adv_reason: str | None
+    minute_fetch_state: str  # COMPLETE / PERMANENT_FAILURE / ...
+    has_any_minute_bar: bool  # any raw bar in the retained window that day
+    signal_bars_complete: bool  # all of 09:30..09:36 present
+    first_five_turnover_sum: float | None  # None => a None turnover inside
+    raw_ohlc_invalid_offsets: tuple[int, ...]  # offsets with invalid raw OHLC
+    stop_path_ohlc_invalid: bool  # invalid raw OHLC on the stop path
+
+
+# Gate (b) counts EXACTLY two facts (decision 2 ruling, item 3):
+# - NO_MINUTE_DATA: minute fetch COMPLETE but not one raw bar anywhere in
+#   the retained window 09:30..10:40 ET for that session (this is NOT a
+#   claim that the stock did not trade all day);
+# - PERMANENT_PROVIDER_GAP.
+# Everything else (missing individual bars, missing turnover, invalid
+# OHLC, KNOWN_INELIGIBLE, UNVERIFIABLE ADV) is recorded separately and is
+# NOT counted in gate (b).
+GATE_B_MISSING_KINDS: frozenset[str] = frozenset(
+    {"NO_MINUTE_DATA", "PERMANENT_PROVIDER_GAP"}
+)
+
+
+@dataclass(frozen=True)
+class MemberDayAudit:
+    """Derived per-member-day classification plus session-level inputs."""
+
+    symbol: str
+    session_date: date
+    adv_kind: str  # carried through: only UNVERIFIABLE blocks auditability
+    gate_b_missing: bool
+    gate_b_kind: str | None
+    pool: bool  # member is in the decision pool (ELIGIBLE)
+    coverage_only: bool  # UNVERIFIABLE / PERMANENT_GAP member
+    integrity_issues: tuple[str, ...]
+
+
+def assemble_member_day_audit(facts: MemberDayFacts) -> MemberDayAudit:
+    """Pure classification of one member-day into the three dimensions.
+
+    Gate (b) (narrowed), pool membership (ELIGIBLE only) and coverage-only
+    membership (UNVERIFIABLE / PERMANENT_GAP) are derived here so the
+    rules are unit-testable without any I/O.  ``adv_kind`` is carried on
+    the audit: gate (a) treats PERMANENT_GAP and UNVERIFIABLE
+    differently (only the latter blocks auditability).
+    """
+
+    issues: list[str] = []
+    gate_b_kind: str | None = None
+    if facts.adv_kind == "PERMANENT_GAP":
+        gate_b_kind = "PERMANENT_PROVIDER_GAP"
+    elif (
+        facts.minute_fetch_state == "COMPLETE"
+        and not facts.has_any_minute_bar
+    ):
+        gate_b_kind = "NO_MINUTE_DATA"
+    if gate_b_kind is None and facts.adv_kind == "UNVERIFIABLE":
+        issues.append(
+            f"ADV_UNVERIFIABLE:{facts.adv_reason or 'UNKNOWN'}"
+        )
+    if not facts.signal_bars_complete:
+        issues.append("SIGNAL_BARS_MISSING")
+    if facts.first_five_turnover_sum is None:
+        issues.append("FIRST_FIVE_TURNOVER_MISSING")
+    if facts.raw_ohlc_invalid_offsets:
+        rendered = ",".join(str(o) for o in facts.raw_ohlc_invalid_offsets)
+        issues.append(f"INVALID_RAW_OHLC@{rendered}")
+    if facts.stop_path_ohlc_invalid:
+        issues.append("STOP_PATH_RAW_OHLC_INVALID")
+    return MemberDayAudit(
+        symbol=facts.symbol,
+        session_date=facts.session_date,
+        adv_kind=facts.adv_kind,
+        gate_b_missing=gate_b_kind is not None,
+        gate_b_kind=gate_b_kind,
+        pool=facts.adv_kind == "ELIGIBLE",
+        coverage_only=facts.adv_kind
+        in ("UNVERIFIABLE", "PERMANENT_GAP"),
+        integrity_issues=tuple(issues),
+    )
+
+
+def session_is_auditable(
+    *,
+    member_audits: Sequence[MemberDayAudit],
+    decision_reason: str | None,
+    decision_status: str,
+    exit_proven: bool | None,
+) -> bool:
+    """Gate (a): can this session's decision be audited from sealed evidence?
+
+    Decision 2 ruling, item 4 (+ final check, item 1): a session is
+    auditable when membership and ADV eligibility are determinable for
+    every member - i.e. no member is UNVERIFIABLE (PERMANENT_GAP never
+    blocks auditability; it is counted by gate (b) instead) - and the
+    frozen rule reproduces a unique OPEN or SKIP with its reason.
+    Confirmed missing bars/turnovers are auditable inputs (they
+    legitimately reproduce DATA_INCOMPLETE or ENTRY_BAR_MISSING).  An
+    OPEN session also needs a provable exit path.  Invalid raw OHLC on
+    any decision member's decision-window bar makes the session
+    non-auditable; a selected trade whose raw stop path is invalid is
+    unresolved (gate (c)) and is never recorded CLOSED.
+    """
+
+    if any(audit.adv_kind == "UNVERIFIABLE" for audit in member_audits):
+        return False
+    if decision_reason is None:
+        return False
+    if decision_status == "OPEN":
+        return exit_proven is True
+    return decision_status == "SKIPPED"
+
+
+def _collect_member_day_facts(
+    *,
+    symbol: str,
+    session_date: date,
+    session_open: datetime,
+    raw_minute_rows: Sequence[Sequence[object]] | None,
+    minute_fetch_state: str,
+    adv_classification: SessionAdvClassification,
+) -> MemberDayFacts:
+    """Gather raw facts for one member-day (no classification).
+
+    The stop-path OHLC fact is deliberately NOT computed here: whether a
+    member's stop path matters depends on the SELECTION, which happens
+    after these facts are gathered.  The caller computes it explicitly
+    for the selected member and merges it into the audit (final check,
+    item 2a).
+    """
+
+    rows = list(raw_minute_rows or [])
+    by_offset: dict[int, Sequence[object]] = {}
+    for row in rows:
+        timestamp = datetime.fromisoformat(str(row[0]))
+        offset = int(
+            (timestamp - session_open).total_seconds() // 60
+        )
+        by_offset[offset] = row
+    expected_offsets = list(range(ENTRY_OFFSET + 1))
+    signal_bars_complete = all(
+        offset in by_offset for offset in expected_offsets
+    )
+    invalid: list[int] = []
+    for offset in expected_offsets:
+        row = by_offset.get(offset)
+        if row is not None and not _raw_bars_valid_ohlc(row):
+            invalid.append(offset)
+    # First-five turnover: live accepts a zero minute and requires no
+    # None with a finite-positive SUM (service ``_signal_turnover``).
+    first_five_rows = [
+        by_offset[offset]
+        for offset in range(SIGNAL_MINUTES)
+        if offset in by_offset
+    ]
+    turnover_sum: float | None = None
+    if len(first_five_rows) == SIGNAL_MINUTES:
+        values: list[float] = []
+        ok = True
+        for row in first_five_rows:
+            turnover = row[6] if len(row) > 6 else None
+            if turnover is None:
+                ok = False
+                break
+            values.append(float(cast(float, turnover)))
+        if ok:
+            total = math.fsum(values)
+            turnover_sum = (
+                total if math.isfinite(total) and total > 0 else None
+            )
+    return MemberDayFacts(
+        symbol=symbol,
+        session_date=session_date,
+        adv_kind=adv_classification.kind,
+        adv_reason=adv_classification.reason,
+        minute_fetch_state=minute_fetch_state,
+        has_any_minute_bar=bool(rows),
+        signal_bars_complete=signal_bars_complete,
+        first_five_turnover_sum=turnover_sum,
+        raw_ohlc_invalid_offsets=tuple(invalid),
+        stop_path_ohlc_invalid=False,  # merged later for the SELECTED member
+    )
+
+
+def raw_stop_path_is_valid(
+    raw_minute_rows: Sequence[Sequence[object]] | None,
     *,
     session_open: datetime,
 ) -> bool:
-    for offset in range(ENTRY_OFFSET + 1):
-        if session_open + timedelta(minutes=offset) not in bars:
+    """Validate the RAW stop path: every minute from entry through the
+    exit bar (offsets ENTRY_OFFSET..EXIT_OFFSET inclusive) that is
+    present must have valid raw OHLC, and none may be missing.
+
+    A repaired low is not raw evidence: an invalid raw stop path makes
+    the trade UNRESOLVED (final check, item 2).
+    """
+
+    by_offset: dict[int, Sequence[object]] = {}
+    for row in raw_minute_rows or []:
+        timestamp = datetime.fromisoformat(str(row[0]))
+        offset = int(
+            (timestamp - session_open).total_seconds() // 60
+        )
+        by_offset[offset] = row
+    for offset in range(ENTRY_OFFSET, EXIT_OFFSET + 1):
+        row = by_offset.get(offset)
+        if row is None or not _raw_bars_valid_ohlc(row):
             return False
     return True
+
+
+def _attempt_receipt_path(cache_dir: Path) -> Path:
+    return cache_dir / "attempt.json"
+
+
+def _write_attempt_receipt(
+    cache_dir: Path,
+    receipt: dict[str, Any],
+) -> None:
+    _atomic_write_json(_attempt_receipt_path(cache_dir), receipt)
+
+
+def _load_attempt_receipt(cache_dir: Path) -> dict[str, Any] | None:
+    path = _attempt_receipt_path(cache_dir)
+    if not path.exists():
+        return None
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise HistoricalReplayError("attempt.json is not an object")
+    return raw
+
+
+def _verify_sealed_file(
+    cache_dir: Path,
+    entry: dict[str, object],
+) -> None:
+    path = cache_dir / str(entry["path"])
+    if not path.exists():
+        raise HistoricalReplayError(
+            f"evaluate refused: sealed file missing: {entry['path']}"
+        )
+    if _file_sha256(path) != str(entry["sha256"]):
+        raise HistoricalReplayError(
+            f"evaluate refused: sealed inputs drifted after seal: "
+            f"{entry['path']}"
+        )
+
+
+def _compute_descriptives_window(
+    trades: Sequence[tuple[date, float]],
+    *,
+    window_start: date,
+    window_end: date,
+) -> dict[str, object]:
+    """Descriptives by the REGISTERED window, including zero-trade months
+    and window-derived partial periods."""
+
+    ordered = sorted(trades, key=lambda item: item[0])
+    by_month: dict[tuple[int, int], list[float]] = {}
+    by_half: dict[tuple[int, int], list[float]] = {}
+    for session_date, value in ordered:
+        by_month.setdefault(
+            (session_date.year, session_date.month), []
+        ).append(value)
+        half = 1 if session_date.month <= 6 else 2
+        by_half.setdefault((session_date.year, half), []).append(value)
+
+    # Every calendar month touched by the window, including zero-trade
+    # months.
+    months: list[tuple[int, int]] = []
+    year, month = window_start.year, window_start.month
+    while (year, month) <= (window_end.year, window_end.month):
+        months.append((year, month))
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
+    for year_month in months:
+        by_month.setdefault(year_month, [])
+    halves: list[tuple[int, int]] = []
+    for year_month in months:
+        half = 1 if year_month[1] <= 6 else 2
+        if (year_month[0], half) not in halves:
+            halves.append((year_month[0], half))
+
+    monthly = [
+        {
+            "month": f"{year:04d}-{month:02d}",
+            "trades": len(by_month.get((year, month), [])),
+            "equal_notional_net_bps_sum": math.fsum(
+                by_month.get((year, month), [])
+            ),
+        }
+        for (year, month) in sorted(by_month)
+    ]
+    first_half, last_half = min(halves), max(halves)
+    del first_half, last_half
+
+    def _half_is_partial(year: int, half: int) -> bool:
+        first_month = 1 if half == 1 else 7
+        last_month = 6 if half == 1 else 12
+        half_start = date(year, first_month, 1)
+        half_end = date(year, last_month, 28)
+        return not (
+            window_start <= half_start and half_end <= window_end
+        )
+
+    half_yearly = [
+        {
+            "half": f"{year}-H{half}",
+            "partial": _half_is_partial(year, half),
+            "trades": len(by_half.get((year, half), [])),
+            "equal_notional_net_bps_sum": math.fsum(
+                by_half.get((year, half), [])
+            ),
+        }
+        for (year, half) in sorted(set(halves))
+    ]
+    equity = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    for _, value in ordered:
+        equity += value
+        peak = max(peak, equity)
+        max_drawdown = max(max_drawdown, peak - equity)
+    values_sorted = sorted((value for _, value in ordered), reverse=True)
+    positives = [value for value in values_sorted if value > 0]
+    positive_total = math.fsum(positives)
+    return {
+        "descriptive_only": True,
+        "never_gating": True,
+        "calendar_half_years": half_yearly,
+        "monthly_trade_counts": {
+            item["month"]: item["trades"] for item in monthly
+        },
+        "monthly_equal_notional_sums": {
+            item["month"]: item["equal_notional_net_bps_sum"]
+            for item in monthly
+        },
+        "worst_month_bps": (
+            min(
+                (
+                    item["equal_notional_net_bps_sum"]
+                    for item in monthly
+                    if item["trades"] > 0
+                ),
+                default=None,
+            )
+        ),
+        "max_drawdown_equal_notional_bps": max_drawdown,
+        "return_concentration": {
+            "best_trade_share_of_positive_total": (
+                positives[0] / positive_total
+                if positive_total > 0 and positives
+                else None
+            ),
+            "best_three_share_of_positive_total": (
+                math.fsum(positives[:3]) / positive_total
+                if positive_total > 0 and positives
+                else None
+            ),
+        },
+        "statement": (
+            "a positive per-trade mean is not stable monthly profit; "
+            "descriptive slices may never be used to drop a period"
+        ),
+    }
+
+
+def _source_provenance_hashes() -> dict[str, str]:
+    """sha256 of the CLI and every frozen source the replay depends on.
+
+    Decision 2 ruling, item D: this replaces the markdown-only "source
+    manifest hash" - the evaluated code is pinned by file hash, not by a
+    document.
+    """
+
+    repo = _repo_root()
+    relpaths = (
+        "backend/app/cli/opening_momentum_historical_replay.py",
+        "backend/app/services/opening_momentum_shadow_service.py",
+        "backend/app/domain/opening_momentum.py",
+        "backend/app/domain/opening_momentum_universe.py",
+        "backend/app/domain/opening_momentum_policy.py",
+        "backend/app/domain/universe_selection/selector.py",
+        "backend/app/domain/universe_selection/catalog.py",
+        "backend/app/domain/universe_selection/membership_history.py",
+        "backend/app/domain/universe_selection/data/"
+        "index_membership_history.json",
+    )
+    hashes: dict[str, str] = {}
+    for relative in relpaths:
+        path = repo / relative
+        if not path.exists():
+            raise HistoricalReplayError(
+                f"evaluate refused: source file missing: {relative}"
+            )
+        hashes[relative] = _file_sha256(path)
+    return hashes
+
+
+def _require_clean_worktree(repo: Path) -> None:
+    """evaluate refuses a dirty backend source tree (decision 2, item D)."""
+
+    try:
+        completed = subprocess.run(
+            (
+                "git",
+                "-C",
+                str(repo),
+                "status",
+                "--porcelain",
+                "--",
+                "backend/app",
+                "backend/tests",
+            ),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HistoricalReplayError(
+            f"evaluate refused: git status unavailable: {exc}"
+        ) from exc
+    dirty = [
+        line
+        for line in completed.stdout.splitlines()
+        if line.strip()
+    ]
+    if dirty:
+        raise HistoricalReplayError(
+            "evaluate refused: the working tree is dirty under "
+            "backend/app and backend/tests (commit or stash first; an "
+            "evaluation must run against a committed, reproducible "
+            f"source state): {len(dirty)} path(s) changed"
+        )
+
+
+def _claim_next_attempt(
+    cache_dir: Path,
+    *,
+    rerun_reason: str | None,
+) -> tuple[int, Path]:
+    """Atomically claim the next attempt slot (decision 2, item D).
+
+    The claim is an exclusive create of ``attempts/NNNN.claim``: two
+    concurrent evaluates can never both proceed.  Any NNNN > 1 requires
+    ``--rerun-reason``.
+    """
+
+    attempts_dir = cache_dir / "attempts"
+    attempts_dir.mkdir(parents=True, exist_ok=True)
+    index = 1
+    while True:
+        claim_path = attempts_dir / f"{index:04d}.claim"
+        try:
+            handle = os.open(
+                claim_path,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                0o644,
+            )
+        except FileExistsError:
+            index += 1
+            continue
+        with os.fdopen(handle, "w", encoding="utf-8") as file_handle:
+            json.dump(
+                {
+                    "state": "STARTED",
+                    "claimed_at": datetime.now(timezone.utc).isoformat(),
+                    "rerun_reason": rerun_reason,
+                },
+                file_handle,
+            )
+        if index > 1 and not rerun_reason:
+            raise HistoricalReplayError(
+                f"evaluate refused: attempt {index} requires "
+                "--rerun-reason (attempt 1 already exists)"
+            )
+        return index, claim_path
 
 
 def run_evaluate(
@@ -2392,8 +3975,35 @@ def run_evaluate(
     output_path: Path,
     rerun_reason: str | None = None,
 ) -> dict[str, Any]:
-    """One-pass evaluation; refuses unsealed inputs and silent overwrites."""
+    """One-pass evaluation (decision 2: closed inputs, run-once guard).
 
+    Prechecks (ALL before any computation and before STARTED is
+    recorded): clean worktree; sealed manifest present and hash-bound;
+    seal receipt's manifest hash verified; plan digest recomputed and
+    compared; source provenance hashes recorded; frozen rule hash
+    reproduces; every sealed file verifies sha256; no unsealed file may
+    be read; the shared cache preflight holds (terminal fetch, warm-up
+    calendar proving the first predecessor); the output path is outside
+    the cache and writable; the attempt claim is exclusive.
+    """
+
+    # ---------- precheck: output path must be OUTSIDE the cache
+    resolved_output = output_path.resolve()
+    resolved_cache = cache_dir.resolve()
+    if (
+        resolved_cache in resolved_output.parents
+        or resolved_output == resolved_cache
+    ):
+        raise HistoricalReplayError(
+            "evaluate refused: the output path is inside the cache; pass "
+            "--output pointing outside the sealed input set"
+        )
+
+    # ---------- precheck: clean worktree + source provenance
+    _require_clean_worktree(_repo_root())
+    source_hashes = _source_provenance_hashes()
+
+    # ---------- precheck: manifest and sealed input set
     manifest_path = cache_dir / "manifest.json"
     if not manifest_path.exists():
         raise HistoricalReplayError(
@@ -2411,113 +4021,426 @@ def run_evaluate(
             f"({frozen_config_version()}); the replay may only run against "
             "the registered rule"
         )
-    drift: list[str] = []
-    for entry in manifest["files"]:
-        path = cache_dir / str(entry["path"])
-        if not path.exists() or _file_sha256(path) != entry["sha256"]:
-            drift.append(str(entry["path"]))
-    if drift:
+    # Seal receipt must verify the manifest it sealed (item D).
+    receipt_path = cache_dir / "seal_receipt.json"
+    if not receipt_path.exists():
         raise HistoricalReplayError(
-            "evaluate refused: sealed inputs drifted after seal: "
-            + ", ".join(drift[:10])
+            "evaluate refused: the seal receipt is missing"
         )
-    if output_path.exists() and not rerun_reason:
+    seal_receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if str(seal_receipt.get("manifest_sha256")) != manifest_sha256:
         raise HistoricalReplayError(
-            "evaluate refused: output already exists; pass --rerun-reason "
-            "to supersede it (the original is kept)"
+            "evaluate refused: the seal receipt's manifest hash does not "
+            "match the manifest on disk (re-seal happened after the "
+            "receipt, or the manifest was modified)"
         )
-    if output_path.exists():
-        supersede_index = 1
-        while True:
-            preserved = output_path.with_name(
-                f"{output_path.stem}.superseded-{supersede_index}.json"
+    # The bound source hashes at seal time must match the current ones
+    # (the markdown source-manifest hash is superseded by these file
+    # hashes; the seal-time doc hash stays recorded for history).
+    for key in ("membership_history_sha256",):
+        sealed_value = manifest.get(key)
+        current_value = source_hashes.get(
+            "backend/app/domain/universe_selection/data/"
+            "index_membership_history.json"
+        )
+        if sealed_value is not None and sealed_value != current_value:
+            raise HistoricalReplayError(
+                f"evaluate refused: bound source hash drifted: {key}"
             )
-            if not preserved.exists():
-                break
-            supersede_index += 1
-        output_path.rename(preserved)
-
-    fetch_snapshot = manifest.get("fetch_status_snapshot", {})
-    symbol_states = fetch_snapshot.get("symbols", {})
-
-    sealed_days = sorted(
-        date.fromisoformat(value)
-        for value in manifest["trading_days"]["trading_days"]
-        if WINDOW_START <= date.fromisoformat(value) <= WINDOW_END
+    # Plan digest recomputed and compared (item D): the stored plan.json
+    # must hash to the sealed plan hash.
+    stored_plan = manifest["plan"]
+    plan_path = cache_dir / "plan.json"
+    if not plan_path.exists():
+        raise HistoricalReplayError(
+            "evaluate refused: the stored plan.json is missing"
+        )
+    stored_plan_payload = json.loads(
+        plan_path.read_text(encoding="utf-8")
     )
+    if (
+        _sealed_plan_digest(stored_plan_payload)
+        != str(stored_plan["sha256"])
+    ):
+        raise HistoricalReplayError(
+            "evaluate refused: the stored plan digest does not match the "
+            "sealed plan hash"
+        )
+
+    # Every sealed file verifies; no UNSEALED file may exist.
+    sealed_paths = {str(entry["path"]) for entry in manifest["files"]}
+    for entry in manifest["files"]:
+        _verify_sealed_file(cache_dir, entry)
+    unsealed: list[str] = []
+    for path in sorted(cache_dir.rglob("*.json.gz")):
+        relative = path.relative_to(cache_dir).as_posix()
+        if relative not in sealed_paths:
+            unsealed.append(relative)
+    if unsealed:
+        raise HistoricalReplayError(
+            "evaluate refused: unsealed input files present: "
+            + ", ".join(unsealed[:10])
+        )
+    # The sealed calendar files must verify too.
+    for relative in ("trading_days.json", "trading_days_warmup.json"):
+        path = cache_dir / relative
+        if not path.exists():
+            raise HistoricalReplayError(
+                f"evaluate refused: sealed calendar file missing: {relative}"
+            )
+    if _file_sha256(cache_dir / "trading_days.json") != str(
+        manifest.get("trading_days_sha256")
+    ):
+        raise HistoricalReplayError(
+            "evaluate refused: trading_days.json drifted after seal"
+        )
+    if _file_sha256(cache_dir / "trading_days_warmup.json") != str(
+        manifest.get("trading_days_warmup_sha256")
+    ):
+        raise HistoricalReplayError(
+            "evaluate refused: trading_days_warmup.json drifted after seal"
+        )
+
+    # ---------- precheck: cache still terminal, warm-up proves the
+    # predecessor, no live fetch (BEFORE any attempt is STARTED)
+    _cache_preflight(cache_dir, plan_payload=None)
+
+    # ---------- precheck: output path writable
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        probe = output_path.with_name(f".{output_path.name}.probe")
+        probe.write_bytes(b"")
+        probe.unlink()
+    except OSError as exc:
+        raise HistoricalReplayError(
+            f"evaluate refused: output path is not writable: {exc}"
+        ) from exc
+
+    # ---------- exclusive attempt claim (atomic; concurrent-safe)
+    attempt_index, claim_path = _claim_next_attempt(
+        cache_dir, rerun_reason=rerun_reason
+    )
+    previous_attempt = _load_attempt_receipt(cache_dir)
+    attempt: dict[str, Any] = {
+        "analysis_id": ANALYSIS_ID,
+        "state": "STARTED",
+        "attempt_index": attempt_index,
+        "started_at": datetime.now(timezone.utc).isoformat(),
+        "output_path": str(output_path),
+        "rerun_reason": rerun_reason,
+        "previous_attempts": (
+            [
+                {
+                    "state": previous_attempt.get("state"),
+                    "started_at": previous_attempt.get("started_at"),
+                    "output_path": previous_attempt.get("output_path"),
+                    "output_sha256": previous_attempt.get(
+                        "output_sha256"
+                    ),
+                }
+            ]
+            if previous_attempt is not None
+            else []
+        ),
+    }
+    _write_attempt_receipt(cache_dir, attempt)
+    try:
+        payload = _evaluate_computation(
+            cache_dir,
+            manifest,
+            manifest_sha256,
+            source_hashes,
+            rerun_reason,
+        )
+    except Exception:
+        attempt["state"] = "FAILED"
+        attempt["finished_at"] = datetime.now(timezone.utc).isoformat()
+        _write_attempt_receipt(cache_dir, attempt)
+        raise
+
+    # ---------- write output (never rename/remove an earlier output)
+    # The first attempt writes exactly ``output_path``.  A reasoned rerun
+    # writes a NEW versioned sibling and links the previous output as
+    # superseded; earlier files are never renamed or removed.
+    if attempt_index == 1:
+        actual_output = output_path
+    else:
+        actual_output = output_path.with_name(
+            f"{output_path.stem}-{attempt_index:04d}"
+            f"{output_path.suffix or '.json'}"
+        )
+        while actual_output.exists():
+            attempt_index += 1
+            actual_output = output_path.with_name(
+                f"{output_path.stem}-{attempt_index:04d}"
+                f"{output_path.suffix or '.json'}"
+            )
+    superseded_link = (
+        {
+            "path": str(previous_attempt.get("output_path")),
+            "sha256": previous_attempt.get("output_sha256"),
+        }
+        if previous_attempt is not None
+        and previous_attempt.get("output_sha256") is not None
+        else None
+    )
+    payload["provenance"]["supersedes"] = superseded_link
+    _atomic_write_json(actual_output, payload)
+    output_sha256 = _file_sha256(actual_output)
+
+    # ---------- small receipt next to the output (no per-trade data)
+    receipt_out = {
+        "analysis_id": ANALYSIS_ID,
+        "attempt_index": attempt["attempt_index"],
+        "plan_sha256": stored_plan["sha256"],
+        "plan_original_sha256": stored_plan.get("original_sha256"),
+        "seal_manifest_sha256": manifest_sha256,
+        "git_head": _git_head(),
+        "source_hashes": source_hashes,
+        "output_sha256": output_sha256,
+        "verdict": payload["verdict"],
+        "gates_passed": payload["gates"]["passed"],
+        "gate_a_auditable_share": payload["gates"][
+            "session_input_coverage"
+        ],
+        "gate_b_missing_share": payload["gates"]["member_day_missing_share"],
+        "n": payload["statistics"]["n"],
+        "weeks": payload["statistics"]["weeks"],
+    }
+    receipt_path_out = actual_output.with_name(
+        f"{actual_output.stem}.receipt{actual_output.suffix or '.json'}"
+    )
+    _atomic_write_json(receipt_path_out, receipt_out)
+
+    attempt["state"] = "COMPLETED"
+    attempt["finished_at"] = datetime.now(timezone.utc).isoformat()
+    attempt["output_path"] = str(actual_output)
+    attempt["output_sha256"] = output_sha256
+    attempt["superseded"] = superseded_link
+    _write_attempt_receipt(cache_dir, attempt)
+    payload["receipt_path"] = str(receipt_path_out)
+    return payload
+
+
+def _evaluate_computation(
+    cache_dir: Path,
+    manifest: dict[str, Any],
+    manifest_sha256: str,
+    source_hashes: dict[str, str],
+    rerun_reason: str | None,
+) -> dict[str, Any]:
+    """The one-pass computation over verified sealed inputs only."""
+
+    permanent_absences: dict[str, Any] = manifest.get(
+        "permanent_absences", {}
+    )
+    symbol_states = manifest.get("fetch_status_snapshot", {}).get(
+        "symbols", {}
+    )
+
+    # The SCORING dates are exactly the in-window sealed sessions:
+    # 2023-09-01..2026-04-30.  Warm-up days are used ONLY for ADV
+    # freshness/gap checks and never become scoring sessions (decision 2
+    # ruling, item 2).
+    scoring_days = sorted(
+        date.fromisoformat(str(value))
+        for value in manifest["trading_days"]["trading_days"]
+        if WINDOW_START <= date.fromisoformat(str(value)) <= WINDOW_END
+    )
+    warmup_days = sorted(
+        date.fromisoformat(str(value))
+        for value in manifest.get("trading_days_warmup", {}).get(
+            "trading_days", []
+        )
+    )
+    full_session_list = sorted([*warmup_days, *scoring_days])
+    previous_session_by_date = {
+        session_date: full_session_list[index - 1]
+        for index, session_date in enumerate(full_session_list)
+        if index > 0
+    }
+    # Every session that could ever fall inside a last-21 window: the
+    # sealed warm-up plus the scoring sessions before D.
+    sealed_sessions_for_adv = tuple(full_session_list)
+
     universe_by_session: dict[date, list[str]] = {
         date.fromisoformat(key): list(value)
         for key, value in manifest["universe"].items()
     }
-
-    still_listed = {
-        candidate.symbol
-        for candidate in (
-            *INDEX_CANDIDATE_CATALOG,
-            *HISTORICAL_INDEX_CANDIDATE_CATALOG,
-        )
-        if INDEX_MEMBERSHIP_HISTORY.is_active(candidate, WINDOW_END)
+    window_end_membership: dict[str, bool] = {
+        str(key): bool(value)
+        for key, value in manifest["window_end_membership"].items()
     }
 
-    minute_cache: dict[str, dict[datetime, Any]] = {}
-    daily_cache: dict[str, list[_CandleView]] = {}
+    sealed_files_by_symbol_kind: dict[tuple[str, str], str] = {
+        (str(entry["symbol"]), str(entry["kind"])): str(entry["path"])
+        for entry in manifest["files"]
+    }
+    # Load minute files per symbol (memory) and only from the sealed list.
+    raw_minute_rows_by_symbol: dict[str, dict[date, list[list[object]]]] = {}
+    for (symbol, kind), relative in sorted(
+        sealed_files_by_symbol_kind.items()
+    ):
+        if kind != "minute":
+            continue
+        raw = _read_gzip_json(cache_dir / relative)
+        rows_by_date: dict[date, list[list[object]]] = {}
+        for row in raw.get("bars", []):
+            timestamp = datetime.fromisoformat(str(row[0]))
+            rows_by_date.setdefault(
+                _MARKET_SESSION.local(timestamp).date(), []
+            ).append(list(row))
+        raw_minute_rows_by_symbol[symbol] = rows_by_date
+    daily_views_by_symbol: dict[str, list[_CandleView]] = {}
+    daily_rows_by_symbol: dict[str, list[_DailyBarRow]] = {}
+    for (symbol, kind), relative in sorted(
+        sealed_files_by_symbol_kind.items()
+    ):
+        if kind != "daily":
+            continue
+        raw = _read_gzip_json(cache_dir / relative)
+        views: list[_CandleView] = []
+        dates_seen: set[date] = set()
+        for row in raw.get("bars", []):
+            session_date = date.fromisoformat(str(row[0]))
+            dates_seen.add(session_date)
+            views.append(
+                _CandleView(
+                    timestamp=_session_open_utc(session_date),
+                    open=float(cast(float, row[1])),
+                    high=float(cast(float, row[2])),
+                    low=float(cast(float, row[3])),
+                    close=float(cast(float, row[4])),
+                    volume=(
+                        float(cast(float, row[5]))
+                        if row[5] is not None
+                        else None
+                    ),
+                    turnover=(
+                        float(cast(float, row[6]))
+                        if row[6] is not None
+                        else None
+                    ),
+                )
+            )
+        daily_views_by_symbol[symbol] = views
+        daily_rows_by_symbol[symbol] = _daily_bar_rows(views)
+
     trades: list[dict[str, Any]] = []
     session_rows: list[dict[str, Any]] = []
     unresolved_sessions: list[str] = []
     auditable_sessions = 0
-    member_days_missing = 0
-    still_listed_missing = 0
     member_days_total = 0
+    gate_b_missing = 0
+    still_listed_missing = 0
+    gate_b_counts: dict[str, int] = {}
+    integrity_issues: list[str] = []
+    pool_sizes: dict[str, int] = {}
+    coverage_only_by_session: dict[str, list[str]] = {}
 
-    for session_date in sealed_days:
+    for session_date in scoring_days:
         session_open = _session_open_utc(session_date)
         universe = universe_by_session.get(session_date, [])
         minute_by_symbol: dict[str, dict[datetime, Any]] = {}
         adv_by_symbol: dict[str, float] = {}
-        member_day_missing_this_session = 0
-        auditable = True
+        pool: list[str] = []
+        coverage_only: list[str] = []
+        audits: list[MemberDayAudit] = []
+
+        previous_sealed_session = previous_session_by_date.get(
+            session_date
+        )
+        if previous_sealed_session is None:
+            raise HistoricalReplayError(
+                "configuration error: scoring session "
+                f"{session_date.isoformat()} has no predecessor in the "
+                "sealed calendars"
+            )
+
         for symbol in universe:
             member_days_total += 1
-            if symbol not in minute_cache:
-                minute_cache[symbol] = _load_minute_bars(cache_dir, symbol)
-            if symbol not in daily_cache:
-                daily_cache[symbol] = _load_daily_bars(cache_dir, symbol)
-            bars = minute_cache[symbol]
-            adv = rebuild_session_adv(
-                _daily_bar_rows(daily_cache[symbol]),
-                as_of=session_date,
-            )
-            minute_by_symbol[symbol] = bars
-            if adv is not None:
-                adv_by_symbol[symbol] = adv
-            has_bars = bool(bars)
-            has_inputs = _member_has_decision_inputs(
-                bars, session_open=session_open
-            )
-            permanent_absence = (
+            permanent_absence = symbol in permanent_absences
+            minute_state = (
                 symbol_states.get(symbol, {})
                 .get("minute", {})
-                .get("state")
-                == "PERMANENT_FAILURE"
+                .get("state", "PENDING")
             )
-            if not has_bars:
-                member_days_missing += 1
-                member_day_missing_this_session += 1
-                if symbol in still_listed:
+            daily_state = (
+                symbol_states.get(symbol, {})
+                .get("daily", {})
+                .get("state", "PENDING")
+            )
+            raw_rows = raw_minute_rows_by_symbol.get(symbol, {}).get(
+                session_date
+            )
+            adv_classification = classify_session_adv(
+                daily_rows_by_symbol.get(symbol, []),
+                as_of=session_date,
+                previous_sealed_session=previous_sealed_session,
+                sealed_sessions=sealed_sessions_for_adv,
+                daily_fetch_complete=(daily_state == "COMPLETE"),
+                permanent_absence=permanent_absence,
+            )
+            facts = _collect_member_day_facts(
+                symbol=symbol,
+                session_date=session_date,
+                session_open=session_open,
+                raw_minute_rows=raw_rows,
+                minute_fetch_state=minute_state,
+                adv_classification=adv_classification,
+            )
+            audit = assemble_member_day_audit(facts)
+            audits.append(audit)
+            if audit.gate_b_missing:
+                gate_b_missing += 1
+                gate_b_counts[audit.gate_b_kind or "?"] = (
+                    gate_b_counts.get(audit.gate_b_kind or "?", 0) + 1
+                )
+                if window_end_membership.get(symbol):
                     still_listed_missing += 1
-                if not permanent_absence:
-                    auditable = False
-            elif not has_inputs or adv is None:
-                auditable = False
-        if auditable:
-            auditable_sessions += 1
+            for issue in audit.integrity_issues:
+                integrity_issues.append(
+                    f"{session_date.isoformat()}:{symbol}:{issue}"
+                )
+            if audit.pool:
+                assert adv_classification.adv is not None
+                adv_by_symbol[symbol] = adv_classification.adv
+                pool.append(symbol)
+                # The pool member is passed with whatever minute bars it
+                # has, coerced through the frozen ``_coerce_candles``
+                # exactly as live does - never filtered by quality.
+                minute_by_symbol[symbol] = _coerced_candles(
+                    (
+                        datetime.fromisoformat(str(row[0])),
+                        float(cast(float, row[1])),
+                        float(cast(float, row[2])),
+                        float(cast(float, row[3])),
+                        float(cast(float, row[4])),
+                        float(cast(float, row[5]))
+                        if row[5] is not None
+                        else None,
+                        float(cast(float, row[6]))
+                        if row[6] is not None
+                        else None,
+                    )
+                    for row in (raw_rows or [])
+                )
+            elif audit.coverage_only:
+                coverage_only.append(symbol)
+        pool_sizes[session_date.isoformat()] = len(pool)
+        coverage_only_by_session[session_date.isoformat()] = sorted(
+            coverage_only
+        )
 
         decision = evaluate_session_decision(
-            universe=universe,
+            universe=pool,
             minute_bars_by_symbol=minute_by_symbol,
             adv_by_symbol=adv_by_symbol,
             session_open=session_open,
+            coverage_only_symbols=coverage_only,
         )
+
+        exit_proven: bool | None = None
         if decision.status != "OPEN":
             session_rows.append(
                 {
@@ -2527,70 +4450,137 @@ def run_evaluate(
                     "candidate_symbol": decision.candidate_symbol,
                 }
             )
-            continue
-        candidate = decision.candidate_symbol
-        entry_price = decision.entry_price
-        stop_loss_pct = decision.stop_loss_pct
-        if (
-            candidate is None
-            or entry_price is None
-            or stop_loss_pct is None
-        ):
-            raise HistoricalReplayError(
-                "open decision is missing entry evidence: "
-                f"{session_date.isoformat()}"
+        else:
+            candidate = decision.candidate_symbol
+            entry_price = decision.entry_price
+            stop_loss_pct = decision.stop_loss_pct
+            if (
+                candidate is None
+                or entry_price is None
+                or stop_loss_pct is None
+            ):
+                raise HistoricalReplayError(
+                    "open decision is missing entry evidence: "
+                    f"{session_date.isoformat()}"
+                )
+            # Final check, item 2(b): validate the RAW stop path (entry
+            # through the exit bar) BEFORE settlement and BEFORE any
+            # trade append.  A repaired low is not raw evidence.
+            raw_candidate_rows = raw_minute_rows_by_symbol.get(
+                candidate, {}
+            ).get(session_date)
+            stop_path_valid = raw_stop_path_is_valid(
+                raw_candidate_rows,
+                session_open=session_open,
             )
-        settled = settle_session_exit(
-            minute_by_symbol[candidate],
-            session_open=session_open,
-            entry_price=entry_price,
-            stop_loss_pct=stop_loss_pct,
-        )
-        if settled is None:
-            unresolved_sessions.append(session_date.isoformat())
-            session_rows.append(
-                {
-                    "session_date": session_date.isoformat(),
-                    "status": "UNRESOLVED_EXIT",
-                    "reason": "EXIT_PATH_INCOMPLETE",
-                    "candidate_symbol": candidate,
-                }
+            if not stop_path_valid:
+                # 2(c): invalid raw stop path => UNRESOLVED: increment
+                # gate (c), write NO CLOSED trade, exclude from the
+                # statistics, and record the fact in the audit.
+                unresolved_sessions.append(session_date.isoformat())
+                session_rows.append(
+                    {
+                        "session_date": session_date.isoformat(),
+                        "status": "UNRESOLVED_EXIT",
+                        "reason": "STOP_PATH_RAW_OHLC_INVALID",
+                        "candidate_symbol": candidate,
+                    }
+                )
+                audits = [
+                    (
+                        replace(
+                            audit,
+                            integrity_issues=(
+                                *audit.integrity_issues,
+                                "STOP_PATH_RAW_OHLC_INVALID",
+                            ),
+                        )
+                        if audit.symbol == candidate
+                        else audit
+                    )
+                    for audit in audits
+                ]
+                exit_proven = False
+            else:
+                settled = settle_session_exit(
+                    minute_by_symbol[candidate],
+                    session_open=session_open,
+                    entry_price=entry_price,
+                    stop_loss_pct=stop_loss_pct,
+                )
+                exit_proven = settled is not None
+                if settled is None:
+                    unresolved_sessions.append(session_date.isoformat())
+                    session_rows.append(
+                        {
+                            "session_date": session_date.isoformat(),
+                            "status": "UNRESOLVED_EXIT",
+                            "reason": "EXIT_PATH_INCOMPLETE",
+                            "candidate_symbol": candidate,
+                        }
+                    )
+                else:
+                    trades.append(
+                        {
+                            "session_date": session_date.isoformat(),
+                            "symbol": candidate,
+                            "entry_price": entry_price,
+                            "stop_loss_pct": stop_loss_pct,
+                            "exit_price": settled.exit_price,
+                            "exit_reason": settled.exit_reason,
+                            "gross_return_bps": settled.gross_return_bps,
+                            "net_return_bps": settled.net_return_bps,
+                        }
+                    )
+                    session_rows.append(
+                        {
+                            "session_date": session_date.isoformat(),
+                            "status": "CLOSED",
+                            "reason": settled.exit_reason,
+                            "candidate_symbol": candidate,
+                        }
+                    )
+
+        # Gate (a) accumulates AFTER the decision and exit classification
+        # (decision 2 ruling, item 4; final check items 1+2).  A raw OHLC
+        # anomaly on ANY decision member's decision-window bar makes the
+        # session non-auditable (the member is never deleted and the
+        # selection is never re-run).
+        # Gate (a) examines EVERY member's audit (an UNVERIFIABLE member
+        # blocks auditability even though it never enters the pool);
+        # decision-window raw-OHLC anomalies are checked on the DECISION
+        # members (the pool).
+        decision_window_anomaly = any(
+            any(
+                issue.startswith("INVALID_RAW_OHLC@")
+                for issue in audit.integrity_issues
             )
-            continue
-        trades.append(
-            {
-                "session_date": session_date.isoformat(),
-                "symbol": candidate,
-                "entry_price": entry_price,
-                "stop_loss_pct": stop_loss_pct,
-                "exit_price": settled.exit_price,
-                "exit_reason": settled.exit_reason,
-                "gross_return_bps": settled.gross_return_bps,
-                "net_return_bps": settled.net_return_bps,
-            }
+            for audit in audits
+            if audit.symbol in set(pool)
         )
-        session_rows.append(
-            {
-                "session_date": session_date.isoformat(),
-                "status": "CLOSED",
-                "reason": settled.exit_reason,
-                "candidate_symbol": candidate,
-            }
-        )
+        if session_is_auditable(
+            member_audits=audits,
+            decision_reason=decision.reason,
+            decision_status=decision.status,
+            exit_proven=(
+                exit_proven if decision.status == "OPEN" else None
+            ),
+        ) and not decision_window_anomaly:
+            auditable_sessions += 1
 
     observations = [
         (
-            date.fromisoformat(trade["session_date"]),
+            date.fromisoformat(str(trade["session_date"])),
             float(trade["net_return_bps"]),
         )
         for trade in trades
     ]
     stat = week_clustered_statistic(observations)
     gates = IntegrityGates(
-        expected_sessions=len(sealed_days),
+        expected_sessions=len(scoring_days),
         auditable_sessions=auditable_sessions,
         member_days_total=member_days_total,
-        member_days_missing_data=member_days_missing,
+        member_days_missing_data=gate_b_missing,
         still_listed_missing_member_days=still_listed_missing,
         unresolved_exit_sessions=len(unresolved_sessions),
     )
@@ -2617,7 +4607,17 @@ def run_evaluate(
                 gates.still_listed_missing_member_days
             ),
             "unresolved_exit_sessions": gates.unresolved_exit_sessions,
+            "gate_b_counted_kinds": sorted(GATE_B_MISSING_KINDS),
         },
+        "member_day_status": {
+            "member_days_total": member_days_total,
+            "gate_b_missing": gate_b_missing,
+            "gate_b_by_kind": gate_b_counts,
+            "integrity_issue_count": len(integrity_issues),
+            "integrity_issues_sample": integrity_issues[:50],
+        },
+        "pool_sizes": pool_sizes,
+        "coverage_only_symbols": coverage_only_by_session,
         "statistics": {
             "n": stat.n,
             "weeks": stat.weeks,
@@ -2632,27 +4632,36 @@ def run_evaluate(
         },
         "sample_minimums": {"trades": MIN_TRADES, "weeks": MIN_WEEKS},
         "sessions": {
-            "expected": len(sealed_days),
+            "expected": len(scoring_days),
             "rows": session_rows,
         },
         "trades": trades,
-        "descriptive": compute_descriptives(observations),
+        "descriptive": _compute_descriptives_window(
+            observations,
+            window_start=WINDOW_START,
+            window_end=WINDOW_END,
+        ),
         "calendar_cross_check": manifest.get("calendar_cross_check"),
         "provenance": {
+            "git_head": _git_head(),
+            "source_hashes": source_hashes,
+            "cli_source_sha256": _file_sha256(Path(__file__).resolve()),
             "plan_doc_sha256": (
                 _file_sha256(doc_path) if doc_path.exists() else None
             ),
-            "git_head": _git_head(),
-            "cli_source_sha256": _file_sha256(Path(__file__).resolve()),
             "input_manifest_sha256": manifest_sha256,
             "input_files": len(manifest["files"]),
+            "sealed_plan_sha256": manifest["plan"]["sha256"],
+            "sealed_plan_original_sha256": manifest["plan"].get(
+                "original_sha256"
+            ),
+            "v2_plan_import": bool(manifest["plan"].get("v2_import")),
+            "permanent_absences": sorted(permanent_absences),
             "frozen_config_version": frozen_config_version(),
             "cli_version": REPLAY_CLI_VERSION,
         },
         "rerun_reason": rerun_reason,
     }
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_json(output_path, payload)
     return payload
 
 
@@ -2696,12 +4705,50 @@ def _build_parser() -> argparse.ArgumentParser:
         "seal", help="write the sealed input manifest and print its hash"
     )
     seal_parser.add_argument("--cache-dir", type=Path, default=None)
+    seal_parser.add_argument(
+        "--plan",
+        type=Path,
+        default=None,
+        help=(
+            "the plan the fetch ran; required for the first seal (stored "
+            "with the cache and hash-bound into the manifest)"
+        ),
+    )
+    seal_parser.add_argument(
+        "--reseal-reason",
+        default=None,
+        help="required to re-seal; the previous receipt is preserved",
+    )
+
+    warmup_parser = subparsers.add_parser(
+        "fetch-calendar-warmup",
+        help=(
+            "fetch the pre-window warm-up CALENDAR (QQQ/DIA daily dates "
+            "only, no prices) so the first scoring session has a provable "
+            "predecessor"
+        ),
+    )
+    warmup_parser.add_argument("--cache-dir", type=Path, default=None)
+    warmup_parser.add_argument("--rate", type=float, default=None)
+    warmup_parser.add_argument(
+        "--reason",
+        default=None,
+        help="required to replace an existing warm-up file",
+    )
 
     evaluate_parser = subparsers.add_parser(
         "evaluate", help="one-pass evaluation requiring the sealed manifest"
     )
     evaluate_parser.add_argument("--cache-dir", type=Path, default=None)
-    evaluate_parser.add_argument("--output", type=Path, default=None)
+    evaluate_parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        help=(
+            "REQUIRED result path OUTSIDE the cache directory; a small "
+            "receipt is written next to it"
+        ),
+    )
     evaluate_parser.add_argument("--rerun-reason", default=None)
 
     return parser
@@ -2767,8 +4814,45 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.cache_dir is not None
                 else _default_cache_dir()
             )
-            manifest_hash = run_seal(cache_dir)
+            plan_payload = (
+                _load_plan(args.plan) if args.plan is not None else None
+            )
+            manifest_hash = run_seal(
+                cache_dir,
+                plan_payload=plan_payload,
+                reseal_reason=args.reseal_reason,
+            )
             print(manifest_hash)
+            return 0
+        if args.command == "fetch-calendar-warmup":
+            cache_dir = (
+                args.cache_dir
+                if args.cache_dir is not None
+                else _default_cache_dir()
+            )
+
+            def _provider_factory() -> ReplayQuoteProvider:
+                return _LongportQuoteProvider(settings)
+
+            def _sleep_warmup(seconds: float) -> None:
+                if seconds > 0:
+                    import time as _time
+
+                    _time.sleep(seconds)
+
+            report = run_fetch_calendar_warmup(
+                cache_dir=cache_dir,
+                provider_factory=_provider_factory,
+                clock=lambda: datetime.now(timezone.utc),
+                sleep=_sleep_warmup,
+                reason=args.reason,
+                rate_per_second=(
+                    args.rate
+                    if args.rate is not None
+                    else DEFAULT_REQUESTS_PER_SECOND
+                ),
+            )
+            print(json.dumps(report, ensure_ascii=True, sort_keys=True))
             return 0
         if args.command == "evaluate":
             cache_dir = (
@@ -2776,11 +4860,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if args.cache_dir is not None
                 else _default_cache_dir()
             )
-            output_path = (
-                args.output
-                if args.output is not None
-                else cache_dir / "output" / "result.json"
-            )
+            output_path = args.output
             payload = run_evaluate(
                 cache_dir=cache_dir,
                 output_path=output_path,
