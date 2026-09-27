@@ -3578,3 +3578,104 @@ class TestGetQuotePackages:
 
         assert quote_ctx.calls == 2
         assert packages[0].key == "US_QBBO_OpenAPI"
+
+
+class TestProbeDepthPermission:
+    def test_success_gives_permitted(self) -> None:
+        class Level:
+            def __init__(self, price: float) -> None:
+                self.price = price
+
+        class Depth:
+            bids = [Level(149.9)]
+            asks = [Level(150.1)]
+
+        class _FakeQuoteContext:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            def depth(self, symbol: str) -> Depth:
+                self.calls.append(symbol)
+                return Depth()
+
+        quote_ctx = _FakeQuoteContext()
+        gateway = BrokerGateway()
+        gateway._quote_ctx = quote_ctx
+        gateway._trade_ctx = object()
+
+        assert gateway.probe_depth_permission("AAPL.US") == "PERMITTED"
+        assert quote_ctx.calls == ["AAPL.US"]
+
+    def test_empty_book_still_gives_permitted(self) -> None:
+        class EmptyDepth:
+            bids: list[object] = []
+            asks: list[object] = []
+
+        class _FakeQuoteContext:
+            def depth(self, _symbol: str) -> EmptyDepth:
+                return EmptyDepth()
+
+        gateway = BrokerGateway()
+        gateway._quote_ctx = _FakeQuoteContext()
+        gateway._trade_ctx = object()
+
+        assert gateway.probe_depth_permission("AAPL.US") == "PERMITTED"
+
+    def test_code_301604_gives_denied(self) -> None:
+        class _NoQuotePermissionError(Exception):
+            pass
+
+        error = _NoQuotePermissionError(
+            "OpenApiException: code=301604, message=no quote permission"
+        )
+
+        class _FakeQuoteContext:
+            def depth(self, _symbol: str) -> object:
+                raise error
+
+        gateway = BrokerGateway()
+        gateway._quote_ctx = _FakeQuoteContext()
+        gateway._trade_ctx = object()
+
+        assert gateway.probe_depth_permission("AAPL.US") == "DENIED"
+
+    def test_generic_error_gives_error(self) -> None:
+        class _FakeQuoteContext:
+            def depth(self, _symbol: str) -> object:
+                raise TimeoutError("socket read timeout")
+
+        gateway = BrokerGateway()
+        gateway._quote_ctx = _FakeQuoteContext()
+        gateway._trade_ctx = object()
+
+        assert gateway.probe_depth_permission("AAPL.US") == "ERROR"
+
+    def test_uses_init_clients_under_lock(self) -> None:
+        class _FakeQuoteContext:
+            def depth(self, _symbol: str) -> object:
+                return object()
+
+        init_calls: list[int] = []
+
+        gateway = BrokerGateway()
+        gateway._quote_ctx = _FakeQuoteContext()
+        gateway._trade_ctx = object()
+
+        def _counting_init() -> None:
+            init_calls.append(1)
+
+        # Patch the bound method the same way existing tests do.
+        gateway._init_clients = _counting_init  # type: ignore[method-assign]
+        assert gateway.probe_depth_permission("AAPL.US") == "PERMITTED"
+        assert init_calls == [1]
+
+    def test_module_constants_match_wire_values(self) -> None:
+        from app.core.broker import (
+            DEPTH_DENIED,
+            DEPTH_ERROR,
+            DEPTH_PERMITTED,
+        )
+
+        assert DEPTH_PERMITTED == "PERMITTED"
+        assert DEPTH_DENIED == "DENIED"
+        assert DEPTH_ERROR == "ERROR"

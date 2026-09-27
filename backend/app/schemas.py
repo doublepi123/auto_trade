@@ -3691,9 +3691,14 @@ class QuoteEntitlementResponse(BaseModel):
 
     ``status`` is one of ``OK | EXPIRING | MISSING | UNKNOWN``. ``UNKNOWN``
     (fetch error or not yet assessed) is never treated as OK by any
-    consumer. ``end_at``/``days_left`` are ``None`` when the broker reports
-    no expiry window (or no package matched). Read-only observation — no
-    trading decision consumes this payload.
+    consumer. ``capability`` is the depth-probe outcome on the primary
+    symbol (``PERMITTED | DENIED | ERROR | SKIPPED``) — the authoritative
+    lapse signal, because LongPort reports a rolling ~30-day package
+    window rather than a real expiry. ``end_at``/``days_left`` are ``None``
+    when the broker reports no window (or no package matched);
+    ``days_left`` is days to the broker-reported window end (may roll
+    forward; not a confirmed expiry). Read-only observation — no trading
+    decision consumes this payload.
     """
 
     market: str
@@ -3702,6 +3707,7 @@ class QuoteEntitlementResponse(BaseModel):
     end_at: Optional[datetime] = None
     days_left: Optional[int] = None
     reason: str
+    capability: Literal["PERMITTED", "DENIED", "ERROR", "SKIPPED"] = "SKIPPED"
 
 
 # ---------------------------------------------------------------------------

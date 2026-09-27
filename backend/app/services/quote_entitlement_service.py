@@ -7,6 +7,22 @@ submit without a fresh trusted bid. Today nothing tells the operator — the
 system just goes quiet. This module makes the entitlement state explicit
 and visible.
 
+**LongPort reports a rolling ~30-day window, not a fixed expiry.**
+``quote_package_details()`` returns ``start = now − 1 day`` and
+``end = now + 29 days`` for every package on every query (verified live:
+two queries 81 s apart moved both bounds by 81 s). Consequences, by
+design:
+
+* ``days_left`` is "days to the broker-reported window end" — it rolls
+  forward with each query and is NOT a confirmed expiry.
+* ``EXPIRING`` only fires for a genuinely fixed-date window; it can never
+  fire while the broker keeps rolling the window.
+* A lapse cannot be inferred from the listing alone — we cannot verify how
+  the listing changes when the entitlement actually lapses. The depth
+  capability probe (``BrokerGateway.probe_depth_permission`` on the primary
+  symbol) is the authoritative lapse signal: ``DENIED`` (301604) means the
+  BBO capability is gone right now.
+
 Design constraints (P0 live safety):
 
 * Pure evaluation (:func:`assess_quote_entitlement`) plus a small
@@ -23,12 +39,14 @@ Design constraints (P0 live safety):
 * Severity: ``EXPIRING`` → WARNING, ``MISSING`` → CRITICAL, with a message
   that says plainly why it matters: live entries and quote-dependent
   protective exits cannot operate without a real-time BBO package.
+* Wording honesty: reasons describe the "broker-reported window end" and
+  never claim "expires/ends in N days" as a fact.
 """
 from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as dataclasses_replace
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Literal, cast
 
@@ -74,7 +92,12 @@ def is_realtime_quote_package(key: str, *, market: str) -> bool:
 
 @dataclass(frozen=True)
 class QuoteEntitlement:
-    """Immutable assessment of one market's real-time quote entitlement."""
+    """Immutable assessment of one market's real-time quote entitlement.
+
+    ``capability`` is the depth-probe outcome on the primary symbol — the
+    authoritative lapse signal, since the package listing reports a rolling
+    ~30-day window rather than a real expiry.
+    """
 
     market: str
     status: Literal["OK", "EXPIRING", "MISSING", "UNKNOWN"]
@@ -82,6 +105,7 @@ class QuoteEntitlement:
     end_at: datetime | None
     days_left: int | None
     reason: str
+    capability: Literal["PERMITTED", "DENIED", "ERROR", "SKIPPED"] = "SKIPPED"
 
 
 def _days_left(end_at: datetime, now: datetime) -> int:
@@ -99,15 +123,23 @@ def assess_quote_entitlement(
     now: datetime,
     warn_days: int = WARN_DAYS_DEFAULT,
 ) -> QuoteEntitlement:
-    """Assess one market's real-time quote entitlement (pure function).
+    """Assess one market's real-time quote entitlement from the listing (pure).
+
+    The listing reports a ROLLING ~30-day window (see module docstring), so
+    this assessment alone cannot detect a lapse — the depth capability
+    probe in :meth:`QuoteEntitlementService.tick` is authoritative. This
+    function classifies what the listing says:
 
     * Among matching packages currently active (``start_at <= now < end_at``)
       the one with the latest ``end_at`` wins.
-    * None active → ``MISSING`` (expired, not yet started, or absent).
-    * Active with ``end_at - now <= warn_days`` → ``EXPIRING`` (boundary
-      inclusive).
-    * A package without ``end_at`` is active from ``start_at`` with no
-      expiry and assesses as ``OK``.
+    * Active with ``end_at - now <= warn_days`` → ``EXPIRING`` — only
+      meaningful for a genuinely fixed-date window; a rolling window never
+      enters this branch.
+    * A package without ``end_at`` is active from ``start_at`` and assesses
+      as ``OK``.
+    * No active matching package → ``MISSING`` (window reported as passed,
+      not yet started, or no match at all) — a listing-based signal that
+      the tick's capability probe may override.
     """
     if market not in _MARKETS:
         return QuoteEntitlement(
@@ -153,8 +185,9 @@ def assess_quote_entitlement(
                 end_at=chosen.end_at,
                 days_left=days,
                 reason=(
-                    f"{chosen.key} ends "
-                    f"{chosen.end_at.isoformat()} ({days} day(s) left)"
+                    f"{chosen.key} broker-reported window ends "
+                    f"{chosen.end_at.isoformat()} ({days} days to the "
+                    f"broker-reported window end)"
                 ),
             )
         return QuoteEntitlement(
@@ -164,8 +197,8 @@ def assess_quote_entitlement(
             end_at=chosen.end_at,
             days_left=days,
             reason=(
-                f"{chosen.key} ends "
-                f"{chosen.end_at.isoformat()} ({days} day(s) left)"
+                f"{chosen.key} active; broker-reported window end "
+                f"{chosen.end_at.isoformat()}"
             ),
         )
     # No active package: report the best-effort candidate for context.
@@ -187,7 +220,8 @@ def assess_quote_entitlement(
             end_at=candidate.end_at,
             days_left=_days_left(candidate.end_at, now),
             reason=(
-                f"{candidate.key} expired at {candidate.end_at.isoformat()}"
+                f"{candidate.key} broker-reported window end has passed: "
+                f"{candidate.end_at.isoformat()}"
             ),
         )
     if candidate.start_at is not None and candidate.start_at > now:
@@ -218,6 +252,10 @@ def assess_quote_entitlement(
         ),
         reason=f"{candidate.key} is not currently active",
     )
+
+
+Capability = Literal["PERMITTED", "DENIED", "ERROR", "SKIPPED"]
+"""Depth-probe outcome on the primary symbol (see ``QuoteEntitlement``)."""
 
 
 class _EntitlementFetchError(RuntimeError):
@@ -254,7 +292,7 @@ class QuoteEntitlementService:
         self._unknown_log_throttle = RepeatedLogThrottle(window_seconds=3600.0)
 
     def tick(self, now: datetime | None = None) -> QuoteEntitlement:
-        """Fetch, assess, cache, and (maybe) notify. Observation only."""
+        """Fetch, assess, probe capability, cache, and notify. Observation only."""
         now = now or datetime.now(timezone.utc)
         runner = self._get_runner()
         if runner is None:
@@ -265,11 +303,14 @@ class QuoteEntitlementService:
                 end_at=None,
                 days_left=None,
                 reason="runner is not available",
+                capability="SKIPPED",
             )
             self._store(result)
             return result
         broker = getattr(runner, "broker", None)
         market = self._primary_market(runner)
+        symbol = self._primary_symbol(runner)
+        capability = self._probe_capability(broker, symbol)
         try:
             packages = self._fetch_packages(broker)
         except Exception as exc:
@@ -280,14 +321,76 @@ class QuoteEntitlementService:
                 end_at=None,
                 days_left=None,
                 reason=f"fetch failed: {type(exc).__name__}",
+                capability=capability,
             )
         else:
-            result = assess_quote_entitlement(
+            listed = assess_quote_entitlement(
                 packages, market=market, now=now, warn_days=self._warn_days
             )
+            result = self._combine(listed, capability, symbol)
         self._store(result)
         self._notify(runner, result, now)
         return result
+
+    @staticmethod
+    def _combine(
+        listed: QuoteEntitlement,
+        capability: Capability,
+        symbol: str,
+    ) -> QuoteEntitlement:
+        """Apply the capability probe's precedence over the listing assessment.
+
+        * DENIED is the authoritative lapse signal: MISSING regardless of
+          what the (rolling-window) listing claims.
+        * PERMITTED means the BBO capability is present right now: OK even
+          when the listing is absent — except a fixed-date EXPIRING window,
+          which can still warn.
+        * ERROR or SKIPPED leaves the listing-based assessment unchanged.
+        """
+        if capability == "DENIED":
+            return dataclasses_replace(
+                listed,
+                status="MISSING",
+                reason=(
+                    f"depth() refused for {symbol}: no real-time quote "
+                    f"permission (301604)"
+                ),
+                capability="DENIED",
+            )
+        if capability == "PERMITTED":
+            if listed.status == "EXPIRING":
+                return dataclasses_replace(
+                    listed,
+                    capability="PERMITTED",
+                )
+            if listed.status == "OK":
+                suffix = (
+                    f"; depth() permitted for {symbol}"
+                    if symbol
+                    else "; depth() permitted"
+                )
+                return dataclasses_replace(
+                    listed,
+                    reason=f"{listed.reason}{suffix}",
+                    capability="PERMITTED",
+                )
+            if listed.status == "MISSING":
+                # Listing says MISSING but the capability is present: the
+                # listing cannot be trusted to detect lapses (rolling
+                # window), so the capability wins.
+                return dataclasses_replace(
+                    listed,
+                    status="OK",
+                    reason=(
+                        f"depth() permitted for {symbol}; package listing "
+                        f"unreliable for lapse detection ({listed.reason})"
+                    ),
+                    capability="PERMITTED",
+                )
+            # UNKNOWN stays UNKNOWN — never treated as OK, even when the
+            # probe is permitted; the fetch failure is the message.
+            return dataclasses_replace(listed, capability="PERMITTED")
+        return dataclasses_replace(listed, capability=capability)
 
     def _get_runner(self) -> object | None:
         factory = self._runner_factory
@@ -324,6 +427,35 @@ class QuoteEntitlementService:
         except Exception:
             logger.debug("primary market lookup failed", exc_info=True)
             return ""
+
+    @staticmethod
+    def _primary_symbol(runner: object) -> str:
+        """Primary symbol from the runner's current strategy params."""
+        try:
+            params = getattr(getattr(runner, "engine", None), "params", None)
+            return str(getattr(params, "symbol", "") or "")
+        except Exception:
+            logger.debug("primary symbol lookup failed", exc_info=True)
+            return ""
+
+    @staticmethod
+    def _probe_capability(broker: object, symbol: str) -> Capability:
+        """Probe depth permission on the primary symbol (single call).
+
+        Empty symbol → ``SKIPPED``. The broker method itself returns
+        ``PERMITTED | DENIED | ERROR``; a missing method or a raising
+        wrapper is an ``ERROR``, never a silent OK.
+        """
+        if not symbol:
+            return "SKIPPED"
+        probe = getattr(broker, "probe_depth_permission", None)
+        if not callable(probe):
+            return "ERROR"
+        try:
+            return cast(Capability, str(probe(symbol)))
+        except Exception:
+            logger.debug("depth permission probe raised", exc_info=True)
+            return "ERROR"
 
     def _store(self, result: QuoteEntitlement) -> None:
         with self._lock:

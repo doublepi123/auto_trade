@@ -39,6 +39,7 @@ def _unassessed_payload() -> QuoteEntitlementResponse:
         end_at=None,
         days_left=None,
         reason="quote entitlement has not been assessed yet",
+        capability="SKIPPED",
     )
 
 
@@ -76,4 +77,5 @@ def get_quote_entitlement(response: Response) -> QuoteEntitlementResponse:
         end_at=result.end_at,
         days_left=result.days_left,
         reason=result.reason,
+        capability=result.capability,
     )

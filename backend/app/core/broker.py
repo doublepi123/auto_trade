@@ -70,6 +70,14 @@ _RETRYABLE_MESSAGE_MARKERS = (
 
 _BBO_CACHE_MAX_AGE_SECONDS = 30.0
 _INCOMPLETE_CANDLE_FINGERPRINT_CACHE_SIZE = 256
+
+#: Outcome of a single depth-permission probe (no retry, one call).
+DEPTH_PERMITTED = "PERMITTED"
+DEPTH_DENIED = "DENIED"
+DEPTH_ERROR = "ERROR"
+
+#: LongPort error marker for "no quote permission" in the exception text.
+_DEPTH_NO_PERMISSION_MARKER = "code=301604"
 _POSITION_PROBE_LOCK = threading.Lock()
 _POSITION_PROBE_COMMAND = (sys.executable, "-m", "app.core.position_probe")
 _POSITION_PROBE_MAX_OUTPUT_BYTES = 1_048_576
@@ -1102,6 +1110,39 @@ class BrokerGateway:
             return self._cached_bbo(symbol)
         self._remember_bbo(symbol, bid, ask)
         return bid, ask
+
+    def probe_depth_permission(self, symbol: str) -> str:
+        """Probe whether ``depth(symbol)`` is permitted for this account.
+
+        A single, non-retrying capability probe used by the quote
+        entitlement observer (6-hourly): a successful call — even with an
+        empty book — returns :data:`DEPTH_PERMITTED`; a LongPort "no quote
+        permission" refusal (``code=301604``) returns
+        :data:`DEPTH_DENIED`; any other exception returns
+        :data:`DEPTH_ERROR` (logged at debug). The live path already calls
+        ``depth()`` every ~15 s through ``_pull_bbo``, so this probe adds
+        no new risk and changes no trading decision.
+        """
+        with self._lock:
+            self._init_clients()
+            quote_ctx = self._quote_ctx
+            if quote_ctx is None:
+                return DEPTH_ERROR
+            depth_reader = getattr(quote_ctx, "depth", None)
+            if not callable(depth_reader):
+                return DEPTH_ERROR
+            try:
+                depth_reader(symbol)
+            except Exception as exc:
+                if _DEPTH_NO_PERMISSION_MARKER in str(exc):
+                    return DEPTH_DENIED
+                logger.debug(
+                    "depth permission probe failed for %s: %s",
+                    symbol,
+                    exc,
+                )
+                return DEPTH_ERROR
+            return DEPTH_PERMITTED
 
     def register_disconnect_hook(self, hook: DisconnectHook) -> None:
         """Register a broker disconnect hook, de-duplicating the same callable."""
