@@ -562,6 +562,7 @@ class TestMainRegistersCronJobs:
             main_module._CRON_WATCHLIST_QUANT,
             main_module._CRON_WATCHLIST_QUANT_V6_EVALUATION,
             main_module._CRON_WS_CLEANUP,
+            main_module._CRON_QUOTE_ENTITLEMENT,
         }
         assert names == expected
         set_cron_health_service(None)

@@ -3686,6 +3686,24 @@ class QuoteStreamHealth(BaseModel):
     as_of: datetime
 
 
+class QuoteEntitlementResponse(BaseModel):
+    """Cached quote-entitlement assessment for ``GET /api/quote-entitlement``.
+
+    ``status`` is one of ``OK | EXPIRING | MISSING | UNKNOWN``. ``UNKNOWN``
+    (fetch error or not yet assessed) is never treated as OK by any
+    consumer. ``end_at``/``days_left`` are ``None`` when the broker reports
+    no expiry window (or no package matched). Read-only observation — no
+    trading decision consumes this payload.
+    """
+
+    market: str
+    status: Literal["OK", "EXPIRING", "MISSING", "UNKNOWN"]
+    package_key: str
+    end_at: Optional[datetime] = None
+    days_left: Optional[int] = None
+    reason: str
+
+
 # ---------------------------------------------------------------------------
 # Strategy presets (named param snapshots)
 # ---------------------------------------------------------------------------

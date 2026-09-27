@@ -28,6 +28,7 @@ from app.core.broker import (
     OrderStatusResult,
     Position,
     Quote,
+    QuotePackage,
     _decimal_attr,
     _get_value,
     _history_boundary_for_sdk,
@@ -3431,3 +3432,149 @@ class TestBoardLotStaticInfo:
         with pytest.raises(_FakeOpenApiException) as caught:
             gateway.get_lot_sizes(["0700.HK", "UNKNOWN.HK"])
         assert caught.value is error
+
+
+class _NaiveDateTime(datetime):
+    """Naive datetime stand-in proving UTC is assumed, not host-local."""
+
+
+class TestGetQuotePackages:
+    def test_returns_normalized_packages_with_tz_aware_utc(self) -> None:
+        # Given: the longport SDK returns naive UTC datetimes.
+        class _Package:
+            def __init__(self, key: str, start: datetime, end: datetime) -> None:
+                self.key = key
+                self.name = f"name-{key}"
+                self.description = f"description-{key}"
+                self.start_at = start
+                self.end_at = end
+
+        naive_start = datetime(2026, 4, 27, 2, 31, 0)
+        naive_end = datetime(2026, 10, 26, 2, 31, 0)
+
+        class _FakeQuoteContext:
+            def quote_package_details(self) -> list[_Package]:
+                return [
+                    _Package("US_QBBO_OpenAPI", naive_start, naive_end),
+                ]
+
+        gateway = BrokerGateway()
+        gateway._quote_ctx = _FakeQuoteContext()
+        gateway._trade_ctx = object()  # quote-only fake; _init_clients retries any missing ctx
+
+        # When
+        packages = gateway.get_quote_packages()
+
+        # Then: naive SDK datetimes are interpreted as UTC, not shifted.
+        assert len(packages) == 1
+        pkg = packages[0]
+        assert isinstance(pkg, QuotePackage)
+        assert pkg.key == "US_QBBO_OpenAPI"
+        assert pkg.name == "name-US_QBBO_OpenAPI"
+        assert pkg.description == "description-US_QBBO_OpenAPI"
+        assert pkg.start_at == datetime(2026, 4, 27, 2, 31, tzinfo=timezone.utc)
+        assert pkg.end_at == datetime(2026, 10, 26, 2, 31, tzinfo=timezone.utc)
+        assert pkg.start_at is not None and pkg.start_at.tzinfo is not None
+        assert pkg.end_at is not None and pkg.end_at.tzinfo is not None
+
+    def test_already_aware_datetimes_are_normalized_to_utc(self) -> None:
+        class _Package:
+            key = "HK_L1_NonMainland_all_platforms"
+            name = "HK L1"
+            description = "HK level-1 quotes"
+            start_at = datetime(
+                2026, 4, 27, 10, 31, tzinfo=ZoneInfo("Asia/Shanghai")
+            )
+            end_at = datetime(
+                2026, 10, 26, 10, 31, tzinfo=ZoneInfo("Asia/Shanghai")
+            )
+
+        class _FakeQuoteContext:
+            def quote_package_details(self) -> list[_Package]:
+                return [_Package()]
+
+        gateway = BrokerGateway()
+        gateway._quote_ctx = _FakeQuoteContext()
+        gateway._trade_ctx = object()
+
+        packages = gateway.get_quote_packages()
+
+        assert packages[0].start_at == datetime(
+            2026, 4, 27, 2, 31, tzinfo=timezone.utc
+        )
+        assert packages[0].end_at == datetime(
+            2026, 10, 26, 2, 31, tzinfo=timezone.utc
+        )
+
+    def test_missing_datetime_fields_become_none(self) -> None:
+        class _Package:
+            key = "CN_Connect"
+            name = "CN Connect"
+            description = "CN market connect"
+            start_at = None
+            end_at = None
+
+        class _FakeQuoteContext:
+            def quote_package_details(self) -> list[_Package]:
+                return [_Package()]
+
+        gateway = BrokerGateway()
+        gateway._quote_ctx = _FakeQuoteContext()
+        gateway._trade_ctx = object()
+
+        packages = gateway.get_quote_packages()
+
+        assert packages[0].key == "CN_Connect"
+        assert packages[0].start_at is None
+        assert packages[0].end_at is None
+
+    def test_propagates_broker_error(self) -> None:
+        class _FakeOpenApiException(Exception):
+            code = 301601
+
+        error = _FakeOpenApiException("not entitled")
+
+        class _FakeQuoteContext:
+            def quote_package_details(self) -> list[object]:
+                raise error
+
+        gateway = BrokerGateway()
+        gateway._quote_ctx = _FakeQuoteContext()
+        gateway._trade_ctx = object()
+
+        with pytest.raises(_FakeOpenApiException) as caught:
+            gateway.get_quote_packages()
+        assert caught.value is error
+
+    def test_retries_transient_error_then_succeeds(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("time.sleep", lambda _s: None)
+
+        class _Package:
+            key = "US_QBBO_OpenAPI"
+            name = "N"
+            description = "D"
+            start_at = None
+            end_at = None
+
+        class _FakeQuoteContext:
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def quote_package_details(self) -> list[_Package]:
+                self.calls += 1
+                if self.calls == 1:
+                    raise OSError("connection reset")
+                return [_Package()]
+
+        quote_ctx = _FakeQuoteContext()
+        gateway = BrokerGateway()
+        gateway._quote_ctx = quote_ctx
+        gateway._trade_ctx = object()
+        monkeypatch.setattr(gateway, "_init_clients", lambda: None)
+
+        packages = gateway.get_quote_packages()
+
+        assert quote_ctx.calls == 2
+        assert packages[0].key == "US_QBBO_OpenAPI"

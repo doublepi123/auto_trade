@@ -122,6 +122,7 @@ from app.api.daily_consistency import router as daily_consistency_router
 from app.api.database_health import router as database_health_router
 from app.api.cron_health import router as cron_health_router
 from app.api.quote_health import router as quote_health_router
+from app.api.quote_entitlement import router as quote_entitlement_router
 from app.api.durable_job_leases import router as durable_job_leases_router
 from app.config import settings
 from app.core.log_throttle import HealthcheckAccessFilter, RepeatedLogThrottle
@@ -217,6 +218,8 @@ _CRON_WATCHLIST_QUANT = "watchlist_quant"
 _CRON_WATCHLIST_QUANT_V6_EVALUATION = "watchlist_quant_v6_evaluation"
 _CRON_WS_CLEANUP = "ws_cleanup"
 
+_CRON_QUOTE_ENTITLEMENT = "quote_entitlement"
+
 
 def _register_cron_health_jobs() -> None:
     """Register the background cron loops with the process-local health service.
@@ -301,6 +304,11 @@ def _register_cron_health_jobs() -> None:
         service.register(
             _CRON_WS_CLEANUP,
             expected_interval_seconds=60.0,
+            enabled_provider=lambda: True,
+        )
+        service.register(
+            _CRON_QUOTE_ENTITLEMENT,
+            expected_interval_seconds=float(_QUOTE_ENTITLEMENT_INTERVAL_SECONDS),
             enabled_provider=lambda: True,
         )
     except Exception:
@@ -624,6 +632,44 @@ async def _ws_cleanup_task() -> None:
         except Exception:
             logger.exception("WebSocket cleanup failed")
             _cron_record_failure(_CRON_WS_CLEANUP, sys.exc_info()[1])  # type: ignore[arg-type]
+
+
+_QUOTE_ENTITLEMENT_INTERVAL_SECONDS = 6 * 3600.0
+
+
+def _quote_entitlement_tick_sync() -> None:
+    """Observation-only entitlement tick: fetch, assess, cache, notify.
+
+    Never pauses/resumes or touches risk/engine state; all broker work hops
+    through the shared QuoteEntitlementService singleton.
+    """
+    from datetime import datetime, timezone
+
+    from app.services.quote_entitlement_service import (
+        get_quote_entitlement_service,
+    )
+
+    service = get_quote_entitlement_service()
+    service.tick(datetime.now(timezone.utc))
+
+
+async def _quote_entitlement_cron() -> None:
+    """Assess quote entitlement at startup and then every 6 hours.
+
+    Observation only: a lapsed real-time BBO package must become visible
+    (notification + ``/api/quote-entitlement``) without changing any trading
+    decision. The loop catches every ordinary exception so it never dies.
+    """
+    while True:
+        try:
+            await asyncio.to_thread(_quote_entitlement_tick_sync)
+            _cron_record_success(_CRON_QUOTE_ENTITLEMENT)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("quote entitlement cron failed")
+            _cron_record_failure(_CRON_QUOTE_ENTITLEMENT, sys.exc_info()[1])  # type: ignore[arg-type]
+        await asyncio.sleep(_QUOTE_ENTITLEMENT_INTERVAL_SECONDS)
 
 
 async def _liveness_heartbeat_task() -> None:
@@ -2429,6 +2475,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(_interval_recenter_cron()),
         asyncio.create_task(_watchlist_quant_cron()),
         asyncio.create_task(_watchlist_quant_v6_evaluation_cron()),
+        asyncio.create_task(_quote_entitlement_cron()),
     )
     try:
         yield
@@ -2596,6 +2643,7 @@ app.include_router(daily_consistency_router)
 app.include_router(database_health_router)
 app.include_router(cron_health_router)
 app.include_router(quote_health_router)
+app.include_router(quote_entitlement_router)
 app.include_router(durable_job_leases_router)
 
 

@@ -208,6 +208,24 @@ class Position:
     available_quantity: Decimal | None = None
 
 
+@dataclass(frozen=True)
+class QuotePackage:
+    """One account quote-entitlement package (observation-only).
+
+    Longbridge's ``quote_package_details`` reports entitlement windows for
+    market-data packages (e.g. ``US_QBBO_OpenAPI``). ``start_at``/``end_at``
+    are tz-aware UTC; the SDK returns naive datetimes which the gateway
+    interprets as UTC. Either may be ``None`` when the broker does not
+    report a window.
+    """
+
+    key: str
+    name: str
+    description: str
+    start_at: datetime | None
+    end_at: datetime | None
+
+
 @dataclass
 class CashBalance:
     currency: str
@@ -870,6 +888,23 @@ def _parse_candle_timestamp(value: Any) -> datetime | None:
     return _parse_datetime(value)
 
 
+def _parse_entitlement_datetime(value: Any) -> datetime | None:
+    """Normalize an entitlement timestamp to tz-aware UTC, or ``None``.
+
+    The longport SDK reports ``quote_package_details`` windows as naive UTC
+    datetimes; naive values are treated as UTC (never host-local), aware
+    values are converted to UTC, and missing/unparseable values become
+    ``None`` so an absent window is never fabricated into a date.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+    return None
+
+
 def _normalize_candlestick_response(
     response: Any,
     *,
@@ -1437,6 +1472,51 @@ class BrokerGateway:
         if not quotes:
             raise ValueError(f"no quote data for {symbol}")
         return quotes[0]
+
+    def get_quote_packages(self) -> list[QuotePackage]:
+        """Fetch the account's quote entitlement packages (observation-only).
+
+        Routes through the same ``_call_with_retry``/``_init_clients``
+        pattern as the other quote reads. The SDK returns naive UTC
+        datetimes; they are interpreted as UTC and normalized to tz-aware
+        UTC here.
+        """
+        return self._call_with_retry(
+            self._get_quote_packages_inner,
+            op="get_quote_packages",
+            max_retries=settings.broker_quote_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
+
+    def _get_quote_packages_inner(self) -> list[QuotePackage]:
+        with self._lock:
+            self._init_clients()
+            quote_ctx = self._quote_ctx
+            if quote_ctx is None:
+                raise RuntimeError("quote context is not initialized")
+            reader = getattr(quote_ctx, "quote_package_details", None)
+            if not callable(reader):
+                raise RuntimeError(
+                    "quote context does not support quote package details"
+                )
+            response = reader()
+            items = response if isinstance(response, list) else [response]
+            packages: list[QuotePackage] = []
+            for item in items:
+                packages.append(
+                    QuotePackage(
+                        key=str(getattr(item, "key", "") or ""),
+                        name=str(getattr(item, "name", "") or ""),
+                        description=str(getattr(item, "description", "") or ""),
+                        start_at=_parse_entitlement_datetime(
+                            getattr(item, "start_at", None)
+                        ),
+                        end_at=_parse_entitlement_datetime(
+                            getattr(item, "end_at", None)
+                        ),
+                    )
+                )
+            return packages
 
     def get_lot_sizes(self, symbols: list[str]) -> dict[str, int]:
         lots: dict[str, int] = {}
