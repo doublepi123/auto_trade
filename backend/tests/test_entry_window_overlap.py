@@ -86,11 +86,21 @@ class _Base:
         db.close()
 
     def _assess(self, **kw):
+        # The seeded sessions use fixed 2026-08/09 dates, so the lookback
+        # must be anchored to a fixed clock too.  Without ``now`` the
+        # service anchors to the wall clock and the fixtures drift out of
+        # the 30-day window as real days pass (first seen 2026-09-28:
+        # the 2026-08-28 fixture fell outside the window).
+        kw.setdefault("now", _TEST_NOW)
         db = self._db()
         try:
             return EntryWindowOverlapService(db).assess(**kw)
         finally:
             db.close()
+
+
+#: Fixed evaluation clock for every lookback in this module (see _assess).
+_TEST_NOW = datetime(2026, 9, 15, 21, 0, tzinfo=timezone.utc)
 
 
 def _flat(px: float, gate: bool, n: int) -> list[tuple[float, bool]]:
@@ -214,6 +224,7 @@ class TestEntryWindowOverlap(_Base):
         try:
             pool = EntryWindowOverlapService(db).assess_pool(
                 symbols=["CCC.US", "AAA.US", "BBB.US"], lookback_days=30,
+                now=_TEST_NOW,
             )
         finally:
             db.close()

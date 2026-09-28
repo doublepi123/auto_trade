@@ -1966,12 +1966,20 @@ def import_v2_plan(plan_payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _load_plan(plan_path: Path) -> dict[str, Any]:
+    """Read a plan file as-is; seal/fetch perform the v2 import themselves.
+
+    The ORIGINAL bytes must reach ``_cache_preflight`` unchanged so a
+    registered v2 plan is imported exactly once and preserved verbatim as
+    ``plan_original.json`` (decision 2, item C).  Importing here as well
+    handed the preflight an already-imported view whose analysis_id is
+    still v2, and the second import refused it (2026-09-28 06:10Z seal,
+    before any outcome).  Only the analysis_id is screened here.
+    """
+
     raw = json.loads(plan_path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise HistoricalReplayError("plan file is not an object")
-    if raw.get("analysis_id") != ANALYSIS_ID:
-        if raw.get("analysis_id") == _V2_PLAN_ANALYSIS_ID:
-            return import_v2_plan(raw)
+    if raw.get("analysis_id") not in (ANALYSIS_ID, _V2_PLAN_ANALYSIS_ID):
         raise HistoricalReplayError(
             "plan file analysis_id does not match the frozen replay"
         )

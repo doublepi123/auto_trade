@@ -2525,6 +2525,90 @@ def test_seal_binds_the_plan_and_its_hash(tmp_path: Path, monkeypatch: pytest.Mo
     assert stored_plan == plan
 
 
+def test_cli_seal_accepts_registered_v2_plan_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``seal --plan <v2 file>`` through the REAL CLI entry point.
+
+    2026-09-28 06:10Z (before any outcome): the CLI's plan loader imported
+    the v2 plan and then handed the imported view - whose analysis_id is
+    still v2 - to the preflight, which imported it a second time and
+    refused it.  Direct ``run_seal`` tests never exercised the loader.
+    """
+
+    from app.cli import opening_momentum_historical_replay as replay_mod
+
+    _no_live_fetch(monkeypatch)
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    sessions = (date(2024, 1, 2),)
+    plan = _minimal_plan(symbols=("AAA.US",), first=sessions[0], last=sessions[0])
+    _complete_synthetic_cache(
+        cache_dir,
+        symbols=("AAA.US",),
+        sessions=sessions,
+        builders_by_symbol={"AAA.US": _SyntheticSessionBars()},
+        adv_per_symbol={"AAA.US": 10_000_000.0},
+        plan=plan,
+    )
+    v2_plan = dict(plan)
+    v2_plan["analysis_id"] = "opening-momentum-top10-pit-historical-v2"
+    plan_file = tmp_path / "plan_v2.json"
+    plan_file.write_text(json.dumps(v2_plan), encoding="utf-8")
+    original_bytes = plan_file.read_bytes()
+
+    # The CLI hands the ORIGINAL plan through untouched; the preflight
+    # performs the single import.
+    loaded = replay_mod._load_plan(plan_file)
+    assert loaded == v2_plan
+
+    imports: list[dict[str, Any]] = []
+
+    def _counting_import(payload: dict[str, Any]) -> dict[str, Any]:
+        # The synthetic plan is not the full v3 plan, so the real
+        # equivalence check would refuse it; this stub records the call
+        # and returns an import view with the same shape.
+        imports.append(payload)
+        view = {key: value for key, value in payload.items() if key != "analysis_id"}
+        view.update(
+            {
+                "imported_from_analysis_id": payload["analysis_id"],
+                "original_analysis_id": payload["analysis_id"],
+                "v3_plan_sha256": "0" * 64,
+                "original_plan_sha256": "1" * 64,
+            }
+        )
+        return view
+
+    monkeypatch.setattr(replay_mod, "import_v2_plan", _counting_import)
+    exit_code = replay_mod.main(
+        ["seal", "--cache-dir", str(cache_dir), "--plan", str(plan_file)]
+    )
+    assert exit_code == 0
+    assert len(imports) == 1, "the v2 plan must be imported exactly once"
+    assert imports[0]["analysis_id"] == "opening-momentum-top10-pit-historical-v2"
+    assert (cache_dir / "seal_receipt.json").exists()
+    # The original plan file and the preserved copy keep the v2 identity.
+    assert plan_file.read_bytes() == original_bytes
+    preserved = json.loads(
+        (cache_dir / "plan_original.json").read_text(encoding="utf-8")
+    )
+    assert preserved["analysis_id"] == "opening-momentum-top10-pit-historical-v2"
+
+
+def test_cli_plan_loader_refuses_foreign_analysis_id(tmp_path: Path) -> None:
+    from app.cli import opening_momentum_historical_replay as replay_mod
+
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps({"analysis_id": "something-else", "symbols": []}),
+        encoding="utf-8",
+    )
+    with pytest.raises(HistoricalReplayError, match="does not match"):
+        replay_mod._load_plan(plan_file)
+
+
 def test_seal_accepts_permanent_failure_with_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
