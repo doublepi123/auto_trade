@@ -19,6 +19,8 @@ backups/
 !backend/app/domain/universe_selection/data/
 !backend/app/domain/universe_selection/data/index_membership_history.json
 !backend/app/domain/universe_selection/data/THIRD_PARTY_NOTICES.md
+!backend/app/domain/monthly_trend/data/
+!backend/app/domain/monthly_trend/data/splits.json
 .superpowers/
 .worktrees/
 .claude/

@@ -1,0 +1,18 @@
+{
+  "registered_as": "SPY_MONTHLY_SMA10 splits evidence (sealed)",
+  "window": {"start": "2010-01-01", "end": "2021-12-31"},
+  "dividend_source_url": "https://www.ssga.com/library-content/products/fund-data/etfs/us/spdr-etf-historical-distributions.xlsx",
+  "dividend_source_note": "The SSGA distributions workbook is the DIVIDEND source only. It has NO split column and is NOT split evidence.",
+  "source_urls": [
+    "https://stockanalysis.com/etf/spy/splits/",
+    "https://stockanalysis.com/etf/qqq/splits/",
+    "https://www.invesco.com/us/financial-products/etfs/product-detail?audienceType=investor&ticker=QQQ"
+  ],
+  "verified_at": "2026-09-28",
+  "statement": "Neither SPY nor QQQ executed a share split with ex-date inside 2010-01-01..2021-12-31. SPY's most recent split was 2-for-1 with ex-date 2005-03-11 (outside the window, before the sealed bar data starts 2010-06). QQQ's most recent split was 2-for-1 on 2022-08-17 (outside the window, after the sealed bar data ends 2022-01-31).",
+  "symbols": {
+    "SPY.US": {"splits_in_window": 0, "last_split": {"ex_date": "2005-03-11", "ratio": 2.0, "note": "before the window; also before LongPort bar coverage starts 2010-06"}},
+    "QQQ.US": {"splits_in_window": 0, "last_split": {"ex_date": "2022-08-17", "ratio": 2.0, "note": "after the window and after the sealed data end 2022-01-31"}}
+  },
+  "note": "This file is SEALED EVIDENCE, not an assumption: the price anomaly screen (screen_unexplained_split_anomalies) is only a tripwire and cannot prove the absence of splits (a 3:2 split plus +1% escapes it). If this file is absent or fails its hash at seal time, the run is DATA_BLOCKED."
+}
