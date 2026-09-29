@@ -235,18 +235,35 @@ rS = sleeve 月末权益收益率，rB = SPY 买入持有月收益率，**包含
 
 **Pin 口径**（沿 §14.9）：全部用 `.venv/bin/python`（3.11.15，与 CI/Docker 一致）计算；宿主 `python3` 为 3.14，`ast.dump` 输出不同。
 
+
+### 14.11 结果前决定：单点 OHLC 关系异常豁免（2026-09-29，任何 evaluate 之前，v2 seal 拒绝之后）
+
+v2 的真实 `seal` 在 2026-09-28 22:00Z 抓取完成后拒绝：`RAW OHLC violates low <= min(o,c) <= max(o,c) <= high for SPY.US on 2020-11-18`（5,878 根 bar 中唯一违规；QQQ 干净；当日 `open > high`，`close` 在 `[low, high]` 内；供应商逐行复现同一根 bar）。本决定记录于**第一次 evaluate 之前**，此时不存在任何结果。**因在输入缺陷已知后放宽一条 fail-closed 接受条件，`analysis_id` 升级为 `spy-monthly-sma10-cash-v3`。** v2 的 seal 拒绝记录与原始输入全部保留；策略、窗口、费用、统计与判定映射零变化。异常只作中性描述：**SPY.US 2020-11-18 的 OHLC 不一致（`open > high`），无法确定错误字段**——不归因于 open，也不归因于 high。
+
+1. **读集按 `(symbol, session, field)` 定义，绝不按整根 bar，且与实际信号或持仓无关。**
+   - **SPY close**：全部封存会话 2010-06-01..2022-01-31，含 warm-up、除息日与每个除息日前一会话（日 TR 指数与拆股异常屏幕读取全部相邻 close；月末 2010-06..2021-12 进信号，月末 2012-01..2021-12 进估值）。
+   - **SPY open**：每个月末 2011-12..2021-12 之后的下一个封存会话——这些是**全部潜在执行日**（无论当日是否实际交易），含 2012-01-03 的边界建仓与 2022-01-03 的最终清算。warm-up 不交易；清算日不开新仓。
+   - **QQQ**：全部会话日期（日历）；月末 close 2012-01..2021-12（price-only 估值）；2012-01-03 与 2022-01-03 的 open（买入与清算）。QQQ 无 TR 指数、无股息贷记。
+   - **股息**：SPY 除息日 close 用于 TR；权利在除息日 open 前按既有持仓固定，**不读 open 价**；派息日结算不读任何价格；除息日恰为执行日时其 open 仍受执行规则保护。
+   - high 与 low 不进任何信号、成交或估值，但仍为完整性边界。
+2. **豁免仅覆盖 `(SPY.US, 2020-11-18)` 上的 `open > high` 关系**，且仅当该日 open 不在读集内且其余全部检查通过时成立。该 bar 的 close 仍被读取；**整根 bar 永不跳过**；全部 OHLC 仍须有限且 > 0；`low ≤ close ≤ high` 仍须成立；每个受保护 open 必须落在 `[low, high]` 内。豁免永不断言 open、high 或任何其他字段正确。
+3. **上限**：两标的合计至多 1 根 bar，且必须与唯一注册条目完全一致。任何其他日期、任何其他关系、或任何读字段违规一律 DATA_BLOCKED。QQQ 遵循同一字段依赖原则，但清单上没有 QQQ 条目，故任何 QQQ OHLC 异常仍然阻断。
+4. **封存异常账本** `backend/app/domain/monthly_trend/data/ohlc_anomaly_ledger.json`（钉死的已提交数据文件，仅含哈希与事实、绝不含价格；已经由 `monthly_trend/data/` 取消忽略）：记录 symbol、日期、违规关系（`open > high`）与读集推理；raw 缓存 `SPY.US.json.gz` 的 sha256 `eef5adc1d68d7020563ba90e729cbcc5a0c6dba29c183765c7907477947e25ca`；供应商复现回执（orchestrator 已核验）：文件 `backend/data/research/sources/spy_2020-11-18_provider_reproduction_20260928T220621Z.json`（git-ignored、只读），sha256 `edb6a218a92ffe2fd571821a2259b3b5376fed8c6603a1eaceba7d7542ccb4fd`，probed_at_utc `2026-09-28T22:06:21.928931+00:00`，请求 `QuoteContext.history_candlesticks_by_date` / SPY.US / Day / 2020-11-16..2020-11-20；NoAdjust `rows_sha256` 前缀 `ec37d6f8c512d5da`（完整值 `ec37d6f8c512d5dabca67b8520e336d320046e78786a84e35a2176792a4dadef`，逐行与封存缓存一致，2020-11-18 违规复现）；ForwardAdjust 前缀 `376d3cac8c12360c`（完整值 `376d3cac8c12360c8218fc0bb4ae450fe342e4b405b2cadf760f6413ff48aa00`，同一违规，仅诊断、永不作为分析输入）。另注：22:02Z 一次未保存的探测给出相同结果，**只有已保存的回执是证据**。seal 将账本哈希入 manifest；最终报告披露它；evaluate 在声明 attempt 之前从封存 bar 重新检测全部违规并要求与账本**完全相等**——账本缺失、被篡改或与重检测结果不符即拒绝，即使外层哈希被一致改写。
+5. **raw 行永不修改、替换或删除。** v3 常量、测试 pin 与代码哈希清单与本决定同一提交落盘。**缓存目录选择：新目录 `backend/data/research/spy_monthly_sma10_v3`（重新抓取 6 个请求）**。理由：旧 v2 缓存目录保留原始证据（含 seal 拒绝前的输入与 22:00Z 抓取回执），而 plan.json 内绑定 `analysis_id` v2——同一目录内的 v3 reseal 需要**就地改写**绑定计划或做有文档的 rebind，两者都是对历史输入的重写；新目录让 v2 证据链保持字节不变，v3 从 plan→fetch→import→seal 全链路干净重建。v2 的 seal 仅到达拒绝（无 manifest、无 attempt），不构成需要归档的封存输入集。
+
 ## 15. Code manifest（pin 清单）
 
 以下清单与 `backend/tests/test_spy_monthly_sma10_preregistration.py` 的 `_MANIFEST` 逐项一致（doc-agreement 断言双向同步）。哈希为 `ast.dump`（无属性）SHA-256，冻结于 2026-09-28。
 
 ```
-app.cli.spy_monthly_sma10_replay = bbd2b2e06d20740c65061212be2eea7d216fdde22664f235a7affb097830cdd1
+app.cli.spy_monthly_sma10_replay = 2450e3175ac583a761e4a072a4aa0d97e691c0a5cd4642be7c2abfd7176143f5
+app.domain.monthly_trend.data.ohlc_anomaly_ledger.json = 3ae6cc9feb8514c8da4493c43509842ef134b9e1eee623592b675eb815369ead
 app.domain.monthly_trend.data.splits.json = 6e0de8ae5173afb22634e2577b90151974a4a1b4136b2ebde347abe733fb165d
 app.domain.monthly_trend.nyse_calendar = 828dda83588b0731c07afcbd7f380d1abe7cce024bd467b7ce19c8057bb977f5
-app.domain.monthly_trend.sma10 = c9127d6015e11422c319b3bac93969e356b30706f70f6c09a9aef35e829f5073
+app.domain.monthly_trend.sma10 = 148fcc1eed3426fb35ad8053ea686297764dcf4642503645d43bddb041cb3455
 dep.app.cli.opening_momentum_historical_replay = ea90fb33573c2aacdd62be0601730bfed9fe4849a4947bf45ead946f4ddb6581
 dep.app.core.accounting_fees = 2f33e6d3ddf3f6c657a14befd361c1bc2e07c73db829db52db1f8f0bc0503a1b
-combined = f56194f783b8ffeaea7bda811db3d5eaed06978420d04bcae0b810ae680c84ff
+combined = eeb4a37bbcf858156f07cc68375155c537c567557924e8e89d72f54794cd024c
 ```
 
 

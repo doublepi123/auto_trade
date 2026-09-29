@@ -891,6 +891,7 @@ def validate_window_data(
     actions: Sequence[CorporateAction],
     calendar_sessions: Sequence[date] | None = None,
     symbol: str = "SPY.US",
+    protected_opens: Sequence[date] | None = None,
 ) -> None:
     """Raise MonthlyReplayBlockedError for every DATA_BLOCKED shape.
 
@@ -912,6 +913,16 @@ def validate_window_data(
       open) — checked for the LAST scoring month too;
     - a corporate action with neither a cash amount nor a ratio, or a
       non-positive/non-finite value where one is present.
+
+    Decision 14.11 (single-point OHLC relation exemption): the uniform
+    gate is enforced per RELATION.  The one registered anomaly
+    (SPY.US 2020-11-18, ``open > high`` - a non-execution day whose
+    open is outside the read set) is excused while every other check
+    still passes.  The bar is never skipped; its close stays checked;
+    the exemption never asserts any field is correct.  Additionally,
+    every PROTECTED open (a potential execution day, whether or not a
+    trade happens - ``protected_opens``) must lie within
+    ``[low, high]`` independent of the ordering relations.
     """
 
     sealed = sorted(set(sessions))
@@ -930,13 +941,34 @@ def validate_window_data(
                 f"RAW OHLC not finite-positive for {symbol} on "
                 f"{row.session.isoformat()}"
             )
-        if not (
-            row.low <= min(row.open, row.close)
-            and max(row.open, row.close) <= row.high
-        ):
+        # Decision 14.11: the uniform OHLC gate is enforced per
+        # RELATION.  A violated relation is excused ONLY when it is the
+        # single registered anomaly (SPY.US 2020-11-18, open > high) -
+        # a session whose open is outside the read set.  Every other
+        # relation on every other session still blocks, and the
+        # registered bar's CLOSE stays fully checked (it is read).
+        for relation in _ohlc_relation_violations(row):
+            if _is_registered_anomaly(
+                symbol, row.session, relation
+            ):
+                continue
             raise MonthlyReplayBlockedError(
                 f"RAW OHLC violates low <= min(o,c) <= max(o,c) <= "
-                f"high for {symbol} on {row.session.isoformat()}"
+                f"high for {symbol} on {row.session.isoformat()} "
+                f"({relation})"
+            )
+    # Decision 14.11: every PROTECTED open (a potential execution day,
+    # whether or not a trade happens) must lie within [low, high] even
+    # when the registered relation exemption applies elsewhere on the
+    # bar.  This is field-level: it reads the open DIRECTLY.
+    for protected in sorted(set(protected_opens or ())):
+        row = rows_by_session.get(protected)
+        if row is None:
+            continue  # missing bars are caught by the calendar checks
+        if not (row.low <= row.open <= row.high):
+            raise MonthlyReplayBlockedError(
+                f"protected execution-day open outside [low, high] for "
+                f"{symbol} on {protected.isoformat()}"
             )
     independent = (
         set(calendar_sessions) if calendar_sessions is not None else None
@@ -1000,6 +1032,90 @@ def validate_window_data(
                 "pay date before ex date (uncertain data) on "
                 f"{action.ex_date.isoformat()}"
             )
+
+
+# ------------------------------------------------- registered anomaly (14.11)
+
+
+#: Decision 14.11 (SPY_MONTHLY_SMA10_PREREGISTRATION.md): the SINGLE
+#: registered OHLC relation anomaly.  SPY.US 2020-11-18 carries
+#: ``open > high`` in the sealed RAW cache (the provider reproduces the
+#: bar identically); that session's open is OUTSIDE the read set (it is
+#: not the next sealed session after any month-end 2011-12..2021-12),
+#: so the ``open > high`` relation alone - on that symbol, that
+#: session, with every other check still passing - is exempt from the
+#: uniform OHLC gate.  The exemption NEVER asserts that open, high or
+#: any other field is correct, never skips the bar, and never excuses a
+#: read field (the bar's close is still read and still checked).
+REGISTERED_OHLC_ANOMALIES: tuple[dict[str, str], ...] = (
+    {
+        "symbol": "SPY.US",
+        "session": "2020-11-18",
+        "relation": "open > high",
+    },
+)
+
+OHLC_RELATION_OPEN_ABOVE_HIGH = "open > high"
+OHLC_RELATION_LOW_ABOVE_CLOSE = "low > close"
+
+
+def _ohlc_relation_violations(row: DailyPriceRow) -> list[str]:
+    """The OHLC ordering relations this row violates (finite-positive
+    already checked), in the registered 14.11 vocabulary: relations,
+    never fields.  Unregistered shapes (``open < low``, ``close >
+    high``) are reported verbatim so they can never match a registered
+    exemption."""
+
+    violated: list[str] = []
+    if row.open > row.high:
+        violated.append(OHLC_RELATION_OPEN_ABOVE_HIGH)
+    if row.low > row.close:
+        violated.append(OHLC_RELATION_LOW_ABOVE_CLOSE)
+    if row.open < row.low:
+        violated.append("open < low")
+    if row.close > row.high:
+        violated.append("close > high")
+    return violated
+
+
+def _is_registered_anomaly(
+    symbol: str, session: date, relation: str
+) -> bool:
+    return any(
+        entry["symbol"] == symbol
+        and entry["session"] == session.isoformat()
+        and entry["relation"] == relation
+        for entry in REGISTERED_OHLC_ANOMALIES
+    )
+
+
+def detect_ohlc_anomalies(
+    daily_rows: Sequence[DailyPriceRow],
+    *,
+    symbol: str = "SPY.US",
+) -> list[dict[str, str]]:
+    """Re-derive the full violation set from bars: every
+    ``(symbol, session, relation)`` whose OHLC ordering is violated.
+    This is the re-derivation primitive evaluate compares against the
+    sealed ledger (decision 14.11: the derived set must EQUAL the
+    ledger exactly)."""
+
+    anomalies: list[dict[str, str]] = []
+    for row in daily_rows:
+        for relation in _ohlc_relation_violations(row):
+            anomalies.append(
+                {
+                    "symbol": symbol,
+                    "session": row.session.isoformat(),
+                    "relation": relation,
+                }
+            )
+    return sorted(
+        anomalies,
+        key=lambda entry: (
+            entry["symbol"], entry["session"], entry["relation"]
+        ),
+    )
 
 
 def _calendar_required(

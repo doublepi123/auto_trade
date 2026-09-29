@@ -38,6 +38,7 @@ from app.cli.spy_monthly_sma10_replay import (
     _derive_trading_days,
     _load_status,
 )
+from app.domain.monthly_trend.sma10 import validate_window_data  # noqa: F401
 from app.core.accounting_fees import (
     SEC98_FIXED_USD,
     SEC98_NOTIONAL_RATE,
@@ -54,6 +55,7 @@ from app.domain.monthly_trend.sma10 import (
     MonthlyReplayBlockedError,
     MonthlyTrendError,
     SampleGates,
+    SleeveResult,
     CorporateAction,
     DailyPriceRow,
     MonthEndBar,
@@ -74,9 +76,11 @@ from app.domain.monthly_trend.sma10 import (
     monthly_return_series,
     next_session_after,
     sample_gates_from_records,
+    screen_unexplained_split_anomalies,
     simulate_leg,
     sleeve_entry_exit_events,
     sma10_signal,
+    validate_window_data,
 )
 
 
@@ -118,6 +122,37 @@ def _synthetic_rows(
             )
         )
     return rows
+
+
+#: Decision 14.11: the single registered OHLC anomaly session.
+_REGISTERED_ANOMALY_SESSION = date(2020, 11, 18)
+
+
+def _inject_registered_ohlc_anomaly(
+    rows: list[DailyPriceRow],
+) -> list[DailyPriceRow]:
+    """Mirror the single registered anomaly (SPY.US 2020-11-18,
+    ``open > high``) into synthetic bars: ONLY that session's open is
+    moved above the high; the close stays inside [low, high] so the
+    sole violated relation is the registered one.  2020-11-18 is a
+    Wednesday mid-month - NOT the next session after any month-end -
+    so its open is outside the read set (decision 14.11)."""
+
+    out: list[DailyPriceRow] = []
+    injected = False
+    for row in rows:
+        if row.session == _REGISTERED_ANOMALY_SESSION:
+            injected = True
+            row = DailyPriceRow(
+                session=row.session,
+                open=round(row.high * 1.01, 6),
+                high=row.high,
+                low=row.low,
+                close=row.close,
+            )
+        out.append(row)
+    assert injected, "fixture must cover 2020-11-18"
+    return out
 
 
 def _quarterly_dividends(
@@ -1090,7 +1125,8 @@ def _write_bars_file(
 
 
 def _write_fetch_cache(
-    cache: Path, *, with_actions: bool = True
+    cache: Path, *, with_actions: bool = True,
+    with_registered_anomaly: bool = True,
 ) -> Path:
     """A complete synthetic fetch cache: SPY/QQQ bars 2010-06..2022-01,
     plan.json, status.json, corporate actions.
@@ -1098,10 +1134,17 @@ def _write_fetch_cache(
     The corporate-actions record is written DIRECTLY in the registered
     sealed shape (xlsx format + registered hash + the 48-quarter
     content fact), because the JSON import path is synthetic-tests-only
-    and is refused by seal (decision 14.6)."""
+    and is refused by seal (decision 14.6).
+
+    ``with_registered_anomaly`` (default True) injects the single
+    registered OHLC anomaly (decision 14.11) into the SPY bars:
+    2020-11-18 open above the high, close still inside [low, high].
+    Pass False for the few fixtures that need a clean cache."""
 
     sessions = _weekdays(date(2010, 6, 1), date(2022, 1, 31))
     spy_rows = _synthetic_rows(sessions, seed=101, drift=0.00055)
+    if with_registered_anomaly:
+        spy_rows = _inject_registered_ohlc_anomaly(spy_rows)
     qqq_rows = _synthetic_rows(sessions, seed=202, drift=0.00065)
     _write_bars_file(cache, "SPY.US", spy_rows)
     _write_bars_file(cache, "QQQ.US", qqq_rows)
@@ -2304,9 +2347,726 @@ class TestGlue:
         one_sided = result["one_sided_dates"]
         assert isinstance(one_sided, list) and len(one_sided) == 2
 
+
+# ------------------------------------------- decision 14.11: OHLC anomaly
+
+
+@pytest.fixture(autouse=True)
+def _no_repo_mutation_guard() -> Any:
+    """Decision 14.11 follow-up guard: NO test in this module may
+    write, unlink or rename anything under the repo.  The committed
+    anomaly ledger in particular is read by seal/evaluate through
+    ``cli._ANOMALY_LEDGER_PATH``; a test that tampers with the real
+    file corrupts the committed evidence and races every other worker
+    under plain ``-n`` distribution (verified defect).  Snapshot the
+    content hashes of the whole ``monthly_trend`` package (minus
+    bytecode caches) plus the governance doc before/after each test."""
+
+    import hashlib as _hashlib
+
+    watch_root = (
+        Path(__file__).resolve().parents[1]
+        / "app"
+        / "domain"
+        / "monthly_trend"
+    )
+    doc = (
+        Path(__file__).resolve().parents[1]
+        / "app"
+        / "domain"
+        / "SPY_MONTHLY_SMA10_PREREGISTRATION.md"
+    )
+
+    def _snapshot() -> dict[str, str]:
+        snapshot: dict[str, str] = {}
+        paths = [
+            path
+            for path in watch_root.rglob("*")
+            if path.is_file()
+            and "__pycache__" not in path.parts
+            and path.suffix != ".pyc"
+        ]
+        paths.append(doc)
+        for path in sorted(paths):
+            stat = path.stat()
+            digest = _hashlib.sha256(path.read_bytes()).hexdigest()
+            # mtime catches write-then-restore mutations (identical
+            # content, touched inode) - a committed evidence file must
+            # never be written, not even "reversibly".
+            snapshot[str(path.relative_to(watch_root.parent))] = (
+                f"{digest}@{stat.st_mtime_ns}"
+            )
+        return snapshot
+
+    before = _snapshot()
+    yield
+    after = _snapshot()
+    assert after == before, (
+        "a test mutated a repo file under app/domain/monthly_trend/ "
+        "or the governance doc; tests must copy to tmp_path and "
+        "monkeypatch the path instead (cli._ANOMALY_LEDGER_PATH)"
+    )
+
+
+class TestDecision1411AllowedException:
+    """The registered anomaly (SPY.US 2020-11-18, open > high) passes
+    seal and the sealed preflight, produces a consistent ledger
+    comparison, and the full synthetic pipeline still evaluates."""
+
+    def test_registered_anomaly_passes_seal_and_preflight(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cache = _write_fetch_cache(
+            tmp_path / "cache",
+            with_actions=True,
+            with_registered_anomaly=True,
+        )
+        _no_live_fetch(monkeypatch)
+        run_seal(cache)
+        manifest = json.loads(
+            (cache / "manifest.json").read_text(encoding="utf-8")
+        )
+        ledger_entry = manifest["ohlc_anomaly_ledger"]
+        assert ledger_entry["entries"] == 1
+        assert ledger_entry["sessions"] == ["2020-11-18"]
+        # The manifest pins the COMMITTED ledger file's hash.
+        assert ledger_entry["sha256"] == cli._file_sha256(
+            cli._ANOMALY_LEDGER_PATH
+        )
+
+    def test_registered_anomaly_full_pipeline_evaluates(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cache = _write_fetch_cache(
+            tmp_path / "cache",
+            with_actions=True,
+            with_registered_anomaly=True,
+        )
+        _seal_for_tests(monkeypatch, cache)
+        payload = run_evaluate(
+            cache_dir=cache,
+            output_path=tmp_path / "out" / "result.json",
+        )
+        assert payload["analysis_id"] == "spy-monthly-sma10-cash-v3"
+        if payload["verdict"] == "DATA_BLOCKED":
+            pytest.fail(str(payload["verdict_reasons"]))
+        assert payload["sample_gates"]["months"] == 120
+        # The final report DISCLOSES the applied ledger.
+        disclosure = payload["ohlc_anomaly_exemptions"]
+        assert disclosure["entries"] == 1
+        assert disclosure["sessions"] == ["2020-11-18"]
+        assert disclosure["relations"] == ["open > high"]
+        assert disclosure["ledger_sha256"] == cli._file_sha256(
+            cli._ANOMALY_LEDGER_PATH
+        )
+
+    def test_registered_anomaly_refused_without_ledger_entry(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An `open > high` violation on a DIFFERENT session is not the
+        # registered entry and still refuses (scope, not mechanism).
+        cache = _write_fetch_cache(tmp_path / "cache", with_actions=True)
+        path = cache / "daily" / "SPY.US.json.gz"
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        for row in raw["bars"]:
+            if row[0] == "2015-06-15":
+                row[1] = row[2] * 1.05  # open above high
+        rendered = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+        with gzip.open(path, "wt", encoding="utf-8") as handle:
+            handle.write(rendered)
+        _resync_status_counts(cache)
+        _no_live_fetch(monkeypatch)
+        with pytest.raises(MonthlySma10Error, match="DATA_BLOCKED"):
+            run_seal(cache)
+
+
+class TestDecision1411ReadSetPrecision:
+    """Which (symbol, session, field) cells are READ.  A violation is
+    excused ONLY on a non-read cell; every read cell still blocks."""
+
+    def _validated(
+        self,
+        rows: list[DailyPriceRow],
+        sessions: list[date],
+        scoring_months: list[tuple[int, int]],
+        symbol: str = "SPY.US",
+        calendar_sessions: list[date] | None = None,
+        actions: list[CorporateAction] | None = None,
+    ) -> None:
+        sma10.validate_window_data(
+            sessions=sessions,
+            scoring_months=scoring_months,
+            daily_rows=rows,
+            actions=actions or [],
+            calendar_sessions=calendar_sessions,
+            symbol=symbol,
+        )
+
+    def _env(
+        self,
+    ) -> tuple[
+        list[date], list[DailyPriceRow], list[tuple[int, int]]
+    ]:
+        # Warm-up 2010-06..2011-12 + scoring 2012-01..2012-03: covers
+        # warm-up closes, ordinary closes, month-end closes and the
+        # boundary entry (2012-01-03) / liquidation opens.
+        sessions = _weekdays(date(2010, 6, 1), date(2012, 3, 31))
+        scoring = _month_iter((2012, 1), (2012, 3))
+        return sessions, _synthetic_rows(sessions, seed=21), scoring
+
+    def test_warmup_close_out_of_bounds_blocks(self) -> None:
+        # A close below low on a WARM-UP session (2010-07) is read by
+        # the TR index -> blocked.
+        sessions, rows, scoring = self._env()
+        row = next(r for r in rows if r.session.month == 7
+                   and r.session.year == 2010)
+        mutated = [
+            DailyPriceRow(
+                session=r.session,
+                open=r.open,
+                high=r.high,
+                low=r.low,
+                close=r.low * 0.5 if r is row else r.close,
+            )
+            for r in rows
+        ]
+        with pytest.raises(MonthlyReplayBlockedError):
+            self._validated(mutated, sessions, scoring)
+
+    def test_ordinary_close_out_of_bounds_blocks(self) -> None:
+        # Mid-month ordinary close (not month-end, not ex-date).
+        sessions, rows, scoring = self._env()
+        target = next(
+            r for r in rows
+            if (r.session.year, r.session.month) == (2011, 4)
+            and r.session.day == 13
+        )
+        mutated = [
+            DailyPriceRow(
+                session=r.session,
+                open=r.open,
+                high=r.high,
+                low=r.low,
+                close=r.high * 2.0 if r is target else r.close,
+            )
+            for r in rows
+        ]
+        with pytest.raises(MonthlyReplayBlockedError):
+            self._validated(mutated, sessions, scoring)
+
+    def test_month_end_close_out_of_bounds_blocks(self) -> None:
+        sessions, rows, scoring = self._env()
+        end = max(
+            s for s in sessions if (s.year, s.month) == (2012, 2)
+        )
+        row = next(r for r in rows if r.session == end)
+        mutated = [
+            DailyPriceRow(
+                session=r.session,
+                open=r.open,
+                high=r.high,
+                low=r.low,
+                close=r.low * 0.5 if r is row else r.close,
+            )
+            for r in rows
+        ]
+        with pytest.raises(MonthlyReplayBlockedError):
+            self._validated(mutated, sessions, scoring)
+
+    def test_ex_date_and_pre_ex_date_close_out_of_bounds_blocks(
+        self,
+    ) -> None:
+        # The ex-date close feeds the TR index; the PRE-ex-date close
+        # is its previous_close.  Both are read.
+        sessions, rows, scoring = self._env()
+        ex = date(2011, 9, 15)
+        idx = next(i for i, r in enumerate(rows) if r.session == ex)
+        for offset, label in ((0, "ex-date"), (-1, "pre-ex-date")):
+            victim = rows[idx + offset]
+            mutated = [
+                DailyPriceRow(
+                    session=r.session,
+                    open=r.open,
+                    high=r.high,
+                    low=r.low,
+                    close=r.high * 2.0 if r is victim else r.close,
+                )
+                for r in rows
+            ]
+            with pytest.raises(MonthlyReplayBlockedError):
+                self._validated(mutated, sessions, scoring)
+            del label
+
+    def test_boundary_entry_open_out_of_bounds_blocks(self) -> None:
+        # 2012-01-03 is the next session after the 2011-12 month-end:
+        # the FIRST potential execution day (the boundary entry).
+        sessions, rows, scoring = self._env()
+        entry = date(2012, 1, 3)
+        assert entry in sessions
+        row = next(r for r in rows if r.session == entry)
+        mutated = [
+            DailyPriceRow(
+                session=r.session,
+                open=r.high * 1.05 if r is row else r.open,
+                high=r.high,
+                low=r.low,
+                close=r.close,
+            )
+            for r in rows
+        ]
+        with pytest.raises(MonthlyReplayBlockedError):
+            self._validated(mutated, sessions, scoring)
+
+    def test_potential_execution_day_open_protected_even_without_trade(
+        self,
+    ) -> None:
+        # The next session after EVERY month-end 2011-12..2021-12 is a
+        # potential execution day whether or not a trade happens.  Pick
+        # one where the synthetic signal does NOT trade (2021-02-01,
+        # after the 2021-01 month-end): its open must still be inside
+        # [low, high].
+        sessions = _weekdays(date(2010, 6, 1), date(2022, 1, 31))
+        scoring = _month_iter((2012, 1), (2021, 12))
+        rows = _synthetic_rows(sessions, seed=21)
+        victim = date(2021, 2, 1)  # next session after 2021-01-29
+        assert victim in sessions
+        row = next(r for r in rows if r.session == victim)
+        mutated = [
+            DailyPriceRow(
+                session=r.session,
+                open=r.high * 1.05 if r is row else r.open,
+                high=r.high,
+                low=r.low,
+                close=r.close,
+            )
+            for r in rows
+        ]
+        with pytest.raises(MonthlyReplayBlockedError):
+            self._validated(mutated, sessions, scoring)
+
+    def test_registered_day_close_out_of_bounds_still_blocks(
+        self,
+    ) -> None:
+        # The registered bar's CLOSE is read: a bad close there is a
+        # second, different violation and must still refuse.
+        sessions, rows, scoring = self._env_full()
+        row = next(
+            r for r in rows if r.session == _REGISTERED_ANOMALY_SESSION
+        )
+        mutated = [
+            DailyPriceRow(
+                session=r.session,
+                open=r.high * 1.01 if r is row else r.open,
+                high=r.high,
+                low=r.low,
+                close=r.high * 2.0 if r is row else r.close,
+            )
+            for r in rows
+        ]
+        with pytest.raises(MonthlyReplayBlockedError):
+            self._validated(mutated, sessions, scoring)
+
+    def _env_full(
+        self,
+    ) -> tuple[
+        list[date], list[DailyPriceRow], list[tuple[int, int]]
+    ]:
+        sessions = _weekdays(date(2010, 6, 1), date(2022, 1, 31))
+        scoring = _month_iter((2012, 1), (2021, 12))
+        rows = _synthetic_rows(sessions, seed=21)
+        assert _REGISTERED_ANOMALY_SESSION in sessions
+        return sessions, rows, scoring
+
+    def test_registered_anomaly_open_excused_in_pure_validation(
+        self,
+    ) -> None:
+        # The SAME shape through the PURE validator: with the ledger
+        # applied, the registered open>high alone does not block.
+        sessions, rows, scoring = self._env_full()
+        mutated = _inject_registered_ohlc_anomaly(rows)
+        self._validated(mutated, sessions, scoring)  # no raise
+
+    def test_non_execution_day_open_high_mismatch_excused(
+        self,
+    ) -> None:
+        # A NON-execution mid-month day whose open>high is excused ONLY
+        # when it is the registered session; here we prove the flip
+        # side: the registered session with ONLY open moved (high
+        # untouched) is excused and every pure-function output equals
+        # the clean baseline (see TestDecision1411NonInterference).
+        sessions, rows, scoring = self._env_full()
+        injected = _inject_registered_ohlc_anomaly(rows)
+        row = next(
+            r for r in injected if r.session == _REGISTERED_ANOMALY_SESSION
+        )
+        assert row.open > row.high  # the registered relation
+        assert row.low <= row.close <= row.high  # close still in range
+
+
+class TestDecision1411ScopeAndCap:
+    """Any deviation from the single registered entry refuses."""
+
+    def test_second_anomaly_blocks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cache = _write_fetch_cache(
+            tmp_path / "cache",
+            with_actions=True,
+            with_registered_anomaly=True,
+        )
+        path = cache / "daily" / "SPY.US.json.gz"
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        for row in raw["bars"]:
+            if row[0] == "2015-06-15":
+                row[1] = row[2] * 1.05
+        rendered = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+        with gzip.open(path, "wt", encoding="utf-8") as handle:
+            handle.write(rendered)
+        _resync_status_counts(cache)
+        _no_live_fetch(monkeypatch)
+        with pytest.raises(MonthlySma10Error, match="DATA_BLOCKED"):
+            run_seal(cache)
+
+    def test_other_relation_on_registered_day_blocks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cache = _write_fetch_cache(
+            tmp_path / "cache",
+            with_actions=True,
+            with_registered_anomaly=True,
+        )
+        path = cache / "daily" / "SPY.US.json.gz"
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        for row in raw["bars"]:
+            if row[0] == "2020-11-18":
+                # open>high stays AND low>close is added: a different
+                # (read-field) relation on the registered day.
+                row[3] = row[4] * 1.05
+        rendered = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+        with gzip.open(path, "wt", encoding="utf-8") as handle:
+            handle.write(rendered)
+        _resync_status_counts(cache)
+        _no_live_fetch(monkeypatch)
+        with pytest.raises(MonthlySma10Error, match="DATA_BLOCKED"):
+            run_seal(cache)
+
+    def test_any_qqq_anomaly_blocks(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cache = _write_fetch_cache(
+            tmp_path / "cache",
+            with_actions=True,
+            with_registered_anomaly=True,
+        )
+        path = cache / "daily" / "QQQ.US.json.gz"
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        for row in raw["bars"]:
+            if row[0] == "2020-11-18":
+                row[1] = row[2] * 1.02  # QQQ open > high
+        rendered = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+        with gzip.open(path, "wt", encoding="utf-8") as handle:
+            handle.write(rendered)
+        _resync_status_counts(cache)
+        _no_live_fetch(monkeypatch)
+        with pytest.raises(MonthlySma10Error, match="QQQ"):
+            run_seal(cache)
+
+    def test_nan_and_non_positive_still_refused(
+        self,
+    ) -> None:
+        sessions = _weekdays(date(2010, 6, 1), date(2022, 1, 31))
+        scoring = _month_iter((2012, 1), (2021, 12))
+        base = _synthetic_rows(sessions, seed=5)
+        idx = next(
+            i for i, r in enumerate(base)
+            if r.session == _REGISTERED_ANOMALY_SESSION
+        )
+        for pos, value in ((1, float("nan")), (2, -1.0), (3, 0.0)):
+            rows = list(base)
+            victim = rows[idx]
+            fields = [victim.open, victim.high, victim.low, victim.close]
+            fields[pos] = value
+            rows[idx] = DailyPriceRow(
+                session=victim.session, open=fields[0], high=fields[1],
+                low=fields[2], close=fields[3],
+            )
+            with pytest.raises(MonthlyReplayBlockedError):
+                sma10.validate_window_data(
+                    sessions=sessions,
+                    scoring_months=scoring,
+                    daily_rows=rows,
+                    actions=[],
+                )
+
+    def test_duplicate_dates_still_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cache = _write_fetch_cache(
+            tmp_path / "cache",
+            with_actions=True,
+            with_registered_anomaly=True,
+        )
+        path = cache / "daily" / "SPY.US.json.gz"
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        raw["bars"].append(list(raw["bars"][50]))
+        rendered = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+        with gzip.open(path, "wt", encoding="utf-8") as handle:
+            handle.write(rendered)
+        _resync_status_counts(cache)
+        _no_live_fetch(monkeypatch)
+        with pytest.raises(MonthlySma10Error, match="duplicate"):
+            run_seal(cache)
+
+
+class TestDecision1411LedgerDrift:
+    """Evaluate re-derives the ledger from the sealed bars and refuses
+    on missing / tampered / mismatched - even when every outer hash was
+    rewritten consistently."""
+
+    def _sealed_with_anomaly(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> Path:
+        cache = _write_fetch_cache(
+            tmp_path / "cache",
+            with_actions=True,
+            with_registered_anomaly=True,
+        )
+        _seal_for_tests(monkeypatch, cache)
+        return cache
+
+    def _rewrite_outer_hashes(self, cache: Path) -> None:
+        """Re-point the manifest + seal receipt at the bytes now on
+        disk so every OUTER hash check passes (isolates the ledger
+        re-derivation)."""
+        _resync_status_counts(cache)
+        manifest = json.loads(
+            (cache / "manifest.json").read_text(encoding="utf-8")
+        )
+        for entry in manifest["files"]:
+            entry["sha256"] = cli._file_sha256(cache / str(entry["path"]))
+            entry["bytes"] = (cache / str(entry["path"])).stat().st_size
+        ledger_rel = "backend/app/domain/monthly_trend/data/ohlc_anomaly_ledger.json"
+        manifest["source_hashes"][ledger_rel] = cli._file_sha256(
+            cli._ANOMALY_LEDGER_PATH
+        )
+        if isinstance(manifest.get("ohlc_anomaly_ledger"), dict):
+            manifest["ohlc_anomaly_ledger"]["sha256"] = (
+                cli._file_sha256(cli._ANOMALY_LEDGER_PATH)
+            )
+        cli._atomic_write_json(cache / "manifest.json", manifest)
+        new_hash = cli._file_sha256(cache / "manifest.json")
+        cli._atomic_write_json(
+            cache / "seal_receipt.json",
+            {
+                "sealed_at": "2026-09-29T00:00:00+00:00",
+                "manifest_sha256": new_hash,
+                "files": len(manifest["files"]),
+                "reseal_reason": "retamper-for-test",
+            },
+        )
+
+    def _ledger_to_tmp(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> Path:
+        """Point the CLI at a tmp_path COPY of the committed ledger:
+        repo files stay untouched (module guard), and the drift path
+        under test is fully driven through ``_ANOMALY_LEDGER_PATH``."""
+
+        copy = tmp_path / "ohlc_anomaly_ledger.json"
+        copy.write_bytes(cli._ANOMALY_LEDGER_PATH.read_bytes())
+        monkeypatch.setattr(cli, "_ANOMALY_LEDGER_PATH", copy)
+        return copy
+
+    def test_missing_ledger_refused_before_attempt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ledger_copy = self._ledger_to_tmp(monkeypatch, tmp_path)
+        cache = self._sealed_with_anomaly(tmp_path, monkeypatch)
+        # Remove the anomaly from the sealed bars, then rewrite outer
+        # hashes: the DERIVED set (empty) no longer equals the ledger
+        # (1 entry) -> refuse even though every hash matches.
+        path = cache / "daily" / "SPY.US.json.gz"
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        for row in raw["bars"]:
+            if row[0] == "2020-11-18":
+                row[1] = row[4]  # open back inside range
+        rendered = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+        with gzip.open(path, "wt", encoding="utf-8") as handle:
+            handle.write(rendered)
+        self._rewrite_outer_hashes(cache)
+        with pytest.raises(MonthlySma10Error, match="anomaly ledger"):
+            run_evaluate(
+                cache_dir=cache,
+                output_path=tmp_path / "out" / "r.json",
+            )
+        assert not (cache / "attempts").exists()
+        # The tmp copy was never mutated either; the committed ledger
+        # is bit-identical to its sealed hash throughout.
+        assert ledger_copy.exists()
+
+    def test_tampered_ledger_refused_before_attempt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ledger_copy = self._ledger_to_tmp(monkeypatch, tmp_path)
+        cache = self._sealed_with_anomaly(tmp_path, monkeypatch)
+        tampered = json.loads(ledger_copy.read_text(encoding="utf-8"))
+        tampered["anomalies"][0]["session"] = "2015-06-15"
+        ledger_copy.write_text(
+            json.dumps(tampered, indent=2), encoding="utf-8"
+        )
+        # Re-point every outer hash at the TAMPERED tmp ledger so the
+        # drift cannot masquerade as a seal-time hash refusal.
+        self._rewrite_outer_hashes(cache)
+        with pytest.raises(MonthlySma10Error) as excinfo:
+            run_evaluate(
+                cache_dir=cache,
+                output_path=tmp_path / "out" / "r.json",
+            )
+        # SPECIFIC reason: the tamper is caught by the registered-
+        # constants validation (session 2015-06-15 is not the
+        # registered 2020-11-18), NOT by a generic source drift.
+        assert "ohlc_anomaly ledger entry session" in str(excinfo.value)
+        assert "2015-06-15" in str(excinfo.value)
+        assert not (cache / "attempts").exists()
+
+    def test_ledger_mismatch_with_consistent_outer_hashes_refused(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Bars carry the anomaly on a DIFFERENT session than the
+        # ledger registers: re-derivation must refuse even with every
+        # outer hash rewritten consistently.
+        cache = _write_fetch_cache(
+            tmp_path / "cache",
+            with_actions=True,
+            with_registered_anomaly=True,
+        )
+        _seal_for_tests(monkeypatch, cache)
+        path = cache / "daily" / "SPY.US.json.gz"
+        with gzip.open(path, "rt", encoding="utf-8") as handle:
+            raw = json.load(handle)
+        for row in raw["bars"]:
+            if row[0] == "2020-11-18":
+                row[1] = row[4]
+            if row[0] == "2015-06-15":
+                row[1] = row[2] * 1.05
+        rendered = json.dumps(raw, sort_keys=True, separators=(",", ":"))
+        with gzip.open(path, "wt", encoding="utf-8") as handle:
+            handle.write(rendered)
+        self._rewrite_outer_hashes(cache)
+        # The off-ledger violation on 2015-06-15 is refused pre-attempt
+        # (the uniform gate refuses the unregistered session BEFORE
+        # the ledger comparison; had it passed, the ledger mismatch
+        # comparison would refuse).  Either way: refusal, zero
+        # attempts.
+        with pytest.raises(MonthlySma10Error) as excinfo:
+            run_evaluate(
+                cache_dir=cache,
+                output_path=tmp_path / "out" / "r.json",
+            )
+        assert "anomaly ledger" in str(excinfo.value) or (
+            "2015-06-15" in str(excinfo.value)
+        )
+        assert not (cache / "attempts").exists()
+
+    def test_seal_refuses_missing_ledger_file(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ledger_copy = self._ledger_to_tmp(monkeypatch, tmp_path)
+        cache = _write_fetch_cache(
+            tmp_path / "cache",
+            with_actions=True,
+            with_registered_anomaly=True,
+        )
+        ledger_copy.unlink()  # the TMP copy, never the committed file
+        _no_live_fetch(monkeypatch)
+        with pytest.raises(MonthlySma10Error, match="anomaly ledger"):
+            run_seal(cache)
+
+
+class TestDecision1411NonInterference:
+    """With synthetic data where ONLY the registered non-execution
+    day's open and high differ, every pure-function output is
+    IDENTICAL: TR index, split screen, trade events, all account legs."""
+
+    def test_pure_outputs_identical(self) -> None:
+        sessions = _weekdays(date(2010, 6, 1), date(2022, 1, 31))
+        clean = _synthetic_rows(sessions, seed=77)
+        dirty = _inject_registered_ohlc_anomaly(clean)
+        actions = _quarterly_dividends(sessions)
+        scoring = _month_iter((2012, 1), (2021, 12))
+
+        # TR signal index identical (uses closes only).
+        assert build_signal_index(clean, actions) == build_signal_index(
+            dirty, actions
+        )
+        # Split anomaly screen identical (adjacent closes only).
+        assert sma10.screen_unexplained_split_anomalies(
+            clean, actions, sessions=sessions
+        ) == sma10.screen_unexplained_split_anomalies(
+            dirty, actions, sessions=sessions
+        )
+
+        # Trade events identical.
+        index = build_signal_index(clean, actions)
+        bars = month_end_index_levels(index, sessions)
+        signals = {
+            key: sma10_signal(bars, year=key[0], month=key[1])
+            for key in (*_month_iter((2010, 6), (2011, 12)), *scoring)
+        }
+        events = sleeve_entry_exit_events(
+            signals=signals, scoring_months=scoring, sessions=sessions
+        )
+        last_end = month_end_sessions(sessions)[(2021, 12)]
+        liquidation = next_session_after(sessions, last_end)
+        assert liquidation is not None
+
+        def _leg(rows: list[DailyPriceRow]) -> SleeveResult:
+            return simulate_leg(
+                sessions=sessions,
+                daily_rows=rows,
+                actions=actions,
+                scoring_months=scoring,
+                entry_events=events,
+                slippage_bps=BASE_SLIPPAGE_BPS,
+                liquidation_session=liquidation,
+            )
+
+        clean_leg = _leg(clean)
+        dirty_leg = _leg(dirty)
+        assert clean_leg.records == dirty_leg.records
+        assert clean_leg.fills == dirty_leg.fills
+        assert clean_leg.dividends == dirty_leg.dividends
+        assert (
+            clean_leg.final_liquidation == dirty_leg.final_liquidation
+        )
+        assert (
+            clean_leg.terminal_cash_after_liquidation
+            == dirty_leg.terminal_cash_after_liquidation
+        )
+        assert (
+            clean_leg.outstanding_receivables
+            == dirty_leg.outstanding_receivables
+        )
+        # No event touches the anomaly session.
+        assert all(
+            session != _REGISTERED_ANOMALY_SESSION
+            for session, _side in events
+        )
+        assert liquidation != _REGISTERED_ANOMALY_SESSION
+
     def test_default_cache_dir_is_gitignored_path(self) -> None:
         assert _default_cache_dir().as_posix().endswith(
-            "data/research/spy_monthly_sma10_v1"
+            "data/research/spy_monthly_sma10_v3"
         )
 
     def test_preflight_rejects_live_fetch(self, tmp_path: Path,
@@ -3278,10 +4038,12 @@ class TestItem2SourceHashEnforcement:
             (cache / "manifest.json").read_text(encoding="utf-8")
         )
         hashes = manifest["source_hashes"]
-        assert isinstance(hashes, dict) and len(hashes) == 8
-        # The ORB module and accounting fees are bound.
+        assert isinstance(hashes, dict) and len(hashes) == 9
+        # The ORB module, accounting fees and the 14.11 anomaly ledger
+        # are bound.
         assert any("opening_momentum" in k for k in hashes)
         assert any("accounting_fees" in k for k in hashes)
+        assert any("ohlc_anomaly_ledger.json" in k for k in hashes)
 
     def test_source_drift_after_seal_refused_before_attempt(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

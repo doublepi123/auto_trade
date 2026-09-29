@@ -93,6 +93,7 @@ from app.domain.monthly_trend.sma10 import (
     circular_block_bootstrap_bounds,
     decide_verdict,
     descriptive_statistics,
+    detect_ohlc_anomalies,
     downside_series,
     entry_share_cap,
     evaluate_claims,
@@ -136,7 +137,7 @@ from app.cli.opening_momentum_historical_replay import (
 
 # ---------------------------------------------------------------- frozen plan
 
-ANALYSIS_ID = "spy-monthly-sma10-cash-v2"
+ANALYSIS_ID = "spy-monthly-sma10-cash-v3"
 REPLAY_CLI_VERSION = "spy-monthly-sma10-cash-replay-cli-v1"
 RULE_NAME = "SPY_MONTHLY_SMA10_CASH_V1"
 
@@ -161,8 +162,32 @@ COMMISSION_NOTIONAL_RATE = SEC98_NOTIONAL_RATE
 DIVIDEND_WITHHOLDING_RATE = 0.30
 
 PAGE_SIZE = 1000
-_CACHE_DIR_NAME = Path("data/research/spy_monthly_sma10_v1")
+#: Decision 14.11: a NEW cache dir for the v3 attempt.  The v2 cache
+#: (``spy_monthly_sma10_v1``, whose seal was REFUSED with DATA_BLOCKED)
+#: stays untouched with its original inputs - a re-bind would have
+#: required mutating the v2-bound plan.json ``analysis_id`` in place,
+#: which is exactly the kind of historical rewrite this lane refuses.
+#: v3 re-fetches (6 requests) into a fresh directory.
+_CACHE_DIR_NAME = Path("data/research/spy_monthly_sma10_v3")
 _PLAN_DOC_RELATIVE_PATH = Path("app/domain/SPY_MONTHLY_SMA10_PREREGISTRATION.md")
+
+#: Decision 14.11: the sealed OHLC anomaly ledger - a PINNED, committed
+#: data file carrying hashes and facts only (never prices).  Seal
+#: validates it against the registered constants and hashes it into
+#: the manifest; evaluate re-derives the violation set from the sealed
+#: bars and requires it to EQUAL the ledger exactly before claiming
+#: the attempt.
+_ANOMALY_LEDGER_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "domain"
+    / "monthly_trend"
+    / "data"
+    / "ohlc_anomaly_ledger.json"
+)
+OHLC_ANOMALY_LEDGER_SYMBOL = "SPY.US"
+OHLC_ANOMALY_LEDGER_SESSION = date(2020, 11, 18)
+OHLC_ANOMALY_LEDGER_RELATION = "open > high"
+OHLC_ANOMALY_LEDGER_CAP = 1
 
 PAUSE_WINDOW_START_UTC = time(13, 0)
 PAUSE_WINDOW_END_UTC = time(22, 0)
@@ -1741,6 +1766,7 @@ def _sealed_preflight(
             "evaluate refused: the sealed manifest has no trading days"
         )
     independent_sessions = expected_nyse_sessions(DATA_START, DATA_END)
+    protected_opens = _potential_execution_opens(sealed_sessions)
     for rows, symbol, acts in (
         (spy_raw_rows, INSTRUMENT, actions),
         (qqq_raw_rows, DISCLOSURE_BENCHMARK, []),
@@ -1753,6 +1779,7 @@ def _sealed_preflight(
                 actions=acts,
                 calendar_sessions=independent_sessions,
                 symbol=symbol,
+                protected_opens=protected_opens,
             )
         except (MonthlyReplayBlockedError, MonthlyTrendError) as exc:
             raise _fail(
@@ -1764,6 +1791,28 @@ def _sealed_preflight(
                 "evaluate refused: malformed bar row in the sealed "
                 f"{symbol} data: {exc!r}"
             ) from exc
+    # ---- Decision 14.11: re-derive the OHLC anomaly set from the
+    # sealed bars and require it to EQUAL the sealed ledger exactly -
+    # BEFORE the attempt is claimed, and independent of the manifest
+    # hashes (a consistently-rewritten outer hash set cannot pass this:
+    # the derivation reads the bars).
+    anomaly_ledger = _validate_anomaly_ledger()
+    _verify_ledger_against_bars(
+        _month_end_market_rows(spy_raw_rows),
+        _month_end_market_rows(qqq_raw_rows),
+        anomaly_ledger,
+    )
+    sealed_ledger = manifest.get("ohlc_anomaly_ledger", {})
+    if (
+        not isinstance(sealed_ledger, dict)
+        or str(sealed_ledger.get("sha256"))
+        != _file_sha256(_ANOMALY_LEDGER_PATH)
+    ):
+        raise _fail(
+            "evaluate refused: the sealed anomaly ledger hash does not "
+            "match the committed ledger file (missing or drifted - "
+            "re-seal with a registered change decision)"
+        )
     return {
         "status": snapshot,
         "plan_payload": plan_payload,
@@ -1773,6 +1822,7 @@ def _sealed_preflight(
         "spy_rows": _month_end_market_rows(spy_raw_rows),
         "qqq_rows": _month_end_market_rows(qqq_raw_rows),
         "sealed_sessions": sealed_sessions,
+        "anomaly_ledger": anomaly_ledger,
     }
 
 
@@ -1786,6 +1836,7 @@ def _source_provenance_hashes_monthly() -> dict[str, str]:
         "backend/app/domain/monthly_trend/sma10.py",
         "backend/app/domain/monthly_trend/nyse_calendar.py",
         "backend/app/domain/monthly_trend/data/splits.json",
+        "backend/app/domain/monthly_trend/data/ohlc_anomaly_ledger.json",
         "backend/app/domain/SPY_MONTHLY_SMA10_PREREGISTRATION.md",
         "backend/app/core/accounting_fees.py",
         # Item 8: the REUSED ORB helper module is a runtime dependency
@@ -1795,6 +1846,20 @@ def _source_provenance_hashes_monthly() -> dict[str, str]:
     )
     hashes: dict[str, str] = {}
     for relative in relpaths:
+        # Decision 14.11 follow-up: the ledger's BYTES are read through
+        # the module-level ``_ANOMALY_LEDGER_PATH`` (monkeypatchable in
+        # tests via a tmp_path copy) while the manifest KEY stays the
+        # repo-relative name, so every hash of the ledger - the
+        # dedicated manifest block, the source_hashes entry and the
+        # drift comparison - is computed over the SAME bytes.
+        if relative.endswith("ohlc_anomaly_ledger.json"):
+            if not _ANOMALY_LEDGER_PATH.exists():
+                raise _fail(
+                    "evaluate refused: source file missing: "
+                    f"{relative}"
+                )
+            hashes[relative] = _file_sha256(_ANOMALY_LEDGER_PATH)
+            continue
         path = repo / relative
         if not path.exists():
             raise _fail(f"evaluate refused: source file missing: {relative}")
@@ -1809,6 +1874,146 @@ def sealed_set_for(calendar: dict[str, object]) -> set[date]:
     }
 
 
+def _validate_anomaly_ledger() -> dict[str, Any]:
+    """Decision 14.11: load the sealed anomaly ledger and verify it
+    equals the registered constants EXACTLY (symbol, session,
+    relation, cap, and the evidence hashes).  Returns the parsed
+    ledger.  Refuses when the file is missing, malformed or tampered -
+    at seal AND at evaluate (before any attempt is claimed)."""
+
+    if not _ANOMALY_LEDGER_PATH.exists():
+        raise _fail(
+            "seal refused (DATA_BLOCKED): the sealed ohlc_anomaly "
+            "ledger is missing (decision 14.11 requires the pinned, "
+            "committed ledger file)"
+        )
+    try:
+        ledger = json.loads(
+            _ANOMALY_LEDGER_PATH.read_text(encoding="utf-8")
+        )
+    except ValueError as exc:
+        raise _fail(
+            "seal refused (DATA_BLOCKED): the ohlc_anomaly ledger is "
+            f"not valid JSON: {exc!r}"
+        ) from exc
+    entries = ledger.get("anomalies")
+    if not isinstance(entries, list):
+        raise _fail(
+            "seal refused (DATA_BLOCKED): the ohlc_anomaly ledger has "
+            "no anomalies list"
+        )
+    if len(entries) != OHLC_ANOMALY_LEDGER_CAP:
+        raise _fail(
+            "seal refused (DATA_BLOCKED): the ohlc_anomaly ledger "
+            f"carries {len(entries)} entries; the registered cap is "
+            f"{OHLC_ANOMALY_LEDGER_CAP}"
+        )
+    entry = entries[0]
+    expected = {
+        "symbol": OHLC_ANOMALY_LEDGER_SYMBOL,
+        "session": OHLC_ANOMALY_LEDGER_SESSION.isoformat(),
+    }
+    for key, want in expected.items():
+        if entry.get(key) != want:
+            raise _fail(
+                "seal refused (DATA_BLOCKED): the ohlc_anomaly ledger "
+                f"entry {key} is {entry.get(key)!r}, the registered "
+                f"value is {want!r}"
+            )
+    relations = entry.get("violated_relations")
+    if relations != [OHLC_ANOMALY_LEDGER_RELATION]:
+        raise _fail(
+            "seal refused (DATA_BLOCKED): the ohlc_anomaly ledger "
+            f"relations are {relations!r}; the registered relation is "
+            f"[{OHLC_ANOMALY_LEDGER_RELATION!r}]"
+        )
+    evidence = entry.get("evidence", {})
+    receipt = evidence.get("provider_reproduction_receipt", {})
+    if (
+        evidence.get("sealed_cache_file_sha256")
+        != "eef5adc1d68d7020563ba90e729cbcc5a0c6dba29c183765c7907477947e25ca"
+    ):
+        raise _fail(
+            "seal refused (DATA_BLOCKED): the ohlc_anomaly ledger "
+            "sealed-cache hash is not the registered SPY.US.json.gz "
+            "sha256"
+        )
+    if (
+        receipt.get("sha256")
+        != "edb6a218a92ffe2fd571821a2259b3b5376fed8c6603a1eaceba7d7542ccb4fd"
+    ):
+        raise _fail(
+            "seal refused (DATA_BLOCKED): the ohlc_anomaly ledger "
+            "provider-reproduction receipt hash is not the registered "
+            "value"
+        )
+    return ledger
+
+
+def _ledger_derived_entries(ledger: dict[str, Any]) -> list[str]:
+    """The (symbol, session, relation) keys the LEDGER registers."""
+
+    return sorted(
+        f"{entry.get('symbol')}|{entry.get('session')}|{relation}"
+        for entry in ledger.get("anomalies", [])
+        for relation in entry.get("violated_relations", [])
+    )
+
+
+def _verify_ledger_against_bars(
+    spy_rows: Sequence[DailyPriceRow],
+    qqq_rows: Sequence[DailyPriceRow],
+    ledger: dict[str, Any],
+) -> None:
+    """Decision 14.11: re-detect every OHLC violation from the sealed
+    bars of BOTH symbols and require the derived set to EQUAL the
+    ledger exactly.  Refuses on a missing, tampered or mismatched
+    ledger EVEN IF the outer hashes were rewritten consistently (the
+    derivation reads the bars, not the manifest)."""
+
+    derived = [
+        f"{item['symbol']}|{item['session']}|{item['relation']}"
+        for item in (
+            *detect_ohlc_anomalies(spy_rows, symbol=INSTRUMENT),
+            *detect_ohlc_anomalies(
+                qqq_rows, symbol=DISCLOSURE_BENCHMARK
+            ),
+        )
+    ]
+    registered = _ledger_derived_entries(ledger)
+    if derived != registered:
+        def _render(items: list[str]) -> str:
+            return (
+                ", ".join(items[:5]) if items else "(none)"
+            )
+
+        raise _fail(
+            "evaluate refused (DATA_BLOCKED): the sealed bars' OHLC "
+            "anomaly set does not equal the anomaly ledger (derived: "
+            f"{_render(derived)}; ledger: {_render(registered)}); the "
+            "ledger must be re-registered by a written decision before "
+            "any attempt is claimed"
+        )
+
+
+def _potential_execution_opens(sessions: Sequence[date]) -> list[date]:
+    """Decision 14.11 read set: the next sealed session after each
+    month-end of 2011-12..2021-12 - EVERY potential execution day
+    (boundary entry 2012-01-03 through final liquidation 2022-01-03),
+    whether or not a trade actually happens there."""
+
+    sealed = sorted(set(sessions))
+    targets: list[date] = []
+    for key in (*WARMUP_MONTHS[-1:], *SCORING_MONTHS):
+        month_end = month_end_sessions(sealed).get(key)
+        if month_end is None:
+            continue
+        following = next_session_after(sealed, month_end)
+        if following is not None:
+            targets.append(following)
+    return targets
+
+
 def _validate_bars_at_seal(
     rows: Sequence[Sequence[Any]],
     *,
@@ -1819,13 +2024,15 @@ def _validate_bars_at_seal(
     """Item 4 (14.9): seal-time OHLC/duplicate/structure validation for
     ONE symbol's RAW bars against the FULL independent calendar."""
 
+    sessions = sorted(sealed_set_for(calendar))
     validate_window_data(
-        sessions=sorted(sealed_set_for(calendar)),
+        sessions=sessions,
         scoring_months=SCORING_MONTHS,
         daily_rows=_month_end_market_rows(list(rows)),
         actions=actions,
         calendar_sessions=expected_nyse_sessions(DATA_START, DATA_END),
         symbol=symbol,
+        protected_opens=_potential_execution_opens(sessions),
     )
 
 
@@ -1999,6 +2206,13 @@ def run_seal(
             }
         )
 
+    # ---- Decision 14.11: the sealed anomaly ledger.  It is validated
+    # against the registered constants here and hashed into the
+    # manifest; evaluate re-derives the violation set from the sealed
+    # bars and requires it to EQUAL the ledger before claiming.
+    anomaly_ledger = _validate_anomaly_ledger()
+    anomaly_ledger_sha256 = _file_sha256(_ANOMALY_LEDGER_PATH)
+
     # Item 7: the sealed independent split evidence is hashed into
     # the manifest; its absence is DATA_BLOCKED (the price screen is
     # only a tripwire and cannot prove "no split").
@@ -2065,6 +2279,19 @@ def run_seal(
         "splits_evidence": {
             "sha256": splits_sha256,
             "path": "backend/app/domain/monthly_trend/data/splits.json",
+        },
+        # Decision 14.11: the sealed OHLC anomaly ledger.
+        "ohlc_anomaly_ledger": {
+            "sha256": anomaly_ledger_sha256,
+            "path": (
+                "backend/app/domain/monthly_trend/data/"
+                "ohlc_anomaly_ledger.json"
+            ),
+            "entries": len(anomaly_ledger.get("anomalies", [])),
+            "sessions": [
+                str(entry.get("session"))
+                for entry in anomaly_ledger.get("anomalies", [])
+            ],
         },
         "independent_calendar": {
             "source": "NYSE rules derivation (nyse_calendar.py, item 5)",
@@ -2404,6 +2631,7 @@ def _evaluate_computation(
             daily_rows=spy_rows,
             actions=actions,
             calendar_sessions=independent_sessions,
+            protected_opens=_potential_execution_opens(sessions),
         )
     except MonthlyReplayBlockedError as exc:
         return _blocked_payload(manifest_sha256, str(exc), source_hashes)
@@ -2730,6 +2958,33 @@ def _evaluate_computation(
             ),
         },
         "descriptive": withholding_disclosure,
+        "ohlc_anomaly_exemptions": {
+            "decision": "SPY_MONTHLY_SMA10_PREREGISTRATION.md 14.11",
+            "entries": len(
+                preflight["anomaly_ledger"].get("anomalies", [])
+            ),
+            "sessions": [
+                str(entry.get("session"))
+                for entry in preflight["anomaly_ledger"].get(
+                    "anomalies", []
+                )
+            ],
+            "relations": [
+                relation
+                for entry in preflight["anomaly_ledger"].get(
+                    "anomalies", []
+                )
+                for relation in entry.get("violated_relations", [])
+            ],
+            "ledger_sha256": _file_sha256(_ANOMALY_LEDGER_PATH),
+            "note": (
+                "the single registered open>high relation on SPY.US "
+                "2020-11-18 is exempt (a non-execution day whose open "
+                "is outside the read set); the bar is never skipped, "
+                "its close stays checked, and the exemption never "
+                "asserts any field is correct"
+            ),
+        },
         "monthly_returns": {
             "sleeve_base": r_sleeve,
             "sleeve_stress": r_stress,

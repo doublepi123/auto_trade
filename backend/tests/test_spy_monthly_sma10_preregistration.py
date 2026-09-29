@@ -62,7 +62,7 @@ _CLI_PATH = (
     / "spy_monthly_sma10_replay.py"
 )
 
-_FROZEN_COMBINED_PIN = "f56194f783b8ffeaea7bda811db3d5eaed06978420d04bcae0b810ae680c84ff"
+_FROZEN_COMBINED_PIN = "eeb4a37bbcf858156f07cc68375155c537c567557924e8e89d72f54794cd024c"
 
 #: Decision 14.7 item 8: the pin covers the WHOLE pure module, the
 #: WHOLE CLI, the sealed calendar module, the sealed split evidence and
@@ -88,6 +88,12 @@ _PINNED_FILES: tuple[tuple[str, Path], ...] = (
         "app.domain.monthly_trend.data.splits.json",
         Path(__file__).resolve().parents[1]
         / "app" / "domain" / "monthly_trend" / "data" / "splits.json",
+    ),
+    (
+        "app.domain.monthly_trend.data.ohlc_anomaly_ledger.json",
+        Path(__file__).resolve().parents[1]
+        / "app" / "domain" / "monthly_trend" / "data"
+        / "ohlc_anomaly_ledger.json",
     ),
     (
         "dep.app.core.accounting_fees",
@@ -134,7 +140,7 @@ def _combined_pin(pins: dict[str, str]) -> str:
 
 def _freeze_failure_message(actual: str) -> str:
     return (
-        "SPY_MONTHLY_SMA10_CASH_V2 registration violated: a pinned "
+        "SPY_MONTHLY_SMA10_CASH_V3 registration violated: a pinned "
         "source file no longer matches its recorded hash.\n"
         f"  recorded: {_FROZEN_COMBINED_PIN}\n"
         f"  actual:   {actual}\n"
@@ -162,7 +168,7 @@ def _doc_manifest_block() -> str:
 
 
 def test_frozen_plan_constants() -> None:
-    assert ANALYSIS_ID == "spy-monthly-sma10-cash-v2"
+    assert ANALYSIS_ID == "spy-monthly-sma10-cash-v3"
     assert REPLAY_CLI_VERSION == "spy-monthly-sma10-cash-replay-cli-v1"
     assert INSTRUMENT == "SPY.US"
     assert DISCLOSURE_BENCHMARK == "QQQ.US"
@@ -294,6 +300,69 @@ def test_doc_agrees_with_pinned_constants_and_manifest() -> None:
             f"doc code manifest is stale for {display}"
         )
     assert f"combined = {_FROZEN_COMBINED_PIN}" in doc
+
+
+def test_registered_decision_14_11_is_recorded_in_doc() -> None:
+    # Decision 14.11 (pre-outcome, after the v2 seal refusal): the
+    # single registered OHLC anomaly exemption, the sealed ledger, the
+    # v3 analysis_id and the new cache dir.
+    doc = _DOC_PATH.read_text(encoding="utf-8")
+    assert "### 14.11 结果前决定：单点 OHLC 关系异常豁免" in doc
+    for token in (
+        "spy-monthly-sma10-cash-v3",
+        "2020-11-18",
+        "open > high",
+        "无法确定错误字段",
+        "ohlc_anomaly_ledger.json",
+        "eef5adc1d68d7020563ba90e729cbcc5a0c6dba29c183765c7907477947e25ca",
+        "edb6a218a92ffe2fd571821a2259b3b5376fed8c6603a1eaceba7d7542ccb4fd",
+        "2026-09-28T22:06:21.928931+00:00",
+        "ec37d6f8c512d5dabca67b8520e336d320046e78786a84e35a2176792a4dadef",
+        "376d3cac8c12360c8218fc0bb4ae450fe342e4b405b2cadf760f6413ff48aa00",
+        "spy_monthly_sma10_v3",
+        "读集",
+    ):
+        assert token in doc, f"doc lost the §14.11 token {token}"
+    # The exemption never asserts a field is correct; the anomaly
+    # description stays neutral.
+    assert "SPY.US 2020-11-18 的 OHLC 不一致" in doc
+
+
+def test_registered_anomaly_constants() -> None:
+    # The registered exemption is a pinned constant set, not a config.
+    assert cli.OHLC_ANOMALY_LEDGER_SYMBOL == "SPY.US"
+    assert cli.OHLC_ANOMALY_LEDGER_SESSION == date(2020, 11, 18)
+    assert cli.OHLC_ANOMALY_LEDGER_RELATION == "open > high"
+    assert cli.OHLC_ANOMALY_LEDGER_CAP == 1
+    assert cli._ANOMALY_LEDGER_PATH.name == "ohlc_anomaly_ledger.json"
+
+
+def test_anomaly_ledger_file_contains_no_prices() -> None:
+    # §14.11: the committed ledger carries hashes and facts only.
+    raw = json.loads(
+        cli._ANOMALY_LEDGER_PATH.read_text(encoding="utf-8")
+    )
+    assert raw["contains_prices"] is False
+    # No NUMERIC price values anywhere in the ledger.
+    def _has_number(node: object) -> bool:
+        if isinstance(node, bool):
+            return False
+        if isinstance(node, (int, float)):
+            return True
+        if isinstance(node, dict):
+            return any(_has_number(v) for v in node.values())
+        if isinstance(node, list):
+            return any(_has_number(v) for v in node)
+        return False
+
+    entry = raw["anomalies"][0]
+    assert not _has_number(entry["read_set_reasoning"])
+    # Fields describing prices are prose facts, never price values.
+    assert entry["symbol"] == cli.OHLC_ANOMALY_LEDGER_SYMBOL
+    assert entry["session"] == "2020-11-18"
+    assert entry["violated_relations"] == [
+        cli.OHLC_ANOMALY_LEDGER_RELATION
+    ]
 
 
 def test_doc_pins_are_recomputed_not_hardcoded_only() -> None:
