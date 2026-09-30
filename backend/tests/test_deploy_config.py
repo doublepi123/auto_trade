@@ -158,6 +158,36 @@ def test_deploy_files_expose_p0_hard_safety_controls() -> None:
     assert "AUTO_TRADE_ALLOW_SHORT_ENTRIES=" not in env_example
 
 
+def test_deploy_files_expose_spy_passive_lane_control() -> None:
+    """The SPY passive lane flag must ship default-off in every deploy file.
+
+    A Settings field absent from compose is silently ignored at runtime: the
+    container keeps the field default regardless of what the operator sets
+    in .env (recorded auto-primary-switch incident). The ``:-`` fallback must
+    equal the Settings default so an unset variable ships fail-closed.
+    """
+    from app.config import Settings
+
+    compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+    dockerhub = (
+        ROOT / "docker-compose.dockerhub.yaml"
+    ).read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    expected_default = (
+        "AUTO_TRADE_SPY_PASSIVE_ENABLED="
+        "${AUTO_TRADE_SPY_PASSIVE_ENABLED:-"
+        f"{str(Settings().spy_passive_lane_enabled).lower()}"
+        "}"
+    )
+    assert "AUTO_TRADE_SPY_PASSIVE_ENABLED=" in compose
+    assert "AUTO_TRADE_SPY_PASSIVE_ENABLED=" in dockerhub
+    assert "AUTO_TRADE_SPY_PASSIVE_ENABLED=" in env_example
+    assert expected_default in compose
+    assert expected_default in dockerhub
+    assert Settings().spy_passive_lane_enabled is False
+
+
 def test_deploy_files_expose_degraded_exit_pricing_controls() -> None:
     compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
     dockerhub = (ROOT / "docker-compose.dockerhub.yaml").read_text(encoding="utf-8")

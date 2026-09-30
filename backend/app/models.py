@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import (
@@ -15,6 +16,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -1442,6 +1444,87 @@ class TrackedEntry(Base):
         default=_utcnow,
     )
     updated_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class PassiveMandate(Base):
+    """Owner-approved mandate row binding the SPY_PASSIVE lane (phase 1).
+
+    The lane binds to THIS persisted row, never to ``symbol == "SPY.US"``.
+    ``entry_authorisation_available`` plus ``claim_token`` form the one-time
+    entry authorisation: a request must atomically claim the token before any
+    order is submitted, and the claim is consumed on use. Owner approvals of
+    2026-09-29 pin the values: SPY.US, $5,000 allotment including fees,
+    FULL_PRINCIPAL risk, the five exemptions, a 6-month manual review
+    (never trades automatically), paper-only binding.
+    """
+
+    __tablename__ = "passive_mandates"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    lane: Mapped[str] = mapped_column(String(40), nullable=False, unique=True)
+    policy_version: Mapped[str] = mapped_column(String(60), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ACTIVE")
+    allotment_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    risk_model: Mapped[str] = mapped_column(String(40), nullable=False)
+    exemptions: Mapped[str] = mapped_column(Text, nullable=False)
+    review_interval_months: Mapped[int] = mapped_column(Integer, nullable=False)
+    entry_authorisation_available: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True,
+    )
+    entry_authorisation_consumed_at: Mapped[Optional[datetime]] = mapped_column(
+        _TZDateTime, nullable=True,
+    )
+    # Passive submit protocol v2 (architect contract spy-passive-submit-contract):
+    # AUTHORIZED -> SUBMIT_CLAIMED (reservation: random claim token, immutable
+    # intent snapshot, available=False, consumed_at) -> CHECKING (execution
+    # ownership: fresh execution token per execute call) -> SUBMITTING (submit
+    # right: final order/cash/fee snapshot) -> ORDER_KNOWN / NO_SUBMIT /
+    # UNCERTAIN (terminal). No transition ever restores authorisation; legacy
+    # v1 states (SUBMITTING/SUBMITTED/FAILED) migrate conservatively to
+    # UNCERTAIN, never back to AUTHORIZED.
+    submit_state: Mapped[str] = mapped_column(
+        String(30), nullable=False, default="AUTHORIZED", server_default="AUTHORIZED",
+    )
+    failure_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    claim_token: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # Reservation-scoped immutable intent snapshot (strict JSON, Decimal
+    # strings, protocol_version passive-submit-v2). Frozen at SUBMIT_CLAIMED;
+    # every later stage re-validates the request against it.
+    intent_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Fresh per-execute ownership token; rotated on every begin_execution.
+    execution_token: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    # Final order/cash/fee facts persisted atomically with the SUBMITTING CAS.
+    final_snapshot_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Durable record of why an attempt is UNCERTAIN (possibly submitted).
+    uncertainty_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    protocol_version: Mapped[Optional[str]] = mapped_column(
+        String(40), nullable=True,
+    )
+    order_binding: Mapped[str] = mapped_column(String(40), nullable=False)
+    bound_broker_order_id: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True,
+    )
+    # Best-known broker receipt facts preserved through uncertainty; the
+    # bound id can never be erased or replaced once written.
+    bound_broker_status: Mapped[Optional[str]] = mapped_column(
+        String(40), nullable=True,
+    )
+    # Latest same-id fill observations (progress facts; R1-5c) — updated in
+    # place, never resetting the bound id.
+    bound_executed_quantity: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(18, 6), nullable=True,
+    )
+    bound_executed_price: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(18, 6), nullable=True,
+    )
+    approved_at: Mapped[datetime] = mapped_column(_TZDateTime, nullable=False)
+    approved_by: Mapped[str] = mapped_column(String(120), nullable=False)
+    approval_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(_TZDateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        _TZDateTime, default=_utcnow, onupdate=_utcnow,
+    )
 
 
 class RuntimeStateSnapshot(Base):

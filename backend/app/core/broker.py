@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Callable, cast
 from zoneinfo import ZoneInfo
 
 from app.config import settings
+from app.core.cash_evidence import CashEvidenceUnavailable, UsdCashSnapshot
 from app.core.position_probe_diagnostics import (
     POSITION_PROBE_MESSAGE_LIMIT,
     POSITION_PROBE_STDERR_LIMIT,
@@ -756,6 +757,62 @@ def _decimal_attr(item: Any, *names: str) -> Decimal:
             except (ValueError, TypeError, AttributeError, _DecimalInvalidOp):
                 return Decimal("0")
     return Decimal("0")
+
+
+def _utc_now() -> datetime:
+    """Aware-UTC wall clock for strict cash-evidence request windows."""
+    return datetime.now(timezone.utc)
+
+
+def _strict_usd_amount_from_response(response: Any) -> Decimal:
+    """Extract the single explicit-USD ``cash_infos.available_cash`` amount.
+
+    Fail-closed parser for strict cash evidence: exactly one entry whose
+    ``currency`` is exactly ``"USD"`` may exist across all account items,
+    and its ``available_cash`` must convert to a finite, nonnegative
+    Decimal. Anything else — zero USD entries, several (ambiguity), or a
+    USD entry whose amount is missing/malformed/non-finite/negative —
+    raises :class:`CashEvidenceUnavailable`. No other field
+    (``total_cash``, margin figures, buy power, other currencies) is ever
+    consulted.
+    """
+    items = response if isinstance(response, list) else [response]
+    usd_amounts: list[Decimal] = []
+    for item in items:
+        cash_infos = _get_value(item, "cash_infos", None)
+        if not cash_infos:
+            continue
+        for entry in cash_infos:
+            currency = _get_value(entry, "currency", None)
+            if not isinstance(currency, str) or currency != "USD":
+                continue
+            raw_amount = _get_value(entry, "available_cash", None)
+            try:
+                amount = Decimal(str(raw_amount))
+            except (ValueError, TypeError, AttributeError, ArithmeticError):
+                raise CashEvidenceUnavailable(
+                    "USD cash_infos entry has unreadable available_cash: "
+                    f"{raw_amount!r}"
+                ) from None
+            if not amount.is_finite():
+                raise CashEvidenceUnavailable(
+                    f"USD cash_infos available_cash is not finite: {amount}"
+                )
+            if amount < 0:
+                raise CashEvidenceUnavailable(
+                    f"USD cash_infos available_cash is negative: {amount}"
+                )
+            usd_amounts.append(amount)
+    if not usd_amounts:
+        raise CashEvidenceUnavailable(
+            "no explicit USD cash_infos entry in account_balance response"
+        )
+    if len(usd_amounts) > 1:
+        raise CashEvidenceUnavailable(
+            f"ambiguous account_balance response: {len(usd_amounts)} USD "
+            "cash_infos entries"
+        )
+    return usd_amounts[0]
 
 
 def _risk_level_attr(item: Any) -> int:
@@ -2142,6 +2199,48 @@ class BrokerGateway:
         return self._call_with_retry(
             _fetch,
             op="get_cash",
+            max_retries=settings.broker_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
+
+    def get_strict_usd_cash_snapshot(self) -> UsdCashSnapshot:
+        """Return a strict, explicit-USD cash evidence snapshot.
+
+        Issues one ``account_balance`` request (via the gateway's standard
+        transient-retry ladder) and succeeds only when the response carries
+        exactly one ``cash_infos`` entry whose ``currency`` is exactly
+        ``"USD"`` with a finite, nonnegative ``available_cash``. Missing,
+        ambiguous, or invalid USD data raises
+        :class:`CashEvidenceUnavailable` — never a fallback to
+        ``total_cash``, margin figures, buy power, or another currency.
+
+        ``request_started_at``/``request_completed_at`` are aware-UTC local
+        timestamps bracketing the successful request only; each retry
+        attempt re-times its own window and failed attempts never
+        contribute timestamps. Nothing is cached, so repeated calls always
+        re-fetch.
+        """
+        def _fetch() -> UsdCashSnapshot:
+            with self._lock:
+                self._init_clients()
+                started_at = _utc_now()
+                response = self._trade_ctx.account_balance()
+                amount = _strict_usd_amount_from_response(response)
+                completed_at = _utc_now()
+                if completed_at < started_at:
+                    raise CashEvidenceUnavailable(
+                        "cash evidence request completed before it started"
+                    )
+                return UsdCashSnapshot(
+                    amount=amount,
+                    currency="USD",
+                    request_started_at=started_at,
+                    request_completed_at=completed_at,
+                    provenance="account_balance.cash_infos.available_cash",
+                )
+        return self._call_with_retry(
+            _fetch,
+            op="get_strict_usd_cash_snapshot",
             max_retries=settings.broker_retry_max,
             base_ms=settings.broker_retry_base_ms,
         )

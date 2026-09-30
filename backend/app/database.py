@@ -17,7 +17,7 @@ from sqlalchemy import (
     inspect,
     text,
 )
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import settings
@@ -771,6 +771,7 @@ def init_db() -> None:
     _ensure_platform_backtest_runs_table(engine)
     _ensure_factor_snapshots_table(engine)
     _ensure_decision_funnel_session_summaries_table(engine)
+    _ensure_passive_mandates_table(engine)
     db = SessionLocal()
     try:
         _bootstrap_credentials(db, CredentialConfig, StrategyConfig)
@@ -1836,6 +1837,203 @@ def _ensure_portfolio_config_table(db_engine: Engine) -> None:
             )
             """
         )
+
+
+_PROTOCOL_V2_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("intent_json", "TEXT"),
+    ("execution_token", "VARCHAR(64)"),
+    ("final_snapshot_json", "TEXT"),
+    ("uncertainty_reason", "TEXT"),
+    ("protocol_version", "VARCHAR(40)"),
+    ("bound_broker_status", "VARCHAR(40)"),
+    ("bound_executed_quantity", "NUMERIC(18, 6)"),
+    ("bound_executed_price", "NUMERIC(18, 6)"),
+)
+
+
+def _migrate_legacy_passive_mandate_rows(connection: Connection) -> int:
+    """Conservatively map legacy protocol-v1 rows onto the v2 state machine.
+
+    Never reauthorises a consumed row: only clearly unspent rows (no token,
+    no consumed_at, no broker id, available=True, no v2 snapshot columns,
+    valid ACTIVE policy) may remain AUTHORIZED. Everything else — including
+    every legacy SUBMITTING/SUBMITTED/FAILED state, NULL/unknown states and
+    contradictory combinations — becomes UNCERTAIN with all facts retained.
+    Idempotent: v2 rows (protocol_version='passive-submit-v2') are skipped.
+    """
+    from datetime import datetime, timezone
+
+    from app.domain.passive_allocation.model import POLICY_VERSION
+    from app.domain.passive_allocation import protocol as passive_protocol
+    from app.domain.passive_allocation.model import PASSIVE_ALLOTMENT_USD
+
+    rows = connection.exec_driver_sql(
+        "SELECT id, submit_state, entry_authorisation_available, claim_token, "
+        "entry_authorisation_consumed_at, bound_broker_order_id, "
+        "execution_token, intent_json, final_snapshot_json, "
+        "uncertainty_reason, status, policy_version, allotment_usd, "
+        "protocol_version FROM passive_mandates"
+    ).fetchall()
+    migrated = 0
+    for row in rows:
+        (
+            row_id,
+            submit_state,
+            available,
+            claim_token,
+            consumed_at,
+            bound_id,
+            execution_token,
+            intent_json,
+            final_json,
+            uncertainty_reason,
+            status,
+            policy_version,
+            allotment_usd,
+            protocol_version,
+        ) = row
+        if protocol_version == passive_protocol.PASSIVE_PROTOCOL_VERSION:
+            # v2-stamped rows are never reset by the idempotent pass, but a
+            # contradictory USED marker on an AUTHORIZED row is still not
+            # reservable — the reservation itself re-validates (R1-7).
+            continue
+        available_flag = _parse_legacy_boolean(available)
+        issue = passive_protocol.legacy_row_may_remain_authorized(
+            submit_state=submit_state,
+            entry_authorisation_available=available_flag,
+            claim_token=claim_token,
+            entry_authorisation_consumed_at=consumed_at,
+            bound_broker_order_id=bound_id,
+            execution_token=execution_token,
+            intent_json=intent_json,
+            final_snapshot_json=final_json,
+            uncertainty_reason=uncertainty_reason,
+            status=status,
+            policy_version=policy_version,
+            allotment_usd=allotment_usd,
+        )
+        if issue is None:
+            # Clearly unspent: adopt the protocol stamp only.
+            connection.exec_driver_sql(
+                "UPDATE passive_mandates SET protocol_version = ? WHERE id = ?",
+                (passive_protocol.PASSIVE_PROTOCOL_VERSION, row_id),
+            )
+            migrated += 1
+            continue
+        connection.exec_driver_sql(
+            "UPDATE passive_mandates SET submit_state = ?, "
+            "uncertainty_reason = ?, protocol_version = ? WHERE id = ?",
+            (
+                passive_protocol.SUBMIT_STATE_UNCERTAIN,
+                (
+                    f"legacy migration 2026-09: {issue}"
+                    if not uncertainty_reason
+                    else f"legacy migration 2026-09 ({issue}); prior: {uncertainty_reason}"
+                ),
+                passive_protocol.PASSIVE_PROTOCOL_VERSION,
+                row_id,
+            ),
+        )
+        migrated += 1
+    return migrated
+
+
+def _parse_legacy_boolean(raw: object) -> bool | None:
+    """SQLite legacy booleans: 1/0 integers and '1'/'0'/''/None only.
+
+    Never ``bool(any truthy)`` — a legacy 'true'/'yes' string must parse as
+    unknown (None), which fails closed, not as True.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, int):
+        return raw == 1
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if stripped in {"1", "0"}:
+            return stripped == "1"
+        return None
+    return None
+
+
+def _ensure_passive_mandates_table(db_engine: Engine) -> None:
+    """Defensive explicit create for passive_mandates (SPY passive lane).
+
+    Created explicitly (rather than only via ``metadata.create_all``) for
+    parity with the other ``_ensure_*`` tables. Idempotent, and upgrades an
+    earlier phase-1 schema in place by adding missing columns, then maps
+    legacy protocol-v1 rows onto the v2 submit state machine
+    conservatively (see ``_migrate_legacy_passive_mandate_rows``).
+    """
+    inspector = inspect(db_engine)
+    table_exists = "passive_mandates" in inspector.get_table_names()
+    columns = (
+        {column["name"] for column in inspector.get_columns("passive_mandates")}
+        if table_exists
+        else set()
+    )
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS passive_mandates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lane VARCHAR(40) NOT NULL,
+                policy_version VARCHAR(60) NOT NULL,
+                symbol VARCHAR(20) NOT NULL,
+                status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+                allotment_usd FLOAT NOT NULL,
+                risk_model VARCHAR(40) NOT NULL,
+                exemptions TEXT NOT NULL,
+                review_interval_months INTEGER NOT NULL,
+                entry_authorisation_available BOOLEAN NOT NULL DEFAULT 1,
+                entry_authorisation_consumed_at DATETIME,
+                submit_state VARCHAR(30) NOT NULL DEFAULT 'AUTHORIZED',
+                failure_reason TEXT,
+                claim_token VARCHAR(64),
+                intent_json TEXT,
+                execution_token VARCHAR(64),
+                final_snapshot_json TEXT,
+                uncertainty_reason TEXT,
+                protocol_version VARCHAR(40),
+                order_binding VARCHAR(40) NOT NULL,
+                bound_broker_order_id VARCHAR(100),
+                bound_broker_status VARCHAR(40),
+                bound_executed_quantity NUMERIC(18, 6),
+                bound_executed_price NUMERIC(18, 6),
+                approved_at DATETIME NOT NULL,
+                approved_by VARCHAR(120) NOT NULL,
+                approval_reason TEXT NOT NULL,
+                created_at DATETIME,
+                updated_at DATETIME,
+                CONSTRAINT ux_passive_mandates_lane UNIQUE (lane)
+            )
+            """
+        )
+        # Re-inspect AFTER the CREATE: on an empty database the CREATE above
+        # just built the full table, and the pre-CREATE column set (empty)
+        # would otherwise drive a duplicate-column ALTER (R1-7c). The
+        # inspection runs ON the open transaction connection — never a
+        # second pooled checkout (re-entrancy guard).
+        columns = {
+            row[1]
+            for row in connection.exec_driver_sql(
+                "PRAGMA table_info(passive_mandates)"
+            ).fetchall()
+        }
+        missing_columns = {
+            "submit_state": "VARCHAR(30) NOT NULL DEFAULT 'AUTHORIZED'",
+            "failure_reason": "TEXT",
+            **dict(_PROTOCOL_V2_COLUMNS),
+        }
+        for name, column_type in missing_columns.items():
+            if name not in columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE passive_mandates ADD COLUMN "
+                    f"{name} {column_type}"
+                )
+        _migrate_legacy_passive_mandate_rows(connection)
 
 
 def _ensure_paper_orders_table(db_engine: Engine) -> None:

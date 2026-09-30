@@ -884,6 +884,15 @@ class Settings(BaseSettings):
         default="",
         validation_alias="AUTO_TRADE_PAPER_ACCOUNT_FINGERPRINT",
     )
+    # Isolated SPY passive buy-and-hold lane (phase 1). DEFAULT OFF; even
+    # when ON the lane additionally requires the confirmed-PAPER attestation
+    # above AND an owner-approved persisted mandate row with an unspent
+    # one-time entry authorisation. Turning this flag on is itself an
+    # owner-approval-gated act (2026-09-29); funded use is not authorised.
+    spy_passive_lane_enabled: bool = Field(
+        default=False,
+        validation_alias="AUTO_TRADE_SPY_PASSIVE_ENABLED",
+    )
 
     def paper_exception_notional_for(self, fingerprint: str) -> float:
         if not self.paper_account_fingerprint:
