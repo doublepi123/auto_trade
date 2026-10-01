@@ -1,9 +1,28 @@
+"""Quote-only historical provider.
+
+Diagnostic decision, 2026-10-01: diagnostic-v1 adds returns-blind context ONLY
+to the existing non-advancing failure, after the existing native read returns.
+It changes provider source / historical evaluator digest / NEW registration
+identities, NOT the v3 provider contract, domain semantics, acquisition spec,
+acceptance, EOF, cohort denominator, parameters, or promotion rules. Preserve
+registrations 51/52, their failures and identities, and sealed publications;
+never force old plans, retry a historical cohort manually, or rewrite records.
+Registration 52 (9b72868f00c8daf9c296d1b2eafc75d34a2d9c9eae832fa0e0f477c931218a36)
+has EA ordinal 40: recent Aug-04 bars before Aug-05 training are NOT exact
+forward-history evidence. Equality metadata does not certify EOF.
+
+Native acquisition uses the provider daemon thread / supervisor parent fetch
+thread; separate compute children do not make acquisition hard-killable or
+GIL-isolated. Native 3.0.23 whole-call/request/reconnect bounds remain UNKNOWN.
+This diagnostic introduces no requests, retries, contexts, timers, or logs.
+"""
 from __future__ import annotations
 
 import hashlib
 import json
 import logging
 import math
+import re
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -102,6 +121,337 @@ _PROVIDER_CONTRACT: Mapping[str, object] = MappingProxyType({
 
 class QuantV6HistoricalProviderError(RuntimeError):
     """Raised when quote-only historical acquisition cannot be trusted."""
+
+
+# Diagnostic-only constants deliberately OUTSIDE _PROVIDER_CONTRACT.
+_PAGING_FAILURE_PREFIX = "historical candlestick cursor did not advance"
+_PAGING_DIAGNOSTIC_MARKER = " | qv6_page_diag_v1="
+_PAGING_MESSAGE_MAX_BYTES = 1800
+_PAGING_FIELDS = ("open", "high", "low", "close", "volume")
+_PAGING_REASONS = {"OK", "TIMESTAMP_INVALID", "OFF_GRID", "NONFINITE",
+                   "NONPOSITIVE_PRICE", "NEGATIVE_VOLUME", "OHLC_INCONSISTENT", "UNREADABLE"}
+_PAGING_DESCRIPTOR_KEYS = {"timestamp_utc", "timestamp_kind", "naive", "bar_validation", "reason"}
+_PAGING_PAYLOAD_KEYS = {"v", "code", "diagnostic_status", "symbol", "page", "request", "counts",
+                      "page_time_range", "previous_raw_boundary", "previous_accepted",
+                      "current_boundary", "comparison"}
+
+
+@dataclass(frozen=True, repr=False)
+class _BoundaryDigest:
+    """Only extra cross-page state: one descriptor and five bounded private hashes.
+
+    Never serialize this object or use its fingerprints in acceptance decisions.
+    No raw SDK objects, numeric values, or numeric strings are retained here.
+    """
+
+    descriptor: dict[str, Any]
+    fingerprints: tuple[str | None, ...]
+
+
+def _diagnostic_utc(timestamp: datetime) -> str:
+    return timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _diagnostic_decimal(value: object) -> tuple[Decimal | None, str]:
+    # Exact built-in types only: never invoke arbitrary __str__/__repr__.
+    if type(value) is Decimal:
+        if value.__sizeof__() > 2048:
+            return None, "UNREADABLE"
+        candidate = value
+    elif type(value) is str:
+        if len(value) > 128:
+            return None, "UNREADABLE"
+        try:
+            candidate = Decimal(value)
+        except InvalidOperation:
+            return None, "UNREADABLE"
+    elif type(value) is int:
+        if value.bit_length() > 512:
+            return None, "UNREADABLE"
+        candidate = Decimal(value)
+    elif type(value) is float:
+        candidate = Decimal(str(value))
+    else:
+        return None, "UNREADABLE"
+    if not candidate.is_finite():
+        return None, "NONFINITE"
+    parts = candidate.as_tuple()
+    if len(parts.digits) > 128 or not isinstance(parts.exponent, int) or abs(parts.exponent) > 128:
+        return None, "UNREADABLE"
+    return candidate, "OK"
+
+
+def _diagnostic_fingerprint(value: Decimal) -> str:
+    # Canonical exact decimal tuple, no context rounding / huge fixed formatting.
+    parts = value.as_tuple()
+    digits = list(parts.digits)
+    exponent = cast(int, parts.exponent)
+    while len(digits) > 1 and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    canonical = "0" if not any(digits) else (
+        str(parts.sign) + ":" + "".join(str(digit) for digit in digits) + ":" + str(exponent)
+    )
+    return hashlib.sha256(canonical.encode("ascii")).hexdigest()
+
+
+def _describe_boundary(item: object, timestamp: datetime, *, accepted: bool = False) -> _BoundaryDigest:
+    raw_timestamp = timestamp if accepted else getattr(item, "timestamp", None)
+    kind = "OTHER"
+    naive: bool | None = None
+    if type(raw_timestamp) is datetime:
+        kind = "DATETIME"
+        naive = raw_timestamp.tzinfo is None or raw_timestamp.utcoffset() is None
+    elif type(raw_timestamp) is str:
+        kind = "STRING"
+        if len(raw_timestamp) <= 64:
+            try:
+                parsed = datetime.fromisoformat(raw_timestamp.strip().replace("Z", "+00:00"))
+                naive = parsed.tzinfo is None or parsed.utcoffset() is None
+            except ValueError:
+                naive = None
+    elif type(raw_timestamp) in (int, float):
+        kind = "NUMBER"
+    elif type(raw_timestamp) is bool:
+        kind = "BOOLEAN"
+    elif raw_timestamp is None:
+        kind = "MISSING"
+    numbers: list[Decimal | None] = []
+    codes: list[str] = []
+    for name in _PAGING_FIELDS:
+        try:
+            number, code = _diagnostic_decimal(getattr(item, name, None))
+        except Exception:
+            number, code = None, "UNREADABLE"
+        numbers.append(number)
+        codes.append(code)
+    fingerprints = tuple(_diagnostic_fingerprint(n) if n is not None else None for n in numbers)
+    reason = "OK"
+    validation = "VALID"
+    if "UNREADABLE" in codes:
+        validation, reason = "UNKNOWN", "UNREADABLE"
+    elif "NONFINITE" in codes:
+        validation, reason = "INVALID", "NONFINITE"
+    elif timestamp.second or timestamp.microsecond or timestamp.minute % 5:
+        validation, reason = "INVALID", "OFF_GRID"
+    else:
+        opened, high, low, close, volume = cast(tuple[Decimal, Decimal, Decimal, Decimal, Decimal], tuple(numbers))
+        if min(opened, high, low, close) <= 0:
+            validation, reason = "INVALID", "NONPOSITIVE_PRICE"
+        elif volume < 0:
+            validation, reason = "INVALID", "NEGATIVE_VOLUME"
+        elif not (low <= opened <= high and low <= close <= high):
+            validation, reason = "INVALID", "OHLC_INCONSISTENT"
+    return _BoundaryDigest({"timestamp_utc": _diagnostic_utc(timestamp), "timestamp_kind": kind,
+                           "naive": naive, "bar_validation": validation, "reason": reason}, fingerprints)
+
+
+def _select_boundary(
+    parsed_rows: tuple[tuple[object, datetime | None], ...], cursor: datetime,
+) -> tuple[str, _BoundaryDigest | None]:
+    if len(parsed_rows) > QUANT_V6_HISTORICAL_PAGE_SIZE:
+        raise ValueError("diagnostic row budget")
+    at_cursor = [(item, ts) for item, ts in parsed_rows if ts == cursor]
+    if len(at_cursor) > 1:
+        return "AMBIGUOUS", None
+    if len(at_cursor) == 1:
+        return "CURSOR_UNIQUE", _describe_boundary(at_cursor[0][0], cursor)
+    times = [ts for _item, ts in parsed_rows if ts is not None]
+    if not times:
+        return "NONE", None
+    maximum = max(times)
+    at_maximum = [(item, ts) for item, ts in parsed_rows if ts == maximum]
+    if len(at_maximum) != 1:
+        return "AMBIGUOUS", None
+    return "MAX_UNIQUE", _describe_boundary(at_maximum[0][0], maximum)
+
+
+def _remember_boundary(
+    parsed_rows: tuple[tuple[object, datetime | None], ...], cursor: datetime,
+) -> _BoundaryDigest | None:
+    try:
+        return _select_boundary(parsed_rows, cursor)[1]
+    except Exception:
+        # Diagnostics never change the original successful page/cursor/counters.
+        return None
+
+
+def _boundary_match(left: _BoundaryDigest | None, right: _BoundaryDigest | None) -> bool | None:
+    if left is None or right is None:
+        return None
+    if left.descriptor["timestamp_utc"] != right.descriptor["timestamp_utc"]:
+        return False
+    if None in left.fingerprints or None in right.fingerprints:
+        return None
+    return left.fingerprints == right.fingerprints
+
+
+def _paging_failure_payload(
+    *, symbol: str, page: int, start: datetime, end: datetime, cursor: datetime,
+    request_boundary: datetime, parsed_rows: tuple[tuple[object, datetime | None], ...],
+    raw_total: int, rejected_total: int, accepted_bars: list[QuantV6Bar],
+    previous_raw_boundary: _BoundaryDigest | None,
+) -> dict[str, Any]:
+    selection, current = _select_boundary(parsed_rows, cursor)
+    accepted = (_describe_boundary(accepted_bars[-1], accepted_bars[-1].start_at, accepted=True)
+                if accepted_bars else None)
+    times = [ts for _item, ts in parsed_rows if ts is not None]
+    changed: list[str] | None = None
+    reference = previous_raw_boundary
+    if reference is None or (current is not None and reference.descriptor["timestamp_utc"] != current.descriptor["timestamp_utc"]):
+        reference = accepted
+    if (current is not None and reference is not None
+            and current.descriptor["timestamp_utc"] == reference.descriptor["timestamp_utc"]
+            and None not in current.fingerprints and None not in reference.fingerprints):
+        changed = [name for name, a, b in zip(_PAGING_FIELDS, current.fingerprints, reference.fingerprints) if a != b]
+    return {
+        "v": 1, "code": "CURSOR_NOT_ADVANCING", "diagnostic_status": "AVAILABLE", "symbol": symbol, "page": page,
+        "request": {"start_utc": _diagnostic_utc(start), "end_utc": _diagnostic_utc(end),
+                    "cursor_utc": _diagnostic_utc(cursor), "cursor_exchange": request_boundary.isoformat(),
+                    "page_size": QUANT_V6_HISTORICAL_PAGE_SIZE},
+        "counts": {"page_rows": len(parsed_rows), "raw_total": raw_total, "rejected_total": rejected_total,
+                   "accepted_total": len(accepted_bars), "before_cursor": sum(t < cursor for t in times),
+                   "at_cursor": sum(t == cursor for t in times), "after_cursor": sum(t > cursor for t in times),
+                   "unparsed": len(parsed_rows) - len(times)},
+        "page_time_range": {"min_utc": _diagnostic_utc(min(times)) if times else None,
+                            "max_utc": _diagnostic_utc(max(times)) if times else None},
+        "previous_raw_boundary": previous_raw_boundary.descriptor if previous_raw_boundary is not None else None,
+        "previous_accepted": accepted.descriptor if accepted is not None else None,
+        "current_boundary": {"selection": selection, "descriptor": current.descriptor if current is not None else None},
+        "comparison": {"raw_match": _boundary_match(current, previous_raw_boundary),
+                       "accepted_match": _boundary_match(current, accepted), "changed_fields": changed},
+    }
+
+
+def _diagnostic_timestamp_valid(value: object, *, exchange: bool = False) -> bool:
+    if type(value) is not str or len(value) > 32:
+        return False
+    suffix = r"[+-]\d{2}:\d{2}" if exchange else "Z"
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{6})?" + suffix, value):
+        return False
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return True
+    except ValueError:
+        return False
+
+
+def _diagnostic_descriptor_valid(value: object) -> bool:
+    if value is None:
+        return True
+    if type(value) is not dict or set(value) != _PAGING_DESCRIPTOR_KEYS:
+        return False
+    return (
+        (value["timestamp_utc"] is None or _diagnostic_timestamp_valid(value["timestamp_utc"]))
+        and type(value["timestamp_kind"]) is str
+        and value["timestamp_kind"] in {"DATETIME", "STRING", "NUMBER", "BOOLEAN", "MISSING", "OTHER"}
+        and (value["naive"] is None or type(value["naive"]) is bool)
+        and type(value["bar_validation"]) is str and value["bar_validation"] in {"VALID", "INVALID", "UNKNOWN"}
+        and type(value["reason"]) is str and value["reason"] in _PAGING_REASONS
+    )
+
+
+def _diagnostic_payload_valid(data: object) -> bool:
+    if type(data) is not dict or type(data.get("v")) is not int or data["v"] != 1:
+        return False
+    if data.get("diagnostic_status") == "UNAVAILABLE":
+        return set(data) == {"v", "code", "diagnostic_status"} and data["code"] in {"BUILD_FAILED", "SIZE_LIMIT"}
+    if set(data) != _PAGING_PAYLOAD_KEYS or data["diagnostic_status"] != "AVAILABLE" or data["code"] != "CURSOR_NOT_ADVANCING":
+        return False
+    if type(data["symbol"]) is not str or not re.fullmatch(r"[A-Z0-9._-]{1,47}\.(?:US|HK)", data["symbol"]):
+        return False
+    if type(data["page"]) is not int or not 1 <= data["page"] <= QUANT_V6_HISTORICAL_MAX_PAGES:
+        return False
+    request = data["request"]
+    if type(request) is not dict or set(request) != {"start_utc", "end_utc", "cursor_utc", "cursor_exchange", "page_size"}:
+        return False
+    if (type(request["page_size"]) is not int or request["page_size"] != QUANT_V6_HISTORICAL_PAGE_SIZE
+            or not all(_diagnostic_timestamp_valid(request[k]) for k in ("start_utc", "end_utc", "cursor_utc"))
+            or not _diagnostic_timestamp_valid(request["cursor_exchange"], exchange=True)):
+        return False
+    counts = data["counts"]
+    if type(counts) is not dict or set(counts) != {"page_rows", "raw_total", "rejected_total", "accepted_total", "before_cursor", "at_cursor", "after_cursor", "unparsed"}:
+        return False
+    if any(type(n) is not int or not 0 <= n <= QUANT_V6_HISTORICAL_MAX_RAW_ROWS for n in counts.values()):
+        return False
+    if (counts["page_rows"] > QUANT_V6_HISTORICAL_PAGE_SIZE or counts["accepted_total"] > QUANT_V6_HISTORICAL_MAX_BARS
+            or sum(counts[k] for k in ("before_cursor", "at_cursor", "after_cursor", "unparsed")) != counts["page_rows"]):
+        return False
+    time_range = data["page_time_range"]
+    if type(time_range) is not dict or set(time_range) != {"min_utc", "max_utc"}:
+        return False
+    if not all(v is None or _diagnostic_timestamp_valid(v) for v in time_range.values()):
+        return False
+    if not all(_diagnostic_descriptor_valid(data[k]) for k in ("previous_raw_boundary", "previous_accepted")):
+        return False
+    boundary = data["current_boundary"]
+    if type(boundary) is not dict or set(boundary) != {"selection", "descriptor"}:
+        return False
+    if type(boundary["selection"]) is not str or boundary["selection"] not in {"CURSOR_UNIQUE", "MAX_UNIQUE", "AMBIGUOUS", "NONE"}:
+        return False
+    if not _diagnostic_descriptor_valid(boundary["descriptor"]) or ((boundary["descriptor"] is None) != (boundary["selection"] in {"AMBIGUOUS", "NONE"})):
+        return False
+    comparison = data["comparison"]
+    if type(comparison) is not dict or set(comparison) != {"raw_match", "accepted_match", "changed_fields"}:
+        return False
+    if any(comparison[k] is not None and type(comparison[k]) is not bool for k in ("raw_match", "accepted_match")):
+        return False
+    fields = comparison["changed_fields"]
+    return fields is None or (type(fields) is list and len(fields) <= 5
+        and all(type(f) is str and f in _PAGING_FIELDS for f in fields) and len(set(fields)) == len(fields))
+
+
+def parse_quant_v6_paging_failure(message: str) -> Mapping[str, Any] | None:
+    """Strict bounded metadata parser, diagnostics ONLY; never authorizes EOF.
+
+    Exact public keys are declared above; descriptors expose normalized time,
+    fixed type/validity codes only. Accept only the original provider prefix or
+    the existing supervisor's single worker/ordinal prefix, not arbitrary text.
+    """
+    if type(message) is not str or len(message) > 2048 or not message.isascii() or "\n" in message or "\r" in message:
+        return None
+    if message.count(_PAGING_DIAGNOSTIC_MARKER) != 1:
+        return None
+    prefix, encoded = message.split(_PAGING_DIAGNOSTIC_MARKER)
+    if not re.fullmatch(r"(?:quant-v6 (?:worker|candidate ordinal (?:0|[1-9][0-9]{0,8})): )?" + re.escape(_PAGING_FAILURE_PREFIX), prefix):
+        return None
+    if len(_PAGING_FAILURE_PREFIX + _PAGING_DIAGNOSTIC_MARKER + encoded) > _PAGING_MESSAGE_MAX_BYTES:
+        return None
+
+    def unique(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate diagnostic key")
+            result[key] = value
+        return result
+
+    def nonfinite(_value: str) -> Any:
+        raise ValueError("nonfinite diagnostic value")
+
+    try:
+        data = json.loads(encoded, object_pairs_hook=unique, parse_constant=nonfinite)
+        return data if _diagnostic_payload_valid(data) else None
+    except (ValueError, TypeError, OverflowError, RecursionError):
+        return None
+
+
+def _paging_failure_message(**context: Any) -> str:
+    """Preserve the original error; complete tiny JSON on any build/size failure."""
+    failure_code = "BUILD_FAILED"
+    try:
+        payload = _paging_failure_payload(**context)
+        encoded = json.dumps(payload, ensure_ascii=True, allow_nan=False, separators=(",", ":"))
+        message = _PAGING_FAILURE_PREFIX + _PAGING_DIAGNOSTIC_MARKER + encoded
+        if len(message.encode("utf-8")) > _PAGING_MESSAGE_MAX_BYTES:
+            failure_code = "SIZE_LIMIT"
+        elif _diagnostic_payload_valid(payload):
+            return message
+    except Exception:
+        failure_code = "BUILD_FAILED"
+    # No serialization dependency on the fallback path, and no exception text.
+    return (_PAGING_FAILURE_PREFIX + _PAGING_DIAGNOSTIC_MARKER
+            + '{"v":1,"code":"' + failure_code + '","diagnostic_status":"UNAVAILABLE"}')
 
 
 @dataclass(frozen=True)
@@ -508,6 +858,7 @@ class QuantV6HistoricalBarProvider:
         period: object,
         adjustment: object,
         cursor: datetime,
+        request_boundary: datetime,
     ) -> tuple[object, ...]:
         reader = getattr(quote_context, "history_candlesticks_by_offset", None)
         if not callable(reader):
@@ -524,7 +875,7 @@ class QuantV6HistoricalBarProvider:
                         adjustment,
                         True,
                         QUANT_V6_HISTORICAL_PAGE_SIZE,
-                        _history_boundary(symbol, cursor),
+                        request_boundary,
                     ),
                     timeout_seconds=(
                         QUANT_V6_HISTORICAL_PAGE_TIMEOUT_MILLISECONDS / 1_000
@@ -598,8 +949,11 @@ class QuantV6HistoricalBarProvider:
             raw_rows = 0
             rejected_rows = 0
             seen_timestamps: set[datetime] = set()
+            previous_raw_boundary: _BoundaryDigest | None = None
             for page_number in range(1, QUANT_V6_HISTORICAL_MAX_PAGES + 1):
                 self._raise_if_cancelled()
+                # Capture the exact exchange-local argument sent by _read_page.
+                request_boundary = _history_boundary(symbol, cursor)
                 items = self._read_page(
                     module=module,
                     quote_context=quote_context,
@@ -607,6 +961,7 @@ class QuantV6HistoricalBarProvider:
                     period=period,
                     adjustment=adjustment,
                     cursor=cursor,
+                    request_boundary=request_boundary,
                 )
                 if not items:
                     return QuantV6HistoricalBarFetch(
@@ -672,7 +1027,13 @@ class QuantV6HistoricalBarProvider:
                                     rejected_rows=rejected_rows,
                                 )
                     raise QuantV6HistoricalProviderError(
-                        "historical candlestick cursor did not advance"
+                        _paging_failure_message(
+                            symbol=symbol, page=page_number, start=start, end=end,
+                            cursor=cursor, request_boundary=request_boundary,
+                            parsed_rows=parsed_rows, raw_total=raw_rows,
+                            rejected_total=rejected_rows, accepted_bars=bars,
+                            previous_raw_boundary=previous_raw_boundary,
+                        )
                     )
                 page_timestamps = tuple(
                     timestamp for _item, timestamp in advancing
@@ -709,6 +1070,7 @@ class QuantV6HistoricalBarProvider:
                         raw_rows=raw_rows,
                         rejected_rows=rejected_rows,
                     )
+                previous_raw_boundary = _remember_boundary(parsed_rows, cursor)
             raise QuantV6HistoricalProviderError(
                 "historical response exceeds the page limit"
             )

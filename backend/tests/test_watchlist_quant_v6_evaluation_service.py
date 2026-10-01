@@ -216,14 +216,20 @@ def test_historical_evaluator_manifest_golden_digest() -> None:
     source, and say in the message what moved. It is emphatically not the
     preregistration hash, which must never be updated to silence a failure.
 
-    The value below was last moved when the spawn supervisor's RSS fence
-    learned to skip a worker another thread had already reaped (a CI race).
+    Diagnostic-v1 decision is recorded in the tracked historical provider
+    module docstring: only bounded returns-blind metadata on the existing
+    nonadvancing failure. Provider source / evaluator / NEW registration
+    identities change; v3 acceptance, acquisition, EOF, old identities and
+    sealed publications do not. This is the necessary mechanical source-golden
+    update, not a frozen strategy parameter change.
+    Previously the spawn supervisor's RSS fence learned to skip a worker
+    another thread had already reaped (a CI race).
     Earlier, d04b927d added ``QuantV6DatabaseSizeFence`` to that module but
     kept the old constant, so `main` CI stayed red for nine commits -- the
     gate fired correctly and was ignored.
     """
     assert quant_v6_historical_evaluator_digest_sha256() == (
-        "030d4b69828a68a2a272d5493d5027739c29058f0c1bb50715e7dbb29ffd6bd4"
+        "a036f4d4d5b2ed827fe757cddc9c8183586be5bbd5c176597d62521ef683d044"
     )
 
 
