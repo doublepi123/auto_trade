@@ -1090,7 +1090,18 @@ def resume_trading(
                 paused_at=None,
                 pause_auto_resumable=False,
             )
-            runner.risk.resume()
+            try:
+                runner.risk.resume()
+            except Exception as exc:
+                # Phase2a W2 fallback: an external safety block refused the
+                # resume. Restore the persisted runtime pause state and
+                # surface the refusal as 409 (production guarded resume
+                # paths already return False -> 409 above).
+                _restore_runner_runtime_state_best_effort(runner, db)
+                raise HTTPException(
+                    status_code=409,
+                    detail=str(exc),
+                ) from exc
         detail = control_scope
         return MessageResponse(message="trading resumed")
     except HTTPException as exc:

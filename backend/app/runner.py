@@ -45,7 +45,9 @@ from app.core.notifiers.serverchan import ServerChanNotifier
 from app.core.position_probe_diagnostics import PositionProbeDiagnostics
 from app.core.risk import DailyLossSnapshot, RiskConfig, RiskController, TradingState
 from app.database import SessionLocal
-from app.models import OrderRecord, ReconciliationEvidence, TrackedEntry, TradeEvent
+from app.domain.passive_allocation import protocol as passive_protocol
+from app.domain.passive_allocation.model import PASSIVE_LANE, PASSIVE_SYMBOL
+from app.models import OrderRecord, ReconciliationEvidence, TrackedEntry, TradeEvent, PassiveMandate
 from app.services.daily_pnl_service import DailyPnlService
 from app.services.notification_log_service import get_notification_sink
 from app.services.opening_momentum_execution_service import (
@@ -305,6 +307,21 @@ class DurableFillReconciliationError(RuntimeError):
     """Raised when recent fills cannot be proved from the durable ledger."""
 
 
+class _EmptyPassiveSnapshot:
+    """Clear passive recovery view (no rows, nothing quarantined)."""
+
+    hard_reasons: tuple[str, ...] = ()
+    quarantined_symbols: frozenset[str] = frozenset()
+    pending_refs: dict[str, str] = {}
+    decisions: tuple[Any, ...] = ()
+    complete = True
+    order_live = False
+
+
+def _EMPTY_PASSIVE_SNAPSHOT() -> "_EmptyPassiveSnapshot":
+    return _EmptyPassiveSnapshot()
+
+
 class AppRunner:
     @staticmethod
     def _build_broker(audit: AuditLogger) -> BrokerGateway:
@@ -357,6 +374,17 @@ class AppRunner:
         self._account_exposure: dict[str, Any] = {}
         self._account_exposure_not_before: float = 0.0
         self._board_lot_residual_symbols: set[str] = set()
+        # Phase2a W3 passive recovery state. The quarantine/ref view is
+        # immutable-between-publishes: each scan builds a NEW snapshot and
+        # publishes it atomically (epoch CAS) under _state_lock; readers
+        # (quarantine callback, entry policy, reduction skip) only ever see
+        # a complete view. All callbacks are PURE MEMORY — no I/O inside.
+        self._passive_quarantined_symbols: frozenset[str] = frozenset()
+        self._passive_pending_refs: dict[str, str] = {}
+        self._passive_recovery_hard_reasons: tuple[str, ...] = ()
+        self._passive_recovery_complete: bool = False
+        self._passive_recovery_inventoried: bool = False
+        self._passive_recovery_service: Any = None
         self._broker_position_symbols: set[str] = set()
         self._board_lot_log_throttle = RepeatedLogThrottle(window_seconds=300)
         self._fee_enrichment_log_throttle = RepeatedLogThrottle(window_seconds=3600)
@@ -390,6 +418,8 @@ class AppRunner:
             entry_cutoff_minutes_before_close=settings.hard_entry_cutoff_minutes_before_close,
             final_order_quote_check=self._validate_final_order_quote,
             entry_policy_check=self._validate_live_entry_policy,
+            passive_reduction_quarantine=self._passive_quarantine_issue,
+            passive_uncertainty_sink=self._passive_uncertainty_sink,
             final_protective_exit_check=(
                 self._validate_final_protective_exit_submission
             ),
@@ -947,6 +977,643 @@ class AppRunner:
         except Exception:
             logger.critical("failed to persist operational risk pause", exc_info=True)
 
+    # ------------------------------------------------------------------
+    # Phase2a W3: passive OFF-recovery (view/guards, pure memory)
+    # ------------------------------------------------------------------
+
+    def _passive_quarantine_issue(self, symbol: str) -> str | None:
+        """W2 reduction-quarantine callback: PURE MEMORY, NO LOCK.
+
+        Returns the quarantine reason when the symbol is quarantined by
+        the latest published recovery view; None otherwise. The view is
+        an immutable frozenset replaced atomically by publish, so an
+        unlocked membership read is safe (CPython reference semantics)
+        and — critically — a caller already inside any runner critical
+        section, or racing a thread that holds the state lock (e.g. the
+        protective-commit invalidation guard), can never deadlock here.
+        """
+        if symbol in self._passive_quarantined_symbols:
+            return (
+                f"SPY_PASSIVE recovery quarantine on {symbol}: "
+                "ownership/resolution unproven; reductions are held "
+                "for manual reconciliation"
+            )
+        return None
+
+    def _passive_uncertainty_sink(
+        self, reason: str, broker_order_id: str | None,
+    ) -> None:
+        """W2 uncertainty sink: tighten SPY quarantine + raise the guard.
+
+        Same short critical section as publish (state RLock); pure
+        memory — the epoch raise is the core controller's own locked
+        operation, no I/O here. An existing manual pause reason is NEVER
+        overwritten by this sink.
+        """
+        # Review1 M2: state->risk order inside the SAME critical section
+        # ``_publish_passive_recovery`` uses, so publish (risk CAS -> view)
+        # and sink (view tighten -> risk raise) serialize against each
+        # other; a sink can no longer slip between a publish's CAS and its
+        # view replacement.
+        with self._state_lock:
+            if PASSIVE_SYMBOL not in self._passive_quarantined_symbols:
+                self._passive_quarantined_symbols = frozenset(
+                    set(self._passive_quarantined_symbols) | {PASSIVE_SYMBOL},
+                )
+            self.risk.raise_external_block("passive_recovery", reason)
+
+    def _passive_recovery_snapshot_view(self) -> dict[str, Any]:
+        """Read-only copy of the published view (state RLock, no I/O)."""
+        with self._state_lock:
+            return {
+                "quarantined": set(self._passive_quarantined_symbols),
+                "pending_refs": dict(self._passive_pending_refs),
+                "hard_reasons": list(self._passive_recovery_hard_reasons),
+                "complete": self._passive_recovery_complete,
+                "inventoried": self._passive_recovery_inventoried,
+            }
+
+    def _get_passive_recovery_service(self) -> Any:
+        """Lazily build the recovery service on the runner session factory."""
+        if self._passive_recovery_service is None:
+            from app.services.passive_recovery_service import (
+                PassiveRecoveryService,
+            )
+
+            self._passive_recovery_service = PassiveRecoveryService(
+                SessionLocal,
+                clock=lambda: datetime.now(timezone.utc),
+            )
+        return self._passive_recovery_service
+
+    def _latch_passive_hard_pause(self, reason: str) -> None:
+        """Non-auto operational pause for a FRESH hard uncertainty only.
+
+        An existing pause (owner manual or earlier fault) is never
+        overwritten — its reason survives all scans/errors.
+        """
+        full_reason = (
+            f"PASSIVE_RECOVERY_UNCERTAIN: {reason} - manual reconciliation "
+            "required before trading resumes"
+        )
+        if not self.risk.paused:
+            self.risk.pause(full_reason, auto_resumable=False)
+        try:
+            from app.services.reconciliation_incident_service import (
+                ReconciliationFailure,
+            )
+
+            with self._db_session() as db:
+                self._reconciliation_incident_svc.record_failure(
+                    db,
+                    ReconciliationFailure(
+                        source="passive_recovery",
+                        category="PASSIVE_RECOVERY",
+                        symbols=(PASSIVE_SYMBOL,),
+                        message=full_reason[:1000],
+                        error_type="PassiveRecoveryHard",
+                    ),
+                )
+                db.commit()
+        except Exception:
+            logger.exception(
+                "failed to record the passive recovery incident",
+            )
+
+    def _publish_passive_recovery(
+        self, snapshot: Any, *, based_on_epoch: int,
+    ) -> None:
+        """Publish one scan's view atomically under the captured epoch.
+
+        The epoch is the SCAN'S captured local variable (never a newer
+        self field). On CAS failure the ENTIRE snapshot is discarded: no
+        quarantine/pending-ref clearing can race a newer uncertainty
+        raise. Memory-only critical section; no I/O here.
+        """
+        # Review1 M2: the risk epoch CAS AND the entire view replacement
+        # happen inside ONE ``_state_lock`` critical section. The sink
+        # takes the SAME lock before its state->risk update, so a sink
+        # can never interleave between the CAS and the view write (which
+        # previously let an old snapshot overwrite a newly-raised
+        # quarantine with an empty view). On a stale epoch the ENTIRE
+        # snapshot is discarded — no quarantine, no refs, no reasons, no
+        # completion flag change.
+        with self._state_lock:
+            cleared = self.risk.publish_external_block(
+                "passive_recovery",
+                (
+                    "; ".join(snapshot.hard_reasons[:3])
+                    if snapshot.hard_reasons
+                    else (
+                        "PASSIVE_RECOVERY: known passive order still live"
+                        if getattr(snapshot, "order_live", False)
+                        else None
+                    )
+                ),
+                based_on_epoch=based_on_epoch,
+            )
+            if not cleared:
+                logger.warning(
+                    "stale passive recovery scan discarded (epoch %d)",
+                    based_on_epoch,
+                )
+                return
+            self._passive_quarantined_symbols = frozenset(
+                snapshot.quarantined_symbols,
+            )
+            self._passive_pending_refs = dict(snapshot.pending_refs)
+            self._passive_recovery_hard_reasons = tuple(
+                snapshot.hard_reasons,
+            )
+            self._passive_recovery_complete = bool(snapshot.complete)
+            self._passive_recovery_inventoried = True
+
+    def _wire_passive_observation_hooks(self) -> None:
+        """Review1 M1: wire the DENY-entry observation bundle to the SAME
+        runner-lifetime ``TradeExecutionService``.
+
+        The bundle exposes only the observation surface
+        (``record_outcome`` / ``record_unresolved_reference`` /
+        ``owner_intent_for``); every entry-granting hook (begin / resolve
+        / claim) rejects and the fresh-entry gate always reports
+        disabled — so late broker receipts on reloaded pending orders can
+        update mandate facts WITHOUT granting any new entry authority.
+        No second execution service, no PassiveAllocationService, no
+        auto-allow hooks.
+        """
+        service = self._get_passive_recovery_service()
+        builder = getattr(service, "observation_hooks", None)
+        if not callable(builder):
+            raise RuntimeError(
+                "passive recovery observation hooks are unavailable; "
+                "passive outcome observation cannot be wired",
+            )
+        # The DENY-entry observation bundle satisfies the frozen
+        # ``PassiveSubmitHooks`` protocol structurally (begin/resolve/
+        # claim reject; record/observe permitted); the executor's own
+        # ``passive_hooks_complete`` check still validates the wiring.
+        self._trade_svc.passive_submit_hooks = cast(
+            "Any",
+            builder(),
+        )
+
+    def _startup_passive_recovery(self) -> None:
+        """DB-only inventory IMMEDIATELY after risk load, before resumes.
+
+        Missing table / DB failure is HARD: the external block is raised,
+        its epoch captured in a LOCAL variable, and the hard preliminary
+        view published under that epoch. A successful zero-row query
+        clears under the same epoch with zero added broker reads.
+        """
+        service = self._get_passive_recovery_service()
+        self._wire_passive_observation_hooks()
+        inv = service.load_inventory()
+        epoch = self.risk.raise_external_block(
+            "passive_recovery",
+            "startup passive inventory verification pending",
+        )
+        if inv.read_error is not None:
+            snapshot = service.preliminary(inv)
+            self._publish_passive_recovery(snapshot, based_on_epoch=epoch)
+            self._latch_passive_hard_pause(
+                f"inventory unreadable: {inv.read_error}",
+            )
+            return
+        if not inv.rows:
+            self.risk.publish_external_block(
+                "passive_recovery", None, based_on_epoch=epoch,
+            )
+            with self._state_lock:
+                self._passive_recovery_inventoried = True
+                self._passive_recovery_complete = True
+            return
+        snapshot = service.preliminary(inv)
+        self._publish_passive_recovery(snapshot, based_on_epoch=epoch)
+        if snapshot.hard_reasons:
+            self._latch_passive_hard_pause(
+                "; ".join(snapshot.hard_reasons[:3]),
+            )
+
+    def _startup_passive_reconcile(
+        self,
+        *,
+        position_snapshot: list[Position] | None,
+        position_snapshot_error: Exception | None,
+    ) -> None:
+        """Full reconcile AFTER tracked reconciliation, BEFORE engine sync.
+
+        Reuses the startup position snapshot (no repeated position
+        query). Known-ID broker queries run OUTSIDE ``_state_lock``. The
+        scan captures its epoch FIRST and publishes only on a
+        same-generation CAS success; a stale scan discards everything.
+        """
+        service = self._get_passive_recovery_service()
+        inv = service.load_inventory()
+        if inv.read_error is not None:
+            epoch = self.risk.raise_external_block(
+                "passive_recovery", "reconcile inventory read error",
+            )
+            snapshot = service.preliminary(inv)
+            self._publish_passive_recovery(snapshot, based_on_epoch=epoch)
+            return
+        if not inv.rows:
+            return
+        epoch = self.risk.raise_external_block(
+            "passive_recovery",
+            "passive recovery reconciliation in progress",
+        )
+
+        def order_status(broker_order_id: str) -> Any:
+            from app.domain.passive_allocation.recovery import (
+                BrokerOrderFact,
+            )
+
+            try:
+                result = self.broker.get_order_status(broker_order_id)
+            except Exception as exc:
+                return BrokerOrderFact(
+                    broker_order_id=broker_order_id,
+                    status=None,
+                    executed_quantity=None,
+                    executed_price=None,
+                    error=f"{type(exc).__name__}: {exc}"[:200],
+                )
+            raw_qty = getattr(result, "executed_quantity", None)
+            raw_price = getattr(result, "executed_price", None)
+            return BrokerOrderFact(
+                broker_order_id=broker_order_id,
+                status=str(getattr(result, "status", "") or "") or None,
+                executed_quantity=(
+                    Decimal(str(raw_qty)) if raw_qty is not None else None
+                ),
+                executed_price=(
+                    Decimal(str(raw_price)) if raw_price is not None else None
+                ),
+                error=None,
+            )
+
+        def local_order(broker_order_id: str) -> Any:
+            from app.domain.passive_allocation.recovery import (
+                LocalOrderFact,
+            )
+
+            try:
+                with self._db_session() as db:
+                    row = (
+                        db.query(OrderRecord)
+                        .filter(
+                            OrderRecord.broker_order_id == broker_order_id,
+                        )
+                        .one_or_none()
+                    )
+            except Exception:
+                return LocalOrderFact(
+                    broker_order_id=broker_order_id,
+                    exists=False,
+                    symbol="",
+                    side="",
+                    quantity=None,
+                    lane_marker_ok=False,
+                    provenance_ref=None,
+                )
+            if row is None:
+                return LocalOrderFact(
+                    broker_order_id=broker_order_id,
+                    exists=False,
+                    symbol="",
+                    side="",
+                    quantity=None,
+                    lane_marker_ok=False,
+                    provenance_ref=None,
+                )
+            return LocalOrderFact(
+                broker_order_id=broker_order_id,
+                exists=True,
+                symbol=str(row.symbol or ""),
+                side=str(row.side or ""),
+                quantity=(
+                    Decimal(str(row.quantity))
+                    if row.quantity is not None
+                    else None
+                ),
+                lane_marker_ok=self._passive_config_lane_ok(row),
+                provenance_ref=self._passive_provenance_ref_for(row),
+            )
+
+        # HoldingFacts: tracked cost is the TOTAL confirmed cost (never
+        # the derived unit avg); unknown positions stay None (not []).
+        tracked_qty: Decimal | None = None
+        tracked_cost: Decimal | None = None
+        if self._trade_svc is not None:
+            snap = self._trade_svc.tracked_position(PASSIVE_SYMBOL)
+            if snap is not None:
+                tracked_qty = snap.quantity
+                tracked_cost = snap.cost
+        broker_spy_qty: Decimal | None = None
+        other_nonzero: tuple[str, ...] = ()
+        if position_snapshot_error is None and position_snapshot is not None:
+            # Review1 P1: a SUCCESSFUL positions list with no SPY entry is
+            # an EXPLICIT broker_spy_qty=0 — not None (unavailable). Only
+            # a snapshot FAILURE leaves the holding None. A SHORT SPY row
+            # never satisfies a LONG BUY holding proof: its quantity is
+            # recorded under the SHORT side and the LONG expectation stays
+            # unmet (classifier HARD).
+            others: list[str] = []
+            for pos in position_snapshot:
+                sym = str(pos.symbol or "")
+                side = str(getattr(pos, "side", "") or "").upper()
+                try:
+                    qty = Decimal(str(getattr(pos, "quantity", 0) or 0))
+                except Exception:
+                    qty = Decimal("0")
+                if sym == PASSIVE_SYMBOL:
+                    if side == "LONG" and qty > 0:
+                        broker_spy_qty = qty
+                    elif side == "SHORT" and qty != 0:
+                        # Incompatible side evidence: record the mismatch
+                        # as a nonzero other-holding so the classifier
+                        # cannot confirm a LONG from a SHORT row.
+                        others.append(sym)
+                    elif broker_spy_qty is None:
+                        broker_spy_qty = Decimal("0")
+                elif qty > 0 and sym:
+                    others.append(sym)
+            if broker_spy_qty is None:
+                broker_spy_qty = Decimal("0")
+            other_nonzero = tuple(sorted(set(others)))
+        holding = None
+        if (
+            broker_spy_qty is not None
+            or tracked_qty is not None
+            or position_snapshot_error is not None
+        ):
+            from app.domain.passive_allocation.recovery import HoldingFacts
+
+            holding = HoldingFacts(
+                broker_spy_qty=broker_spy_qty,
+                other_nonzero_symbols=other_nonzero,
+                tracked_spy_qty=tracked_qty,
+                tracked_spy_cost=tracked_cost,
+            )
+        snapshot = service.reconcile(
+            inv,
+            order_status=order_status,
+            local_order=local_order,
+            holding=holding,
+        )
+        self._publish_passive_recovery(snapshot, based_on_epoch=epoch)
+        if snapshot.hard_reasons and not self.risk.paused:
+            self._latch_passive_hard_pause(
+                "; ".join(snapshot.hard_reasons[:3]),
+            )
+
+    def _passive_provenance_ref_for(self, row: Any) -> str | None:
+        """Derive the owner ref from the ORDER SUBMISSION EVENT evidence.
+
+        Review1 M3: the provenance must come from the actual
+        ``ORDER_SUBMITTED`` TradeEvent for THIS exact broker order id —
+        its ``payload.passive_owner_ref`` — never from the mandate's own
+        tokens (that comparison was a tautology). Missing or ambiguous
+        event evidence yields None (the caller must treat that as HARD,
+        never latest-wins). The mandate's tokens are only consulted to
+        CONFIRM the event ref matches the live mandate identity.
+        """
+        order_id = str(getattr(row, "broker_order_id", "") or "").strip()
+        if not order_id:
+            return None
+        try:
+            with self._db_session() as db:
+                events = (
+                    db.query(TradeEvent)
+                    .filter(
+                        TradeEvent.event_type == "ORDER_SUBMITTED",
+                        TradeEvent.broker_order_id == order_id,
+                    )
+                    .all()
+                )
+                if not events:
+                    return None
+                refs: set[str] = set()
+                for event in events:
+                    try:
+                        payload = json.loads(
+                            str(event.payload_json or "{}"),
+                        )
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    ref = str(payload.get("passive_owner_ref", "") or "")
+                    if ref:
+                        refs.add(ref)
+                if len(refs) != 1:
+                    # Missing, duplicate or inconsistent event evidence:
+                    # never pick an arbitrary/latest ref.
+                    return None
+                event_ref = next(iter(refs))
+                mandate = (
+                    db.query(PassiveMandate)
+                    .filter(PassiveMandate.lane == PASSIVE_LANE)
+                    .one_or_none()
+                )
+                if mandate is None:
+                    return None
+                if not (mandate.claim_token and mandate.execution_token):
+                    return None
+                mandate_ref = (
+                    f"{mandate.id}:{mandate.claim_token}:"
+                    f"{mandate.execution_token}"
+                )
+                if event_ref != mandate_ref:
+                    return None
+                return event_ref
+        except Exception:
+            return None
+
+    def _passive_config_lane_ok(self, row: Any) -> bool:
+        """Strict passive-lane proof from the ACTUAL serialized config.
+
+        Review1 M3: the SEC98 accounting marker is shared with ordinary
+        RANGE orders and is NOT a lane marker. The production serializer
+        (``_passive_config_snapshot_json``) writes ``passive_lane`` and
+        ``passive_protocol_version`` into the OrderRecord's
+        config_snapshot — require BOTH, with no fee-model substitution.
+        An older snapshot lacking the markers fails closed.
+        """
+        raw = getattr(row, "config_snapshot", None)
+        if not raw:
+            return False
+        try:
+            snapshot = json.loads(str(raw))
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(snapshot, dict):
+            return False
+        if snapshot.get("passive_lane") != PASSIVE_LANE:
+            return False
+        protocol_version = snapshot.get("passive_protocol_version")
+        if protocol_version != passive_protocol.PASSIVE_PROTOCOL_VERSION:
+            return False
+        return True
+
+    def _passive_intent_from_ref(self, ref: str) -> Any:
+        try:
+            mandate_id_s, _claim, _exec = ref.split(":", 2)
+            with self._db_session() as db:
+                mandate = db.get(PassiveMandate, int(mandate_id_s))
+                if mandate is None or not mandate.intent_json:
+                    return None
+                return passive_protocol.intent_from_json(
+                    mandate.intent_json,
+                )
+        except Exception:
+            return None
+
+    def _startup_passive_restore_pending_refs(
+        self, db: Session,
+    ) -> list[str]:
+        """Install VALIDATED pending refs onto restored pending orders.
+
+        A preliminary ``pending_refs[broker_id] = mandate:claim:exec`` is
+        installed only after authenticating the LOCAL order: same broker
+        id, SPY/BUY, quantity equal to the immutable intent, lane marker
+        present. Missing/ambiguous/conflicting refs become
+        representation issues (never latest-wins); no execution token is
+        invented and no cost facts are written.
+        """
+        view = self._passive_recovery_snapshot_view()
+        refs: dict[str, str] = view["pending_refs"]
+        if not refs:
+            return []
+        issues: list[str] = []
+        try:
+            rows = (
+                db.query(OrderRecord)
+                .filter(
+                    OrderRecord.broker_order_id.in_(sorted(refs)),
+                )
+                .all()
+            )
+        except Exception:
+            return ["pending passive ref validation query failed"]
+        by_id = {str(r.broker_order_id): r for r in rows}
+        svc = self._trade_svc
+        for broker_id, ref in sorted(refs.items()):
+            row = by_id.get(broker_id)
+            # Preliminary inventory may include terminal IDs. They still
+            # require the full ownership proof below, but have no pending
+            # executor object to attach; absence is not an attach failure.
+            if row is not None and row.status in _TERMINAL_ORDER_STATUSES:
+                continue
+            if row is None:
+                issues.append(
+                    f"passive pending ref {broker_id}: no matching local "
+                    "live order; refusing to install"
+                )
+                continue
+            intent = self._passive_intent_from_ref(ref)
+            if intent is None:
+                issues.append(
+                    f"passive pending ref {broker_id}: mandate intent "
+                    "unavailable; refusing to install"
+                )
+                continue
+            try:
+                qty = Decimal(str(row.quantity))
+            except Exception:
+                qty = None
+            symbol_ok = (
+                str(row.symbol or "").upper() == intent.symbol.upper()
+            )
+            side_ok = str(row.side or "").upper() == "BUY"
+            qty_ok = qty is not None and qty == intent.quantity
+            # M3: strict passive-lane proof from the serialized config
+            # (SEC98 alone is a RANGE marker and must never restore).
+            lane_ok = self._passive_config_lane_ok(row)
+            provenance = self._passive_provenance_ref_for(row)
+            provenance_ok = provenance == ref
+            if not (
+                symbol_ok and side_ok and qty_ok and lane_ok and provenance_ok
+            ):
+                issues.append(
+                    f"passive pending ref {broker_id}: local order does "
+                    "not authenticate (lane={lane_ok}, "
+                    f"provenance={provenance_ok}); refusing to install"
+                )
+                continue
+            attached = False
+            try:
+                attached = bool(svc.attach_passive_owner_ref(broker_id, ref))
+            except Exception:
+                attached = False
+            if not attached:
+                issues.append(
+                    f"passive pending ref {broker_id}: attach failed "
+                    "(missing pending or conflicting existing ref); "
+                    "refusing to continue silently"
+                )
+        if issues:
+            # Review1 M1: a restore failure is a REPRESENTATION issue and
+            # must raise the external block — never a logger-only skip.
+            epoch = self.risk.raise_external_block(
+                "passive_recovery",
+                "pending passive ref restoration failed: "
+                + "; ".join(issues[:3]),
+            )
+            with self._state_lock:
+                self._passive_quarantined_symbols = frozenset(
+                    set(self._passive_quarantined_symbols) | {PASSIVE_SYMBOL},
+                )
+            logger.error(
+                "passive pending-ref restoration issues raised the "
+                "external block (epoch %d): %s",
+                epoch,
+                "; ".join(issues[:5]),
+            )
+        return issues
+
+    def _refresh_passive_before_resume_eligibility(self) -> None:
+        """Passive-specific refresh BEFORE the eligibility short-circuit.
+
+        ``resume_after_verification`` checks ``resume_eligibility`` before
+        ``verify_operational_resume``; without this refresh a transient
+        startup read failure would deadlock manual re-verification behind
+        a guard that only a NEW scan can resolve. The refresh re-runs the
+        DB-only inventory: a transient read failure may resolve; a
+        persisted UNCERTAIN NEVER auto-clears (the service classification
+        stays hard until an explicit reconciliation decision).
+        """
+        view = self._passive_recovery_snapshot_view()
+        if not view["inventoried"]:
+            return
+        block = self.risk.external_block()
+        if block is None or block.source != "passive_recovery":
+            return
+        # Review1 P1: the manual refresh reuses the FULL startup
+        # reconcile machinery — FRESH broker positions and known-ID order
+        # reads — never a preliminary-only scan that would keep every
+        # ORDER_KNOWN row blocked forever. ``_startup_passive_reconcile``
+        # performs the complete classification under a captured epoch;
+        # sticky persisted UNCERTAIN stays HARD (the service semantics),
+        # a transient read failure can clear once verified, and a
+        # confirmed known holding removes only the transient external
+        # block while the symbol stays quarantined/entry-inhibited.
+        try:
+            fresh_positions: list[Position] | None = None
+            fresh_error: Exception | None = None
+            try:
+                fresh_positions = self.broker.get_positions()
+            except Exception as exc:
+                fresh_error = exc
+            self._startup_passive_reconcile(
+                position_snapshot=fresh_positions,
+                position_snapshot_error=fresh_error,
+            )
+        except Exception:
+            logger.exception(
+                "passive manual-refresh reconcile failed; guard remains",
+            )
+
     def _initialize_runner(self) -> None:
         with self._db_session() as db:
             config = self._state_svc.load(db, self.engine, self.risk)
@@ -968,6 +1635,16 @@ class AppRunner:
                 self._load_credentials(db=db),
                 resubscribe=False,
             )
+        # Phase2a W3: DB-only passive inventory IMMEDIATELY after the risk
+        # load above and BEFORE every early direct resume path below (the
+        # pending-timeout resume in particular). Hard failures raise the
+        # external guard under a captured epoch; verified zero rows clear
+        # with zero added broker reads.
+        try:
+            self._startup_passive_recovery()
+        except Exception:
+            logger.exception("passive startup inventory failed; guard stays raised")
+
         # In-memory only and never raises; the background writer does the I/O.
         self._bind_decision_funnel()
         self._register_broker_disconnect_hook()
@@ -997,6 +1674,19 @@ class AppRunner:
             with self._db_session() as db:
                 self._load_pending_orders(db)
                 self._resume_pending_timeout_pause_if_filled(db)
+                try:
+                    ref_issues = (
+                        self._startup_passive_restore_pending_refs(db)
+                    )
+                    if ref_issues:
+                        logger.warning(
+                            "passive pending-ref validation issues: %s",
+                            "; ".join(ref_issues[:5]),
+                        )
+                except Exception:
+                    logger.exception(
+                        "passive pending-ref restoration failed",
+                    )
             self._sync_risk_from_order_ledger()
             position_snapshot: list[Position] | None = None
             position_snapshot_error: Exception | None = None
@@ -1013,6 +1703,17 @@ class AppRunner:
                     position_snapshot=position_snapshot,
                     position_snapshot_error=position_snapshot_error,
                 )
+            # Phase2a W3 step C: passive reconcile AFTER tracked
+            # reconciliation, BEFORE the engine sync below — reusing this
+            # position snapshot (no extra broker position query) and
+            # querying known order IDs outside the state lock.
+            try:
+                self._startup_passive_reconcile(
+                    position_snapshot=position_snapshot,
+                    position_snapshot_error=position_snapshot_error,
+                )
+            except Exception:
+                logger.exception("passive startup reconcile failed")
             if self.risk.paused and self.risk.pause_reason:
                 reconciliation_failed = True
             # Force an engine-vs-broker position sync BEFORE the quote
@@ -1562,6 +2263,14 @@ class AppRunner:
     ) -> tuple[bool, str]:
         with self._trade_svc.submission_guard():
             self.risk.revoke_protective_exits()
+            # Phase2a W3: the passive guard would otherwise short-circuit
+            # the eligibility check below before any re-verification could
+            # run. Refresh the passive view FIRST (a transient read failure
+            # may resolve; persisted UNCERTAIN never auto-clears).
+            try:
+                self._refresh_passive_before_resume_eligibility()
+            except Exception:
+                logger.exception("passive resume refresh failed")
             eligibility = self.risk.resume_eligibility()
             if not eligibility.approved:
                 self._broadcast_status()
@@ -4907,6 +5616,35 @@ class AppRunner:
                     "symbols": residual_symbols,
                 },
             )
+        # Immutable-frozenset read; no lock (see _passive_quarantine_issue).
+        passive_quarantined = sorted(self._passive_quarantined_symbols)
+        if passive_quarantined:
+            return EntryPolicyCheckResult(
+                issue=(
+                    "SPY_PASSIVE recovery quarantine active on "
+                    f"{', '.join(passive_quarantined)}; new entries "
+                    "inhibited until reconciliation completes"
+                ),
+                skip_category="POSITION",
+                details={
+                    "entry_policy": "SPY_PASSIVE_RECOVERY_QUARANTINE",
+                    "policy_reason": "OWNERSHIP_UNPROVEN",
+                    "symbols": passive_quarantined,
+                },
+            )
+        external_block = self.risk.external_block()
+        if external_block is not None:
+            return EntryPolicyCheckResult(
+                issue=(
+                    f"external safety block ({external_block.source}: "
+                    f"{external_block.reason}); new entries inhibited"
+                ),
+                skip_category="RISK",
+                details={
+                    "entry_policy": "EXTERNAL_SAFETY_BLOCK",
+                    "policy_reason": external_block.source,
+                },
+            )
         if self._opening_execution_capital_slot_reserved():
             return EntryPolicyCheckResult(
                 issue="opening momentum execution owns the capital slot",
@@ -7652,6 +8390,13 @@ class AppRunner:
         quote_quality: Mapping[str, Any] | None = None,
     ) -> tuple[_ReductionIntent | None, bool, bool]:
         existing = self._reduction_intents.get(quote.symbol)
+        # Immutable-frozenset read; no lock (see _passive_quarantine_issue).
+        if quote.symbol in self._passive_quarantined_symbols:
+            # Phase2a W3 (contract F): a quarantined SPY quote produces NO
+            # new automatic reduction intent and NEVER clears the existing
+            # intent or engine state — reductions are held for manual
+            # reconciliation; the W2 FINAL guard stays authoritative.
+            return existing, False, False
         tracked = self._trade_svc.tracked_position(quote.symbol)
         if tracked is None:
             self._position_peak_executable.pop(quote.symbol, None)

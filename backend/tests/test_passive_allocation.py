@@ -371,8 +371,7 @@ class TestProtocolPure:
                 fact=S.PassiveOutcomeFact(
                     outcome=S.SUBMIT_STATE_ORDER_KNOWN,
                     broker_order_id="abc",
-                ),
-            )
+                ), intent_quantity=Decimal("8"),)
             is None
         )
         # Same fact twice is idempotent.
@@ -383,8 +382,7 @@ class TestProtocolPure:
                 fact=S.PassiveOutcomeFact(
                     outcome=S.SUBMIT_STATE_ORDER_KNOWN,
                     broker_order_id="abc",
-                ),
-            )
+                ), intent_quantity=Decimal("8"),)
             == "IDEMPOTENT"
         )
         # Conflicting broker id is a conflict (never erase/replace).
@@ -395,8 +393,7 @@ class TestProtocolPure:
                 fact=S.PassiveOutcomeFact(
                     outcome=S.SUBMIT_STATE_ORDER_KNOWN,
                     broker_order_id="xyz",
-                ),
-            )
+                ), intent_quantity=Decimal("8"),)
             == "CONFLICT"
         )
         # NO_SUBMIT from CHECKING/SUBMITTING burns; from ORDER_KNOWN refused.
@@ -406,8 +403,7 @@ class TestProtocolPure:
                 bound_broker_order_id=None,
                 fact=S.PassiveOutcomeFact(
                     outcome=S.SUBMIT_STATE_NO_SUBMIT,
-                ),
-            )
+                ), intent_quantity=Decimal("8"),)
             is None
         )
         assert (
@@ -416,8 +412,7 @@ class TestProtocolPure:
                 bound_broker_order_id="abc",
                 fact=S.PassiveOutcomeFact(
                     outcome=S.SUBMIT_STATE_NO_SUBMIT,
-                ),
-            )
+                ), intent_quantity=Decimal("8"),)
             is not None
         )
         # UNCERTAIN from SUBMITTING/ORDER_KNOWN/CHECKING ok; same = idempotent.
@@ -433,8 +428,7 @@ class TestProtocolPure:
                     fact=S.PassiveOutcomeFact(
                         outcome=S.SUBMIT_STATE_UNCERTAIN,
                         reason="x",
-                    ),
-                )
+                    ), intent_quantity=Decimal("8"),)
                 in (None, "IDEMPOTENT", "CONFLICT")
             )
         # No outcome ever restores AUTHORIZED / SUBMIT_CLAIMED / CHECKING.
@@ -447,8 +441,7 @@ class TestProtocolPure:
                 S.validate_outcome_write(
                     current_state=S.SUBMIT_STATE_AUTHORIZED,
                     bound_broker_order_id=None,
-                    fact=S.PassiveOutcomeFact(outcome=outcome),
-                )
+                    fact=S.PassiveOutcomeFact(outcome=outcome), intent_quantity=Decimal("8"),)
                 is not None
             )
 

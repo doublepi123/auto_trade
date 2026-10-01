@@ -318,6 +318,7 @@ _PASSIVE_VALIDATED_KEY = "passive_validated_intent"
 _PASSIVE_CASH_KEY = "passive_cash_evidence"
 _PASSIVE_FINAL_ORDER_KEY = "passive_final_order"
 _PASSIVE_SUBMIT_RIGHT_KEY = "passive_submit_right_won"
+_PASSIVE_ESCALATED_KEY = "passive_receipt_escalated_uncertain"
 
 
 def _passive_owner_ref_string(
@@ -374,6 +375,7 @@ _PRIVATE_PASSIVE_CONTEXT_KEYS = frozenset(
         _PASSIVE_CASH_KEY,
         _PASSIVE_FINAL_ORDER_KEY,
         _PASSIVE_SUBMIT_RIGHT_KEY,
+        _PASSIVE_ESCALATED_KEY,
     },
 )
 
@@ -522,6 +524,8 @@ class TradeExecutionService:
         paper_account_confirmed: bool = False,
         passive_risk_policy_resolver: _PassiveRiskPolicyResolver | None = None,
         passive_submit_hooks: _PassiveSubmitHooks | None = None,
+        passive_reduction_quarantine: Callable[[str], str | None] | None = None,
+        passive_uncertainty_sink: Callable[[str, str | None], None] | None = None,
     ) -> None:
         self._record_order = record_order
         self._update_order_status = update_order_status
@@ -572,6 +576,11 @@ class TradeExecutionService:
         # Private passive authority channel: set only inside
         # execute_passive_entry for the duration of its own execute() call.
         self._passive_call_state: _PassiveCallState | None = None
+        # Phase2a W2 guards: authoritative reduction-quarantine reader and
+        # the no-I/O uncertainty sink (runner implements epoch-raise +
+        # quarantine). Default None => exact legacy range behaviour.
+        self._passive_reduction_quarantine = passive_reduction_quarantine
+        self._passive_uncertainty_sink = passive_uncertainty_sink
         self._extended_hours_context: tuple[str, str, datetime] | None = None
         self._extended_hours_unsupported: set[tuple[str, str, date]] = set()
         self._extended_hours_attempts: dict[tuple[str, str, date], int] = {}
@@ -851,6 +860,41 @@ class TradeExecutionService:
     def pending_order_by_broker_id(self, order_id: str) -> _PendingOrder | None:
         with self._state_lock:
             return self._pending_orders_by_id.get(order_id)
+
+    def attach_passive_owner_ref(self, broker_order_id: str, ref: str) -> bool:
+        """Attach a validated passive owner ref to an existing pending order.
+
+        Phase2a review1 M1: the durable ``mandate:claim:exec`` reference is
+        installed on a REAL pending order only — a missing pending, an
+        invalid/empty ref, or an existing DIFFERENT ref (never replaced)
+        all return False so the caller raises a representation issue +
+        external block instead of silently continuing. Short state lock
+        only; no DB/network; the pending's immutable data (id/symbol/
+        action/quantity/price/snapshots) is preserved verbatim and both
+        pending indexes (by id, by symbol/legacy) are rebuilt through the
+        existing helpers.
+        """
+        broker_order_id = str(broker_order_id or "").strip()
+        ref = str(ref or "").strip()
+        if not broker_order_id or not ref:
+            return False
+        parts = ref.split(":")
+        if len(parts) != 3 or not all(parts):
+            return False
+        with self._state_lock:
+            pending = self._pending_orders_by_id.get(broker_order_id)
+            if pending is None:
+                return False
+            existing = str(pending.passive_owner_ref or "")
+            if existing:
+                return existing == ref
+            updated = dataclass_replace(
+                pending,
+                passive_owner_ref=ref,
+            )
+            self._pending_orders_by_id[broker_order_id] = updated
+            self._rebuild_pending_orders_by_symbol_locked()
+            return True
 
     def pending_order_for(self, symbol: str) -> _PendingOrder | None:
         with self._state_lock:
@@ -3251,6 +3295,20 @@ class TradeExecutionService:
             notify_risk_event=notify_risk_event,
         )
         logger.info("BUY: %s qty=%s price=%s", symbol, fill_qty, fill_price)
+        if self._active_execution_context.get(_PASSIVE_ESCALATED_KEY):
+            # Phase2a W2: the receipt escalated (e.g. an ACTUAL overfill
+            # above the immutable intent) and the fills are NOW accounted
+            # above; surface the explicit UNCERTAIN status (the escalation
+            # collaborators — pause/incident/sink — already ran).
+            return OrderStatus(
+                str(pending.broker_order_id or ""),
+                "UNCERTAIN",
+                reason=(
+                    "ORDER_RECONCILIATION_UNCERTAIN: "
+                    f"{PASSIVE_LANE} receipt escalated to uncertain; "
+                    "actual broker fills were accounted"
+                ),
+            )
         return order_status
 
     def _execute_sell(
@@ -3701,6 +3759,10 @@ class TradeExecutionService:
                 # R1-4: ANY exception after the broker call (orders/
                 # pending/settlement processing) is UNCERTAIN for the lane —
                 # never a success-like ORDER_KNOWN and never a swallow.
+                # Phase2a W2: an ESCALATED receipt (e.g. an actual
+                # overfill) keeps flowing through this normal processing so
+                # the real fills are accounted; the dedicated entry's
+                # finalizer surfaces the explicit UNCERTAIN afterwards.
                 try:
                     return self._process_submitted_order(
                         precheck_result,
@@ -3752,6 +3814,89 @@ class TradeExecutionService:
                 restore_engine_snapshot=restore_engine_snapshot,
                 notify_risk_event=notify_risk_event,
                 avg_price=avg_price,
+            )
+
+    def _record_passive_fill_observation(
+        self,
+        pending: _PendingOrder,
+        order_status: OrderStatus,
+        *,
+        risk: RiskController | None = None,
+        notifier: "NotifierInterface | None" = None,
+        notify_risk_event: _NotifyRiskEvent | None = None,
+    ) -> None:
+        """Phase2a W2: observe an ACCOUNTED fill on the passive mandate.
+
+        Runs AFTER ``_book_fill`` — the actual broker quantity has already
+        been booked through the existing tracked/settlement path; this only
+        reports the cumulative broker observation to the mandate. Marked
+        refs only (delayed fills carry ``passive_owner_ref``; an immediate
+        fill may still hold the active-context owner). An ESCALATED or
+        failing write escalates to UNCERTAIN (pause + incident + sink)
+        WITHOUT ever trimming or undoing the booked fill. No double
+        booking: ``_book_fill`` remains the single accounting authority;
+        this is observation only.
+        """
+        ref_string = str(pending.passive_owner_ref or "")
+        owner: passive_protocol.PassiveOwner | None = None
+        if ref_string:
+            try:
+                owner = self._passive_owner_from_ref(ref_string)
+            except Exception:
+                owner = None
+        if owner is None:
+            owner = self._active_passive_owner()
+        if owner is None:
+            return
+        broker_id = str(pending.broker_order_id or "")
+        status_text = str(getattr(order_status, "status", "") or "")
+        if not broker_id or not status_text:
+            return
+        cumulative_qty = self._resolved_decimal(
+            order_status, "executed_quantity", Decimal("0"),
+        )
+        cumulative_price = self._resolved_decimal(
+            order_status, "executed_price", Decimal("0"),
+        )
+        fact = passive_protocol.PassiveOutcomeFact(
+            outcome=passive_protocol.SUBMIT_STATE_ORDER_KNOWN,
+            broker_order_id=broker_id,
+            broker_status=status_text,
+            executed_quantity=(
+                cumulative_qty if cumulative_qty > 0 else None
+            ),
+            executed_price=(
+                cumulative_price if cumulative_price > 0 else None
+            ),
+        )
+        hooks = self._passive_hooks_or_none()
+        if hooks is None:
+            return
+        try:
+            write_result = hooks.record_outcome(owner, fact)
+        except Exception as exc:
+            self._escalate_passive_uncertain(
+                owner,
+                broker_id,
+                (
+                    f"recording the accounted fill observation failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+                risk=risk,
+                notifier=notifier,
+            )
+            return
+        if self._passive_write_escalated(write_result):
+            self._escalate_passive_uncertain(
+                owner,
+                broker_id,
+                (
+                    f"the accounted fill observation escalated "
+                    f"(status {status_text!r}, cumulative "
+                    f"{cumulative_qty}@{cumulative_price})"
+                ),
+                risk=risk,
+                notifier=notifier,
             )
 
     def _record_passive_receipt_progress(
@@ -3817,7 +3962,7 @@ class TradeExecutionService:
         if not broker_id or not status_text:
             return
         try:
-            hooks.record_outcome(
+            write_result = hooks.record_outcome(
                 owner,
                 passive_protocol.PassiveOutcomeFact(
                     outcome=passive_protocol.SUBMIT_STATE_ORDER_KNOWN,
@@ -3840,6 +3985,21 @@ class TradeExecutionService:
                 broker_order_id=broker_id,
                 risk=risk,
                 notify_risk_event=notify_risk_event,
+            )
+            return
+        if self._passive_write_escalated(write_result):
+            # Phase2a W2: the typed result escalated (conflicting/unknown
+            # status or an overfill above the immutable intent): surface
+            # it through the full uncertainty path (pause + incident +
+            # sink) — never a silent sticky-uncertain with 0 incidents.
+            self._escalate_passive_uncertain(
+                owner,
+                broker_id,
+                (
+                    f"receipt progress escalated (status {status_text!r})"
+                ),
+                risk=risk,
+                notifier=None,
             )
 
     def _escalate_unresolved_passive_reference(
@@ -3882,7 +4042,8 @@ class TradeExecutionService:
                 )
         if risk is not None:
             try:
-                risk.pause(reason, auto_resumable=False)
+                if not risk.paused:
+                    risk.pause(reason, auto_resumable=False)
             except Exception:
                 logger.exception(
                     "failed to pause for an unresolved passive reference"
@@ -3989,7 +4150,8 @@ class TradeExecutionService:
         )
         if risk is not None:
             try:
-                risk.pause(reason, auto_resumable=False)
+                if not risk.paused:
+                    risk.pause(reason, auto_resumable=False)
             except Exception:
                 logger.exception("failed to pause for uncertain passive pending")
         if notify_risk_event is not None:
@@ -4080,6 +4242,15 @@ class TradeExecutionService:
         """
         broker_id = str(getattr(result, "broker_order_id", "") or "")
         status_text = str(getattr(result, "status", "") or "")
+        # Phase2a W2/P3: the FIRST receipt includes the submit response's
+        # ACTUAL executed quantity/price (an immediate FILLED carries real
+        # fills here) so the overfill check sees the broker's own facts.
+        executed_quantity = self._resolved_decimal(
+            result, "executed_quantity", Decimal("0"),
+        )
+        executed_price = self._resolved_decimal(
+            result, "executed_price", Decimal("0"),
+        )
         classification = passive_protocol.classify_submit_receipt(
             broker_order_id=broker_id,
             status=status_text,
@@ -4101,16 +4272,71 @@ class TradeExecutionService:
             outcome=passive_protocol.SUBMIT_STATE_ORDER_KNOWN,
             broker_order_id=broker_id,
             broker_status=status_text,
+            executed_quantity=(
+                executed_quantity if executed_quantity > 0 else None
+            ),
+            executed_price=(
+                executed_price if executed_price > 0 else None
+            ),
         )
         try:
-            hooks.record_outcome(owner, fact)
+            write_result = hooks.record_outcome(owner, fact)
         except Exception as exc:
             return self._escalate_passive_uncertain(
                 owner, broker_id,
                 f"binding the broker receipt failed: {type(exc).__name__}",
                 risk=risk, notifier=notifier,
             )
+        # Phase2a W2: consume the W1 typed result. ESCALATED_UNCERTAIN
+        # (e.g. an overfill above the immutable intent) is classified
+        # here BUT returned only AFTER the caller has accounted the
+        # actual broker fills — the escalate-return contractually happens
+        # post-``_process_submitted_order`` (never an early return that
+        # would skip booking the real fill). Returning this marker status
+        # tells the submit path "recorded-uncertain; still process facts".
+        escalated = self._passive_write_escalated(write_result)
+        if escalated:
+            # Run the FULL escalation side effects now (pause +
+            # unresolved incident + uncertainty sink — the fact conflicts,
+            # e.g. an actual overfill above the immutable intent), mark the
+            # escalation in the per-call context, and return None: the
+            # caller CONTINUES normal processing so the real broker fills
+            # are accounted through the existing settlement path; the
+            # dedicated entry's finalizer then surfaces the explicit
+            # UNCERTAIN status from the marker.
+            self._escalate_passive_uncertain(
+                owner,
+                broker_id,
+                (
+                    f"receipt escalated to uncertain (status {status_text!r},"
+                    f" executed {executed_quantity}@{executed_price})"
+                ),
+                risk=risk,
+                notifier=notifier,
+            )
+            self._active_execution_context[_PASSIVE_ESCALATED_KEY] = True
         return None
+
+    @staticmethod
+    def _passive_write_escalated(write_result: object) -> bool:
+        """True when a record_outcome typed result means ESCALATED_UNCERTAIN.
+
+        Fails closed: an unknown result value (future/None-typed
+        implementations predating W1's enum) is treated as escalated —
+        never as success.
+        """
+        enum_cls = getattr(passive_protocol, "OutcomeWriteResult", None)
+        if enum_cls is None:
+            # W1 enum not landed: no typed contract to trust — fail safe
+            # by treating a non-None legacy return as needing no action,
+            # but a None return (legacy success) stays success. Real
+            # overfill safety then rests on the exception path plus the
+            # fill-observation check below.
+            return False
+        try:
+            return write_result is enum_cls.ESCALATED_UNCERTAIN
+        except Exception:
+            return True
 
     def _escalate_ownerless_passive_uncertain(
         self,
@@ -4144,7 +4370,8 @@ class TradeExecutionService:
         )
         if risk is not None:
             try:
-                risk.pause(reason, auto_resumable=False)
+                if not risk.paused:
+                    risk.pause(reason, auto_resumable=False)
             except Exception:
                 logger.exception(
                     "failed to pause for an ownerless passive uncertainty"
@@ -4206,9 +4433,28 @@ class TradeExecutionService:
         )
         if risk is not None:
             try:
-                risk.pause(reason, auto_resumable=False)
+                # Phase2a W2: PRESERVE an existing pause reason — the
+                # uncertainty adds its own incident/sink evidence without
+                # overwriting whatever the operator or an earlier fault
+                # already latched.
+                if not risk.paused:
+                    risk.pause(reason, auto_resumable=False)
             except Exception:
                 logger.exception("failed to pause for uncertain passive submit")
+        # Phase2a W2: notify the no-I/O uncertainty sink (the runner wires
+        # it at startup — epoch-raise + quarantine — BEFORE any lane
+        # gating, so it fires even with the flag OFF). A sink exception
+        # must never erase the independent pause/incident above.
+        if self._passive_uncertainty_sink is not None:
+            try:
+                self._passive_uncertainty_sink(
+                    reason, broker_order_id or None,
+                )
+            except Exception:
+                logger.exception(
+                    "passive uncertainty sink failed (pause/incident "
+                    "already applied)"
+                )
         if notifier is not None:
             try:
                 notifier.notify_risk_event(
@@ -4247,6 +4493,60 @@ class TradeExecutionService:
     ) -> OrderStatus | ApprovedOrder:
         protective_commit_required = False
         final_price_floor: Decimal | None = None
+        # Phase2a W2 FINAL safety gate (parent correction #4): blocks
+        # position-INCREASING requests whenever an external safety block is
+        # active, even for a direct generic caller with no runner
+        # entry-policy callback, and consults the AUTHORITATIVE reduction
+        # quarantine for reductions (callback error is fail-closed). This
+        # runs BEFORE the pre-submit boundary; an earlier optional check
+        # can never replace it, and no new broker mutation exists here.
+        external_block = getattr(risk, "external_block", None)
+        external_block_fact = (
+            external_block() if callable(external_block) else None
+        )
+        if (
+            external_block_fact is not None
+            and action in _ENTRY_ACTIONS
+        ):
+            block_source = str(getattr(external_block_fact, "source", ""))
+            block_reason = str(getattr(external_block_fact, "reason", ""))
+            return self._skip_order(
+                symbol,
+                action,
+                (
+                    f"external safety block active "
+                    f"({block_source}: "
+                    f"{block_reason}); new exposure refused"
+                ),
+                skip_category="RISK",
+            )
+        if (
+            action in _POSITION_REDUCING_ACTIONS
+            and self._passive_reduction_quarantine is not None
+        ):
+            try:
+                quarantine_reason = self._passive_reduction_quarantine(
+                    symbol,
+                )
+            except Exception as exc:
+                return self._skip_order(
+                    symbol,
+                    action,
+                    (
+                        f"reduction quarantine check failed "
+                        f"({type(exc).__name__}); fail-closed"
+                    ),
+                    skip_category="POSITION",
+                )
+            if quarantine_reason:
+                return self._skip_order(
+                    symbol,
+                    action,
+                    (
+                        f"reduction refused: {quarantine_reason}"
+                    ),
+                    skip_category="POSITION",
+                )
         boundary_result = self.pre_submit_risk_check(
             _PreSubmitRiskRequest(
                 action=action,
@@ -5529,6 +5829,11 @@ class TradeExecutionService:
             if order_id in self._finalized_order_ids:
                 self._book_fill(pending, order_status, risk=risk, fill_qty=fill_qty,
                                 notify_risk_event=notify_risk_event)
+                self._record_passive_fill_observation(
+                    pending, order_status,
+                    risk=risk, notifier=notifier,
+                    notify_risk_event=notify_risk_event,
+                )
                 return
             if order_id in self._fill_finalization_in_flight:
                 logger.debug("fill finalization already in flight for order %s", order_id)
@@ -5580,6 +5885,14 @@ class TradeExecutionService:
     ) -> None:
         receipt = self._book_fill(
             pending, order_status, risk=risk, fill_qty=fill_qty,
+            notify_risk_event=notify_risk_event,
+        )
+        # Phase2a W2: observe the accounted fill on a MARKED passive order
+        # (immediate and delayed fills both land here). The booking above
+        # already happened — this never trims or re-books it.
+        self._record_passive_fill_observation(
+            pending, order_status,
+            risk=risk, notifier=notifier,
             notify_risk_event=notify_risk_event,
         )
         key = settlement_key(pending.broker_order_id)

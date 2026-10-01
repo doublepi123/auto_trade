@@ -25,6 +25,7 @@ PAPER attestation, or clock.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Final, Protocol, runtime_checkable
@@ -455,6 +456,28 @@ class PassiveOutcomeFact:
         )
 
 
+# --- outcome write results (Phase2a P3, frozen) ----------------------------
+
+
+class OutcomeWriteResult(str, Enum):
+    """Typed result of one ``record_outcome`` write (Phase2a P3).
+
+    - APPLIED — the durable write landed (first bind, forward progress, or
+      a burn).
+    - IDEMPOTENT — the row already carried exactly this fact; no write.
+    - ESCALATED_UNCERTAIN — the fact conflicted (or the row is sticky
+      uncertain) and the row was escalated/preserved as UNCERTAIN; NEVER
+      masquerades as success.
+
+    IO/CAS failures remain EXCEPTIONS (``PassivePersistenceUncertain``,
+    ``ValueError`` on lost races) — they are never typed results.
+    """
+
+    APPLIED = "APPLIED"
+    IDEMPOTENT = "IDEMPOTENT"
+    ESCALATED_UNCERTAIN = "ESCALATED_UNCERTAIN"
+
+
 @runtime_checkable
 class PassiveSubmitHooks(Protocol):
     """The frozen hook bundle the service injects into TradeExecutionService.
@@ -481,7 +504,9 @@ class PassiveSubmitHooks(Protocol):
         cash: UsdCashEvidence,
     ) -> bool: ...
 
-    def record_outcome(self, owner: PassiveOwner, fact: PassiveOutcomeFact) -> None: ...
+    def record_outcome(
+        self, owner: PassiveOwner, fact: PassiveOutcomeFact,
+    ) -> OutcomeWriteResult: ...
 
     def record_unresolved_reference(
         self,
@@ -551,12 +576,17 @@ def validate_outcome_write(
     current_state: str | None,
     bound_broker_order_id: str | None,
     fact: PassiveOutcomeFact,
+    intent_quantity: Decimal,
     bound_broker_status: str | None = None,
     bound_executed_quantity: Decimal | None = None,
     bound_executed_price: Decimal | None = None,
-    intent_quantity: Decimal | None = None,
 ) -> str | None:
     """Pure decision for ``record_outcome``.
+
+    ``intent_quantity`` (the immutable owner intent bound) is REQUIRED and
+    is validated on EVERY branch — including the initial SUBMITTING bind
+    and UNCERTAIN/unknown observations. A fill beyond the intent is a
+    conflict that escalates to UNCERTAIN with the observation preserved.
 
     Returns one of:
 
@@ -568,20 +598,38 @@ def validate_outcome_write(
       (strictly higher status rank or strictly greater cumulative fill);
       the caller must CAS the write against the prior facts it read.
     - ``"CONFLICT"`` — the fact contradicts the row (different id, stale/
-      backwards/regressive facts, or late doubt on a known row). The
-      caller escalates to UNCERTAIN preserving every recorded fact — the
-      bound id is never erased or replaced.
+      backwards/regressive facts, an overfill, or late doubt on a known
+      row). The caller escalates to UNCERTAIN preserving every recorded
+      fact — the bound id is never erased or replaced.
     - an error string — the write must be refused outright.
 
-    Monotonicity guarantees (fix-14 finding 3): missing observed fields
-    never erase recorded facts; cumulative fill quantity never decreases;
-    a terminal status never reverts to a live one; UNCERTAIN is sticky
-    under all ordinary receipts (no hidden auto-reconciliation — an
-    explicit reconciliation operation is out of Phase-1 scope).
+    Monotonicity guarantees: missing observed fields never erase recorded
+    facts; cumulative fill quantity never decreases and never exceeds the
+    intent bound; a terminal status never reverts to a live one; UNCERTAIN
+    is sticky under all ordinary receipts (no hidden
+    auto-reconciliation — an explicit reconciliation operation is out of
+    Phase-1 scope).
     """
     fact_issue = fact.validate()
     if fact_issue is not None:
         return fact_issue
+    if not isinstance(intent_quantity, Decimal) or (
+        not intent_quantity.is_finite()
+    ):
+        return "intent_quantity must be a finite Decimal bound"
+    if intent_quantity <= 0:
+        return "intent_quantity must be a positive share count"
+    observed = fact.executed_quantity
+    if observed is not None and (
+        not observed.is_finite() or observed < 0
+    ):
+        return "observed executed_quantity must be finite and non-negative"
+    # Phase2a P3: the overfill bound applies on EVERY branch, including
+    # the FIRST bind (SUBMITTING -> ORDER_KNOWN) and UNCERTAIN/unknown
+    # observations — an overfilling first bind escalates rather than
+    # becoming canonical progress.
+    if observed is not None and observed > intent_quantity:
+        return "CONFLICT"
     if current_state is None or current_state not in SUBMIT_STATES:
         return (
             f"mandate submit state {current_state!r} is not recognised; "
@@ -696,7 +744,9 @@ def compare_receipt_facts(
       quantity at a non-decreasing status, OR the FIRST positive fill
       observed on an id whose recorded facts are still missing (a coherent
       first observation is forward information, not a regression). The
-      row may advance.
+      row may advance. A first EXPLICIT zero is also forward information
+      at an unchanged SUBMITTED, REJECTED or CANCELLED status, provided
+      any previously known price is unchanged. Missing is never zero.
     - ``"BACKWARD"`` — stale/regressive or contradictory. The existing
       proof is preserved and the row escalates to UNCERTAIN — differences
       are NOT blanket "progress".
@@ -707,7 +757,8 @@ def compare_receipt_facts(
       (``PARTIAL_FILLED 3 -> SUBMITTED 4`` is BACKWARD).
     - A recorded TERMINAL status never changes to another status at all —
       terminal→terminal swaps and terminal→live are both BACKWARD. The
-      only legal same-terminal change is a coherent incremental fill.
+      only legal same-terminal changes are a coherent incremental fill
+      or the first explicit zero at REJECTED/CANCELLED.
     - When ``intent_quantity`` (the immutable owner intent bound) is
       supplied, the cumulative fill quantity may never exceed it: a fill
       beyond the intent is BACKWARD (kept as conflicting evidence by the
@@ -769,6 +820,20 @@ def compare_receipt_facts(
         and observed_qty > intent_quantity
     ):
         return "BACKWARD"
+
+    # Learning an explicit no-fill quantity is progress even when the
+    # status has not changed. Keep this separate from positive first fills:
+    # zero cannot prove FILLED/PARTIAL_FILLED or an unknown status.
+    if (
+        same_status
+        and observed_status in {"SUBMITTED", "REJECTED", "CANCELLED"}
+        and stored_qty is None
+        and observed_qty is not None
+        and observed_qty == Decimal("0")
+    ):
+        if stored_price is not None and observed_price != stored_price:
+            return "BACKWARD"
+        return "FORWARD"
 
     status_forward = _status_rank(observed_status) > _status_rank(
         stored_status,

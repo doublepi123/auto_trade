@@ -538,7 +538,18 @@ class PassiveSubmitHookBundle:
         self,
         owner: passive_protocol.PassiveOwner,
         fact: passive_protocol.PassiveOutcomeFact,
-    ) -> None:
+    ) -> passive_protocol.OutcomeWriteResult:
+        """Record one outcome fact; returns the typed write result.
+
+        Phase2a P3: every actual return is an ``OutcomeWriteResult`` —
+        APPLIED (durable write landed), IDEMPOTENT (exact fact already
+        present), or ESCALATED_UNCERTAIN (conflict/sticky-uncertainty
+        preserved — never masquerading as success). IO/CAS failures still
+        raise. An overfill on the FIRST bind binds the known broker
+        id/status but leaves the canonical bound qty empty, retaining the
+        observed excess in the reason; an existing id/intent is never
+        overwritten.
+        """
         owner_issue = owner.validate()
         if owner_issue is not None:
             raise ValueError(
@@ -584,7 +595,7 @@ class PassiveSubmitHookBundle:
             )
             if verdict == "IDEMPOTENT":
                 db.rollback()
-                return
+                return passive_protocol.OutcomeWriteResult.IDEMPOTENT
             # Shared ownership/token predicate for every mutating branch:
             # both owner tokens + the exact old state (null-safe).
             ownership = (
@@ -594,11 +605,39 @@ class PassiveSubmitHookBundle:
                 PassiveMandate.submit_state == prior_state,
             )
             if verdict == "CONFLICT":
-                # Contradictory/stale/backwards fact: escalate to UNCERTAIN
-                # and RECORD the contradiction — every recorded fact and the
-                # bound id are preserved (never erased or replaced). The
-                # UPDATE re-checks the old receipt facts so a concurrent
-                # writer cannot be silently clobbered.
+                # Contradictory/stale/backwards/overfill fact: escalate to
+                # UNCERTAIN and RECORD the contradiction — every recorded
+                # fact and the bound id are preserved (never erased or
+                # replaced). Phase2a P3 first-bind-overfill semantics: when
+                # NO id was bound yet and the conflicting fact carries a
+                # KNOWN broker id, that id/status is bound now (so the known
+                # id is retained) while the canonical bound qty stays empty
+                # for the excess and the reason retains the observed excess.
+                conflict_values: dict[str, object] = {
+                    "submit_state": (
+                        passive_protocol.SUBMIT_STATE_UNCERTAIN
+                    ),
+                    "uncertainty_reason": (
+                        f"conflicting outcome fact {fact.outcome} "
+                        f"(broker id {fact.broker_order_id!r}, "
+                        f"status {fact.broker_status!r}, fills "
+                        f"{fact.executed_quantity!r}@"
+                        f"{fact.executed_price!r}) against recorded "
+                        f"{prior_status!r} "
+                        f"{prior_qty!r}@{prior_price!r} from state "
+                        f"{prior_state}; bound id "
+                        f"{prior_id!r} retained"
+                    )[:500],
+                }
+                if not prior_id and fact.broker_order_id:
+                    conflict_values["bound_broker_order_id"] = (
+                        fact.broker_order_id
+                    )
+                    conflict_values["bound_broker_status"] = (
+                        fact.broker_status or None
+                    )
+                    # Canonical bound qty deliberately NOT set: the observed
+                    # excess stays in the reason, never as canonical proof.
                 updated = _cas_rowcount(
                     db.execute(
                         update(PassiveMandate)
@@ -611,22 +650,7 @@ class PassiveSubmitHookBundle:
                             ),
                             PassiveMandate.bound_executed_price.is_(prior_price),
                         )
-                        .values(
-                            submit_state=(
-                                passive_protocol.SUBMIT_STATE_UNCERTAIN
-                            ),
-                            uncertainty_reason=(
-                                f"conflicting outcome fact {fact.outcome} "
-                                f"(broker id {fact.broker_order_id!r}, "
-                                f"status {fact.broker_status!r}, fills "
-                                f"{fact.executed_quantity!r}@"
-                                f"{fact.executed_price!r}) against recorded "
-                                f"{prior_status!r} "
-                                f"{prior_qty!r}@{prior_price!r} from state "
-                                f"{prior_state}; bound id "
-                                f"{prior_id!r} retained"
-                            )[:500],
-                        ),
+                        .values(**conflict_values),
                     )
                 )
                 if updated != 1:
@@ -636,7 +660,7 @@ class PassiveSubmitHookBundle:
                         "uncertain and was NOT recorded"
                     )
                 db.commit()
-                return
+                return passive_protocol.OutcomeWriteResult.ESCALATED_UNCERTAIN
             if verdict == "PROGRESS":
                 # Genuine FORWARD same-id progress: CAS against the exact
                 # prior receipt facts the decision was made on, so a stale
@@ -705,7 +729,7 @@ class PassiveSubmitHookBundle:
                         )
                     )
                     if fresh_comparison == "EXACT":
-                        return  # another writer recorded the same facts
+                        return passive_protocol.OutcomeWriteResult.IDEMPOTENT  # another writer recorded the same facts
                     if fresh_comparison == "FORWARD":
                         updated = _progress_update(
                             fresh.bound_broker_status,
@@ -720,7 +744,7 @@ class PassiveSubmitHookBundle:
                                 "NOT recorded"
                             )
                         db.commit()
-                        return
+                        return passive_protocol.OutcomeWriteResult.APPLIED
                     # BACKWARD against fresh facts: fall through to the
                     # conflict escalation below with the FRESH facts.
                     conflict_values = {
@@ -774,9 +798,9 @@ class PassiveSubmitHookBundle:
                             "outcome is uncertain and was NOT recorded"
                         )
                     db.commit()
-                    return
+                    return passive_protocol.OutcomeWriteResult.ESCALATED_UNCERTAIN
                 db.commit()
-                return
+                return passive_protocol.OutcomeWriteResult.APPLIED
             if verdict is not None:
                 raise ValueError(verdict)
             values: dict[str, object] = {
@@ -822,6 +846,7 @@ class PassiveSubmitHookBundle:
                     "outcome write lost the state race; outcome is uncertain"
                 )
             db.commit()
+            return passive_protocol.OutcomeWriteResult.APPLIED
 
 
 # ---------------------------------------------------------------------------

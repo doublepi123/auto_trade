@@ -236,6 +236,7 @@ class TestMonotonicReceiptValidator:
                 executed_quantity=None,
                 executed_price=None,
             ),
+            intent_quantity=Decimal("8"),
         )
         assert verdict == "CONFLICT"
 
@@ -251,6 +252,7 @@ class TestMonotonicReceiptValidator:
                 executed_quantity=None,
                 executed_price=None,
             ),
+            intent_quantity=Decimal("8"),
         )
         assert verdict == "CONFLICT"
 
@@ -266,6 +268,7 @@ class TestMonotonicReceiptValidator:
                 executed_quantity=Decimal("5"),
                 executed_price=Decimal("620"),
             ),
+            intent_quantity=Decimal("8"),
         )
         assert verdict == "CONFLICT"
 
@@ -282,6 +285,7 @@ class TestMonotonicReceiptValidator:
                     executed_quantity=Decimal("5"),
                     executed_price=Decimal("620"),
                 ),
+                intent_quantity=Decimal("8"),
             )
             assert verdict == "CONFLICT", live
 
@@ -297,6 +301,7 @@ class TestMonotonicReceiptValidator:
                 executed_quantity=Decimal("8"),
                 executed_price=Decimal("620"),
             ),
+            intent_quantity=Decimal("8"),
         )
         assert verdict == "PROGRESS"
 
@@ -313,6 +318,7 @@ class TestMonotonicReceiptValidator:
                 executed_quantity=Decimal("5"),
                 executed_price=Decimal("620"),
             ),
+            intent_quantity=Decimal("8"),
         )
         assert verdict == "PROGRESS"
 
@@ -328,6 +334,7 @@ class TestMonotonicReceiptValidator:
                 executed_quantity=Decimal("4"),
                 executed_price=Decimal("620"),
             ),
+            intent_quantity=Decimal("8"),
         )
         assert verdict == "PROGRESS"
 
@@ -343,6 +350,7 @@ class TestMonotonicReceiptValidator:
                 executed_quantity=Decimal("8"),
                 executed_price=Decimal("610"),
             ),
+            intent_quantity=Decimal("8"),
         )
         assert verdict == "CONFLICT"
 
@@ -354,6 +362,7 @@ class TestMonotonicReceiptValidator:
             bound_executed_quantity=None,
             bound_executed_price=None,
             fact=_fact(broker_status="SUBMITTED"),
+            intent_quantity=Decimal("8"),
         )
         assert verdict == "IDEMPOTENT"
 
@@ -366,6 +375,7 @@ class TestMonotonicReceiptValidator:
                 bound_executed_quantity=None,
                 bound_executed_price=None,
                 fact=_fact(broker_status=status),
+                intent_quantity=Decimal("8"),
             )
             assert verdict == "IDEMPOTENT", status  # sticky, no auto-clear
 
@@ -377,6 +387,7 @@ class TestMonotonicReceiptValidator:
             bound_executed_quantity=None,
             bound_executed_price=None,
             fact=_fact(broker_order_id="other-id", broker_status="FILLED"),
+            intent_quantity=Decimal("8"),
         )
         assert verdict == "CONFLICT"
 
@@ -1029,6 +1040,7 @@ class TestFirstFillAfterUnknown:
                 executed_quantity=Decimal("5"),
                 executed_price=Decimal("619.90"),
             ),
+            intent_quantity=Decimal("8"),
         )
         assert verdict == "PROGRESS"
 
@@ -1092,6 +1104,7 @@ class TestFirstFillAfterUnknown:
             fact=_fact(broker_status="FILLED",
                        executed_quantity=Decimal("5"),
                        executed_price=Decimal("620")),
+            intent_quantity=Decimal("8"),
         )
         assert verdict == "CONFLICT"
         # terminal -> live stays blocked
@@ -1104,6 +1117,7 @@ class TestFirstFillAfterUnknown:
             fact=_fact(broker_status="SUBMITTED",
                        executed_quantity=Decimal("5"),
                        executed_price=Decimal("619.90")),
+            intent_quantity=Decimal("8"),
         )
         assert verdict == "CONFLICT"
         # same fill conflicting price stays blocked
@@ -1116,6 +1130,7 @@ class TestFirstFillAfterUnknown:
             fact=_fact(broker_status="FILLED",
                        executed_quantity=Decimal("8"),
                        executed_price=Decimal("610")),
+            intent_quantity=Decimal("8"),
         )
         assert verdict == "CONFLICT"
 
@@ -1129,6 +1144,7 @@ class TestFirstFillAfterUnknown:
             fact=_fact(broker_status="FILLED",
                        executed_quantity=Decimal("5"),
                        executed_price=Decimal("619.90")),
+            intent_quantity=Decimal("8"),
         )
         assert verdict == "IDEMPOTENT"  # sticky: ordinary receipt no-clear
 
@@ -1360,6 +1376,7 @@ class TestB5StatusProgressionIndependent:
             bound_executed_price=None,
             fact=_fact(broker_status="SUBMITTED",
                        executed_quantity=Decimal("4")),
+            intent_quantity=Decimal("8"),
         )
         assert verdict == "CONFLICT"
 
@@ -1373,6 +1390,7 @@ class TestB5StatusProgressionIndependent:
             fact=_fact(broker_status="REJECTED",
                        executed_quantity=Decimal("9"),
                        executed_price=Decimal("620")),
+            intent_quantity=Decimal("8"),
         )
         assert verdict == "CONFLICT"
 
@@ -1386,6 +1404,7 @@ class TestB5StatusProgressionIndependent:
             fact=_fact(broker_status="CANCELLED",
                        executed_quantity=Decimal("8"),
                        executed_price=Decimal("620")),
+            intent_quantity=Decimal("8"),
         )
         assert verdict == "CONFLICT"
 
@@ -1398,6 +1417,7 @@ class TestB5StatusProgressionIndependent:
             bound_executed_price=None,
             fact=_fact(broker_status="MYSTERY_STATUS",
                        executed_quantity=Decimal("4")),
+            intent_quantity=Decimal("8"),
         )
         assert verdict == "CONFLICT"
 
