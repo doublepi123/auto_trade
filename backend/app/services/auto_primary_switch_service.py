@@ -326,7 +326,7 @@ class AutoPrimarySwitchService:
 
         reference_price = float(best.last_close_price or 0)
         half_width = reference_price * (
-            settings.llm_interval_volatility_threshold_pct / 100
+            settings.recenter_half_width_pct() / 100
         )
         buy_low = round(reference_price - half_width, 4)
         sell_high = round(reference_price + half_width, 4)

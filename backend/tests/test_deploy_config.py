@@ -264,6 +264,31 @@ def test_deploy_files_expose_universe_and_live_regime_controls() -> None:
             assert f"{key}=" in env_example
 
 
+def test_deploy_files_expose_interval_recenter_half_width_control() -> None:
+    """Compose must forward the recenter half-width override.
+
+    A Settings field absent from compose is silently ignored at runtime: the
+    container keeps the field default regardless of what the operator sets in
+    .env (recorded auto-primary-switch incident). The ``:-`` fallback must be
+    empty so an unset variable keeps the Settings default (None = fall back to
+    llm_interval_volatility_threshold_pct), never a silently narrower/wider
+    band.
+    """
+    compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+    dockerhub_compose = (
+        ROOT / "docker-compose.dockerhub.yaml"
+    ).read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    expected = (
+        "AUTO_TRADE_INTERVAL_RECENTER_HALF_WIDTH_PCT="
+        "${AUTO_TRADE_INTERVAL_RECENTER_HALF_WIDTH_PCT:-}"
+    )
+    assert expected in compose
+    assert expected in dockerhub_compose
+    assert "AUTO_TRADE_INTERVAL_RECENTER_HALF_WIDTH_PCT=" in env_example
+
+
 def test_compose_healthchecks_use_strict_readiness_endpoint() -> None:
     for filename in ("docker-compose.yaml", "docker-compose.dockerhub.yaml"):
         compose = (ROOT / filename).read_text(encoding="utf-8")

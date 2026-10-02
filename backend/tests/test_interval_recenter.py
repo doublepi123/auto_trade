@@ -195,6 +195,42 @@ class TestIntervalRecenter(_Base):
         cfg = self._config()
         assert cfg.buy_low < 366.0 < cfg.sell_high
 
+    def test_half_width_override_narrows_the_recentered_band(
+        self, monkeypatch
+    ) -> None:
+        # The operator narrowed the live band to +/-0.3% via
+        # AUTO_TRADE_INTERVAL_RECENTER_HALF_WIDTH_PCT. The recenter must not
+        # silently widen it back to +/-llm_interval_volatility_threshold_pct
+        # on the first drift, or entry frequency collapses again after one
+        # recenter.
+        monkeypatch.setitem(
+            settings.__dict__, "interval_recenter_half_width_pct", 0.3
+        )
+        self._seed()
+        now = datetime.now(timezone.utc)
+        result = self._run(_Runner(price=366.0, price_at=now), now=now)
+        assert result.outcome == OUTCOME_RECENTERED
+        cfg = self._config()
+        # +/-0.3% of 366, not the +/-1% volatility threshold.
+        assert cfg.buy_low == pytest.approx(364.902, abs=0.0001)
+        assert cfg.sell_high == pytest.approx(367.098, abs=0.0001)
+
+    def test_unset_half_width_override_keeps_the_volatility_threshold_band(
+        self, monkeypatch
+    ) -> None:
+        # Explicitly unset: the half-width falls back to
+        # llm_interval_volatility_threshold_pct, which is the behaviour every
+        # existing deployment relies on.
+        monkeypatch.setitem(
+            settings.__dict__, "interval_recenter_half_width_pct", None
+        )
+        self._seed()
+        now = datetime.now(timezone.utc)
+        self._run(_Runner(price=366.0, price_at=now), now=now)
+        cfg = self._config()
+        assert cfg.buy_low == pytest.approx(362.34, abs=0.01)
+        assert cfg.sell_high == pytest.approx(369.66, abs=0.01)
+
     def test_reload_borrows_the_service_session(self) -> None:
         """_commit holds the service session; reload_strategy() without it
         nested a second checkout and tripped the reentrancy guard in

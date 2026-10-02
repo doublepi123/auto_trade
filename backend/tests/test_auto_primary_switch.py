@@ -381,6 +381,36 @@ class TestAutoPrimarySwitch(_Base):
         finally:
             db.close()
 
+    def test_half_width_override_narrows_the_switch_band(self, monkeypatch) -> None:
+        # AUTO_TRADE_INTERVAL_RECENTER_HALF_WIDTH_PCT must drive the band the
+        # switch writes too: the switch resets the interval around the
+        # candidate price, so a +/-1% band from the LLM volatility threshold
+        # would re-widen the live band an operator deliberately narrowed.
+        monkeypatch.setitem(
+            settings.__dict__, "interval_recenter_half_width_pct", 0.3
+        )
+        self._primary("NVDA.US")
+        self._evidence("NVDA.US", trend_bars=70, calm_bars=10, close_price=210.0)
+        self._selection_run(["CSCO.US"])
+        self._evidence("CSCO.US", trend_bars=0, calm_bars=80, close_price=111.0)
+        self._reach("CSCO.US", closed=6, reached=5)
+
+        result = AutoPrimarySwitchService(self._db()).evaluate(_Runner())
+        assert result.outcome == OUTCOME_SWITCHED
+
+        db = self._db()
+        try:
+            config = db.query(StrategyConfig).order_by(
+                StrategyConfig.id.desc()
+            ).first()
+            assert config is not None
+            assert config.symbol == "CSCO.US"
+            # +/-0.3% of 111, not the +/-1% volatility threshold.
+            assert config.buy_low == pytest.approx(110.667, abs=0.0001)
+            assert config.sell_high == pytest.approx(111.333, abs=0.0001)
+        finally:
+            db.close()
+
     def test_skips_candidate_without_a_reference_price(self) -> None:
         self._primary("NVDA.US")
         self._evidence("NVDA.US", trend_bars=70, calm_bars=10)

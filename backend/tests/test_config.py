@@ -280,6 +280,56 @@ class TestSettings:
         monkeypatch.setenv("AUTO_TRADE_NOTIFY_DEDUP_WINDOW_SECONDS", "12.5")
         assert Settings().notify_dedup_window_seconds == 12.5
 
+    def test_interval_recenter_half_width_defaults_to_unset(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Unset must preserve today's behaviour exactly: the recenter falls
+        # back to llm_interval_volatility_threshold_pct.
+        monkeypatch.delenv(
+            "AUTO_TRADE_INTERVAL_RECENTER_HALF_WIDTH_PCT", raising=False
+        )
+        s = Settings()
+        assert s.interval_recenter_half_width_pct is None
+        assert s.recenter_half_width_pct() == s.llm_interval_volatility_threshold_pct
+
+    def test_interval_recenter_half_width_reads_env(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AUTO_TRADE_INTERVAL_RECENTER_HALF_WIDTH_PCT", "0.3")
+
+        s = Settings()
+        assert s.interval_recenter_half_width_pct == 0.3
+        # The override must not leak into the volatility threshold itself,
+        # which still drives LLM re-analysis and interval application.
+        assert s.llm_interval_volatility_threshold_pct == 1.0
+        assert s.recenter_half_width_pct() == 0.3
+
+    def test_interval_recenter_half_width_empty_env_is_unset(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Compose forwards `${VAR:-}` (an empty string) when the operator has
+        # not set the variable; an empty string must mean "unset", not a
+        # validation crash on a float field.
+        monkeypatch.setenv("AUTO_TRADE_INTERVAL_RECENTER_HALF_WIDTH_PCT", "")
+
+        s = Settings()
+        assert s.interval_recenter_half_width_pct is None
+        assert s.recenter_half_width_pct() == s.llm_interval_volatility_threshold_pct
+
+    @pytest.mark.parametrize("value", ["0", "-0.1", "10.1", "nan", "inf"])
+    def test_interval_recenter_half_width_rejects_invalid_values(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        value: str,
+    ) -> None:
+        monkeypatch.setenv("AUTO_TRADE_INTERVAL_RECENTER_HALF_WIDTH_PCT", value)
+
+        with pytest.raises(ValidationError):
+            Settings()
+
     def test_production_requires_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("AUTO_TRADE_ENV", "prod")
         monkeypatch.setenv("AUTO_TRADE_API_KEY", "")

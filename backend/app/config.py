@@ -854,6 +854,32 @@ class Settings(BaseSettings):
         le=48,
         validation_alias="AUTO_TRADE_INTERVAL_RECENTER_MAX_PER_DAY",
     )
+    # Optional half-width (percent) for the band the automatic recenter and the
+    # auto primary switch write. UNSET keeps today's behaviour: the half-width
+    # falls back to ``llm_interval_volatility_threshold_pct``. That threshold
+    # also drives LLM re-analysis and interval application, so an operator who
+    # narrowed the live band (e.g. to +/-0.3%) needs this separate knob or the
+    # first recenter silently widens the band back to +/-1%.
+    interval_recenter_half_width_pct: float | None = Field(
+        default=None,
+        gt=0,
+        le=10,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_INTERVAL_RECENTER_HALF_WIDTH_PCT",
+    )
+
+    @field_validator(
+        "interval_recenter_half_width_pct",
+        mode="before",
+    )
+    @classmethod
+    def _empty_recenter_half_width_is_unset(cls, value: Any) -> Any:
+        # Compose forwards `${VAR:-}` — an empty string — when the operator
+        # has not set the variable; an empty string must read as "unset", not
+        # fail float validation and take the deployment down.
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
     # Operator attestation that the connected brokerage account is a paper /
     # demo account. DEFAULT FALSE, and it grants nothing on its own — it only
     # makes ``paper_max_position_notional`` eligible to be honoured. Kept as a
@@ -900,6 +926,21 @@ class Settings(BaseSettings):
         if fingerprint and fingerprint == self.paper_account_fingerprint:
             return self.hard_max_position_notional
         return min(self.hard_max_position_notional, FUNDED_MAX_POSITION_NOTIONAL)
+
+    def recenter_half_width_pct(self) -> float:
+        """Half-width (percent) for the band the recenter and the auto
+        primary switch write.
+
+        Returns the dedicated override when set, else
+        ``llm_interval_volatility_threshold_pct`` (the historical behaviour).
+        Only ``interval_recenter_service`` and ``auto_primary_switch_service``
+        may call this — the threshold itself still drives LLM re-analysis,
+        interval application and entry-window overlap, which must NOT follow
+        the override.
+        """
+        if self.interval_recenter_half_width_pct is not None:
+            return self.interval_recenter_half_width_pct
+        return self.llm_interval_volatility_threshold_pct
     auto_primary_switch_enabled: bool = Field(
         default=False,
         validation_alias="AUTO_TRADE_AUTO_PRIMARY_SWITCH_ENABLED",

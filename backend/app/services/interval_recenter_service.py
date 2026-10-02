@@ -260,7 +260,7 @@ class IntervalRecenterService:
                 detail=detail,
             )
 
-        half_width = price * (settings.llm_interval_volatility_threshold_pct / 100)
+        half_width = price * (settings.recenter_half_width_pct() / 100)
         new_buy_low = round(price - half_width, 4)
         new_sell_high = round(price + half_width, 4)
         if new_buy_low <= 0 or new_sell_high <= new_buy_low:
