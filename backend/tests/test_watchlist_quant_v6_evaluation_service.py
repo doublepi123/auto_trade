@@ -216,6 +216,9 @@ def test_historical_evaluator_manifest_golden_digest() -> None:
     source, and say in the message what moved. It is emphatically not the
     preregistration hash, which must never be updated to silence a failure.
 
+    Provider v4 adds first-page valid pre-window singleton empty evidence;
+    its contract and source change this derived historical digest, but not
+    the domain acquisition, semantic or domain evaluator goldens.
     Diagnostic-v1 decision is recorded in the tracked historical provider
     module docstring: only bounded returns-blind metadata on the existing
     nonadvancing failure. Provider source / evaluator / NEW registration
@@ -229,7 +232,7 @@ def test_historical_evaluator_manifest_golden_digest() -> None:
     gate fired correctly and was ignored.
     """
     assert quant_v6_historical_evaluator_digest_sha256() == (
-        "a036f4d4d5b2ed827fe757cddc9c8183586be5bbd5c176597d62521ef683d044"
+        "a94e650d17ad3abd922b783bbde1897d980fe29280490f3681fc0fe2cee34b5a"
     )
 
 

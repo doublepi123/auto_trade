@@ -1,5 +1,12 @@
 """Quote-only historical provider.
 
+Provider decision, 2026-10-02: v4 additionally treats one real-validator-valid
+row strictly before the initial cursor, on page one with no accepted bars,
+as empty in-window evidence. This is not proof of EOF or delisting. All other
+non-advancing pages remain fail-closed except the existing exact terminal
+repeat. The provider contract and derived registration identities change;
+domain acquisition, semantics, evaluator and diagnostic-v1 stay unchanged.
+
 Diagnostic decision, 2026-10-01: diagnostic-v1 adds returns-blind context ONLY
 to the existing non-advancing failure, after the existing native read returns.
 It changes provider source / historical evaluator digest / NEW registration
@@ -48,12 +55,13 @@ from app.services.watchlist_quant_v6_deadline import (
 logger = logging.getLogger("auto_trade.watchlist_quant_v6_historical_provider")
 
 QUANT_V6_HISTORICAL_PROVIDER_CONTRACT_VERSION = (
-    "watchlist-quant-v6-longport-quote-only-history-v3"
+    "watchlist-quant-v6-longport-quote-only-history-v4"
 )
 QUANT_V6_HISTORICAL_PERIOD = "MIN_5"
 QUANT_V6_HISTORICAL_ADJUSTMENT_MODE = "NO_ADJUST"
 QUANT_V6_HISTORICAL_PAGE_BOUNDARY = (
     "EXCLUSIVE_AFTER_CURSOR_WITH_EXACT_VALID_SINGLETON_TERMINAL_REPEAT"
+    "_OR_FIRST_PAGE_VALID_SINGLETON_STRICTLY_BEFORE_INITIAL_CURSOR"
 )
 QUANT_V6_HISTORICAL_PAGE_SIZE = 1_000
 QUANT_V6_HISTORICAL_MAX_PAGES = 16
@@ -995,6 +1003,26 @@ class QuantV6HistoricalBarProvider:
                     1 for _item, timestamp in parsed_rows if timestamp is None
                 )
                 if not advancing:
+                    # A strictly pre-window singleton supplies no usable
+                    # evidence. Validate the actual row, never diagnostics.
+                    if (
+                        page_number == 1
+                        and not bars
+                        and cursor == start - _BAR_DURATION
+                        and len(parsed_rows) == 1
+                    ):
+                        initial_item, initial_timestamp = parsed_rows[0]
+                        if (
+                            initial_timestamp is not None
+                            and initial_timestamp < cursor
+                            and _coerce_bar(initial_item, initial_timestamp) is not None
+                        ):
+                            return QuantV6HistoricalBarFetch(
+                                bars=(),
+                                pages=page_number,
+                                raw_rows=raw_rows,
+                                rejected_rows=rejected_rows,
+                            )
                     # Longport's forward paging repeats its inclusive
                     # boundary once the available history is exhausted.
                     # Treat only one exact, valid copy of the already

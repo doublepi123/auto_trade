@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -55,7 +56,10 @@ from app.services.watchlist_quant_v6_evaluation_service import (
 )
 from app.services.watchlist_quant_v6_historical_provider import (
     QuantV6HistoricalBarFetch,
+    QuantV6HistoricalBarProvider,
+    quant_v6_historical_provider_contract,
 )
+from app.services.watchlist_quant_v6_deadline import QuantV6EvaluationDeadline
 from app.services.watchlist_quant_v6_publication_service import (
     QuantV6PublicationReceipt,
     WatchlistQuantV6PublicationService,
@@ -573,6 +577,117 @@ def test_all_reader_endpoints_are_persisted_only_and_bounded(
         event.remove(environment.engine, "before_cursor_execute", _capture)
 
     assert environment.provider.calls == provider_calls
+
+
+_V4_BOUNDARY = (
+    "EXCLUSIVE_AFTER_CURSOR_WITH_EXACT_VALID_SINGLETON_TERMINAL_REPEAT"
+    "_OR_FIRST_PAGE_VALID_SINGLETON_STRICTLY_BEFORE_INITIAL_CURSOR"
+)
+
+
+@pytest.mark.parametrize("version", [1, 2, 3, 4])
+def test_reader_complete_evidence_for_each_provider_version(
+    environment_factory: _EnvironmentFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    version: int,
+) -> None:
+    contract = dict(quant_v6_historical_provider_contract())
+    contract["provider_contract_version"] = f"watchlist-quant-v6-longport-quote-only-history-v{version}"
+    contract["page_boundary"] = (
+        "EXCLUSIVE_AFTER_LAST_ACCEPTED_TIMESTAMP" if version == 1 else
+        _V4_BOUNDARY if version == 4 else
+        "EXCLUSIVE_AFTER_CURSOR_WITH_EXACT_VALID_SINGLETON_TERMINAL_REPEAT"
+    )
+    monkeypatch.setattr(evaluation_service_module, "quant_v6_historical_provider_contract", lambda: contract)
+    monkeypatch.setattr(evaluation_service_module, "quant_v6_historical_provider_digest_sha256", lambda: quant_v6_payload_sha256(contract))
+    monkeypatch.setattr(evaluation_service_module, "quant_v6_historical_evaluator_digest_sha256", lambda: quant_v6_payload_sha256(evaluation_service_module.quant_v6_historical_evaluator_manifest()))
+    environment = environment_factory.build(member_count=1)
+    publication_id = _publication_id(environment)
+    detail = environment.client.get(f"/api/watchlist/quant-v6/publications/{publication_id}")
+    assert detail.status_code == 200
+    assert detail.json()["validation"]["registration_identity_verified"] is True
+    members = environment.client.get(f"/api/watchlist/quant-v6/publications/{publication_id}/members")
+    assert members.status_code == 200
+    digest = members.json()["items"][0]["assessment_artifact_sha256"]
+    artifact = environment.client.get(f"/api/watchlist/quant-v6/publications/{publication_id}/artifacts/{digest}")
+    assert artifact.status_code == 200
+    assert artifact.json()["payload_identity_verified"] is True
+    for wrong in ("EXCLUSIVE_AFTER_LAST_ACCEPTED_TIMESTAMP", _V4_BOUNDARY, "UNKNOWN"):
+        if wrong != contract["page_boundary"]:
+            with pytest.raises(QuantV6ReadIntegrityError):
+                _validate_provider_contract({**contract, "page_boundary": wrong})
+
+
+def test_pre_window_singleton_mixed_cohort_spawn_publication_reader(
+    environment_factory: _EnvironmentFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services import watchlist_quant_v6_historical_provider as provider_module
+    from app.services import watchlist_quant_v6_spawn_supervisor as supervisor
+
+    monkeypatch.setattr(provider_module, "_runtime_local_timezone_is_utc", lambda: True)
+    environment = environment_factory.build(publish=False, member_count=2)
+    plan = environment.plan
+    missing_symbol = plan.members[0].symbol
+    healthy_bars = _complete_eventful_bars(plan)
+    deadline = QuantV6EvaluationDeadline(120)
+    calls: list[str] = []
+    spawned: list[str | None] = []
+    original_start = supervisor._start_workers
+
+    def capture_workers(**kwargs: Any):
+        states = original_start(**kwargs)
+        spawned.extend(getattr(state.process, "_start_method", None) for state in states)
+        return states
+
+    monkeypatch.setattr(supervisor, "_start_workers", capture_workers)
+
+    class _FakeContext:
+        def history_candlesticks_by_offset(self, symbol, period, adjustment, forward, count, cursor):
+            assert (period, adjustment, forward, count) == ("MIN5", "RAW", True, 1000)
+            calls.append(symbol)
+            if symbol == missing_symbol:
+                timestamp = cursor.astimezone(timezone.utc) - timedelta(days=1)
+                return [SimpleNamespace(timestamp=timestamp, open=100, high=101, low=99, close=100, volume=1000)]
+            return [SimpleNamespace(timestamp=bar.start_at, open=bar.open, high=bar.high,
+                low=bar.low, close=bar.close, volume=bar.volume)
+                for bar in healthy_bars if bar.start_at > cursor][:count]
+
+    provider = QuantV6HistoricalBarProvider(
+        module_loader=lambda: pytest.fail("no SDK, credentials or network"),
+        evaluation_deadline=deadline,
+    )
+    provider._module = SimpleNamespace(Period=SimpleNamespace(Min_5="MIN5"), AdjustType=SimpleNamespace(NoAdjust="RAW"))
+    provider._quote_context = _FakeContext()
+    service = WatchlistQuantV6PublicationService(environment.session_factory, clock=lambda: _PUBLISHED_AT)
+    environment.receipt = service.register_provider_evaluate_publish(
+        plan=plan, provider=provider, evaluation_deadline=deadline, compute_workers=2,
+    )
+    assert spawned == ["spawn", "spawn"]
+    assert calls.count(missing_symbol) == 1
+    publication_id = _publication_id(environment)
+    members = environment.client.get(f"/api/watchlist/quant-v6/publications/{publication_id}/members")
+    assert members.status_code == 200
+    assert members.json()["total"] == len(plan.members) == 2
+    payloads = []
+    for member in members.json()["items"]:
+        digest = member["assessment_artifact_sha256"]
+        response = environment.client.get(f"/api/watchlist/quant-v6/publications/{publication_id}/artifacts/{digest}")
+        assert response.status_code == 200
+        assert response.json()["payload_identity_verified"] is True
+        payloads.append(response.json()["payload"])
+    missing, healthy = payloads
+    assert missing["aggregates"]["covered_sessions"] == 0
+    assert missing["aggregates"]["event_count"] == 0
+    assert missing["aggregates"]["median_net_return_bps"] is None
+    assert missing["aggregates"]["session_denominator"] == len(plan.target_session_dates)
+    assert len(missing["leaves"]) == len(plan.target_session_dates)
+    assert {leaf["status"] for leaf in missing["leaves"]} == {"MISSING"}
+    assert missing["policy"]["recommended_action"] == "AVOID"
+    expected = evaluate_quant_v6_registration(registration=plan, provider=_Provider(healthy_bars))[1]
+    assert healthy["aggregates"]["covered_sessions"] == expected.covered_sessions == 30
+    assert healthy["aggregates"]["event_count"] == expected.event_count
+    assert members.json()["items"][1]["assessment_artifact_sha256"] == expected.assessment_artifact_sha256
 
 
 def test_reader_accepts_legacy_v1_historical_evaluator_closure(

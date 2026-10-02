@@ -213,6 +213,10 @@ _PROVIDER_FIXED_TEXT_VALUES = {
     "runtime_local_timezone_required": "UTC",
 }
 _PROVIDER_PAGE_BOUNDARY_BY_VERSION = {
+    "watchlist-quant-v6-longport-quote-only-history-v4": (
+        "EXCLUSIVE_AFTER_CURSOR_WITH_EXACT_VALID_SINGLETON_TERMINAL_REPEAT"
+        "_OR_FIRST_PAGE_VALID_SINGLETON_STRICTLY_BEFORE_INITIAL_CURSOR"
+    ),
     "watchlist-quant-v6-longport-quote-only-history-v1": (
         "EXCLUSIVE_AFTER_LAST_ACCEPTED_TIMESTAMP"
     ),

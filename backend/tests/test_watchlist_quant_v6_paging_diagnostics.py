@@ -78,8 +78,45 @@ def _metadata(error: BaseException) -> Any:
     return data
 
 
+@pytest.mark.parametrize("timestamp", [OLD, OLD.replace(tzinfo=None)])
+def test_first_page_valid_pre_window_singleton_is_empty_evidence(timestamp: datetime) -> None:
+    provider, context = _provider([[_row(timestamp)]])
+    result = provider.fetch_five_minute_no_adjust("EA.US", start_at=START, end_at=END)
+    assert result.bars == ()
+    assert (result.pages, result.raw_rows, result.rejected_rows) == (1, 1, 0)
+    assert len(context.calls) == 1
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+def test_later_page_old_singleton_stays_fail_closed(accepted: bool) -> None:
+    first = _row(START) if accepted else _row(START, close=-1)
+    error, context = _error([[first], [_row()]])
+    data = _metadata(error)
+    assert data["page"] == 2
+    assert data["counts"]["accepted_total"] == int(accepted)
+    assert len(context.calls) == 2
+
+
+def test_first_page_acceptance_uses_real_validator_not_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(provider_module, "_coerce_bar", lambda item, timestamp: None)
+    error, context = _error([[_row()]])
+    assert _metadata(error)["current_boundary"]["descriptor"]["bar_validation"] == "VALID"
+    assert len(context.calls) == 1
+
+
+def test_first_page_success_does_not_build_failure_diagnostics(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail(**kwargs: Any) -> str:
+        pytest.fail("successful empty evidence must not build a failure marker")
+    monkeypatch.setattr(provider_module, "_paging_failure_message", fail)
+    provider, context = _provider([[_row()]])
+    result = provider.fetch_five_minute_no_adjust("EA.US", start_at=START, end_at=END)
+    assert result.bars == ()
+    assert (result.pages, result.raw_rows, result.rejected_rows) == (1, 1, 0)
+    assert len(context.calls) == 1
+
+
 @pytest.mark.parametrize("rows,selection,before,equal", [
-    ([_row()], "MAX_UNIQUE", 1, 0),
+    ([_row(OLD.replace(minute=45)), _row(OLD.replace(minute=50)), _row()], "MAX_UNIQUE", 3, 0),
     ([_row(CURSOR)], "CURSOR_UNIQUE", 0, 1),
     ([_row(OLD.replace(minute=50)), _row()], "MAX_UNIQUE", 2, 0),
 ])
@@ -147,7 +184,7 @@ def test_cursor_boundary_preferred_over_duplicate_old_rows() -> None:
     (OLD.timestamp(), "NUMBER", None),
 ])
 def test_normalized_timestamp_descriptor(timestamp: object, kind: str, naive: bool | None) -> None:
-    error, _ = _error([[_row(timestamp)]])
+    error, _ = _error([[_row(OLD.replace(minute=50)), _row(timestamp)]])
     descriptor = _metadata(error)["current_boundary"]["descriptor"]
     assert descriptor == {"timestamp_utc": "2026-08-04T19:55:00Z", "timestamp_kind": kind,
         "naive": naive, "bar_validation": "VALID", "reason": "OK"}
@@ -183,7 +220,7 @@ def test_normal_end_success_and_counts_unchanged() -> None:
 
 
 def test_wire_roundtrip_preserves_metadata_type_and_ordinal() -> None:
-    error, _ = _error([[_row()]])
+    error, _ = _error([[_row(CURSOR)]])
     data = _metadata(error)
     kind = _classify_fetch_failure(error)
     assert kind == "PROVIDER"
@@ -203,7 +240,7 @@ def test_builder_failure_or_oversize_is_complete_tiny_json(monkeypatch: pytest.M
             raise ValueError("token-secret account-secret payload-secret")
         return {"v": 1, "code": "CURSOR_NOT_ADVANCING", "diagnostic_status": "AVAILABLE", "symbol": "secret" * 1000}
     monkeypatch.setattr(provider_module, "_paging_failure_payload", bad_builder)
-    error, context = _error([[_row()]])
+    error, context = _error([[_row(CURSOR)]])
     data = _metadata(error)
     assert data == {"v": 1, "code": "BUILD_FAILED" if mode == "raise" else "SIZE_LIMIT", "diagnostic_status": "UNAVAILABLE"}
     assert len(context.calls) == 1
@@ -211,7 +248,7 @@ def test_builder_failure_or_oversize_is_complete_tiny_json(monkeypatch: pytest.M
 
 
 def test_parser_strict_rejection() -> None:
-    error, _ = _error([[_row()]])
+    error, _ = _error([[_row(CURSOR)]])
     data = _metadata(error)
     payload = json.dumps(data, separators=(",", ":"))
     malformed = [str(error)[:-1], str(error) + MARKER + payload, "arbitrary prefix " + str(error),
@@ -233,7 +270,7 @@ def test_huge_decimal_and_untrusted_string_are_unknown_without_formatting() -> N
         def __repr__(self) -> str:
             pytest.fail("diagnostic must not repr arbitrary field values")
     for value in (Decimal("1e999999999"), _FakeUntrusted(), "9" * 10000):
-        error, _ = _error([[_row(close=value)]])
+        error, _ = _error([[_row(CURSOR, close=value)]])
         descriptor = _metadata(error)["current_boundary"]["descriptor"]
         assert descriptor["bar_validation"] == "UNKNOWN"
         assert descriptor["reason"] == "UNREADABLE"
@@ -272,7 +309,7 @@ def test_helper_failure_cannot_change_existing_success_or_error(monkeypatch: pyt
     assert result.bars == (provider_module._coerce_bar(_row(START), START),)
     assert (result.pages, result.raw_rows, result.rejected_rows) == (2, 2, 0)
     assert len(context.calls) == 2
-    error, context = _error([[_row()]])
+    error, context = _error([[_row(CURSOR)]])
     assert _metadata(error)["diagnostic_status"] == "UNAVAILABLE"
     assert len(context.calls) == 1
     assert "secret" not in str(error)
@@ -298,7 +335,7 @@ def test_only_private_bounded_fingerprints_retained() -> None:
 
 @pytest.mark.parametrize("kind", ["unknown_nested", "duplicate_nested", "wrong_bool", "wrong_list", "duplicate_field", "wrong_time", "null_descriptor", "nested_deep", "nonfinite", "escape"])
 def test_parser_rejects_nested_and_type_attacks(kind: str) -> None:
-    error, _ = _error([[_row()]])
+    error, _ = _error([[_row(CURSOR)]])
     data = dict(_metadata(error))
     if kind == "unknown_nested":
         data["request"]["secret"] = "token-secret"
@@ -334,7 +371,7 @@ def test_actual_exchange_boundary_is_captured_not_reconstructed(monkeypatch: pyt
         calls.append(result)
         return result
     monkeypatch.setattr(provider_module, "_history_boundary", boundary)
-    error, context = _error([[_row()]])
+    error, context = _error([[_row(CURSOR)]])
     data = _metadata(error)
     assert len(calls) == 1
     assert data["request"]["cursor_exchange"] == context.calls[0][5].isoformat() == calls[0].isoformat()
@@ -350,12 +387,12 @@ def test_unparsed_and_duplicate_nonboundary_rows_not_silently_dropped() -> None:
     assert data["page_time_range"] == {"min_utc": "2026-08-04T19:50:00Z", "max_utc": "2026-08-04T19:55:00Z"}
 
 
-def test_old_v3_contract_and_acquisition_spec_are_unchanged() -> None:
+def test_v4_contract_changes_only_composite_acquisition_spec() -> None:
     from app.domain.watchlist_quant_v6 import QUANT_V6_ACQUISITION_SPEC_DIGEST, quant_v6_payload_sha256
     from app.services.watchlist_quant_v6_evaluation_service import quant_v6_registration_acquisition_spec
 
-    assert provider_module.QUANT_V6_HISTORICAL_PROVIDER_CONTRACT_VERSION == "watchlist-quant-v6-longport-quote-only-history-v3"
+    assert provider_module.QUANT_V6_HISTORICAL_PROVIDER_CONTRACT_VERSION == "watchlist-quant-v6-longport-quote-only-history-v4"
     # Domain-only digest is distinct from the registered composite acquisition spec.
     assert QUANT_V6_ACQUISITION_SPEC_DIGEST == "6091b895dd0ddc62e25e5acf27e2c199552da12418d690dc8bcbb80a682305f8"
-    assert quant_v6_payload_sha256(quant_v6_registration_acquisition_spec()) == "e824a40b33781095767a7269ab952b07a418138f7c4fcd0b16db55bf3b3527b1"
+    assert quant_v6_payload_sha256(quant_v6_registration_acquisition_spec()) == "6259f8bbe2358f61126b21c6f9f561e11804128eefaae9312c66637644f961b3"
     assert not any("diag" in key for key in provider_module.quant_v6_historical_provider_contract())
