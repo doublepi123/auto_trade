@@ -4,9 +4,11 @@
 derived from the following MIT-licensed projects:
 
 - `jmccarrell/n100tickers` at commit
-  `9a23023b59707c5372ae1fff4ed983b3ad025c74`
+  `cf7c89419941316ff8523726ccba136125f2c11c` (2026-09-26 release)
 - `unliftedq/index-constitution` at commit
   `650596e3c59a19d9c8767c8b504e3728da0fd07f`
+
+The catalog snapshot date is 2026-09-26.
 
 The generated file is used only for point-in-time research sensitivity.
 It does not replace the current catalog source and does not prove a fully

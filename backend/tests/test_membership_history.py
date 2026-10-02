@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import date
 
+import pytest
+
 from app.domain.universe_selection import (
     INDEX_CANDIDATE_CATALOG,
     INDEX_MEMBERSHIP_HISTORY,
@@ -69,15 +71,12 @@ def test_membership_history_reports_partial_catalog_coverage() -> None:
     )
 
     assert coverage.catalog_size == 123
-    assert coverage.authoritative_symbols == 121
-    assert coverage.snapshot_only_symbols == (
-        "HONA.US",
-        "SPCX.US",
-    )
+    assert coverage.authoritative_symbols == 123
+    assert coverage.snapshot_only_symbols == ()
     assert coverage.missing_symbols == ()
-    assert 0.98 < coverage.authoritative_ratio < 0.99
-    assert coverage.historical_symbol_count == 169
-    assert coverage.historical_symbols_present == 121
+    assert coverage.authoritative_ratio == 1.0
+    assert coverage.historical_symbol_count == 171
+    assert coverage.historical_symbols_present == 123
     assert len(coverage.historical_symbols_missing) == 48
 
 
@@ -87,13 +86,10 @@ def test_research_catalog_covers_all_historical_membership_symbols() -> None:
     )
 
     assert coverage.catalog_size == 171
-    assert coverage.authoritative_symbols == 169
-    assert coverage.snapshot_only_symbols == (
-        "HONA.US",
-        "SPCX.US",
-    )
+    assert coverage.authoritative_symbols == 171
+    assert coverage.snapshot_only_symbols == ()
     assert coverage.missing_symbols == ()
-    assert coverage.historical_symbols_present == 169
+    assert coverage.historical_symbols_present == 171
     assert coverage.historical_symbols_missing == ()
     assert coverage.historical_coverage_ratio == 1.0
 
@@ -131,14 +127,30 @@ def test_expanded_candidates_are_active_at_catalog_snapshot() -> None:
         ) is True
 
 
-def test_snapshot_only_membership_fails_closed_before_snapshot() -> None:
-    hona = _candidate("HONA.US")
-
+@pytest.mark.parametrize("symbol,before,joined", [
+    ("HONA.US", date(2026, 6, 28), date(2026, 6, 29)),
+    ("SPCX.US", date(2026, 7, 6), date(2026, 7, 7)),
+])
+def test_membership_history_tracks_real_union_boundaries(
+    symbol: str, before: date, joined: date,
+) -> None:
+    # Real dated unions supersede the former snapshot-only overrides.
     assert INDEX_MEMBERSHIP_HISTORY.is_active(
-        hona,
-        date(2026, 7, 23),
+        _candidate(symbol),
+        before,
     ) is False
     assert INDEX_MEMBERSHIP_HISTORY.is_active(
-        hona,
-        date(2026, 7, 24),
+        _candidate(symbol),
+        joined,
     ) is True
+
+
+@pytest.mark.parametrize("symbol,before,removed", [
+    ("EA.US", date(2026, 8, 3), date(2026, 8, 4)),
+    ("KHC.US", date(2026, 9, 13), date(2026, 9, 14)),
+])
+def test_membership_history_tracks_2026_removal_boundaries(
+    symbol: str, before: date, removed: date,
+) -> None:
+    assert INDEX_MEMBERSHIP_HISTORY.is_active(_candidate(symbol), before) is True
+    assert INDEX_MEMBERSHIP_HISTORY.is_active(_candidate(symbol), removed) is False

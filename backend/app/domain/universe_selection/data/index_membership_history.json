@@ -1,5 +1,5 @@
 {
-  "catalog_snapshot_date": "2026-07-24",
+  "catalog_snapshot_date": "2026-09-26",
   "effective_start_date": "2022-01-01",
   "intervals": {
     "DJIA": {
@@ -488,7 +488,7 @@
       "EA": [
         [
           "2022-01-01",
-          ""
+          "2026-08-04"
         ]
       ],
       "EBAY": [
@@ -581,6 +581,12 @@
           ""
         ]
       ],
+      "HONA": [
+        [
+          "2026-06-29",
+          ""
+        ]
+      ],
       "IDXX": [
         [
           "2022-01-01",
@@ -632,7 +638,7 @@
       "KHC": [
         [
           "2022-01-01",
-          ""
+          "2026-09-14"
         ]
       ],
       "KLAC": [
@@ -941,6 +947,12 @@
           "2025-11-06"
         ]
       ],
+      "SPCX": [
+        [
+          "2026-07-07",
+          ""
+        ]
+      ],
       "SPLK": [
         [
           "2022-01-01",
@@ -1093,18 +1105,15 @@
   },
   "snapshot_overrides": {
     "DJIA": {},
-    "NASDAQ_100": {
-      "HONA": "2026-07-24",
-      "SPCX": "2026-07-24"
-    }
+    "NASDAQ_100": {}
   },
-  "source_version": "n100tickers-9a23023b_index-constitution-650596e3_catalog-snapshot-2026-07-24",
+  "source_version": "n100tickers-cf7c8941_index-constitution-650596e3_catalog-snapshot-2026-09-26",
   "sources": [
     {
-      "commit": "9a23023b59707c5372ae1fff4ed983b3ad025c74",
+      "commit": "cf7c89419941316ff8523726ccba136125f2c11c",
       "license": "MIT",
       "name": "jmccarrell/n100tickers",
-      "url": "https://github.com/jmccarrell/n100tickers/tree/9a23023b59707c5372ae1fff4ed983b3ad025c74"
+      "url": "https://github.com/jmccarrell/n100tickers/tree/cf7c89419941316ff8523726ccba136125f2c11c"
     },
     {
       "commit": "650596e3c59a19d9c8767c8b504e3728da0fd07f",

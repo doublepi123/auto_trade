@@ -232,7 +232,7 @@ def test_historical_evaluator_manifest_golden_digest() -> None:
     gate fired correctly and was ignored.
     """
     assert quant_v6_historical_evaluator_digest_sha256() == (
-        "a94e650d17ad3abd922b783bbde1897d980fe29280490f3681fc0fe2cee34b5a"
+        "0a3c2492abcece76a32fb4cb22ffc8c448f65c3f377eacf36f894755c5774761"
     )
 
 

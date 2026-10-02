@@ -13,7 +13,7 @@ from urllib.request import urlopen
 import yaml
 
 
-_N100_COMMIT = "9a23023b59707c5372ae1fff4ed983b3ad025c74"
+_N100_COMMIT = "cf7c89419941316ff8523726ccba136125f2c11c"
 _DOW_COMMIT = "650596e3c59a19d9c8767c8b504e3728da0fd07f"
 _N100_BASE_URL = (
     "https://raw.githubusercontent.com/jmccarrell/n100tickers/"
@@ -28,14 +28,14 @@ _N100_SHA256 = {
     2023: "7d545922ec54325c9fc97eef738750d502ef4fd0bce3a58232741319febc7a3e",
     2024: "12bec472989760c3915e32582d42772f73241f4ef0067633ff57cb22cb3ae693",
     2025: "e20a547ed1bb5d6fde305e91560ed74aa9b74d6cadd7aee78dab8867b19366ee",
-    2026: "f45d2b464ca7e52c81527385da88a455575414e7ec12786f52f0e70b255bed6b",
+    2026: "a8d8d58165a654c5a2c4ab8006d56c4d6efd7edf41154cf838be8693b87c1bf6",
 }
 _DOW_SHA256 = (
     "42e8ec9910caf9db26e8f944fce3cc460b567f1862a0f3141b06b6f851975056"
 )
 _EFFECTIVE_START = date(2022, 1, 1)
-_CATALOG_SNAPSHOT_DATE = date(2026, 7, 24)
-_SNAPSHOT_ONLY_NASDAQ_SYMBOLS = ("HONA", "SPCX")
+_CATALOG_SNAPSHOT_DATE = date(2026, 9, 26)
+_SNAPSHOT_ONLY_NASDAQ_SYMBOLS = ()
 _OUTPUT = (
     Path(__file__).resolve().parents[1]
     / "app"
