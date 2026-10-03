@@ -977,6 +977,119 @@ class TestTradeExecutionServiceBasics:
 
         assert qty == 10
 
+    def test_paper_caps_size_full_position_entry_through_margin_power(
+        self,
+        svc: TradeExecutionService,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Paper-relaxed caps flow from Settings through the real sizing path.
+
+        The caps a paper-confirmed deployment produces (notional 85000,
+        quantity 1000, risk 400) must let the sizing arithmetic reach
+        floor(85000/372) = 228 shares at price 372 with a 0.25% stop, and
+        that quantity must clear the mandatory pre-submit boundary. Reading
+        the caps from ``Settings`` keeps this test tied to the actual config
+        clamps rather than hand-picked numbers.
+        """
+        monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_POSITION_NOTIONAL",
+            "85000",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_POSITION_QUANTITY",
+            "1000",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_RISK_PER_TRADE",
+            "400",
+        )
+        from app.config import Settings
+
+        settings = Settings()
+        assert settings.hard_max_position_notional == 85000
+        assert settings.hard_max_position_quantity == 1000
+        assert settings.hard_max_risk_per_trade == 400
+
+        broker = MagicMock()
+        broker.get_positions.return_value = []
+        broker.estimate_margin_max_quantity.return_value = Decimal("100000")
+        svc.margin_safety_factor = 1.0
+        svc.max_position_quantity = settings.hard_max_position_quantity
+        svc.max_position_notional = settings.hard_max_position_notional
+        svc.max_risk_per_trade = settings.hard_max_risk_per_trade
+        svc.stop_loss_pct = 0.25
+
+        qty = svc._entry_quantity_from_margin_power(
+            broker,
+            "TSLA.US",
+            "BUY",
+            Decimal("372"),
+            "USD",
+        )
+
+        # Notional binds: 85000/372 = 228.49 -> 228 (quantity 1000 and risk
+        # 400/(0.0025*372)=430.1 would both permit more).
+        assert qty == 228
+
+        approved = svc.pre_submit_risk_check(
+            _PreSubmitRiskRequest(
+                action="BUY",
+                symbol="TSLA.US",
+                quantity=Decimal("228"),
+                price=Decimal("372"),
+            ),
+            broker,
+        )
+        assert isinstance(approved, ApprovedOrder)
+        assert approved.quantity == Decimal("228")
+
+    def test_paper_caps_fail_closed_when_margin_estimate_is_unavailable(
+        self,
+        svc: TradeExecutionService,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Relaxed caps never bypass the broker buying-power check.
+
+        When the margin estimate fails, sizing must still return zero even
+        with the paper-relaxed caps configured: the relaxation raises the
+        ceilings, it does not remove the fail-closed dependency on broker
+        buying power.
+        """
+        monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_POSITION_NOTIONAL",
+            "85000",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_POSITION_QUANTITY",
+            "1000",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_RISK_PER_TRADE",
+            "400",
+        )
+        from app.config import Settings
+
+        settings = Settings()
+        broker = MagicMock()
+        broker.estimate_margin_max_quantity.return_value = Decimal("0")
+        svc.margin_safety_factor = 1.0
+        svc.max_position_quantity = settings.hard_max_position_quantity
+        svc.max_position_notional = settings.hard_max_position_notional
+        svc.max_risk_per_trade = settings.hard_max_risk_per_trade
+        svc.stop_loss_pct = 0.25
+
+        qty = svc._entry_quantity_from_margin_power(
+            broker,
+            "TSLA.US",
+            "BUY",
+            Decimal("372"),
+            "USD",
+        )
+
+        assert qty == 0
+
     def test_guarded_mode_reproduces_current_nvda_23_share_sizing(
         self,
         svc: TradeExecutionService,

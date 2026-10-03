@@ -13,12 +13,14 @@ logger = logging.getLogger(__name__)
 # Position-notional ceiling for a funded account. P0: no configuration path
 # may exceed it.
 FUNDED_MAX_POSITION_NOTIONAL = 5000.0
-# Upper bound on the ceiling a CONFIRMED PAPER account may request. Chosen as
-# the point where the notional ceiling stops binding and the unchanged $250
-# risk budget starts to, since 1% (the stop-loss ceiling) of $25,000 is $250.
-# Beyond this, sizing would need a larger risk budget, which this exception
-# does not grant.
-PAPER_MAX_POSITION_NOTIONAL_BOUND = 25000.0
+# Upper bounds on the ceilings a CONFIRMED PAPER account may request. These
+# are code ceilings, not defaults: without the paper attestation AND a
+# separately requested amount per cap, the funded limits apply unchanged.
+# Each relaxation is its own exposure decision and must be requested
+# individually — confirming the account grants nothing by itself.
+PAPER_MAX_POSITION_NOTIONAL_BOUND = 200000.0
+PAPER_MAX_POSITION_QUANTITY_BOUND = 5000
+PAPER_MAX_RISK_PER_TRADE_BOUND = 2000.0
 
 
 class Settings(BaseSettings):
@@ -903,6 +905,25 @@ class Settings(BaseSettings):
         allow_inf_nan=False,
         validation_alias="AUTO_TRADE_PAPER_MAX_POSITION_NOTIONAL",
     )
+    # Quantity ceiling to use INSTEAD of the funded-account 100 shares while
+    # the paper attestation holds. 0 (the default) means "no request": the
+    # funded cap applies. Bounded by PAPER_MAX_POSITION_QUANTITY_BOUND for the
+    # same reason as the notional request above.
+    paper_max_position_quantity: int = Field(
+        default=0,
+        ge=0,
+        validation_alias="AUTO_TRADE_PAPER_MAX_POSITION_QUANTITY",
+    )
+    # Per-trade risk ceiling to use INSTEAD of the funded-account $250 while
+    # the paper attestation holds. 0 (the default) means "no request": the
+    # funded cap applies. Bounded by PAPER_MAX_RISK_PER_TRADE_BOUND for the
+    # same reason as the notional request above.
+    paper_max_risk_per_trade: float = Field(
+        default=0.0,
+        ge=0,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_PAPER_MAX_RISK_PER_TRADE",
+    )
     # Optional: the credential fingerprint the paper attestation was made
     # about. Empty keeps the pre-existing behaviour, so an existing paper
     # deployment is not stranded by adding this.
@@ -1192,28 +1213,51 @@ class Settings(BaseSettings):
             )
         self.opening_momentum_execution_enabled = False
         self.full_buying_power_usage_enabled = False
-        self.hard_max_position_quantity = min(self.hard_max_position_quantity, 100)
-        # Notional is the one ceiling a confirmed paper account may raise, and
-        # only up to PAPER_MAX_POSITION_NOTIONAL_BOUND. That bound is where the
-        # two caps coincide AT THE STOP-LOSS CEILING: 1% of $25,000 is exactly
-        # the UNCHANGED $250 risk budget, so at a 1% stop neither cap binds
-        # before the other.
-        #
-        # This coincidence is NOT a proof that more notional always needs more
-        # risk budget. The risk cap binds notional at
+        # Each paper relaxation (quantity, notional, per-trade risk) is
+        # granted ONLY by the paper attestation AND a separately requested
+        # amount, each bounded by its own code ceiling
+        # (PAPER_MAX_*_BOUND). These are ceilings, not defaults: without the
+        # attestation, or with a zero request, the funded caps apply
+        # unchanged. The funded 100/5000/250 trio is where the caps coincide
+        # AT THE STOP-LOSS CEILING (1% of $5,000 is $50; the funded risk
+        # budget of $250 permits exactly the funded notional at a 1% stop),
+        # but that coincidence is NOT a proof that more notional always
+        # needs more risk budget. The risk cap binds notional at
         # ``max_risk / (stop_pct/100)``, which GROWS as the stop tightens: the
         # same $250 already permits $50,000 at a 0.5% stop, where the notional
-        # ceiling — not the risk budget — is what binds. Raising the bound past
-        # $25,000 is withheld because it is a separate exposure decision, not
-        # because the arithmetic forces it. See
+        # ceiling — not the risk budget — is what binds. See
         # ``test_notional_headroom_above_the_paper_bound_depends_on_the_stop``.
         #
-        # Nor does the coincidence mean $250 is the worst case: fees, slippage,
-        # halts and failed exits can all push a realised loss past the budget.
+        # Nor does any coincidence mean $250 is the worst case: fees,
+        # slippage, halts and failed exits can all push a realised loss past
+        # the budget.
         #
-        # ``min`` is kept on the requested value so the exception can only ever
-        # widen what is permitted, never force exposure upward: an operator
-        # must still be able to dial the cap below $5,000 while it is active.
+        # ``min`` is kept on the requested value so each exception can only
+        # ever widen what is permitted, never force exposure upward: an
+        # operator must still be able to dial a cap below the funded default
+        # while it is active.
+        if self.paper_account_confirmed and self.paper_max_position_quantity > 0:
+            # The requested amount REPLACES the funded ceiling rather than
+            # capping it. Capping alone would be inert: the funded default is
+            # itself 100, so ``min(default, raised_ceiling)`` never moves.
+            self.hard_max_position_quantity = min(
+                self.paper_max_position_quantity,
+                PAPER_MAX_POSITION_QUANTITY_BOUND,
+            )
+            logger.warning(
+                "paper-account exception active: position quantity ceiling is "
+                "%d instead of 100; this must never be set on a funded "
+                "account",
+                self.hard_max_position_quantity,
+            )
+        else:
+            self.hard_max_position_quantity = min(self.hard_max_position_quantity, 100)
+            if self.paper_max_position_quantity > 0:
+                logger.warning(
+                    "paper quantity request %d ignored: the paper-account "
+                    "confirmation flag is not set",
+                    self.paper_max_position_quantity,
+                )
         if self.paper_account_confirmed and self.paper_max_position_notional > 0:
             # The requested amount REPLACES the funded ceiling rather than
             # capping it. Capping alone would be inert: the funded default is
@@ -1236,7 +1280,32 @@ class Settings(BaseSettings):
                 self.hard_max_position_notional,
                 FUNDED_MAX_POSITION_NOTIONAL,
             )
-        self.hard_max_risk_per_trade = min(self.hard_max_risk_per_trade, 250.0)
+            if self.paper_max_position_notional > 0:
+                logger.warning(
+                    "paper notional request %.2f ignored: the paper-account "
+                    "confirmation flag is not set",
+                    self.paper_max_position_notional,
+                )
+        if self.paper_account_confirmed and self.paper_max_risk_per_trade > 0:
+            # Same replacement-not-capping rationale as the two blocks above.
+            self.hard_max_risk_per_trade = min(
+                self.paper_max_risk_per_trade,
+                PAPER_MAX_RISK_PER_TRADE_BOUND,
+            )
+            logger.warning(
+                "paper-account exception active: per-trade risk ceiling is "
+                "%.2f instead of 250.00; this must never be set on a funded "
+                "account",
+                self.hard_max_risk_per_trade,
+            )
+        else:
+            self.hard_max_risk_per_trade = min(self.hard_max_risk_per_trade, 250.0)
+            if self.paper_max_risk_per_trade > 0:
+                logger.warning(
+                    "paper risk request %.2f ignored: the paper-account "
+                    "confirmation flag is not set",
+                    self.paper_max_risk_per_trade,
+                )
         self.hard_stop_loss_pct = min(self.hard_stop_loss_pct, 1.0)
         self.hard_max_holding_minutes = min(self.hard_max_holding_minutes, 60)
         self.hard_entry_cutoff_minutes_before_close = max(

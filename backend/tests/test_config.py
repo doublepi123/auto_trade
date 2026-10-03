@@ -416,13 +416,12 @@ class TestSettings:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A confirmed paper account may hold more notional, nothing else.
+        """A notional-only request raises only the notional ceiling.
 
-        $25,000 is where the two caps coincide at the stop-loss ceiling: 1% of
-        $25,000 is exactly the unchanged $250 risk budget. Raising notional
-        past that point is withheld because it is a separate exposure
-        decision — NOT because the arithmetic forces a bigger risk budget. At a
-        tighter stop the same $250 permits more notional; see
+        Each paper relaxation (quantity, notional, per-trade risk) must be
+        separately requested; requesting notional alone leaves the funded
+        100-share and $250 caps exactly in place. Whether more notional
+        would also need a bigger risk budget depends on the stop; see
         ``test_notional_headroom_above_the_paper_bound_depends_on_the_stop``.
         """
         monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
@@ -442,6 +441,144 @@ class TestSettings:
         assert s.hard_allow_position_addons is False
         assert s.llm_shadow_mode is True
         assert s.full_buying_power_usage_enabled is False
+
+    def test_paper_quantity_and_risk_requests_are_honoured_separately(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Each relaxation is paper-attestation-only and separately requested.
+
+        With the confirmation flag set, an explicit quantity request raises
+        the quantity cap and an explicit risk request raises the risk cap,
+        each bounded by its own paper code ceiling. The un-requested notional
+        cap stays at the funded default.
+        """
+        monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_POSITION_QUANTITY",
+            "1000",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_RISK_PER_TRADE",
+            "400",
+        )
+
+        s = Settings()
+
+        assert s.hard_max_position_quantity == 1000
+        assert s.hard_max_risk_per_trade == 400
+        # The notional cap was not requested, so it keeps the funded ceiling.
+        assert s.hard_max_position_notional == 5000
+        # The other P0 invariants are untouched by sizing relaxations.
+        assert s.hard_stop_loss_pct == 1
+        assert s.hard_max_holding_minutes == 60
+        assert s.hard_entry_cutoff_minutes_before_close == 45
+        assert s.hard_flatten_minutes_before_close == 15
+        assert s.allow_short_entries is False
+        assert s.hard_allow_position_addons is False
+        assert s.llm_shadow_mode is True
+        assert s.full_buying_power_usage_enabled is False
+
+    def test_paper_quantity_and_risk_requests_clamp_to_their_bounds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The paper requests are bounded, not unlimited switches.
+
+        Without bounds the confirmation flag would become an
+        unlimited-exposure switch, which is exactly the property the P0
+        clamps exist to deny.
+        """
+        monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_POSITION_QUANTITY",
+            "999999",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_RISK_PER_TRADE",
+            "999999",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_POSITION_NOTIONAL",
+            "999999",
+        )
+
+        s = Settings()
+
+        assert s.hard_max_position_quantity == 5000
+        assert s.hard_max_risk_per_trade == 2000
+        assert s.hard_max_position_notional == 200000
+
+    def test_paper_requests_below_the_funded_caps_lower_them(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The requests are ceilings, not floors: dialling down stays possible.
+
+        The relaxation can only ever widen what is permitted; it must never
+        force exposure upward, or an operator could not reduce risk while
+        the exception is active.
+        """
+        monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_POSITION_QUANTITY",
+            "40",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_RISK_PER_TRADE",
+            "100",
+        )
+
+        s = Settings()
+
+        assert s.hard_max_position_quantity == 40
+        assert s.hard_max_risk_per_trade == 100
+
+    def test_paper_quantity_and_risk_requests_are_ignored_without_confirmation(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Fail closed: the amounts alone must not relax anything.
+
+        A funded deployment that inherits only the amounts — from a copied
+        .env, say — keeps every funded ceiling. Each of the three caps must
+        stay funded-regardless of its request.
+        """
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_POSITION_QUANTITY",
+            "1000",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_RISK_PER_TRADE",
+            "400",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_PAPER_MAX_POSITION_NOTIONAL",
+            "85000",
+        )
+
+        s = Settings()
+
+        assert s.hard_max_position_quantity == 100
+        assert s.hard_max_risk_per_trade == 250
+        assert s.hard_max_position_notional == 5000
+
+    def test_paper_confirmation_with_zero_requests_keeps_funded_caps(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Zero is "no request", not a request for zero exposure.
+
+        Confirming the paper account without stating any amount must not
+        move any cap: the funded 100 / 5000 / 250 stay exactly as they are.
+        """
+        monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
+
+        s = Settings()
+
+        assert s.hard_max_position_quantity == 100
+        assert s.hard_max_risk_per_trade == 250
+        assert s.hard_max_position_notional == 5000
 
     def test_paper_notional_request_is_a_ceiling_not_a_floor(
         self,
@@ -463,24 +600,32 @@ class TestSettings:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The 25,000 bound is NOT proof that more notional needs more risk.
+        """The paper notional bound is NOT proof that more notional needs more risk.
 
-        `config.py` and `test_paper_experiment_raises_only_the_notional_ceiling`
-        both justify the 25,000 bound by saying that going past it "would
-        require raising the risk budget as well". That holds only when the stop
-        sits exactly at the 1% ceiling, where `250 / 1% == 25,000` makes the two
-        caps bind at the same point. It is not a general statement: the risk cap
-        binds notional at `max_risk / (stop_pct/100)`, which GROWS as the stop
-        tightens, so at a 0.5% stop the SAME 250 budget already permits 50,000
-        of notional and the notional ceiling — not the risk budget — is what
-        binds.
+        `config.py` historically justified a 25,000 bound by saying that going
+        past it "would require raising the risk budget as well". That holds
+        only when the stop sits exactly at the 1% ceiling, where
+        `250 / 1% == 25,000` makes the two caps bind at the same point. It is
+        not a general statement: the risk cap binds notional at
+        `max_risk / (stop_pct/100)`, which GROWS as the stop tightens, so at a
+        0.5% stop the SAME 250 budget already permits 50,000 of notional and
+        the notional ceiling — not the risk budget — is what binds.
 
-        This test pins the arithmetic so the rationale cannot drift back into an
-        unconditional claim. It deliberately does NOT assert that any cap should
-        be raised: the clamps stay exactly where they are.
+        This test pins the arithmetic so the rationale cannot drift back into
+        an unconditional claim. It deliberately does NOT assert that any cap
+        should be raised: the clamps stay exactly where they are.
         """
         monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
         monkeypatch.setenv("AUTO_TRADE_PAPER_MAX_POSITION_NOTIONAL", "25000")
+        # Keep the sibling requests out of this arithmetic check.
+        monkeypatch.delenv(
+            "AUTO_TRADE_PAPER_MAX_POSITION_QUANTITY",
+            raising=False,
+        )
+        monkeypatch.delenv(
+            "AUTO_TRADE_PAPER_MAX_RISK_PER_TRADE",
+            raising=False,
+        )
 
         s = Settings()
 
@@ -520,7 +665,7 @@ class TestSettings:
 
         s = Settings()
 
-        assert s.hard_max_position_notional == 25000
+        assert s.hard_max_position_notional == 200000
 
     def test_paper_notional_is_ignored_without_the_confirmation_flag(
         self,

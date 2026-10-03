@@ -289,6 +289,47 @@ def test_deploy_files_expose_interval_recenter_half_width_control() -> None:
     assert "AUTO_TRADE_INTERVAL_RECENTER_HALF_WIDTH_PCT=" in env_example
 
 
+def test_deploy_files_expose_paper_sizing_exception_controls() -> None:
+    """Compose must forward every paper-sizing exception variable.
+
+    A Settings field absent from compose is silently ignored at runtime: the
+    container keeps the field default regardless of what the operator sets
+    in .env (recorded auto-primary-switch incident). The ``:-0`` fallback
+    equals the Settings default (0 = no request) so an unset variable ships
+    fail-closed with the funded caps.
+    """
+    from app.config import Settings
+
+    compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+    dockerhub = (
+        ROOT / "docker-compose.dockerhub.yaml"
+    ).read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    keys = (
+        "AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED",
+        "AUTO_TRADE_PAPER_MAX_POSITION_NOTIONAL",
+        "AUTO_TRADE_PAPER_MAX_POSITION_QUANTITY",
+        "AUTO_TRADE_PAPER_MAX_RISK_PER_TRADE",
+    )
+    for key in keys:
+        assert f"{key}=" in compose, key
+        assert f"{key}=" in dockerhub, key
+        assert f"{key}=" in env_example, key
+
+    for amount_key in keys[1:]:
+        expected = f"{amount_key}=${{{amount_key}:-0}}"
+        assert expected in compose, expected
+        assert expected in dockerhub, expected
+
+    # The Settings defaults must stay "no request" so the compose fallback
+    # never silently arms a relaxation.
+    assert Settings().paper_max_position_notional == 0.0
+    assert Settings().paper_max_position_quantity == 0
+    assert Settings().paper_max_risk_per_trade == 0.0
+    assert Settings().paper_account_confirmed is False
+
+
 def test_compose_healthchecks_use_strict_readiness_endpoint() -> None:
     for filename in ("docker-compose.yaml", "docker-compose.dockerhub.yaml"):
         compose = (ROOT / filename).read_text(encoding="utf-8")
