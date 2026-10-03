@@ -20,7 +20,10 @@ from app.core.accounting_fees import (
 from app.core.accounting_fees import order_fee as _accounting_order_fee
 from app.core.board_lot import BoardLotResolution, quantize_to_board_lot
 from app.core.broker import ExtendedHoursUnsupportedError
-from app.core.execution_session import resolve_execution_session
+from app.core.execution_session import (
+    is_extended_closing_window,
+    resolve_execution_session,
+)
 from app.core.fees import (
     estimate_round_trip_fee,
     evaluate_long_round_trip_edge,
@@ -522,6 +525,7 @@ class TradeExecutionService:
         record_board_lot_residual: _RecordBoardLotResidual | None = None,
         extended_hours_protective_exits_enabled: bool = False,
         paper_account_confirmed: bool = False,
+        extended_hours_trading_enabled: bool = False,
         passive_risk_policy_resolver: _PassiveRiskPolicyResolver | None = None,
         passive_submit_hooks: _PassiveSubmitHooks | None = None,
         passive_reduction_quarantine: Callable[[str], str | None] | None = None,
@@ -563,6 +567,7 @@ class TradeExecutionService:
         self._degraded_lot_rejections: dict[str, tuple[Decimal, date]] = {}
         self.extended_hours_protective_exits_enabled = extended_hours_protective_exits_enabled
         self.paper_account_confirmed = paper_account_confirmed
+        self.extended_hours_trading_enabled = extended_hours_trading_enabled
         self._passive_risk_policy_resolver = passive_risk_policy_resolver
         # Passive submit protocol v2: the all-or-nothing hook bundle. A
         # partially wired bundle is treated as absent — every passive marker
@@ -609,7 +614,13 @@ class TradeExecutionService:
         """Shared in-memory permission check; never performs broker I/O."""
         if not (reduce_only and action in _POSITION_REDUCING_ACTIONS):
             return ExtendedHoursExitDecision(False, "UNKNOWN", "extended hours require a reduce-only exit")
-        if not self.extended_hours_protective_exits_enabled:
+        if not (
+            self.extended_hours_protective_exits_enabled
+            or (
+                self.extended_hours_trading_enabled
+                and not self.paper_account_confirmed
+            )
+        ):
             return ExtendedHoursExitDecision(False, "UNKNOWN", "extended-hours protective exits are disabled")
         if self.paper_account_confirmed:
             return ExtendedHoursExitDecision(False, "UNKNOWN", "paper account does not support extended hours")
@@ -627,6 +638,65 @@ class TradeExecutionService:
                 return ExtendedHoursExitDecision(False, session.phase, "extended-hours retry backoff has not elapsed")
             if self._extended_hours_attempts.get(key, 0) >= 3:
                 return ExtendedHoursExitDecision(False, session.phase, "extended-hours phase attempt cap reached")
+        return ExtendedHoursExitDecision(True, session.phase, session.reason)
+
+    def _entry_cutoff_active(self, market: str) -> bool:
+        """Entry-cutoff predicate.
+
+        Legacy: within ``entry_cutoff_minutes_before_close`` of the RTH close
+        while RTH is open. With the extended-hours trading flag effective
+        (on + not paper), the cutoff is measured instead from the end of the
+        last executable phase of the day (20:00 ET normally, RTH close on
+        half days): no new entries after 19:15 ET, NOT 15:15 ET.
+        """
+        minutes = self.entry_cutoff_minutes_before_close
+        if not (
+            self.extended_hours_trading_enabled
+            and not self.paper_account_confirmed
+        ):
+            return is_closing_window(market, minutes)
+        return is_extended_closing_window(market, minutes)
+
+    def _extended_hours_entry_decision(
+        self, *, symbol: str, market: str, instant: datetime | None = None,
+    ) -> ExtendedHoursExitDecision | None:
+        """Extended-hours ENTRY permission; None means refuse.
+
+        Narrow by design (owner 2026-10-03): only the dedicated
+        ``extended_hours_trading_enabled`` flag (NOT the older protective-exit
+        flag), never a paper-attested account, only a US PRE/POST phase, and
+        only a long BUY (callers check the action before asking). Shares the
+        same latch/backoff/cap state as exits so an SDK-unsupported symbol
+        stops being asked in both directions.
+        """
+        if not (
+            self.extended_hours_trading_enabled
+            and not self.paper_account_confirmed
+        ):
+            return None
+        now = instant if instant is not None else datetime.now(timezone.utc)
+        session = resolve_execution_session(market, now)
+        if not session.extended_hours_executable:
+            return ExtendedHoursExitDecision(False, session.phase, session.reason)
+        key = (symbol.upper(), session.phase, trade_day_for(market, now))
+        with self._state_lock:
+            if self._extended_hours_sdk_unsupported:
+                return ExtendedHoursExitDecision(
+                    False, session.phase, "SDK extended-hours execution is unsupported",
+                )
+            if key in self._extended_hours_unsupported:
+                return ExtendedHoursExitDecision(
+                    False, session.phase,
+                    "extended-hours execution is unsupported for this symbol and phase",
+                )
+            if time.monotonic() < self._extended_hours_retry_at.get(key, 0):
+                return ExtendedHoursExitDecision(
+                    False, session.phase, "extended-hours retry backoff has not elapsed",
+                )
+            if self._extended_hours_attempts.get(key, 0) >= 3:
+                return ExtendedHoursExitDecision(
+                    False, session.phase, "extended-hours phase attempt cap reached",
+                )
         return ExtendedHoursExitDecision(True, session.phase, session.reason)
 
     def _extended_hours_terminal_outcome(
@@ -1724,11 +1794,65 @@ class TradeExecutionService:
             and trading_session_mode == "ANY"
             and not is_trading_hours(market)
         ):
-            return self._skip_order(
+            # Extended-hours trading opt-in (owner 2026-10-03): a long BUY in
+            # an executable US PRE/POST phase may pass when the flag is
+            # effective (on + not paper). Every other non-RTH case — HK,
+            # overnight, weekends, holidays, half-day post, RTH_ONLY mode,
+            # paper accounts, flag off — keeps today's refusal.
+            extended_entry_decision = self._extended_hours_entry_decision(
+                symbol=symbol, market=market,
+            )
+            if extended_entry_decision is None:
+                return self._skip_order(
+                    symbol,
+                    action,
+                    f"non-trading hours for {market}; ANY mode cannot open a long position",
+                    skip_category="SESSION",
+                )
+            if not extended_entry_decision.permitted:
+                return self._skip_order(
+                    symbol,
+                    action,
+                    f"non-trading hours for {market}: {extended_entry_decision.reason}",
+                    skip_category="SESSION",
+                )
+            self._extended_hours_context = (
                 symbol,
-                action,
-                f"non-trading hours for {market}; ANY mode cannot open a long position",
-                skip_category="SESSION",
+                extended_entry_decision.phase,
+                datetime.now(timezone.utc),
+            )
+        if (
+            trading_session_mode == "ANY"
+            and self.extended_hours_trading_enabled
+            and not self.paper_account_confirmed
+            and action in _POSITION_REDUCING_ACTIONS
+            and not is_trading_hours(market)
+        ):
+            # Extended-hours trading opt-in (owner 2026-10-03): with the flag
+            # effective (on + not paper), an ANY-mode non-RTH reduce-only exit
+            # goes through the same extended-hours decision as under RTH_ONLY,
+            # so it carries outside_rth=ANY_TIME in an executable phase
+            # instead of resting unfilled until the 30s status timeout. In an
+            # UNAVAILABLE phase the intent is held without submitting or
+            # pausing — identical outcome to RTH_ONLY. On a paper-attested
+            # account the flag is ineffective (CONTRACT B/E): the block does
+            # not gate at all and the exit proceeds exactly as with the flag
+            # off. Flag off: same — no gate, today's behaviour.
+            exit_decision = self.extended_hours_exit_decision(
+                action=action, symbol=symbol, market=market,
+                reduce_only=reduce_only,
+            )
+            if not exit_decision.permitted:
+                return self._skip_order(
+                    symbol,
+                    action,
+                    f"non-RTH for {market}: {exit_decision.reason}",
+                    skip_category="SESSION",
+                )
+            self._extended_hours_context = (
+                symbol,
+                exit_decision.phase,
+                datetime.now(timezone.utc),
             )
         if trading_session_mode == "RTH_ONLY":
             if not is_trading_hours(market):
@@ -1754,10 +1878,7 @@ class TradeExecutionService:
                     f"opening warmup for {market}",
                     skip_category="SESSION",
                 )
-        if action in _ENTRY_ACTIONS and is_closing_window(
-            market,
-            self.entry_cutoff_minutes_before_close,
-        ):
+        if action in _ENTRY_ACTIONS and self._entry_cutoff_active(market):
             return self._skip_order(
                 symbol,
                 action,
@@ -4855,18 +4976,35 @@ class TradeExecutionService:
             execution_market = market_for_symbol(symbol)
             if not is_trading_hours(execution_market):
                 now = datetime.now(timezone.utc)
-                decision = self.extended_hours_exit_decision(
-                    action=action, symbol=symbol, market=execution_market,
-                    reduce_only=reduce_only, instant=now,
-                )
-                if not decision.permitted:
-                    return self._skip_order(
-                        symbol, action,
-                        f"execution session closed before submission: {decision.reason}",
-                        skip_category="SESSION",
+                if action in _ENTRY_ACTIONS:
+                    # Extended-hours ENTRY final binding (flag-gated): re-check
+                    # the executable phase at submit time — an approval made
+                    # at 19:59 cannot submit at 20:01.
+                    entry_decision = self._extended_hours_entry_decision(
+                        symbol=symbol, market=execution_market, instant=now,
                     )
-                outside_rth = "ANY_TIME"
-                self._extended_hours_context = (symbol, decision.phase, now)
+                    if entry_decision is None or not entry_decision.permitted:
+                        return self._skip_order(
+                            symbol, action,
+                            "execution session closed before submission: "
+                            + (entry_decision.reason if entry_decision else "extended-hours entries are not permitted"),
+                            skip_category="SESSION",
+                        )
+                    outside_rth = "ANY_TIME"
+                    self._extended_hours_context = (symbol, entry_decision.phase, now)
+                else:
+                    decision = self.extended_hours_exit_decision(
+                        action=action, symbol=symbol, market=execution_market,
+                        reduce_only=reduce_only, instant=now,
+                    )
+                    if not decision.permitted:
+                        return self._skip_order(
+                            symbol, action,
+                            f"execution session closed before submission: {decision.reason}",
+                            skip_category="SESSION",
+                        )
+                    outside_rth = "ANY_TIME"
+                    self._extended_hours_context = (symbol, decision.phase, now)
         final_order = dataclass_replace(
             boundary_approval,
             price=(

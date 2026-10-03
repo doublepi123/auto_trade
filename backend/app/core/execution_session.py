@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Literal
 
 from app.core.holiday_calendar import (
@@ -80,3 +80,65 @@ def resolve_execution_session(
         datetime.combine(day, start, tzinfo=session.timezone).astimezone(timezone.utc),
         datetime.combine(day, end, tzinfo=session.timezone).astimezone(timezone.utc),
     )
+
+
+def _utc_now(instant: datetime | None) -> datetime:
+    if instant is None:
+        return datetime.now(timezone.utc)
+    if instant.tzinfo is None:
+        return instant.replace(tzinfo=timezone.utc)
+    return instant.astimezone(timezone.utc)
+
+
+def extended_last_executable_close(
+    market: str, instant: datetime | None = None,
+) -> datetime | None:
+    """End of the last extended-hours-executable phase of ``instant``'s day.
+
+    With AUTO_TRADE_EXTENDED_HOURS_TRADING_ENABLED effective, entry cutoff and
+    flatten windows are measured from THIS boundary, not the RTH close:
+    - US normal trading day: post-market ends 20:00 ET;
+    - US half day: post-market is unsupported, so the RTH close (13:00 ET);
+    - HK: no extended phases, so the RTH close;
+    - weekends, holidays, calendar-coverage gaps: None (nothing executable).
+    The result is an exchange-local aware datetime; None means no executable
+    phase exists that day.
+
+    Lives here — NOT in market_calendar.py — because that module's source is
+    hashed into frozen research digests (strategy_v2 forward semantics,
+    watchlist_quant_v6, llm_interval_forward) which must not drift.
+    """
+    code = market.upper()
+    session = get_session(code)
+    now = _utc_now(instant)
+    local = session.local(now)
+    day = local.date()
+    if day.year < COVERAGE_START_YEAR or is_coverage_expired(code, day):
+        return None
+    if local.weekday() >= 5 or is_market_closed(code, day):
+        return None
+    close = session.close_time(day)
+    if code == "US" and not is_half_day(code, day):
+        return datetime.combine(day, time(20), tzinfo=session.timezone)
+    return datetime.combine(day, close, tzinfo=session.timezone)
+
+
+def is_extended_closing_window(
+    market: str, minutes: int, instant: datetime | None = None,
+) -> bool:
+    """Whether ``instant`` is within ``minutes`` of the last executable phase end.
+
+    Companion to ``extended_last_executable_close``: with the extended-hours
+    trading flag effective this replaces the RTH-close ``is_closing_window``
+    boundary. False whenever no executable phase exists that day. Unlike
+    ``is_closing_window`` it does NOT require RTH to be open — the window may
+    fall inside PRE/POST. Lives here for the same frozen-digest reason as
+    ``extended_last_executable_close``.
+    """
+    if minutes <= 0:
+        return False
+    now = _utc_now(instant)
+    close = extended_last_executable_close(market, now)
+    if close is None:
+        return False
+    return close - timedelta(minutes=minutes) <= now < close

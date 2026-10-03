@@ -34,7 +34,10 @@ from app.core.board_lot import BoardLotCache
 from app.core.broker import BrokerGateway, Position, Quote
 from app.core.engine import EngineSnapshot, EngineState, StrategyEngine, StrategyParams, TriggerResult
 from app.core.exit_policy import ExitPolicyConfig, ExitQuote, PositionExitContext, ReductionCause, ReductionDecision, evaluate_exit_policy
-from app.core.execution_session import resolve_execution_session
+from app.core.execution_session import (
+    is_extended_closing_window,
+    resolve_execution_session,
+)
 from app.core.exit_pricing import degraded_exit_limit, parse_quote_source_timestamp, select_reference_price
 from app.core.fees import one_side_fee_rate
 from app.core.log_throttle import RepeatedLogThrottle
@@ -427,6 +430,13 @@ class AppRunner:
                 self._validate_protective_exit_commit
             ),
             terminal_callback_store=OrderTerminalCallbackService(),
+            extended_hours_protective_exits_enabled=(
+                settings.extended_hours_protective_exits_enabled
+            ),
+            paper_account_confirmed=settings.paper_account_confirmed,
+            extended_hours_trading_enabled=(
+                settings.extended_hours_trading_enabled
+            ),
         )
         self._state_svc = RuntimeStateService()
         self._primary_generation = 0
@@ -6205,7 +6215,7 @@ class AppRunner:
             in_session_symbols: list[str] = []
             for sym in symbols:
                 market = market_for_symbol(sym) or self.engine.params.market
-                if is_trading_hours(market):
+                if self._market_in_active_session(market):
                     in_session_symbols.append(sym)
             if not in_session_symbols:
                 return False
@@ -8489,7 +8499,7 @@ class AppRunner:
                 ask=float(quote.ask),
             ),
             now=datetime.now(timezone.utc),
-            in_flatten_window=is_closing_window(
+            in_flatten_window=self._in_flatten_window(
                 market,
                 engine.params.flatten_minutes_before_close,
             ),
@@ -10960,6 +10970,66 @@ class AppRunner:
 
     def _get_trading_session_mode(self) -> str:
         return self._trading_session_mode or "ANY"
+
+    def _extended_hours_trading_effective(self) -> bool:
+        """Read the extended-hours trading flag off the live trade service."""
+        return bool(
+            self._trade_svc.extended_hours_trading_enabled
+            and not self._trade_svc.paper_account_confirmed
+        )
+
+    def _in_flatten_window(
+        self,
+        market: str,
+        minutes: int,
+        *,
+        instant: datetime | None = None,
+    ) -> bool:
+        """Flatten-window predicate for ``market``.
+
+        Legacy semantics: within ``minutes`` of the RTH close while RTH is
+        open. With the extended-hours trading flag effective (on + not
+        paper) on the US market, the window is measured instead from the end
+        of the last executable phase of the day (20:00 ET normally, RTH
+        close on half days) and also applies during PRE/POST: flatten runs
+        19:45-20:00 ET on a normal day, NOT 15:45-16:00 ET.
+
+        Call shapes match HEAD exactly when ``instant`` is not given: the
+        legacy path calls ``is_closing_window(market, minutes)`` with no
+        third argument, so tests monkeypatching either calendar function
+        with 2-arg lambdas keep working.
+        """
+        if not self._extended_hours_trading_effective():
+            if instant is None:
+                return is_closing_window(market, minutes)
+            return is_closing_window(market, minutes, instant)
+        now = instant if instant is not None else datetime.now(timezone.utc)
+        return is_extended_closing_window(market, minutes, now)
+
+    def _market_in_active_session(
+        self,
+        market: str,
+        *,
+        instant: datetime | None = None,
+    ) -> bool:
+        """Whether ``market`` currently has an executable session.
+
+        Legacy: RTH only. With the extended-hours trading flag effective,
+        US PRE/POST phases count as in-session too (resubscribe filter).
+
+        Call shape matches HEAD exactly when ``instant`` is not given:
+        ``is_trading_hours(market)`` with no second argument, so tests
+        monkeypatching it with 1-arg lambdas keep working.
+        """
+        if instant is None:
+            if is_trading_hours(market):
+                return True
+        elif is_trading_hours(market, instant):
+            return True
+        if not self._extended_hours_trading_effective():
+            return False
+        now = instant if instant is not None else datetime.now(timezone.utc)
+        return resolve_execution_session(market, now).extended_hours_executable
 
     def _refresh_trading_session_mode(self) -> None:
         try:

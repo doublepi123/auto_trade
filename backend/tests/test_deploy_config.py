@@ -507,3 +507,40 @@ def test_deploy_files_expose_extended_hours_protective_exit_control() -> None:
     )
     assert expected_default in compose
     assert expected_default in dockerhub_compose
+
+
+def test_deploy_files_expose_extended_hours_trading_control() -> None:
+    """Compose must forward the extended-hours trading opt-in.
+
+    Same incident class as the protective-exit flag: a Settings field absent
+    from compose is silently ignored at runtime. The ``:-`` fallback must
+    equal the Settings default (false) so an unset variable ships fail-closed,
+    and the paper-account caveat must be documented in .env.example.
+    """
+    from app.config import Settings
+
+    compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+    dockerhub_compose = (
+        ROOT / "docker-compose.dockerhub.yaml"
+    ).read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    assert "AUTO_TRADE_EXTENDED_HOURS_TRADING_ENABLED=" in compose, (
+        "docker-compose.yaml must forward the extended-hours trading flag"
+    )
+    assert (
+        "AUTO_TRADE_EXTENDED_HOURS_TRADING_ENABLED=" in dockerhub_compose
+    ), "docker-compose.dockerhub.yaml must forward the extended-hours trading flag"
+    assert (
+        "AUTO_TRADE_EXTENDED_HOURS_TRADING_ENABLED=" in env_example
+    ), ".env.example must document the extended-hours trading flag"
+
+    expected_default = (
+        "AUTO_TRADE_EXTENDED_HOURS_TRADING_ENABLED="
+        "${AUTO_TRADE_EXTENDED_HOURS_TRADING_ENABLED:-"
+        f"{str(Settings().extended_hours_trading_enabled).lower()}"
+        "}"
+    )
+    assert expected_default in compose
+    assert expected_default in dockerhub_compose
+    assert Settings().extended_hours_trading_enabled is False

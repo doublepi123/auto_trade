@@ -1136,6 +1136,45 @@ class Settings(BaseSettings):
             "setting this to false does not enable live LLM orders."
         ),
     )
+    # Opt-in for US extended-hours TRADING (pre-market 04:00-09:30 ET and
+    # post-market close-20:00 ET): long entries AND reduce-only exits
+    # submitted as LO/Day with outside_rth=ANY_TIME. DEFAULT OFF, and it has
+    # NO effect on a paper-attested account — Longbridge paper accounts do
+    # NOT support US extended-hours trading, so paper + flag on fails closed
+    # to off (see ``extended_hours_trading_effective``). Turning this on for a
+    # funded account is a separate owner decision (owner, 2026-10-03).
+    # Overnight (20:00-04:00 ET), OutsideRTH.Overnight and enable_overnight
+    # quotes stay unsupported. Shorts, add-ons and LLM orders stay banned.
+    extended_hours_trading_enabled: bool = Field(
+        default=False,
+        validation_alias="AUTO_TRADE_EXTENDED_HOURS_TRADING_ENABLED",
+        description=(
+            "Permit US pre-market and after-hours long entries and "
+            "reduce-only exits via outside_rth=ANY_TIME. No effect on a "
+            "paper-attested account (paper accounts do not support US "
+            "extended-hours trading). Overnight stays unsupported."
+        ),
+    )
+
+    def extended_hours_trading_effective(self) -> bool:
+        """Flag effective only when enabled AND not on a paper-attested account.
+
+        Paper + flag on fails closed to off (owner decision 2026-10-03):
+        Longbridge paper accounts do not support US extended-hours trading.
+        The warning is emitted once per Settings instance, not per call.
+        """
+        if not self.extended_hours_trading_enabled:
+            return False
+        if self.paper_account_confirmed:
+            if not getattr(self, "_ext_hours_paper_warned", False):
+                logger.warning(
+                    "AUTO_TRADE_EXTENDED_HOURS_TRADING_ENABLED ignored: "
+                    "paper accounts do not support US extended-hours trading"
+                )
+                self._ext_hours_paper_warned = True
+            return False
+        return True
+
     llm_max_order_price_deviation_pct: float = Field(
         default=1.0,
         gt=0,
