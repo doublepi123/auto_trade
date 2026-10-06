@@ -2422,6 +2422,21 @@ class DiagnosticLiveSafety(BaseModel):
     live_max_entries_per_symbol_per_day: int
 
 
+class DiagnosticFundedMargin(BaseModel):
+    """Funded full-margin exception block (observer-only; no secrets)."""
+
+    enabled: bool = False
+    configured: bool = False
+    binding_status: str = "DISABLED"
+    requested_caps: dict[str, float] = Field(default_factory=dict)
+    code_bounds: dict[str, float] = Field(default_factory=dict)
+    effective_caps: dict[str, float | None] = Field(default_factory=dict)
+    factor: float | None = None
+    last_limiting_factor: str | None = None
+    cutoff_minutes: int = 0
+    flatten_minutes: int = 0
+
+
 class DecisionFunnelDiagnostics(BaseModel):
     """Live-path decision-funnel counters for the current exchange-local
     trading session. Read stages in order; the first zero count indicts the
@@ -2492,6 +2507,9 @@ class DiagnosticsResponse(BaseModel):
     dedup_suppressed_total: int
     dedup_window_seconds: float
     live_safety: DiagnosticLiveSafety
+    funded_margin: DiagnosticFundedMargin = Field(
+        default_factory=DiagnosticFundedMargin,
+    )
     quote_stream: DiagnosticQuoteStream
     risk: DiagnosticRiskState
     symbol_runtimes: list[DiagnosticSymbolRuntime]

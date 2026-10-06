@@ -544,3 +544,63 @@ def test_deploy_files_expose_extended_hours_trading_control() -> None:
     assert expected_default in compose
     assert expected_default in dockerhub_compose
     assert Settings().extended_hours_trading_enabled is False
+
+
+def test_deploy_files_expose_funded_margin_exception_controls() -> None:
+    """Compose must forward every funded-margin exception variable.
+
+    A Settings field absent from compose is silently ignored at runtime:
+    the container keeps the field default regardless of what the operator
+    sets in .env (recorded auto-primary-switch incident). The ``:-``
+    fallbacks must equal the Settings defaults (off / empty / 0) so an
+    unset variable ships fail-closed with the funded caps.
+    """
+    from app.config import Settings
+
+    compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+    dockerhub = (
+        ROOT / "docker-compose.dockerhub.yaml"
+    ).read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    keys = (
+        "AUTO_TRADE_FUNDED_MARGIN_ENABLED",
+        "AUTO_TRADE_FUNDED_MARGIN_ACCOUNT_FINGERPRINT",
+        "AUTO_TRADE_FUNDED_MARGIN_MAX_POSITION_QUANTITY",
+        "AUTO_TRADE_FUNDED_MARGIN_MAX_POSITION_NOTIONAL",
+        "AUTO_TRADE_FUNDED_MARGIN_MAX_RISK_PER_TRADE",
+    )
+    for key in keys:
+        assert f"{key}=" in compose, key
+        assert f"{key}=" in dockerhub, key
+        assert f"{key}=" in env_example, key
+
+    expected_defaults = {
+        "AUTO_TRADE_FUNDED_MARGIN_ENABLED": (
+            "${AUTO_TRADE_FUNDED_MARGIN_ENABLED:-false}"
+        ),
+        "AUTO_TRADE_FUNDED_MARGIN_ACCOUNT_FINGERPRINT": (
+            "${AUTO_TRADE_FUNDED_MARGIN_ACCOUNT_FINGERPRINT:-}"
+        ),
+        "AUTO_TRADE_FUNDED_MARGIN_MAX_POSITION_QUANTITY": (
+            "${AUTO_TRADE_FUNDED_MARGIN_MAX_POSITION_QUANTITY:-0}"
+        ),
+        "AUTO_TRADE_FUNDED_MARGIN_MAX_POSITION_NOTIONAL": (
+            "${AUTO_TRADE_FUNDED_MARGIN_MAX_POSITION_NOTIONAL:-0}"
+        ),
+        "AUTO_TRADE_FUNDED_MARGIN_MAX_RISK_PER_TRADE": (
+            "${AUTO_TRADE_FUNDED_MARGIN_MAX_RISK_PER_TRADE:-0}"
+        ),
+    }
+    for key, expected in expected_defaults.items():
+        line = f"{key}={expected}"
+        assert line in compose, line
+        assert line in dockerhub, line
+
+    # The Settings defaults must stay fail-closed so the compose fallback
+    # never silently arms the exception.
+    assert Settings().funded_margin_enabled is False
+    assert Settings().funded_margin_account_fingerprint == ""
+    assert Settings().funded_margin_max_position_quantity == 0
+    assert Settings().funded_margin_max_position_notional == 0.0
+    assert Settings().funded_margin_max_risk_per_trade == 0.0

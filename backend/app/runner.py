@@ -79,6 +79,7 @@ from app.services.trade_event_service import record_trade_event
 from app.services.trade_execution_service import (
     BrokerSubmissionUncertainError,
     EntryPolicyCheckResult,
+    EXECUTION_CONTEXT_INITIATOR_KEY,
     FinalOrderQuoteCheckResult,
     ORDER_EXECUTION_BLOCKED_PREFIX,
     ORDER_PERSISTENCE_UNCERTAIN_PREFIX,
@@ -321,8 +322,40 @@ class _EmptyPassiveSnapshot:
     order_live = False
 
 
-def _EMPTY_PASSIVE_SNAPSHOT() -> "_EmptyPassiveSnapshot":
+def _EMPTY_PASSIVE_SNAPSHOT() -> "_EmptyPassiveSnapshot":  # noqa: N802
     return _EmptyPassiveSnapshot()
+
+
+def _raw_strategy_cap_int(value: object) -> int | None:
+    """RAW strategy quantity cap or None; never raises (round-2 finding 1).
+
+    Accepts only a genuine positive finite number that is not a bool.
+    Anything else (None, non-numeric, NaN, inf, negative, bool) returns
+    None, which leaves the funded-margin exception INERT for that cap
+    and preserves the clamped hard_ceiling behaviour untouched.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        candidate = int(value)  # pyright: ignore[reportArgumentType]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if candidate <= 0:
+        return None
+    return candidate
+
+
+def _raw_strategy_cap_float(value: object) -> float | None:
+    """RAW strategy notional/risk cap or None; never raises."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        candidate = float(value)  # pyright: ignore[reportArgumentType]
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(candidate) or candidate <= 0:
+        return None
+    return candidate
 
 
 class AppRunner:
@@ -423,6 +456,9 @@ class AppRunner:
             entry_policy_check=self._validate_live_entry_policy,
             passive_reduction_quarantine=self._passive_quarantine_issue,
             passive_uncertainty_sink=self._passive_uncertainty_sink,
+            funded_margin_fingerprint_provider=(
+                self._current_credential_fingerprint
+            ),
             final_protective_exit_check=(
                 self._validate_final_protective_exit_submission
             ),
@@ -550,6 +586,13 @@ class AppRunner:
         self._protective_exit_authorization_scope: tuple[object, ...] | None = None
         self._protective_runtime_generation = 0
         self._broker_identity_fingerprint = ""
+        # Funded-margin exception binding source: the CURRENT credential
+        # fingerprint, published only while ALL THREE credential parts are
+        # non-empty. Read lazily by the trade service at sizing/pre-submit
+        # (never frozen here — credentials load after
+        # _configure_live_safety), so a reload/rotation is picked up and a
+        # mismatch fails closed to the clamped funded caps.
+        self._credential_parts_complete = False
         self._reconciliation_gate: str = "passed"
         self.engine.reconciliation_gate = "passed"
         self._last_reconciliation_gate_log_at: float = 0.0
@@ -1989,6 +2032,72 @@ class AppRunner:
             getattr(config, "stop_loss_pct", settings.hard_stop_loss_pct),
             settings.hard_stop_loss_pct,
         )
+        # Funded-margin exception (contract §B): hand over the RAW
+        # strategy-row caps (pre-hard_ceiling) alongside the clamped
+        # fields above, which keep their values and semantics unchanged
+        # (the passive lane and diagnostics read the clamped ones). The
+        # exception resolver takes min(raw, requested, code bound) per
+        # cap — never a min against the already-clamped cached values.
+        # Round-2 review finding 1 (P0): the handover must NEVER raise —
+        # None/non-numeric/NaN/inf/negative/bool values leave the
+        # exception INERT for that cap (raw None), while the clamped
+        # hard_ceiling fields above keep their exact 432dc793 behaviour.
+        self._trade_svc.raw_strategy_max_position_quantity = (
+            _raw_strategy_cap_int(
+                getattr(
+                    config,
+                    "max_position_quantity",
+                    settings.hard_max_position_quantity,
+                ),
+            )
+        )
+        self._trade_svc.raw_strategy_max_position_notional = (
+            _raw_strategy_cap_float(
+                getattr(
+                    config,
+                    "max_position_notional",
+                    settings.hard_max_position_notional,
+                ),
+            )
+        )
+        self._trade_svc.raw_strategy_max_risk_per_trade = (
+            _raw_strategy_cap_float(
+                getattr(
+                    config,
+                    "max_risk_per_trade",
+                    settings.hard_max_risk_per_trade,
+                ),
+            )
+        )
+        # The static exception knobs come from Settings (validated at
+        # load: fingerprint normalized, requests clamped to the code
+        # bounds, cutoff/flatten floors raised, extended hours forced
+        # off). The runtime binding is NOT evaluated here — credentials
+        # load after this method runs; sizing/pre-submit resolve it
+        # lazily against the CURRENT fingerprint.
+        self._trade_svc.funded_margin_enabled = (
+            settings.funded_margin_enabled
+        )
+        self._trade_svc.funded_margin_account_fingerprint = (
+            settings.funded_margin_account_fingerprint
+        )
+        self._trade_svc.funded_margin_requested_quantity = (
+            settings.funded_margin_max_position_quantity
+        )
+        self._trade_svc.funded_margin_requested_notional = (
+            settings.funded_margin_max_position_notional
+        )
+        self._trade_svc.funded_margin_requested_risk = (
+            settings.funded_margin_max_risk_per_trade
+        )
+        # Keep the trade service's extended-hours flag coherent with the
+        # (possibly validator-forced-off) setting on every reload.
+        self._trade_svc.extended_hours_trading_enabled = (
+            settings.extended_hours_trading_enabled
+        )
+        self._trade_svc.paper_account_confirmed = (
+            settings.paper_account_confirmed
+        )
         self._trade_svc.entry_cutoff_minutes_before_close = hard_floor_int(
             getattr(
                 config,
@@ -2087,7 +2196,10 @@ class AppRunner:
         if self._broker_identity_fingerprint:
             try:
                 payload = json.loads(str(event.payload_json or "{}"))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, RecursionError):
+                # A pathologically nested historical payload can raise
+                # RecursionError, which must fail the provenance check
+                # (fail-closed) instead of aborting startup recovery.
                 return False
             if (
                 not isinstance(payload, dict)
@@ -3282,6 +3394,9 @@ class AppRunner:
                         settings.live_max_entries_per_symbol_per_day
                     ),
                 },
+                # Funded full-margin exception (contract §H): observer-only
+                # block, no credentials and no fingerprint VALUE ever.
+                "funded_margin": self._funded_margin_diagnostics_block(),
                 "quote_stream": {
                     "last_push_age_seconds": age_since(self._last_push_quote_at),
                     "last_quote_age_seconds": age_since(self._last_quote_at),
@@ -3303,6 +3418,26 @@ class AppRunner:
                 },
                 "symbol_runtimes": symbol_runtimes,
             }
+
+    def _funded_margin_diagnostics_block(self) -> dict[str, Any]:
+        """Observer-only funded-margin diagnostics (contract §H).
+
+        Extends the trade service's block with the runner-side session
+        floors. NEVER includes credentials or the fingerprint VALUE —
+        only the binding status and resolved caps. The binding status is
+        refreshed by actually resolving it once (cheap, in-memory), so the
+        block reports the live CURRENT-credential state, not a snapshot.
+        """
+        service_block = self._trade_svc.funded_margin_diagnostics()
+        return {
+            **service_block,
+            "cutoff_minutes": int(
+                self._trade_svc.entry_cutoff_minutes_before_close
+            ),
+            "flatten_minutes": int(
+                self.engine.params.flatten_minutes_before_close
+            ),
+        }
 
     def llm_symbol_statuses(self) -> list[dict[str, Any]]:
         now = time.monotonic()
@@ -4287,6 +4422,8 @@ class AppRunner:
         decision: _QuoteTriggerDecision,
         quote: Quote,
         reason: str,
+        *,
+        initiator: str = "RANGE",
     ) -> dict[str, object]:
         now = datetime.now(timezone.utc)
         bid = float(quote.bid)
@@ -4362,6 +4499,9 @@ class AppRunner:
             "config_version": hashlib.sha256(snapshot_json.encode("utf-8")).hexdigest(),
             "config_snapshot": snapshot_json,
             "accounting_fee_model": ACCOUNTING_FEE_MODEL_US_SEC98,
+            # Round-2 finding 4: the explicit initiator marker the
+            # funded-margin resolver gates on (top level, runner-owned).
+            "execution_initiator": initiator,
             "exit_cause": (
                 decision.reduction_cause or "TARGET" if is_exit else ""
             ),
@@ -4409,6 +4549,11 @@ class AppRunner:
                 snapshot_json.encode("utf-8")
             ).hexdigest(),
             "config_snapshot": snapshot_json,
+            # The opening lane overrides the initiator so the
+            # funded-margin resolver excludes this order (round-2
+            # finding 4): the marker is top-level AND inside the
+            # snapshot.
+            "execution_initiator": "OPENING_MOMENTUM",
         }
 
     @staticmethod
@@ -5144,6 +5289,7 @@ class AppRunner:
                     llm_decision,
                     quote,
                     "LLM trade action",
+                    initiator="LLM",
                 ),
             )
         except BrokerSubmissionUncertainError:
@@ -8936,6 +9082,25 @@ class AppRunner:
         material = "\0".join(identity_parts).encode("utf-8")
         return hashlib.sha256(material).hexdigest()
 
+    def _current_credential_fingerprint(self) -> str:
+        """CURRENT credential fingerprint, or "" until all parts are present.
+
+        Single injection point for the funded-margin exception binding
+        (contract §B). Pure in-memory read: the completeness flag and the
+        fingerprint are published together, atomically, by
+        ``_apply_credentials``. Incomplete credentials => "" => the
+        binding fails closed to the clamped funded caps.
+        """
+        with self._state_lock:
+            if not self._credential_parts_complete:
+                return ""
+            return self._broker_identity_fingerprint
+
+    @property
+    def _funded_margin_fingerprint_provider(self) -> Callable[[], str]:
+        """Bound-method accessor mirroring the injected trade-service hook."""
+        return self._current_credential_fingerprint
+
     def _apply_credentials(
         self,
         credentials: PlainCredentials,
@@ -9025,6 +9190,14 @@ class AppRunner:
             self.broker = new_broker
             self.notifier = new_notifier
             self._broker_identity_fingerprint = broker_identity_fingerprint
+            # Funded-margin binding source: publish the CURRENT fingerprint
+            # ONLY when all three credential parts are non-empty, so the
+            # lazy sizing/pre-submit binding fails closed on partial
+            # credentials and picks up a rotation automatically.
+            self._credential_parts_complete = all(
+                bool(str(value or "").strip())
+                for value in credential_env.values()
+            )
             try:
                 old_broker.close()
             except Exception as exc:
@@ -9087,10 +9260,17 @@ class AppRunner:
             "source": "runner",
         }
         metadata = ledger_metadata or {}
+        # Round-3 finding 1 (P0): the execution-initiator marker is
+        # execution-internal and must never appear in the persisted
+        # ORDER_SUBMITTED payload_json (or therefore the event-list API).
+        # The service already strips it before building the ledger
+        # metadata; this is the serialization-boundary backstop for any
+        # other caller path. Only the explicit funded-margin evidence
+        # block (written when the exception actually applied) survives.
         submission_payload.update({
             key: value.isoformat() if isinstance(value, datetime) else value
             for key, value in metadata.items()
-            if key not in {"config_snapshot"}
+            if key not in {"config_snapshot", EXECUTION_CONTEXT_INITIATOR_KEY}
         })
         if self._broker_identity_fingerprint:
             submission_payload["broker_identity_fingerprint"] = (
@@ -9610,6 +9790,61 @@ class AppRunner:
                 logger.exception(
                     "failed to load submission provenance for pending orders"
                 )
+        # Round-3 finding 2 / review-3 finding 1 (P0): the funded-margin
+        # verdict is recovered PER ORDER, ONLY from a submission event
+        # that passes ``_submission_event_matches_order`` for THIS row
+        # (same id + symbol + broker side + created-at window + payload
+        # identity). A same-id event from another account / wrong symbol
+        # / wrong side / stale time never contributes its evidence, and
+        # only a literal BUY row (entry) can recover the flag — so no
+        # global unvalidated id set is built from all events anymore.
+        def _funded_margin_evidence_applied(event: TradeEvent) -> bool:
+            """Decode the persisted evidence block; fail closed.
+
+            Malformed / missing / wrong-shaped / pathologically nested
+            payloads yield False (never raise); ``applied`` must be the
+            literal True, not a truthy coercion.
+            """
+            try:
+                payload = json.loads(str(event.payload_json or "{}"))
+            except (TypeError, ValueError, RecursionError):
+                return False
+            if not isinstance(payload, dict):
+                return False
+            evidence = payload.get("funded_margin")
+            return (
+                isinstance(evidence, dict)
+                and evidence.get("applied") is True
+            )
+
+        def _recover_funded_margin_entry(row: OrderRecord) -> bool:
+            # The provenance filter is id/symbol/side/time/identity — the
+            # exact gates this loop already enforces — applied BEFORE any
+            # evidence decoding so a mismatched event's payload is never
+            # parsed for funded evidence. Both the row AND the event must
+            # be a literal BUY: the matcher normalizes BUY_TO_COVER to the
+            # BUY broker side, but that is a position reduction and can
+            # never carry a funded-margin ENTRY verdict. Acceptance
+            # correction: the matcher only compares payload identity when
+            # the recovering runner holds a NONEMPTY current fingerprint,
+            # so an unbound runner needs its own gate — the verdict may
+            # become True ONLY when the current credential identity is
+            # nonempty and the very same validated event proves it. The
+            # feature-enabled flag is deliberately NOT consulted: a
+            # historically marked order keeps its protective retry
+            # management after restart even when the flag is now OFF.
+            if str(getattr(row, "side", "") or "").strip().upper() != "BUY":
+                return False
+            if not self._broker_identity_fingerprint:
+                return False
+            return any(
+                str(event.side or "").strip().upper() == "BUY"
+                and self._submission_event_matches_order(event, row)
+                and _funded_margin_evidence_applied(event)
+                for event in submitted_events
+                if str(event.broker_order_id or "")
+                == str(row.broker_order_id or "")
+            )
         for row in rows:
             issue = self._live_order_representation_issue(
                 row,
@@ -9674,6 +9909,11 @@ class AppRunner:
                     ),
                     next_status_check_at=0.0,
                     submitted_at=now - submitted_age_seconds,
+                    # Review-3 finding 1: restored ONLY from this row's
+                    # validated submission provenance evidence block.
+                    funded_margin_entry=(
+                        _recover_funded_margin_entry(row)
+                    ),
                 )
             )
         self._trade_svc.load_pending_orders(pending_orders)

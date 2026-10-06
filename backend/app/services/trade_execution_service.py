@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import inspect
+import json
 import secrets
 import time
 from collections.abc import Iterator, Mapping
@@ -12,7 +13,12 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_FLOOR
 from threading import RLock, get_ident
 from typing import TYPE_CHECKING, Callable, Final, Optional, Protocol, assert_never, cast
 
-from app.config import settings
+from app.config import (
+    FUNDED_MARGIN_MAX_POSITION_NOTIONAL_BOUND,
+    FUNDED_MARGIN_MAX_POSITION_QUANTITY_BOUND,
+    FUNDED_MARGIN_MAX_RISK_PER_TRADE_BOUND,
+    settings,
+)
 from app.core.accounting_fees import (
     ACCOUNTING_FEE_MODEL_US_SEC98,
     allocated_entry_fee as _accounting_allocated_entry_fee,
@@ -245,6 +251,12 @@ class _PendingOrder:
     restore_engine_snapshot_fn: Callable[[EngineSnapshot], None] | None = None
     timeout_recovery_attempted: bool = False
     known_terminal_status: str = ""
+    # Round-2 finding 3: stamped True at submit time when the order was a
+    # range ENTRY sized under an EFFECTIVE funded-margin exception (the
+    # execution context is cleared by then, so the verdict must ride on
+    # the pending itself). Drives the bounded cancel-retry path in
+    # ``_reconcile_pending_order``.
+    funded_margin_entry: bool = False
     extended_hours: bool = False
     extended_hours_key: tuple[str, str, date] | None = None
     extended_hours_cancel_requested: bool = False
@@ -317,6 +329,36 @@ _PassiveSubmitHooks = passive_protocol.PassiveSubmitHooks
 # Per-execute() passive protocol state, stored in the private execution
 # context (scoped to one call under the submission lock) — never service state.
 _PASSIVE_OWNER_KEY = "passive_submit_owner"
+# Round-2 finding 3 (P1): bounded cancel-retry cap for a pending range
+# ENTRY while the funded-margin exception is effective. After the cap the
+# reconcile loop stops cancelling and escalates once for manual
+# intervention (the order stays tracked, the pause stays on).
+_PENDING_ENTRY_CANCEL_RETRY_CAP: Final[int] = 3
+# Round-2 finding 4: execution-source markers that EXCLUDE an order from
+# the funded-margin exception. The runner hands an explicit TOP-LEVEL
+# ``execution_initiator`` marker ("RANGE" | "OPENING_MOMENTUM" | "LLM")
+# on every order context, and ``_opening_execution_ledger_context``
+# additionally writes ``strategy_source=OPENING_MOMENTUM`` inside the
+# serialized config_snapshot — both are checked so a context built by the
+# REAL runner hand-off can never relax the caps. The nested
+# ``strategy_source=INTERVAL`` marker is deliberately NOT excluding: the
+# primary range lane and the (P0-shadowed, unreachable) LLM lane share
+# that snapshot marker, so the explicit initiator is what distinguishes
+# them. The LLM exclusion is defence in depth: ``llm_shadow_mode`` is
+# hard-pinned True and ``_llm_order_execution_enabled`` is always False,
+# so no LLM order can reach sizing in the first place.
+_FUNDED_MARGIN_EXCLUDED_SOURCES: Final[frozenset[str]] = frozenset(
+    {"OPENING_MOMENTUM", "LLM"},
+)
+# Explicit top-level runner hand-off marker (round-2 finding 4). The
+# marker is EXECUTION-INTERNAL: the service strips it from the ledger
+# metadata before any durable serialization (round-3 finding 1), so it
+# never reaches ORDER_SUBMITTED payload_json, orders rows, audit logs or
+# the event-list API. When the exception was EFFECTIVE, a small explicit
+# evidence block is persisted instead (round-3 finding 2).
+EXECUTION_CONTEXT_INITIATOR_KEY: Final[str] = "execution_initiator"
+# Persisted evidence block key (ONLY written when the exception applied).
+FUNDED_MARGIN_EVIDENCE_KEY: Final[str] = "funded_margin"
 _PASSIVE_VALIDATED_KEY = "passive_validated_intent"
 _PASSIVE_CASH_KEY = "passive_cash_evidence"
 _PASSIVE_FINAL_ORDER_KEY = "passive_final_order"
@@ -530,6 +572,7 @@ class TradeExecutionService:
         passive_submit_hooks: _PassiveSubmitHooks | None = None,
         passive_reduction_quarantine: Callable[[str], str | None] | None = None,
         passive_uncertainty_sink: Callable[[str, str | None], None] | None = None,
+        funded_margin_fingerprint_provider: Callable[[], str] | None = None,
     ) -> None:
         self._record_order = record_order
         self._update_order_status = update_order_status
@@ -586,6 +629,40 @@ class TradeExecutionService:
         # quarantine). Default None => exact legacy range behaviour.
         self._passive_reduction_quarantine = passive_reduction_quarantine
         self._passive_uncertainty_sink = passive_uncertainty_sink
+        # Funded full-margin exception (P3a; default OFF). The provider is
+        # injected by the runner and returns the CURRENT credential
+        # fingerprint ONLY while all three credential parts are present,
+        # else "". The binding is evaluated LAZILY — at sizing and again at
+        # pre-submit — never frozen at startup (credentials load after
+        # _configure_live_safety). Default None => never effective.
+        self.funded_margin_fingerprint_provider = (
+            funded_margin_fingerprint_provider
+        )
+        # Runtime-configurable exception knobs (runner updates these from
+        # Settings; tests may arm them directly). Defaults keep the
+        # exception inert and byte-for-byte identical to flag-off.
+        self.funded_margin_enabled: bool = False
+        self.funded_margin_account_fingerprint: str = ""
+        self.funded_margin_requested_quantity: int = 0
+        self.funded_margin_requested_notional: float = 0.0
+        self.funded_margin_requested_risk: float = 0.0
+        # RAW (pre-hard_ceiling) strategy caps handed over by the runner.
+        # The clamped fields above keep their values and semantics; only
+        # the exception resolver reads these.
+        self.raw_strategy_max_position_quantity: int | None = None
+        self.raw_strategy_max_position_notional: float | None = None
+        self.raw_strategy_max_risk_per_trade: float | None = None
+        self._funded_margin_last_binding_status: str = "DISABLED"
+        self._funded_margin_last_limiting_factor: str | None = None
+        # Round-2 finding 3: bounded cancel attempts per pending ENTRY
+        # order id (funded-margin effective path only).
+        self._pending_entry_cancel_attempts: dict[str, int] = {}
+        # Round-3 finding 2: submit-time frozen funded-margin verdict for
+        # the order currently being submitted (set by
+        # _process_submitted_order, consumed by _track_pending_order and
+        # the submission-record-failure recovery; reset before each
+        # submit).
+        self._funded_margin_applied_at_submit = False
         self._extended_hours_context: tuple[str, str, datetime] | None = None
         self._extended_hours_unsupported: set[tuple[str, str, date]] = set()
         self._extended_hours_attempts: dict[tuple[str, str, date], int] = {}
@@ -777,6 +854,7 @@ class TradeExecutionService:
                     extended_hours_key=pending.extended_hours_key,
                     extended_hours_cancel_requested=pending.extended_hours_cancel_requested,
                     passive_owner_ref=pending.passive_owner_ref,
+                    funded_margin_entry=pending.funded_margin_entry,
                 )
             self._pending_orders_by_id = refreshed
             self._rebuild_pending_orders_by_symbol_locked()
@@ -829,6 +907,10 @@ class TradeExecutionService:
                         extended_hours=existing.extended_hours or pending.extended_hours,
                         extended_hours_key=existing.extended_hours_key or pending.extended_hours_key,
                         extended_hours_cancel_requested=existing.extended_hours_cancel_requested,
+                        funded_margin_entry=(
+                            existing.funded_margin_entry
+                            or pending.funded_margin_entry
+                        ),
                     )
                 merged_by_id[pending.broker_order_id] = pending
 
@@ -2194,6 +2276,215 @@ class TradeExecutionService:
             stop_loss_pct=stop_loss_pct,
         )
 
+    def _range_entry_limits_for(
+        self,
+        symbol: str,
+        action: str,
+        market: str | None = None,
+    ) -> _EntryRiskLimits | None:
+        """Resolve the funded-margin exception caps for the range-lane BUY.
+
+        Returns ``None`` unless EVERY gate holds (contract §C): the
+        exception is configured (enabled + not paper + valid fingerprint +
+        all three requests > 0), the CURRENT credential fingerprint
+        matches (re-evaluated on every call so a rotation fails closed),
+        and the order is the primary range-lane path — no passive owner or
+        lane marker in the execution context, not an opening-momentum
+        entry, not SELL_SHORT, not HK. Any miss returns None and the
+        caller keeps ``_entry_risk_limits`` (the clamped caps) unchanged.
+        """
+        resolved_market = (
+            market if market is not None else market_for_symbol(symbol)
+        )
+        status = "DISABLED"
+        try:
+            if not self.funded_margin_enabled:
+                return None
+            if self.paper_account_confirmed:
+                status = "PAPER"
+                return None
+            provider = self.funded_margin_fingerprint_provider
+            if provider is None:
+                status = "NOT_CONFIGURED"
+                return None
+            configured = (
+                self.funded_margin_account_fingerprint != ""
+                and self.funded_margin_requested_quantity > 0
+                and self.funded_margin_requested_notional > 0
+                and self.funded_margin_requested_risk > 0
+            )
+            if not configured:
+                status = "NOT_CONFIGURED"
+                return None
+            # CURRENT-credential binding: evaluated LAZILY, fail-closed.
+            try:
+                current = str(provider() or "")
+            except Exception:
+                status = "CREDENTIALS_INCOMPLETE"
+                return None
+            if not current:
+                status = "CREDENTIALS_INCOMPLETE"
+                return None
+            if current != self.funded_margin_account_fingerprint:
+                status = "MISMATCH"
+                return None
+            status = "MATCHED"
+            # LANE gates (checked AFTER the binding so diagnostics report
+            # the credential state even when the lane is excluded): primary
+            # range-lane BUY on the US market only — no passive owner or
+            # lane marker, not an opening-momentum entry, not an LLM order,
+            # not SELL_SHORT, not HK. Round-2 finding 4: the source markers
+            # live BOTH at the context top level AND inside the runner's
+            # serialized config_snapshot (where _opening_execution_ledger_
+            # context actually writes them); both are checked so a context
+            # built by the real runner hand-off can never relax the caps.
+            if action != "BUY" or resolved_market != "US":
+                return None
+            context = self._active_execution_context
+            if context.get(_PASSIVE_OWNER_KEY) is not None or context.get(
+                EXECUTION_CONTEXT_LANE_KEY,
+            ):
+                return None
+            source_markers = self._funded_margin_source_markers(context)
+            if source_markers & _FUNDED_MARGIN_EXCLUDED_SOURCES:
+                return None
+            # min(raw strategy value, requested value, code bound) per cap;
+            # stop_loss_pct is shared and unchanged.
+            raw_qty = self._positive_finite_limit(
+                self.raw_strategy_max_position_quantity,
+            )
+            raw_notional = self._positive_finite_limit(
+                self.raw_strategy_max_position_notional,
+            )
+            raw_risk = self._positive_finite_limit(
+                self.raw_strategy_max_risk_per_trade,
+            )
+            if raw_qty is None or raw_notional is None or raw_risk is None:
+                status = "NOT_CONFIGURED"
+                return None
+            return _EntryRiskLimits(
+                max_quantity=min(
+                    raw_qty,
+                    Decimal(self.funded_margin_requested_quantity),
+                    Decimal(FUNDED_MARGIN_MAX_POSITION_QUANTITY_BOUND),
+                ),
+                max_notional=min(
+                    raw_notional,
+                    Decimal(str(self.funded_margin_requested_notional)),
+                    Decimal(str(FUNDED_MARGIN_MAX_POSITION_NOTIONAL_BOUND)),
+                ),
+                max_risk=min(
+                    raw_risk,
+                    Decimal(str(self.funded_margin_requested_risk)),
+                    Decimal(str(FUNDED_MARGIN_MAX_RISK_PER_TRADE_BOUND)),
+                ),
+                stop_loss_pct=self._positive_finite_limit(
+                    self.stop_loss_pct,
+                ) or Decimal("0"),
+            )
+        finally:
+            self._funded_margin_last_binding_status = status
+
+    def funded_margin_diagnostics(self) -> dict[str, object]:
+        """Observer-only funded-margin exception diagnostics (no secrets)."""
+        limits = self._range_entry_limits_for(
+            "", "BUY", "US",
+        )
+        if limits is not None:
+            effective: tuple[int | None, float | None, float | None] = (
+                int(limits.max_quantity),
+                float(limits.max_notional),
+                float(limits.max_risk),
+            )
+        else:
+            effective = (None, None, None)
+        return {
+            "enabled": bool(self.funded_margin_enabled),
+            "configured": bool(
+                self.funded_margin_enabled
+                and not self.paper_account_confirmed
+                and self.funded_margin_account_fingerprint != ""
+                and self.funded_margin_requested_quantity > 0
+                and self.funded_margin_requested_notional > 0
+                and self.funded_margin_requested_risk > 0
+            ),
+            "binding_status": self._funded_margin_last_binding_status,
+            "requested_caps": {
+                "quantity": self.funded_margin_requested_quantity,
+                "notional": self.funded_margin_requested_notional,
+                "risk": self.funded_margin_requested_risk,
+            },
+            "code_bounds": {
+                "quantity": FUNDED_MARGIN_MAX_POSITION_QUANTITY_BOUND,
+                "notional": FUNDED_MARGIN_MAX_POSITION_NOTIONAL_BOUND,
+                "risk": FUNDED_MARGIN_MAX_RISK_PER_TRADE_BOUND,
+            },
+            "effective_caps": {
+                "quantity": effective[0],
+                "notional": effective[1],
+                "risk": effective[2],
+            },
+            "factor": (
+                None
+                if self.margin_safety_factor is None
+                else float(self.margin_safety_factor)
+            ),
+            "last_limiting_factor": self._funded_margin_last_limiting_factor,
+        }
+
+    def _funded_margin_source_markers(
+        self,
+        context: Mapping[str, object],
+    ) -> set[str]:
+        """Collect execution-source markers from the ACTIVE context.
+
+        Round-2 finding 4: reads the explicit TOP-LEVEL
+        ``execution_initiator`` the runner hands off AND the
+        ``strategy_source`` markers (top level + inside the serialized
+        ``config_snapshot``, where ``_opening_execution_ledger_context``
+        actually writes it), so the marker the REAL runner hand-off
+        carries is what gates the lane.
+        """
+        markers: set[str] = set()
+        initiator = str(
+            context.get(EXECUTION_CONTEXT_INITIATOR_KEY, "") or "",
+        ).upper()
+        if initiator:
+            markers.add(initiator)
+        for key in ("strategy_source",):
+            top_level = str(context.get(key, "") or "").upper()
+            if top_level:
+                markers.add(top_level)
+            raw_snapshot = context.get("config_snapshot")
+            if raw_snapshot:
+                try:
+                    snapshot = json.loads(str(raw_snapshot))
+                except (TypeError, ValueError):
+                    snapshot = None
+                if isinstance(snapshot, dict):
+                    nested = str(
+                        snapshot.get(key, "") or "",
+                    ).upper()
+                    if nested:
+                        markers.add(nested)
+        return markers
+
+    def _funded_margin_exception_effective_for(
+        self,
+        symbol: str,
+        action: str,
+        market: str | None = None,
+    ) -> bool:
+        """True only when the exception resolves caps for THIS order.
+
+        Thin wrapper over ``_range_entry_limits_for`` for call sites that
+        only need the effective/not-effective verdict (e.g. the final
+        submit-time session re-check); never used to bypass the resolver.
+        """
+        return (
+            self._range_entry_limits_for(symbol, action, market) is not None
+        )
+
     def _entry_safety_configuration_error(self) -> str | None:
         match self._entry_risk_limits():
             case str() as issue:
@@ -2471,7 +2762,6 @@ class TradeExecutionService:
                 limits = resolved_limits
             case unreachable:
                 assert_never(unreachable)
-
         # SPY_PASSIVE lane branch: an order bound to an active mandate
         # resolves a passive policy instead of the range stop-distance
         # model. Range orders carry no lane context, resolve None here, and
@@ -2604,6 +2894,52 @@ class TradeExecutionService:
             )
 
         approved_price = max(request.price, fresh_price)
+        # Funded-margin exception (contract §E): re-resolve the binding at
+        # the boundary. Effective => the exception caps replace the clamped
+        # trio for THIS order AND broker margin capacity is re-estimated at
+        # the FINAL approved price; a projected quantity above
+        # floor(factor x capacity) or any resolved cap rejects. No longer
+        # effective (e.g. credential rotation between sizing and submit)
+        # => the clamped funded caps apply and an oversized order fails
+        # closed. Flag-off / paper / unbound: NOT one extra broker call.
+        funded_margin_limits = self._range_entry_limits_for(
+            request.symbol, request.action,
+        )
+        if funded_margin_limits is not None:
+            limits = funded_margin_limits
+            capacity = self._positive_finite_limit(
+                broker.estimate_margin_max_quantity(
+                    request.symbol,
+                    "BUY",
+                    approved_price,
+                    "USD",
+                ),
+            )
+            if capacity is None:
+                return self._pre_submit_risk_rejection(
+                    request,
+                    "funded margin capacity is unavailable at the final "
+                    "approved price",
+                )
+            raw_pre_submit_factor = self.margin_safety_factor
+            pre_submit_factor = self._positive_finite_limit(
+                ENTRY_BUYING_POWER_USAGE
+                if raw_pre_submit_factor is None
+                else raw_pre_submit_factor,
+            )
+            if pre_submit_factor is None or pre_submit_factor > 1:
+                return self._pre_submit_risk_rejection(
+                    request,
+                    "funded margin safety factor must be greater than "
+                    "zero and at most one",
+                )
+            capacity_qty = int(capacity * pre_submit_factor)
+            if request.quantity > Decimal(capacity_qty):
+                return self._pre_submit_risk_rejection(
+                    request,
+                    f"projected quantity {request.quantity} exceeds margin "
+                    f"capacity {capacity_qty} at the final approved price",
+                )
         projected_quantity = position_check.current_quantity + request.quantity
         if projected_quantity > limits.max_quantity:
             return self._pre_submit_risk_rejection(
@@ -2737,7 +3073,19 @@ class TradeExecutionService:
         *,
         safety_factor: float | None = None,
     ) -> int:
-        limits_result = self._entry_risk_limits()
+        action = "SELL_SHORT" if side == "SELL" else "BUY"
+        # Funded-margin exception (contract §C/§D): resolve the range-lane
+        # caps FIRST so an effective exception replaces the clamped trio
+        # for THIS call only; every other caller keeps _entry_risk_limits.
+        # Flag-off / paper / unbound => None => byte-for-byte legacy path.
+        funded_margin_limits = self._range_entry_limits_for(
+            symbol, action,
+        )
+        limits_result = (
+            funded_margin_limits
+            if funded_margin_limits is not None
+            else self._entry_risk_limits()
+        )
         match limits_result:
             case str() as issue:
                 logger.error("%s: %s", side, issue)
@@ -2753,7 +3101,7 @@ class TradeExecutionService:
         position_check = self._entry_position_check(
             broker,
             symbol,
-            "SELL_SHORT" if side == "SELL" else "BUY",
+            action,
         )
         if position_check is None:
             return 0
@@ -2793,6 +3141,17 @@ class TradeExecutionService:
         if factor is None:
             logger.error("%s: buying-power safety factor is invalid", side)
             return 0
+        if funded_margin_limits is not None and factor > 1:
+            # Contract §D: full-margin sizing requires 0 < factor <= 1;
+            # anything above one is an invalid configuration, never an
+            # over-leveraged order.
+            logger.error(
+                "%s: funded-margin safety factor %s exceeds 1.0; quantity "
+                "is zero until the factor is fixed",
+                side,
+                factor,
+            )
+            return 0
 
         candidate = max_qty * factor
         remaining_qty = limits.max_quantity - current_qty
@@ -2810,6 +3169,42 @@ class TradeExecutionService:
         )
         risk_qty = remaining_risk / stop_distance
         candidate = min(candidate, risk_qty)
+
+        # Funded-margin exception (contract §D): when a cap binds below
+        # floor(factor x margin capacity) the capped quantity still
+        # PROCEEDS (an authorized smaller trade beats no trade) but is
+        # never silent — the limiting factor is recorded for the trade
+        # event payload and diagnostics.
+        if funded_margin_limits is not None:
+            full_margin_qty = int(max_qty * factor)
+            limiting_factor: str | None = None
+            if candidate < Decimal(full_margin_qty):
+                if candidate >= max(Decimal("0"), remaining_qty):
+                    limiting_factor = "QUANTITY_CAP"
+                elif candidate >= risk_qty:
+                    limiting_factor = "RISK_CAP"
+                elif candidate >= notional_qty:
+                    limiting_factor = "NOTIONAL_CAP"
+                else:
+                    limiting_factor = "MARGIN_CAPACITY"
+            self._funded_margin_last_limiting_factor = limiting_factor
+            if limiting_factor is not None:
+                self._active_execution_context.setdefault(
+                    "funded_margin_limiting_factor",
+                    limiting_factor,
+                )
+                self._active_execution_context.setdefault(
+                    "funded_margin_full_margin_qty",
+                    full_margin_qty,
+                )
+                logger.info(
+                    "full margin capped by %s: margin capacity %d shares, "
+                    "capped to %d shares for %s",
+                    limiting_factor,
+                    full_margin_qty,
+                    int(candidate),
+                    symbol,
+                )
 
         qty = int(candidate)
         if qty <= 0:
@@ -3750,6 +4145,10 @@ class TradeExecutionService:
         should inspect ``status == "FILLED"`` and perform their own tail logic.
         """
         with self._submission_lock:
+            # Round-3 finding 2: reset the frozen verdict before each
+            # submit; _process_submitted_order re-resolves it while the
+            # execution context for THIS order is live.
+            self._funded_margin_applied_at_submit = False
             precheck_result = self._final_submission_precheck(
                 action,
                 symbol,
@@ -3776,6 +4175,45 @@ class TradeExecutionService:
                 return precheck_result
 
             approved_order = precheck_result
+            # Round-2 finding 2 (P1): final-submit session re-check. When
+            # the funded-margin exception is EFFECTIVE for this order
+            # (range US BUY, binding MATCHED — resolved fresh here), the
+            # session calendar is re-consulted AFTER every blocking step
+            # (pre-submit boundary, capacity re-estimate, policy gates)
+            # and immediately BEFORE the single broker mutation: a clock
+            # that crossed the RTH close or the 90-minute entry cutoff
+            # during those queries skips with SESSION and never submits.
+            # Flag-off / paper / unbound / reductions resolve ineffective
+            # => no new calendar call, identical behaviour and call shapes.
+            if approved_order.action in _ENTRY_ACTIONS and (
+                self._funded_margin_exception_effective_for(
+                    approved_order.symbol,
+                    approved_order.action,
+                )
+            ):
+                session_market = market_for_symbol(approved_order.symbol)
+                if not is_trading_hours(session_market):
+                    return self._skip_order(
+                        approved_order.symbol,
+                        approved_order.action,
+                        (
+                            f"RTH session ended before final submission "
+                            f"for {session_market}"
+                        ),
+                        skip_category="SESSION",
+                    )
+                if self._entry_cutoff_active(session_market):
+                    return self._skip_order(
+                        approved_order.symbol,
+                        approved_order.action,
+                        (
+                            f"entry cutoff within "
+                            f"{self.entry_cutoff_minutes_before_close} "
+                            "minutes of close crossed before final "
+                            "submission"
+                        ),
+                        skip_category="SESSION",
+                    )
             submit_started_at = datetime.now(timezone.utc)
             submit_started_monotonic = time.perf_counter()
             # The passive submit right (if any) was consumed by the precheck
@@ -5223,6 +5661,25 @@ class TradeExecutionService:
         acknowledged_at = datetime.now(timezone.utc)
         ack_latency_ms = (time.perf_counter() - submit_started_monotonic) * 1000
         ledger_metadata = dict(self._active_execution_context)
+        # Round-3 finding 1 (P0): the execution-initiator marker is
+        # INTERNAL to the sizing/lane gates. It must never reach the
+        # persisted ledger (ORDER_SUBMITTED payload_json, orders row,
+        # audit, event-list API) — strip it here, where the durable
+        # payload is assembled. Round-3 finding 2 (P1): when the
+        # funded-margin exception was EFFECTIVE for this ENTRY, freeze
+        # that verdict now and persist one small explicit evidence block
+        # through the existing submission provenance; OFF/paper/unbound
+        # and every non-entry order persist exactly what they do today.
+        ledger_metadata.pop(EXECUTION_CONTEXT_INITIATOR_KEY, None)
+        self._funded_margin_applied_at_submit = (
+            action in _ENTRY_ACTIONS
+            and self._funded_margin_exception_effective_for(symbol, action)
+        )
+        if self._funded_margin_applied_at_submit:
+            ledger_metadata[FUNDED_MARGIN_EVIDENCE_KEY] = {
+                "applied": True,
+                "limiting_factor": self._funded_margin_last_limiting_factor,
+            }
         _passive_owner_for_ledger = self._active_passive_owner()
         if _passive_owner_for_ledger is not None:
             # R1-5d: the trusted accounting/policy metadata must live in the
@@ -5434,6 +5891,16 @@ class TradeExecutionService:
         restore_engine_snapshot_fn: Callable[[EngineSnapshot], None] | None = None,
         extended_hours: bool = False,
     ) -> None:
+        # Round-2 finding 3 / round-3 finding 2: the funded-margin verdict
+        # is FROZEN at submit time by ``_process_submitted_order`` (which
+        # runs first on every live path and resolves the exception while
+        # the execution context is still live). Only ENTRY actions under
+        # an effective exception carry it — the bounded cancel-retry path
+        # is entry-scoped by construction.
+        funded_margin_entry = (
+            action in _ENTRY_ACTIONS
+            and self._funded_margin_applied_at_submit
+        )
         pending = _PendingOrder(
             broker=broker,
             broker_order_id=result.broker_order_id,
@@ -5454,6 +5921,7 @@ class TradeExecutionService:
             restore_engine_snapshot_fn=restore_engine_snapshot_fn,
             extended_hours=extended_hours,
             extended_hours_key=self._active_extended_hours_key() if extended_hours else None,
+            funded_margin_entry=funded_margin_entry,
         )
         passive_owner = self._active_passive_owner()
         if passive_owner is not None:
@@ -5538,6 +6006,10 @@ class TradeExecutionService:
                     extended_hours=existing_by_id.extended_hours or pending.extended_hours,
                     extended_hours_key=existing_by_id.extended_hours_key or pending.extended_hours_key,
                     extended_hours_cancel_requested=existing_by_id.extended_hours_cancel_requested,
+                    funded_margin_entry=(
+                        existing_by_id.funded_margin_entry
+                        or pending.funded_margin_entry
+                    ),
                 )
             self._pending_orders_by_id[pending.broker_order_id] = pending
             self._rebuild_pending_orders_by_symbol_locked()
@@ -5548,6 +6020,7 @@ class TradeExecutionService:
             if removed is not None:
                 self._rebuild_pending_orders_by_symbol_locked()
                 self._pending_status_query_warned_ids.discard(order_id)
+            self._pending_entry_cancel_attempts.pop(order_id, None)
 
     def _defer_pending_status_retry(self, pending: _PendingOrder, now: float) -> None:
         updated_pending = dataclass_replace(
@@ -5571,6 +6044,72 @@ class TradeExecutionService:
         now = time.monotonic()
         if now < pending.next_status_check_at:
             return
+        # Round-2 finding 3 (P1): for a pending range ENTRY submitted while
+        # the funded-margin exception was effective (stamped at submit
+        # time — see _track_pending_order), the ONE-shot timeout latch
+        # (``timeout_recovery_attempted``) is not enough: a failed first
+        # cancel or a broker that keeps reporting live left the order live
+        # into the cutoff/flatten windows. Drive BOUNDED cancel retries
+        # from the real reconcile loop until a terminal status is
+        # confirmed; once the cap is exhausted keep the order tracked
+        # (existing uncertainty/pause semantics), record a risk event,
+        # notify for manual intervention, and keep polling so a late
+        # terminal status is still finalized through the normal path.
+        if (
+            self._order_status_timeout_seconds > 0
+            and now - pending.submitted_at >= self._order_status_timeout_seconds
+            and pending.timeout_recovery_attempted
+            and pending.funded_margin_entry
+        ):
+            with self._state_lock:
+                attempts = self._pending_entry_cancel_attempts.get(
+                    pending.broker_order_id, 0,
+                )
+            if attempts < _PENDING_ENTRY_CANCEL_RETRY_CAP:
+                self._handle_pending_order_timeout(
+                    pending,
+                    risk=risk,
+                    notifier=notifier,
+                    restore_engine_snapshot=restore_engine_snapshot,
+                    notify_risk_event=notify_risk_event,
+                )
+                return
+            if attempts == _PENDING_ENTRY_CANCEL_RETRY_CAP:
+                # Cap reached without a confirmed terminal state:
+                # escalate once for manual intervention, then fall
+                # through to the ordinary status poll below (the order
+                # stays tracked and blocks new entries; the risk pause
+                # from the first timeout attempt remains).
+                with self._state_lock:
+                    self._pending_entry_cancel_attempts[
+                        pending.broker_order_id
+                    ] = attempts + 1
+                reason = (
+                    "PENDING_ENTRY_UNCONFIRMED: pending entry "
+                    f"{pending.broker_order_id} for {pending.symbol} "
+                    "could not be confirmed terminal after bounded "
+                    f"cancel retries ({attempts}); manual intervention "
+                    "required before the flatten window"
+                )
+                logger.error(reason)
+                try:
+                    self._record_risk_event(reason)
+                except Exception:
+                    logger.exception(
+                        "failed to record pending-entry risk event for %s",
+                        pending.broker_order_id,
+                    )
+                if notify_risk_event is not None:
+                    try:
+                        notify_risk_event(
+                            "PENDING_ENTRY_UNCONFIRMED", reason,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "failed to notify pending-entry uncertainty "
+                            "for %s",
+                            pending.broker_order_id,
+                        )
         if (
             self._order_status_timeout_seconds > 0
             and now - pending.submitted_at >= self._order_status_timeout_seconds
@@ -5632,6 +6171,9 @@ class TradeExecutionService:
             extended_hours_cancel_requested=pending.extended_hours_cancel_requested,
             # R1-5: the complete owner reference survives every rebuild.
             passive_owner_ref=pending.passive_owner_ref,
+            # Round-2 finding 3: the submit-time funded-margin verdict is
+            # immutable pending data — it survives every rebuild.
+            funded_margin_entry=pending.funded_margin_entry,
         )
         with self._state_lock:
             self._pending_orders_by_id[updated_pending.broker_order_id] = updated_pending
@@ -5722,6 +6264,17 @@ class TradeExecutionService:
         notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> None:
         pending = dataclass_replace(pending, timeout_recovery_attempted=True)
+        # Round-2 finding 3: count this cancel attempt for the bounded
+        # entry-retry path driven by the reconcile loop.
+        with self._state_lock:
+            self._pending_entry_cancel_attempts[
+                pending.broker_order_id
+            ] = (
+                self._pending_entry_cancel_attempts.get(
+                    pending.broker_order_id, 0,
+                )
+                + 1
+            )
         with self._state_lock:
             if pending.broker_order_id in self._pending_orders_by_id:
                 self._pending_orders_by_id[pending.broker_order_id] = pending
@@ -6496,6 +7049,13 @@ class TradeExecutionService:
             next_status_check_at=time.monotonic() + self._order_status_poll_interval_seconds,
             submitted_at=time.monotonic(),
             restore_engine_snapshot_fn=restore_engine_snapshot,
+            # Round-3 finding 2: the submission record failed, but the
+            # frozen submit-time verdict survives in memory — the order
+            # keeps its bounded-retry entitlement on the reconcile path.
+            funded_margin_entry=(
+                resolved_action in _ENTRY_ACTIONS
+                and self._funded_margin_applied_at_submit
+            ),
         )
 
         if cancel_status is not None:

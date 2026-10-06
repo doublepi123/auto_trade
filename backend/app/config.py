@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -11,7 +13,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 logger = logging.getLogger(__name__)
 
 # Position-notional ceiling for a funded account. P0: no configuration path
-# may exceed it.
+# may exceed it, EXCEPT the account-bound funded full-margin exception
+# below (FUNDED_MARGIN_*), which is the only authorised way above it and is
+# itself bounded by FUNDED_MARGIN_MAX_POSITION_NOTIONAL_BOUND.
 FUNDED_MAX_POSITION_NOTIONAL = 5000.0
 # Upper bounds on the ceilings a CONFIRMED PAPER account may request. These
 # are code ceilings, not defaults: without the paper attestation AND a
@@ -21,6 +25,46 @@ FUNDED_MAX_POSITION_NOTIONAL = 5000.0
 PAPER_MAX_POSITION_NOTIONAL_BOUND = 200000.0
 PAPER_MAX_POSITION_QUANTITY_BOUND = 5000
 PAPER_MAX_RISK_PER_TRADE_BOUND = 2000.0
+# Upper bounds on the ceilings the funded full-margin exception may
+# authorise (owner decision 2026-10-05/06; design P3a §c). These are
+# AUTHORIZATION CEILINGS, not targets: a request above them clamps to the
+# bound, and a fresher broker capacity above them never widens them. They
+# relax the funded trio ONLY for the bound account's range-lane US BUY.
+FUNDED_MARGIN_MAX_POSITION_QUANTITY_BOUND = 1000
+FUNDED_MARGIN_MAX_POSITION_NOTIONAL_BOUND = 25000.0
+FUNDED_MARGIN_MAX_RISK_PER_TRADE_BOUND = 250.0
+
+# 64 lowercase hex (SHA-256) — the credential fingerprint format the
+# exception's account binding accepts. Anything else reads as unset.
+_FUNDED_MARGIN_FINGERPRINT_HEX = frozenset("0123456789abcdef")
+
+
+def _valid_funded_margin_fingerprint(value: str) -> bool:
+    return (
+        len(value) == 64
+        and all(ch in _FUNDED_MARGIN_FINGERPRINT_HEX for ch in value)
+    )
+
+
+@dataclass(frozen=True)
+class FundedMarginConfiguration:
+    """Resolved state of the funded full-margin exception (no secrets).
+
+    ``configured`` is the static part (settings only); ``effective`` is
+    decided at sizing/pre-submit time against the CURRENT credential
+    fingerprint, never here.
+    """
+
+    enabled: bool
+    configured: bool
+    fingerprint_bound: bool
+    not_configured_reason: str | None
+    requested_quantity: int
+    requested_notional: float
+    requested_risk: float
+    effective_quantity: int | None
+    effective_notional: float | None
+    effective_risk: float | None
 
 
 class Settings(BaseSettings):
@@ -941,12 +985,143 @@ class Settings(BaseSettings):
         validation_alias="AUTO_TRADE_SPY_PASSIVE_ENABLED",
     )
 
+    # Funded full-margin sizing exception (P3a; owner decision
+    # 2026-10-05/06). DEFAULT OFF, account-bound, and it never mutates the
+    # hard_max_* clamps above: the funded trio (100/5000/250) stays exactly
+    # as clamped, and this exception resolves SEPARATELY, lazily, at
+    # sizing and pre-submit, against the CURRENT credential fingerprint.
+    # "Configured" = enabled AND not paper_account_confirmed AND a valid
+    # 64-lowercase-hex fingerprint AND all three requests > 0 (finite).
+    # Anything else is flag-off behaviour plus one warning.
+    funded_margin_enabled: bool = Field(
+        default=False,
+        validation_alias="AUTO_TRADE_FUNDED_MARGIN_ENABLED",
+    )
+    # Credential fingerprint (SHA-256 of app key + app secret + access
+    # token) the exception was authorised for. Must be exactly 64
+    # lowercase hex; any other value is treated as unset (with a warning)
+    # so a malformed binding can never authorize the exception.
+    funded_margin_account_fingerprint: str = Field(
+        default="",
+        validation_alias="AUTO_TRADE_FUNDED_MARGIN_ACCOUNT_FINGERPRINT",
+    )
+    # Requested ceilings under the code bounds
+    # (FUNDED_MARGIN_MAX_*_BOUND). 0 (the default) means "no request":
+    # the funded caps apply. These are authorization ceilings, not
+    # targets; each must be > 0 for the exception to be configured.
+    funded_margin_max_position_quantity: int = Field(
+        default=0,
+        ge=0,
+        validation_alias="AUTO_TRADE_FUNDED_MARGIN_MAX_POSITION_QUANTITY",
+    )
+    funded_margin_max_position_notional: float = Field(
+        default=0.0,
+        ge=0,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_FUNDED_MARGIN_MAX_POSITION_NOTIONAL",
+    )
+    funded_margin_max_risk_per_trade: float = Field(
+        default=0.0,
+        ge=0,
+        allow_inf_nan=False,
+        validation_alias="AUTO_TRADE_FUNDED_MARGIN_MAX_RISK_PER_TRADE",
+    )
+
+    @field_validator(
+        "funded_margin_max_position_quantity",
+        "funded_margin_max_position_notional",
+        "funded_margin_max_risk_per_trade",
+        mode="before",
+    )
+    @classmethod
+    def _invalid_funded_margin_request_is_no_request(
+        cls, value: Any,
+    ) -> Any:
+        # A negative or non-finite request must not take the deployment
+        # down (Compose forwards operator input verbatim): it reads as "no
+        # request" — flag-off behaviour — with one warning naming the
+        # variable. The zero/valid cases pass through untouched.
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            return value
+        if parsed < 0 or not math.isfinite(parsed):
+            logger.warning(
+                "invalid AUTO_TRADE_FUNDED_MARGIN_* request %r is treated "
+                "as no request; the funded caps apply",
+                value,
+            )
+            return 0
+        return value
+
     def paper_exception_notional_for(self, fingerprint: str) -> float:
         if not self.paper_account_fingerprint:
             return self.hard_max_position_notional
         if fingerprint and fingerprint == self.paper_account_fingerprint:
             return self.hard_max_position_notional
         return min(self.hard_max_position_notional, FUNDED_MAX_POSITION_NOTIONAL)
+
+    def funded_margin_configuration(self) -> FundedMarginConfiguration:
+        """Resolve the STATIC configured state of the funded-margin exception.
+
+        Pure settings read: enabled AND not paper AND a valid fingerprint
+        AND all three requests strictly positive and finite. The runtime
+        binding (CURRENT fingerprint match) is evaluated separately, at
+        sizing and pre-submit, never here.
+        """
+        requested_quantity = self.funded_margin_max_position_quantity
+        requested_notional = self.funded_margin_max_position_notional
+        requested_risk = self.funded_margin_max_risk_per_trade
+        fingerprint_valid = _valid_funded_margin_fingerprint(
+            self.funded_margin_account_fingerprint,
+        )
+        if not self.funded_margin_enabled:
+            reason: str | None = "DISABLED"
+        elif self.paper_account_confirmed:
+            reason = "PAPER"
+        elif not fingerprint_valid:
+            reason = "INVALID_FINGERPRINT"
+        elif not (
+            requested_quantity > 0
+            and math.isfinite(requested_notional)
+            and requested_notional > 0
+            and math.isfinite(requested_risk)
+            and requested_risk > 0
+        ):
+            reason = "ZERO_REQUEST"
+        else:
+            reason = None
+        configured = reason is None
+        return FundedMarginConfiguration(
+            enabled=self.funded_margin_enabled,
+            configured=configured,
+            fingerprint_bound=fingerprint_valid,
+            not_configured_reason=reason,
+            requested_quantity=requested_quantity,
+            requested_notional=requested_notional,
+            requested_risk=requested_risk,
+            effective_quantity=(
+                min(
+                    requested_quantity,
+                    FUNDED_MARGIN_MAX_POSITION_QUANTITY_BOUND,
+                )
+                if configured else None
+            ),
+            effective_notional=(
+                min(
+                    requested_notional,
+                    FUNDED_MARGIN_MAX_POSITION_NOTIONAL_BOUND,
+                )
+                if configured else None
+            ),
+            effective_risk=(
+                min(
+                    requested_risk,
+                    FUNDED_MARGIN_MAX_RISK_PER_TRADE_BOUND,
+                )
+                if configured else None
+            ),
+        )
 
     def recenter_half_width_pct(self) -> float:
         """Half-width (percent) for the band the recenter and the auto
@@ -1359,6 +1534,73 @@ class Settings(BaseSettings):
             self.hard_entry_cutoff_minutes_before_close = (
                 self.hard_flatten_minutes_before_close
             )
+        # Funded full-margin exception (P3a): normalize the fingerprint and
+        # clamp the requests FIRST, then, only when CONFIGURED, raise the
+        # account-wide session floors and force extended-hours trading off
+        # (safer direction; the flatten anchor returns to the RTH close).
+        # Enabled-but-not-configured keeps flag-off behaviour + one warning.
+        # The hard_max_* sizing clamps above are NEVER touched by this.
+        if self.funded_margin_enabled:
+            if not _valid_funded_margin_fingerprint(
+                self.funded_margin_account_fingerprint,
+            ):
+                logger.warning(
+                    "AUTO_TRADE_FUNDED_MARGIN_ACCOUNT_FINGERPRINT is not 64 "
+                    "lowercase hex; the funded-margin exception is treated "
+                    "as unset"
+                )
+                self.funded_margin_account_fingerprint = ""
+            self.funded_margin_max_position_quantity = min(
+                self.funded_margin_max_position_quantity,
+                FUNDED_MARGIN_MAX_POSITION_QUANTITY_BOUND,
+            )
+            self.funded_margin_max_position_notional = min(
+                self.funded_margin_max_position_notional,
+                FUNDED_MARGIN_MAX_POSITION_NOTIONAL_BOUND,
+            )
+            self.funded_margin_max_risk_per_trade = min(
+                self.funded_margin_max_risk_per_trade,
+                FUNDED_MARGIN_MAX_RISK_PER_TRADE_BOUND,
+            )
+        funded_margin = self.funded_margin_configuration()
+        if self.funded_margin_enabled and not funded_margin.configured:
+            logger.warning(
+                "AUTO_TRADE_FUNDED_MARGIN_ENABLED is set but the exception "
+                "is not configured (%s); behaving exactly as flag-off",
+                funded_margin.not_configured_reason,
+            )
+        if funded_margin.configured:
+            # Account-wide, safer direction (design P3a §d): entries stop
+            # at least 90 minutes before the close and flatten starts at
+            # least 30 minutes before it, so the exception never races the
+            # broker's own liquidation at the close. flatten stays <=
+            # cutoff; operator-raised values survive via max().
+            self.hard_entry_cutoff_minutes_before_close = max(
+                self.hard_entry_cutoff_minutes_before_close,
+                90,
+            )
+            self.hard_flatten_minutes_before_close = max(
+                self.hard_flatten_minutes_before_close,
+                30,
+            )
+            if (
+                self.hard_flatten_minutes_before_close
+                > self.hard_entry_cutoff_minutes_before_close
+            ):
+                self.hard_entry_cutoff_minutes_before_close = (
+                    self.hard_flatten_minutes_before_close
+                )
+            # No PRE/POST entries while the exception is active: flatten
+            # must anchor to the RTH close, not the 20:00 ET extended
+            # close. The protective-exits opt-in is deliberately NOT
+            # touched (reduce-only protection stays available).
+            if self.extended_hours_trading_enabled:
+                logger.warning(
+                    "AUTO_TRADE_EXTENDED_HOURS_TRADING_ENABLED forced off: "
+                    "the funded-margin exception requires RTH-close-anchored "
+                    "flatten and forbids extended-hours entries"
+                )
+            self.extended_hours_trading_enabled = False
         if (
             self.universe_selection_min_realized_vol
             >= self.universe_selection_max_realized_vol

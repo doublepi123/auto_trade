@@ -1390,3 +1390,312 @@ class TestSettings:
         )
 
         assert Settings().extended_hours_protective_exits_enabled is True
+
+
+class TestFundedMarginExceptionSettings:
+    """AUTO_TRADE_FUNDED_MARGIN_* — account-bound full-margin exception.
+
+    Owner decision (2026-10-05/06): relax the funded caps ONLY through this
+    default-OFF exception; the hard_max_* clamps (100/5000/250) themselves
+    are NEVER mutated. "Configured" = enabled AND not paper AND a valid
+    64-hex fingerprint AND all three requests > 0.
+    """
+
+    _VARS = (
+        "AUTO_TRADE_FUNDED_MARGIN_ENABLED",
+        "AUTO_TRADE_FUNDED_MARGIN_ACCOUNT_FINGERPRINT",
+        "AUTO_TRADE_FUNDED_MARGIN_MAX_POSITION_QUANTITY",
+        "AUTO_TRADE_FUNDED_MARGIN_MAX_POSITION_NOTIONAL",
+        "AUTO_TRADE_FUNDED_MARGIN_MAX_RISK_PER_TRADE",
+    )
+    _FP = "3" * 64
+
+    def _clear(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in self._VARS:
+            monkeypatch.delenv(name, raising=False)
+
+    def _arm(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        enabled: str = "true",
+        fingerprint: str | None = None,
+        qty: str = "1000",
+        notional: str = "25000",
+        risk: str = "250",
+    ) -> None:
+        self._clear(monkeypatch)
+        monkeypatch.setenv("AUTO_TRADE_FUNDED_MARGIN_ENABLED", enabled)
+        monkeypatch.setenv(
+            "AUTO_TRADE_FUNDED_MARGIN_ACCOUNT_FINGERPRINT",
+            self._FP if fingerprint is None else fingerprint,
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_FUNDED_MARGIN_MAX_POSITION_QUANTITY", qty,
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_FUNDED_MARGIN_MAX_POSITION_NOTIONAL", notional,
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_FUNDED_MARGIN_MAX_RISK_PER_TRADE", risk,
+        )
+
+    def test_defaults_are_off_and_inert(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        self._clear(monkeypatch)
+        monkeypatch.chdir(tmp_path)
+
+        s = Settings()
+
+        assert s.funded_margin_enabled is False
+        assert s.funded_margin_account_fingerprint == ""
+        assert s.funded_margin_max_position_quantity == 0
+        assert s.funded_margin_max_position_notional == 0.0
+        assert s.funded_margin_max_risk_per_trade == 0.0
+        # Flag off: hard caps/floors/extended flag byte-identical to today.
+        assert s.hard_max_position_quantity == 100
+        assert s.hard_max_position_notional == 5000
+        assert s.hard_max_risk_per_trade == 250
+        assert s.hard_entry_cutoff_minutes_before_close == 45
+        assert s.hard_flatten_minutes_before_close == 15
+        assert s.extended_hours_trading_enabled is False
+
+    def test_enabled_without_configuration_changes_nothing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # Flag on but no fingerprint / zero requests => identical to off.
+        self._arm(monkeypatch, fingerprint="", qty="0", notional="0", risk="0")
+
+        s = Settings()
+
+        assert s.funded_margin_enabled is True
+        assert s.hard_max_position_quantity == 100
+        assert s.hard_max_position_notional == 5000
+        assert s.hard_max_risk_per_trade == 250
+        assert s.hard_entry_cutoff_minutes_before_close == 45
+        assert s.hard_flatten_minutes_before_close == 15
+        assert s.extended_hours_trading_enabled is False
+
+    def test_configured_raises_cutoff_and_flatten_floors(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._arm(monkeypatch)
+
+        s = Settings()
+
+        # The exception never mutates the sizing clamps...
+        assert s.hard_max_position_quantity == 100
+        assert s.hard_max_position_notional == 5000
+        assert s.hard_max_risk_per_trade == 250
+        # ...but the account-wide session floors rise (safer direction).
+        assert s.hard_entry_cutoff_minutes_before_close == 90
+        assert s.hard_flatten_minutes_before_close == 30
+
+    def test_configured_forces_extended_hours_off(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._arm(monkeypatch)
+        monkeypatch.setenv(
+            "AUTO_TRADE_EXTENDED_HOURS_TRADING_ENABLED", "true",
+        )
+
+        s = Settings()
+
+        assert s.extended_hours_trading_enabled is False
+        assert s.extended_hours_trading_effective() is False
+        # The protective-exits opt-in is NOT touched.
+        assert s.extended_hours_protective_exits_enabled is False
+
+    def test_configured_keeps_flatten_not_above_cutoff_when_operator_raises(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._arm(monkeypatch)
+        monkeypatch.setenv(
+            "AUTO_TRADE_HARD_ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE", "120",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_HARD_FLATTEN_MINUTES_BEFORE_CLOSE", "45",
+        )
+
+        s = Settings()
+
+        # Operator-raised values survive; flatten stays <= cutoff.
+        assert s.hard_entry_cutoff_minutes_before_close == 120
+        assert s.hard_flatten_minutes_before_close == 45
+
+    def test_paper_attestation_disarms_the_exception(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._arm(monkeypatch)
+        monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
+
+        s = Settings()
+
+        # Paper + paper requests keep their own path; the funded-margin
+        # exception must not fire on a paper-attested account.
+        assert s.funded_margin_enabled is True
+        assert s.hard_entry_cutoff_minutes_before_close == 45
+        assert s.hard_flatten_minutes_before_close == 15
+        assert s.extended_hours_trading_enabled is False
+
+    @pytest.mark.parametrize(
+        "fingerprint",
+        ["", "XYZ", "abc", "A" * 64, "3" * 63, "3" * 65, "g" * 64],
+    )
+    def test_invalid_fingerprint_is_treated_as_unset(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        fingerprint: str,
+    ) -> None:
+        self._arm(monkeypatch, fingerprint=fingerprint)
+
+        s = Settings()
+
+        assert s.funded_margin_account_fingerprint == ""
+        # Not configured: identical to flag-off.
+        assert s.hard_entry_cutoff_minutes_before_close == 45
+        assert s.hard_flatten_minutes_before_close == 15
+
+    def test_valid_fingerprint_survives_normalization(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._arm(monkeypatch)
+
+        s = Settings()
+
+        assert s.funded_margin_account_fingerprint == self._FP
+
+    @pytest.mark.parametrize(
+        ("qty", "notional", "risk"),
+        [
+            ("0", "25000", "250"),
+            ("1000", "0", "250"),
+            ("1000", "25000", "0"),
+            ("-5", "25000", "250"),
+            ("1000", "-5", "250"),
+            ("1000", "25000", "-5"),
+            ("nan", "25000", "250"),
+            ("1000", "nan", "250"),
+            ("1000", "25000", "nan"),
+            ("inf", "25000", "250"),
+        ],
+    )
+    def test_zero_negative_or_non_finite_requests_behave_as_off(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        qty: str,
+        notional: str,
+        risk: str,
+    ) -> None:
+        self._arm(monkeypatch, qty=qty, notional=notional, risk=risk)
+
+        s = Settings()
+
+        # Not configured: identical to flag-off, regardless of the value.
+        assert s.hard_entry_cutoff_minutes_before_close == 45
+        assert s.hard_flatten_minutes_before_close == 15
+
+    def test_requests_above_the_code_bounds_clamp_to_the_bounds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._arm(monkeypatch, qty="99999", notional="999999", risk="99999")
+
+        from app.config import (
+            FUNDED_MARGIN_MAX_POSITION_NOTIONAL_BOUND,
+            FUNDED_MARGIN_MAX_POSITION_QUANTITY_BOUND,
+            FUNDED_MARGIN_MAX_RISK_PER_TRADE_BOUND,
+        )
+
+        s = Settings()
+
+        assert s.funded_margin_max_position_quantity == (
+            FUNDED_MARGIN_MAX_POSITION_QUANTITY_BOUND
+        )
+        assert s.funded_margin_max_position_notional == (
+            FUNDED_MARGIN_MAX_POSITION_NOTIONAL_BOUND
+        )
+        assert s.funded_margin_max_risk_per_trade == (
+            FUNDED_MARGIN_MAX_RISK_PER_TRADE_BOUND
+        )
+        # The bounds are the authorization ceilings from the design.
+        assert FUNDED_MARGIN_MAX_POSITION_QUANTITY_BOUND == 1000
+        assert FUNDED_MARGIN_MAX_POSITION_NOTIONAL_BOUND == 25000.0
+        assert FUNDED_MARGIN_MAX_RISK_PER_TRADE_BOUND == 250.0
+
+    def test_requests_below_the_bounds_are_kept(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._arm(monkeypatch, qty="400", notional="12000", risk="180")
+
+        s = Settings()
+
+        assert s.funded_margin_max_position_quantity == 400
+        assert s.funded_margin_max_position_notional == 12000
+        assert s.funded_margin_max_risk_per_trade == 180
+
+    def test_not_configured_states_are_distinguishable(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from app.config import FundedMarginConfiguration
+
+        # OFF
+        self._clear(monkeypatch)
+        s = Settings()
+        c = s.funded_margin_configuration()
+        assert isinstance(c, FundedMarginConfiguration)
+        assert c.configured is False
+        assert c.not_configured_reason == "DISABLED"
+        assert c.effective_quantity is None
+
+        # PAPER
+        self._arm(monkeypatch)
+        monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
+        s = Settings()
+        c = s.funded_margin_configuration()
+        assert c.configured is False
+        assert c.not_configured_reason == "PAPER"
+
+        # INVALID_FINGERPRINT
+        self._arm(monkeypatch, fingerprint="nothex")
+        monkeypatch.delenv(
+            "AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", raising=False,
+        )
+        s = Settings()
+        c = s.funded_margin_configuration()
+        assert c.configured is False
+        assert c.not_configured_reason == "INVALID_FINGERPRINT"
+
+        # ZERO_REQUEST
+        self._arm(monkeypatch, qty="0", notional="25000", risk="250")
+        monkeypatch.delenv(
+            "AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", raising=False,
+        )
+        s = Settings()
+        c = s.funded_margin_configuration()
+        assert c.configured is False
+        assert c.not_configured_reason == "ZERO_REQUEST"
+
+        # CONFIGURED
+        self._arm(monkeypatch)
+        monkeypatch.delenv(
+            "AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", raising=False,
+        )
+        s = Settings()
+        c = s.funded_margin_configuration()
+        assert c.configured is True
+        assert c.not_configured_reason is None
+        assert c.effective_quantity == 1000
+        assert c.effective_notional == 25000.0
+        assert c.effective_risk == 250.0

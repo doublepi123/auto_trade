@@ -88,6 +88,9 @@ class _Base:
         db.close()
 
     def _assess(self, **kw):
+        # Keep the fixed historical fixtures inside their lookback windows,
+        # independent of the wall clock when this suite runs.
+        kw.setdefault("now", datetime(2026, 9, 13, tzinfo=timezone.utc))
         db = self._db()
         try:
             return IntervalWidthFitnessService(db).assess(**kw)
