@@ -241,6 +241,7 @@ class _QuoteTriggerDecision:
     exit_price_floor: float | None = None
     exit_hold_reason: str = ""
     execution_phase: str | None = None
+    extended_take_profit: bool = False
 
 
 @dataclass(frozen=True)
@@ -494,6 +495,7 @@ class AppRunner:
         self._disconnect_retry_count = 0
         self._trading_session_mode: str = "ANY"
         self._trigger_in_flight = False
+        self._strategy_reload_lock = threading.RLock()
         self._defer_broker_close = False
         self._last_quote_at = 0.0
         self._last_push_quote_at = 0.0
@@ -1673,7 +1675,17 @@ class AppRunner:
             )
 
     def _initialize_runner(self) -> None:
+        # Same serialization boundary as reload. start() holds _start_lock
+        # and does not hold _state_lock here, so reload guard → state lock
+        # stays the only order. The read is forced fresh after expire_all.
+        with self.strategy_reload_guard():
+            self._initialize_runner_locked()
+
+    def _initialize_runner_locked(self) -> None:
         with self._db_session() as db:
+            expire = getattr(db, "expire_all", None)
+            if callable(expire):
+                expire()
             config = self._state_svc.load(db, self.engine, self.risk)
             self._configure_live_safety(config)
             self._load_tracked_entries(db)
@@ -2076,8 +2088,9 @@ class AppRunner:
         )
         # The static exception knobs come from Settings (validated at
         # load: fingerprint normalized, requests clamped to the code
-        # bounds, cutoff/flatten floors raised, extended hours forced
-        # off). The runtime binding is NOT evaluated here — credentials
+        # bounds, cutoff/flatten floors raised; the extended-hours flag
+        # is left as configured). The runtime binding is NOT evaluated
+        # here — credentials
         # load after this method runs; sizing/pre-submit resolve it
         # lazily against the CURRENT fingerprint.
         self._trade_svc.funded_margin_enabled = (
@@ -3488,6 +3501,10 @@ class AppRunner:
             ]
 
     def stop(self) -> None:
+        try:
+            self._notification_retry_queue.drain()
+        except Exception:
+            logger.exception("notification retry drain failed during stop")
         self._notification_retry_queue.stop()
         with self._start_lock:
             defer_broker_close = False
@@ -3631,64 +3648,98 @@ class AppRunner:
             current_market = (self.engine.params.market or "").strip().upper()
             if normalized_symbol == current_symbol and normalized_market == current_market:
                 return
-            if self._trigger_in_flight:
-                raise PrimarySwitchBlockedError(
-                    "primary strategy cannot change while an order trigger is in flight"
-                )
-            pending_symbols = sorted(getattr(self._trade_svc, "_pending_orders", {}))
-            if pending_symbols:
-                raise PrimarySwitchBlockedError(
-                    "primary strategy cannot change while orders are pending: "
-                    + ", ".join(pending_symbols)
-                )
-            if self._reduction_intents:
-                raise PrimarySwitchBlockedError(
-                    "primary strategy cannot change while deterministic reduction is active"
-                )
-            if self._post_fill_expectations:
-                raise PrimarySwitchBlockedError(
-                    "primary strategy cannot change while fill settlement is pending"
-                )
-            if self.risk.paused and self.risk.pause_reason.startswith(
-                _OPERATIONAL_PAUSE_PREFIXES
-            ):
-                raise PrimarySwitchBlockedError(
-                    "primary strategy cannot change during unresolved reconciliation"
-                )
-            tracked_symbols = sorted(self._trade_svc.snapshot_tracked_entries())
-            if tracked_symbols:
-                raise PrimarySwitchBlockedError(
-                    "primary strategy cannot change while positions are tracked: "
-                    + ", ".join(tracked_symbols)
-                )
-            if self.engine.state != EngineState.FLAT:
-                raise PrimarySwitchBlockedError(
-                    f"primary strategy cannot change while engine state is {self.engine.state.value}"
-                )
-            if current_symbol and not self._running:
-                raise PrimarySwitchCheckError(
-                    "primary strategy can only change while the runner is active and flat"
-                )
-            try:
-                broker_positions = self.broker.get_positions()
-            except Exception as exc:
-                raise PrimarySwitchCheckError(
-                    "cannot verify broker positions before primary strategy change"
-                ) from exc
-            exposed_symbols = sorted(
-                {
-                    str(position.symbol)
-                    for position in broker_positions
-                    if Decimal(str(position.quantity)) > 0
-                }
-            )
-            if exposed_symbols:
-                raise PrimarySwitchBlockedError(
-                    "primary strategy cannot change while broker positions exist: "
-                    + ", ".join(exposed_symbols)
-                )
+            self._assert_flat_for_strategy_mutation_locked()
 
-    def reload_strategy(self, db: Session | None = None) -> None:
+    def assert_band_change_safe(self, symbol: str, market: str) -> None:
+        """Flatness proof for a same-symbol band change.
+
+        ``assert_primary_switch_safe`` returns immediately when the symbol
+        and market are unchanged, which is correct for a switch and wrong
+        for recentering: moving ``buy_low`` while LONG is an add-on in
+        disguise. This always runs the checks.
+        """
+        del symbol, market
+        with self._state_lock:
+            self._assert_flat_for_strategy_mutation_locked()
+
+    def _assert_flat_for_strategy_mutation_locked(self) -> None:
+        """Caller holds ``_state_lock``. Same checks the switch runs after
+        its same-symbol early return, including the broker position read.
+        """
+        if self._trigger_in_flight:
+            raise PrimarySwitchBlockedError(
+                "primary strategy cannot change while an order trigger is in flight"
+            )
+        pending_symbols = sorted(getattr(self._trade_svc, "_pending_orders", {}))
+        if pending_symbols:
+            raise PrimarySwitchBlockedError(
+                "primary strategy cannot change while orders are pending: "
+                + ", ".join(pending_symbols)
+            )
+        if self._reduction_intents:
+            raise PrimarySwitchBlockedError(
+                "primary strategy cannot change while deterministic reduction is active"
+            )
+        if self._post_fill_expectations:
+            raise PrimarySwitchBlockedError(
+                "primary strategy cannot change while fill settlement is pending"
+            )
+        if self.risk.paused and self.risk.pause_reason.startswith(
+            _OPERATIONAL_PAUSE_PREFIXES
+        ):
+            raise PrimarySwitchBlockedError(
+                "primary strategy cannot change during unresolved reconciliation"
+            )
+        tracked_symbols = sorted(self._trade_svc.snapshot_tracked_entries())
+        if tracked_symbols:
+            raise PrimarySwitchBlockedError(
+                "primary strategy cannot change while positions are tracked: "
+                + ", ".join(tracked_symbols)
+            )
+        if self.engine.state != EngineState.FLAT:
+            raise PrimarySwitchBlockedError(
+                f"primary strategy cannot change while engine state is {self.engine.state.value}"
+            )
+        current_symbol = (self.engine.params.symbol or "").strip().upper()
+        if current_symbol and not self._running:
+            raise PrimarySwitchCheckError(
+                "primary strategy can only change while the runner is active and flat"
+            )
+        try:
+            broker_positions = self.broker.get_positions()
+        except Exception as exc:
+            raise PrimarySwitchCheckError(
+                "cannot verify broker positions before primary strategy change"
+            ) from exc
+        exposed_symbols = sorted(
+            {
+                str(position.symbol)
+                for position in broker_positions
+                if Decimal(str(position.quantity)) > 0
+            }
+        )
+        if exposed_symbols:
+            raise PrimarySwitchBlockedError(
+                "primary strategy cannot change while broker positions exist: "
+                + ", ".join(exposed_symbols)
+            )
+
+    @contextmanager
+    def strategy_reload_guard(self):
+        """Serialize config read, commit, reload and rollback.
+
+        Lock order is this lock, then ``_state_lock``. Callers must not
+        already hold ``_state_lock`` or the submission guard.
+        """
+        with self._strategy_reload_lock:
+            yield
+
+    def reload_strategy(
+        self,
+        db: Session | None = None,
+        *,
+        require_flat: bool = False,
+    ) -> None:
         """Re-read the strategy config, reusing ``db`` when the caller holds one.
 
         ``PUT /api/strategy`` (and the preset / rollback / watchlist-switch
@@ -3710,10 +3761,31 @@ class AppRunner:
         which hold none.
         """
         with self._db_session_or(db) as session:
-            self._reload_strategy_with_session(session)
+            self._reload_strategy_with_session(
+                session,
+                require_flat=require_flat,
+            )
 
-    def _reload_strategy_with_session(self, db: Session) -> None:
+    def _reload_strategy_with_session(
+        self,
+        db: Session,
+        *,
+        require_flat: bool = False,
+    ) -> None:
+        with self._strategy_reload_lock:
+            self._reload_strategy_locked(db, require_flat=require_flat)
+
+    def _reload_strategy_locked(
+        self,
+        db: Session,
+        *,
+        require_flat: bool = False,
+    ) -> None:
         svc = StrategyService(db)
+        # Callers commit before reload, so expire_all drops only the
+        # identity-map copy. The zero-arg get_config() then re-reads the
+        # durable row. Fakes that replace get_config stay zero-arg.
+        db.expire_all()
         config = svc.get_config()
         new_params = StrategyParams(
             symbol=config.symbol,
@@ -3793,6 +3865,16 @@ class AppRunner:
                 # Re-check under the same lock used by quote evaluation so
                 # no trigger can appear between the broker proof and swap.
                 self.assert_primary_switch_safe(new_params.symbol, new_params.market)
+            elif require_flat and (
+                new_params.buy_low != self.engine.params.buy_low
+                or new_params.sell_high != self.engine.params.sell_high
+            ):
+                # Same lock. A position that appeared after evaluate's
+                # check refuses the swap; the caller rolls the band back.
+                self.assert_band_change_safe(
+                    new_params.symbol,
+                    new_params.market,
+                )
             previous_quote_symbols = set(self._desired_quote_symbols_locked())
             previous_band = (
                 self.engine.params.symbol,
@@ -4116,6 +4198,15 @@ class AppRunner:
                     decision.result = active_engine.update_price(quote.last_price)
                 if decision.result is not None and decision.result.triggered:
                     if decision.result.action in _POSITION_REDUCING_ACTIONS:
+                        if (
+                            not decision.reduce_only
+                            and self._extended_take_profit_permitted(
+                                decision.result.action,
+                                quote.symbol,
+                                active_market,
+                            )
+                        ):
+                            decision.extended_take_profit = True
                         self._bind_exit_price_locked(decision, quote)
                         if decision.exit_hold_reason:
                             if decision.engine_snapshot is not None:
@@ -4168,6 +4259,28 @@ class AppRunner:
                 ):
                     self.decision_funnel.record_skip("COOLDOWN")
         return decision
+
+    def _extended_take_profit_permitted(
+        self,
+        action: str,
+        symbol: str,
+        market: str,
+    ) -> bool:
+        """ANY + effective extended hours, closing a tracked LONG only.
+
+        Does not set reduce_only and does not allow a loss exit. Quantity
+        is still capped by the tracked position at submit time.
+        """
+        if action != "SELL" or self._get_trading_session_mode() != "ANY":
+            return False
+        if not self._extended_hours_trading_effective():
+            return False
+        if is_trading_hours(market):
+            return False
+        tracked = self._trade_svc.tracked_position(symbol)
+        if tracked is None or tracked.side != "LONG" or tracked.quantity <= 0:
+            return False
+        return resolve_execution_session(market).extended_hours_executable
 
     def _bind_exit_price_locked(self, decision: _QuoteTriggerDecision, quote: Quote) -> None:
         """Bind executable exit evidence without changing healthy quote pricing."""
@@ -4331,6 +4444,7 @@ class AppRunner:
                 restore_engine_snapshot=restore_engine_snapshot,
                 notify_risk_event=self.notifier.notify_risk_event,
                 reduce_only=decision.reduce_only,
+                extended_take_profit=decision.extended_take_profit,
                 execution_context=ledger_context,
                 is_funnel_primary=self._is_primary_symbol(
                     decision.trigger_symbol or quote.symbol
@@ -6186,9 +6300,12 @@ class AppRunner:
             # These constraints protect exits deliberately released into a thin
             # pre/post book. Applying them to ordinary reductions would invent
             # a new reason an exit cannot leave, recreating the defect we fix.
-            if not is_trading_hours(market) and self._trade_svc.extended_hours_exit_decision(
-                action=action, symbol=symbol, market=market, reduce_only=True,
-            ).permitted:
+            if not is_trading_hours(market) and (
+                self._trade_svc.extended_hours_exit_decision(
+                    action=action, symbol=symbol, market=market, reduce_only=True,
+                ).permitted
+                or self._extended_take_profit_permitted(action, symbol, market)
+            ):
                 session = resolve_execution_session(market)
                 if not session.extended_hours_executable:
                     return "execution session is not executable"

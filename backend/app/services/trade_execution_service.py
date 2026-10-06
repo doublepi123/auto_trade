@@ -4,6 +4,7 @@ import logging
 import inspect
 import json
 import secrets
+import threading
 import time
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -258,7 +259,7 @@ class _PendingOrder:
     # ``_reconcile_pending_order``.
     funded_margin_entry: bool = False
     extended_hours: bool = False
-    extended_hours_key: tuple[str, str, date] | None = None
+    extended_hours_key: tuple[str, str, date, str] | None = None
     extended_hours_cancel_requested: bool = False
     # SPY_PASSIVE protocol: durable owner reference so later status-poll /
     # fill callbacks never depend on the (cleared) active execution
@@ -663,10 +664,14 @@ class TradeExecutionService:
         # the submission-record-failure recovery; reset before each
         # submit).
         self._funded_margin_applied_at_submit = False
-        self._extended_hours_context: tuple[str, str, datetime] | None = None
-        self._extended_hours_unsupported: set[tuple[str, str, date]] = set()
-        self._extended_hours_attempts: dict[tuple[str, str, date], int] = {}
-        self._extended_hours_retry_at: dict[tuple[str, str, date], float] = {}
+        self._execution_session_mode: str = "ANY"
+        self._extended_hours_context: (
+            tuple[str, str, datetime, str] | tuple[str, str, datetime] | None
+        ) = None
+        self._extended_hours_unsupported: set[tuple[str, str, date, str]] = set()
+        self._extended_hours_attempts: dict[tuple[str, str, date, str], int] = {}
+        self._extended_hours_retry_at: dict[tuple[str, str, date, str], float] = {}
+        self._extended_hours_takeover_alerted: set[tuple[str, str, date, str]] = set()
         self._state_lock = RLock()
         self._submission_lock = RLock()
         self._pending_orders: dict[str, _PendingOrder] = {}
@@ -705,17 +710,58 @@ class TradeExecutionService:
         session = resolve_execution_session(market, now)
         if not session.extended_hours_executable:
             return ExtendedHoursExitDecision(False, session.phase, session.reason)
-        key = (symbol.upper(), session.phase, trade_day_for(market, now))
-        with self._state_lock:
-            if self._extended_hours_sdk_unsupported:
-                return ExtendedHoursExitDecision(False, session.phase, "SDK extended-hours execution is unsupported")
-            if key in self._extended_hours_unsupported:
-                return ExtendedHoursExitDecision(False, session.phase, "extended-hours execution is unsupported for this symbol and phase")
-            if time.monotonic() < self._extended_hours_retry_at.get(key, 0):
-                return ExtendedHoursExitDecision(False, session.phase, "extended-hours retry backoff has not elapsed")
-            if self._extended_hours_attempts.get(key, 0) >= 3:
-                return ExtendedHoursExitDecision(False, session.phase, "extended-hours phase attempt cap reached")
+        key = (symbol.upper(), session.phase, trade_day_for(market, now), "EXIT")
+        refusal = self._extended_hours_budget_refusal(key, session.phase, kind="EXIT")
+        if refusal is not None:
+            return refusal
         return ExtendedHoursExitDecision(True, session.phase, session.reason)
+
+    def _tracked_long_close(self, symbol: str, action: str) -> bool:
+        """True when a SELL closes a tracked LONG and cannot open exposure."""
+        if action != "SELL":
+            return False
+        tracked = self.tracked_position(symbol)
+        return (
+            tracked is not None
+            and tracked.side == "LONG"
+            and tracked.quantity > 0
+        )
+
+    def _extended_hours_trading_effective(self) -> bool:
+        """Same predicate as the earlier session gate: on and not paper."""
+        return (
+            self.extended_hours_trading_enabled
+            and not self.paper_account_confirmed
+        )
+
+    def _final_submit_session_open(
+        self,
+        market: str,
+        *,
+        symbol: str,
+        trading_session_mode: str,
+    ) -> bool:
+        """Whether a funded entry may still pass the final session re-check.
+
+        RTH always passes this check (the cutoff is separate). Outside RTH
+        the order may proceed only when this execution already carries an
+        ANY-mode extended ENTRY authorization for this symbol and the
+        current phase is still executable. An approval that started in RTH
+        has no such authorization, so a clock that crosses 16:00 skips
+        instead of submitting a plain RTH order into POST.
+        """
+        if is_trading_hours(market):
+            return True
+        if trading_session_mode != "ANY":
+            return False
+        if not self._extended_hours_trading_effective():
+            return False
+        context = self._extended_hours_context
+        if context is None or len(context) < 4 or context[3] != "ENTRY":
+            return False
+        if str(context[0]).upper() != symbol.upper():
+            return False
+        return resolve_execution_session(market).extended_hours_executable
 
     def _entry_cutoff_active(self, market: str) -> bool:
         """Entry-cutoff predicate.
@@ -755,44 +801,169 @@ class TradeExecutionService:
         session = resolve_execution_session(market, now)
         if not session.extended_hours_executable:
             return ExtendedHoursExitDecision(False, session.phase, session.reason)
-        key = (symbol.upper(), session.phase, trade_day_for(market, now))
+        key = (symbol.upper(), session.phase, trade_day_for(market, now), "ENTRY")
+        refusal = self._extended_hours_budget_refusal(key, session.phase, kind="ENTRY")
+        if refusal is not None:
+            return refusal
+        return ExtendedHoursExitDecision(True, session.phase, session.reason)
+
+    def _extended_hours_budget_refusal(
+        self,
+        key: tuple[str, str, date, str],
+        phase: str,
+        *,
+        kind: str,
+    ) -> ExtendedHoursExitDecision | None:
         with self._state_lock:
             if self._extended_hours_sdk_unsupported:
                 return ExtendedHoursExitDecision(
-                    False, session.phase, "SDK extended-hours execution is unsupported",
+                    False, phase, "SDK extended-hours execution is unsupported",
                 )
             if key in self._extended_hours_unsupported:
+                if kind == "EXIT":
+                    return ExtendedHoursExitDecision(
+                        False, phase,
+                        "extended-hours exits are disabled for this symbol and phase",
+                    )
                 return ExtendedHoursExitDecision(
-                    False, session.phase,
+                    False, phase,
                     "extended-hours execution is unsupported for this symbol and phase",
                 )
             if time.monotonic() < self._extended_hours_retry_at.get(key, 0):
                 return ExtendedHoursExitDecision(
-                    False, session.phase, "extended-hours retry backoff has not elapsed",
+                    False, phase, "extended-hours retry backoff has not elapsed",
                 )
             if self._extended_hours_attempts.get(key, 0) >= 3:
+                if kind == "EXIT":
+                    return ExtendedHoursExitDecision(
+                        False, phase,
+                        "extended-hours exits are disabled for this symbol and phase",
+                    )
                 return ExtendedHoursExitDecision(
-                    False, session.phase, "extended-hours phase attempt cap reached",
+                    False, phase, "extended-hours phase attempt cap reached",
                 )
-        return ExtendedHoursExitDecision(True, session.phase, session.reason)
+        return None
+
+    def _claim_exit_takeover_alert(
+        self,
+        key: tuple[str, str, date, str],
+        notify_risk_event: _NotifyRiskEvent | None,
+    ) -> tuple[str, str, date, Decimal, Decimal] | None:
+        """Decide an EXIT takeover alert. Caller holds ``_state_lock``.
+
+        A missing notifier does not consume the dedup key. The key is
+        marked only when a send will be attempted, so a slow notify cannot
+        run under this lock.
+        """
+        symbol, phase, day, kind = key
+        if kind != "EXIT" or notify_risk_event is None:
+            return None
+        alert_key = (symbol, phase, day, "EXIT")
+        if alert_key in self._extended_hours_takeover_alerted:
+            return None
+        self._extended_hours_takeover_alerted.add(alert_key)
+        tracked = self._entry_positions.get(symbol)
+        quantity = tracked.quantity if tracked is not None else Decimal("0")
+        average = tracked.avg_price if tracked is not None else Decimal("0")
+        return (symbol, phase, day, quantity, average)
+
+    def _send_exit_takeover_alert(
+        self,
+        claimed: tuple[str, str, date, Decimal, Decimal],
+        notify_risk_event: _NotifyRiskEvent,
+    ) -> None:
+        """Send outside ``_state_lock``. A failed send stays deduped."""
+        symbol, phase, day, quantity, average = claimed
+        reason = (
+            f"{symbol} {phase} {day.isoformat()} tracked quantity {quantity} "
+            f"average price {average}: automatic exits disabled for this "
+            "phase — manual takeover required"
+        )
+        try:
+            cast(Callable[..., object], notify_risk_event)(
+                "EXTENDED_EXITS_DISABLED",
+                reason,
+                severity="CRITICAL",
+            )
+        except TypeError:
+            try:
+                notify_risk_event("EXTENDED_EXITS_DISABLED", reason)
+            except Exception:
+                logger.exception("extended-hours takeover alert failed")
+        except Exception:
+            logger.exception("extended-hours takeover alert failed")
 
     def _extended_hours_terminal_outcome(
-        self, key: tuple[str, str, date], *, unsupported: bool,
+        self,
+        key: tuple[str, str, date, str],
+        *,
+        unsupported: bool,
+        notify_risk_event: _NotifyRiskEvent | None = None,
     ) -> None:
-        """Retain reduction intent while bounding retries after definitive outcomes."""
-        with self._state_lock:
-            attempts = self._extended_hours_attempts.get(key, 0) + 1
-            self._extended_hours_attempts[key] = attempts
-            self._extended_hours_retry_at[key] = time.monotonic() + 60.0
-            if unsupported or attempts >= 3:
-                self._extended_hours_unsupported.add(key)
+        """Bound retries for one kind. A real-unsupported signal disables both.
 
-    def _active_extended_hours_key(self) -> tuple[str, str, date] | None:
+        Budgets, unsupported latches and takeover-alert dedup live only in
+        process memory. A cold start does not restore them. A pending order
+        rebuilt from the database has no extended-hours key, so it cannot
+        resume the extended budget and fails closed to the ordinary path.
+        """
+        symbol, phase, day, kind = key
+        claimed: tuple[str, str, date, Decimal, Decimal] | None = None
+        write_risk_event = False
+        with self._state_lock:
+            if unsupported:
+                for disabled in ("ENTRY", "EXIT"):
+                    both = (symbol, phase, day, disabled)
+                    self._extended_hours_unsupported.add(both)
+                claimed = self._claim_exit_takeover_alert(
+                    (symbol, phase, day, "EXIT"),
+                    notify_risk_event,
+                )
+            else:
+                attempts = self._extended_hours_attempts.get(key, 0) + 1
+                self._extended_hours_attempts[key] = attempts
+                self._extended_hours_retry_at[key] = time.monotonic() + 60.0
+                if attempts >= 3:
+                    self._extended_hours_unsupported.add(key)
+                    if kind == "EXIT":
+                        write_risk_event = True
+                        claimed = self._claim_exit_takeover_alert(
+                            key,
+                            notify_risk_event,
+                        )
+        if claimed is not None and notify_risk_event is not None:
+            threading.Thread(
+                target=self._send_exit_takeover_alert,
+                args=(claimed, notify_risk_event),
+                name="extended-exit-takeover-alert",
+                daemon=True,
+            ).start()
+        if write_risk_event:
+            try:
+                self._record_risk_event(
+                    "extended-hours exits are disabled for "
+                    f"{symbol} {phase}; operator takeover required"
+                )
+            except Exception:
+                logger.exception(
+                    "extended-hours exit-disable risk event failed"
+                )
+
+    def _active_extended_hours_key(self) -> tuple[str, str, date, str] | None:
         context = self._extended_hours_context
         if context is None:
             return None
-        symbol, phase, decided_at = context
-        return (symbol.upper(), phase, trade_day_for(market_for_symbol(symbol), decided_at))
+        if len(context) == 3:
+            symbol, phase, decided_at = context
+            kind = "EXIT"
+        else:
+            symbol, phase, decided_at, kind = context
+        return (
+            symbol.upper(),
+            phase,
+            trade_day_for(market_for_symbol(symbol), decided_at),
+            kind,
+        )
 
     @staticmethod
     def _accepts_positional_args(callback: Callable[..., object], count: int) -> bool:
@@ -1307,6 +1478,7 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
         reduce_only: bool = False,
+        extended_take_profit: bool = False,
         execution_context: Mapping[str, object] | None = None,
         is_funnel_primary: bool = False,
         entry_policy_check: EntryPolicyCheck | None = None,
@@ -1370,6 +1542,7 @@ class TradeExecutionService:
                 )
             self._active_execution_context.setdefault("market", market)
             self._active_execution_context.setdefault("fee_rate", float(fee_rate))
+            self._execution_session_mode = trading_session_mode
             if sized_quantity is not None:
                 self._active_execution_context[
                     EXECUTION_CONTEXT_SIZED_QUANTITY_KEY
@@ -1404,6 +1577,7 @@ class TradeExecutionService:
                     restore_engine_snapshot=restore_engine_snapshot,
                     notify_risk_event=notify_risk_event,
                     reduce_only=reduce_only,
+                    extended_take_profit=extended_take_profit,
                     is_funnel_primary=is_funnel_primary,
                     entry_policy_check=entry_policy_check,
                     allow_opening_warmup_entry=(
@@ -1852,6 +2026,7 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
         reduce_only: bool = False,
+        extended_take_profit: bool = False,
         entry_policy_check: EntryPolicyCheck | None = None,
         allow_opening_warmup_entry: bool = False,
         is_funnel_primary: bool = False,
@@ -1902,13 +2077,20 @@ class TradeExecutionService:
                 symbol,
                 extended_entry_decision.phase,
                 datetime.now(timezone.utc),
+                "ENTRY",
             )
         if (
             trading_session_mode == "ANY"
-            and self.extended_hours_trading_enabled
-            and not self.paper_account_confirmed
+            and self._extended_hours_trading_effective()
             and action in _POSITION_REDUCING_ACTIONS
             and not is_trading_hours(market)
+            and (
+                reduce_only
+                or (
+                    extended_take_profit
+                    and self._tracked_long_close(symbol, action)
+                )
+            )
         ):
             # Extended-hours trading opt-in (owner 2026-10-03): with the flag
             # effective (on + not paper), an ANY-mode non-RTH reduce-only exit
@@ -1922,7 +2104,7 @@ class TradeExecutionService:
             # off. Flag off: same — no gate, today's behaviour.
             exit_decision = self.extended_hours_exit_decision(
                 action=action, symbol=symbol, market=market,
-                reduce_only=reduce_only,
+                reduce_only=True,
             )
             if not exit_decision.permitted:
                 return self._skip_order(
@@ -1935,6 +2117,7 @@ class TradeExecutionService:
                 symbol,
                 exit_decision.phase,
                 datetime.now(timezone.utc),
+                "EXIT",
             )
         if trading_session_mode == "RTH_ONLY":
             if not is_trading_hours(market):
@@ -1949,7 +2132,9 @@ class TradeExecutionService:
                         symbol, action, f"non-RTH for {market}: {decision.reason}",
                         skip_category="SESSION",
                     )
-                self._extended_hours_context = (symbol, decision.phase, decided_at)
+                self._extended_hours_context = (
+                    symbol, decision.phase, decided_at, "EXIT",
+                )
             if action in _ENTRY_ACTIONS and is_opening_warmup(
                 market,
                 settings.trading_open_warmup_minutes,
@@ -2121,7 +2306,8 @@ class TradeExecutionService:
                 engine_snapshot=engine_snapshot,
                 restore_engine_snapshot=restore_engine_snapshot,
                 notify_risk_event=notify_risk_event,
-                reduce_only=reduce_only,
+                reduce_only=reduce_only or extended_take_profit,
+                extended_take_profit=extended_take_profit,
                 is_funnel_primary=is_funnel_primary,
             )
         if action == "SELL_SHORT":
@@ -3843,6 +4029,7 @@ class TradeExecutionService:
         restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
         notify_risk_event: _NotifyRiskEvent | None = None,
         reduce_only: bool = False,
+        extended_take_profit: bool = False,
         is_funnel_primary: bool = False,
     ) -> OrderStatus | None:
         positions = broker.get_positions()
@@ -3854,6 +4041,14 @@ class TradeExecutionService:
         if qty <= 0:
             logger.warning("SELL: no available long quantity for %s", symbol)
             return self._skip_order(symbol, "SELL", f"no available long quantity for {symbol}", skip_category="POSITION")
+        if extended_take_profit:
+            tracked = self.tracked_position(symbol)
+            if (
+                tracked is not None
+                and tracked.side == "LONG"
+                and qty > tracked.quantity
+            ):
+                qty = tracked.quantity
 
         self._record_positive_sizing(is_funnel_primary)
         norm = self._normalize_board_lot_quantity(symbol, "SELL", qty)
@@ -4192,14 +4387,27 @@ class TradeExecutionService:
                 )
             ):
                 session_market = market_for_symbol(approved_order.symbol)
-                if not is_trading_hours(session_market):
+                if not self._final_submit_session_open(
+                    session_market,
+                    symbol=approved_order.symbol,
+                    trading_session_mode=self._execution_session_mode,
+                ):
+                    # Extended-not-effective keeps today's RTH wording so
+                    # flag-off / paper / unbound paths stay identical.
+                    if self._extended_hours_trading_effective():
+                        session_reason = (
+                            f"execution session closed before final "
+                            f"submission for {session_market}"
+                        )
+                    else:
+                        session_reason = (
+                            f"RTH session ended before final submission "
+                            f"for {session_market}"
+                        )
                     return self._skip_order(
                         approved_order.symbol,
                         approved_order.action,
-                        (
-                            f"RTH session ended before final submission "
-                            f"for {session_market}"
-                        ),
+                        session_reason,
                         skip_category="SESSION",
                     )
                 if self._entry_cutoff_active(session_market):
@@ -4240,7 +4448,11 @@ class TradeExecutionService:
                     TradeExecutionService._extended_hours_sdk_unsupported = True
                     key = self._active_extended_hours_key()
                     if key is not None:
-                        self._extended_hours_terminal_outcome(key, unsupported=True)
+                        self._extended_hours_terminal_outcome(
+                            key,
+                            unsupported=True,
+                            notify_risk_event=notify_risk_event,
+                        )
                     if restore_engine_snapshot is not None and engine_snapshot is not None:
                         restore_engine_snapshot(engine_snapshot)
                     return self._skip_order(symbol, action, str(exc), skip_category="RISK")
@@ -5429,7 +5641,9 @@ class TradeExecutionService:
                             skip_category="SESSION",
                         )
                     outside_rth = "ANY_TIME"
-                    self._extended_hours_context = (symbol, entry_decision.phase, now)
+                    self._extended_hours_context = (
+                        symbol, entry_decision.phase, now, "ENTRY",
+                    )
                 else:
                     decision = self.extended_hours_exit_decision(
                         action=action, symbol=symbol, market=execution_market,
@@ -5442,7 +5656,9 @@ class TradeExecutionService:
                             skip_category="SESSION",
                         )
                     outside_rth = "ANY_TIME"
-                    self._extended_hours_context = (symbol, decision.phase, now)
+                    self._extended_hours_context = (
+                        symbol, decision.phase, now, "EXIT",
+                    )
         final_order = dataclass_replace(
             boundary_approval,
             price=(
@@ -5865,8 +6081,29 @@ class TradeExecutionService:
             if approved_order.outside_rth is not None and order_status.status == "REJECTED":
                 key = self._active_extended_hours_key()
                 if key is not None:
-                    self._extended_hours_terminal_outcome(key, unsupported=True)
-                self._record_risk_event(f"extended-hours order {result.broker_order_id} rejected; phase disabled")
+                    # A plain REJECTED counts against its own kind. Only a
+                    # broker outside_rth that is not ANY_TIME, or
+                    # ExtendedHoursUnsupportedError, disables both.
+                    self._extended_hours_terminal_outcome(
+                        key,
+                        unsupported=False,
+                        notify_risk_event=notify_risk_event,
+                    )
+                    try:
+                        if key[3] == "EXIT" and key in self._extended_hours_unsupported:
+                            self._record_risk_event(
+                                "extended-hours exits are disabled for "
+                                f"{key[0]} {key[1]}; operator takeover required"
+                            )
+                        else:
+                            self._record_risk_event(
+                                f"extended-hours order {result.broker_order_id} "
+                                "rejected"
+                            )
+                    except Exception:
+                        logger.exception(
+                            "extended-hours rejection risk event failed"
+                        )
                 if restore_engine_snapshot is not None and engine_snapshot is not None:
                     restore_engine_snapshot(engine_snapshot)
                 return order_status
@@ -6231,7 +6468,9 @@ class TradeExecutionService:
                 return
             if updated_pending.extended_hours and updated_pending.extended_hours_key is not None:
                 self._extended_hours_terminal_outcome(
-                    updated_pending.extended_hours_key, unsupported=status == "REJECTED",
+                    updated_pending.extended_hours_key,
+                    unsupported=False,
+                    notify_risk_event=notify_risk_event,
                 )
             else:
                 self._pause_after_failed_order(updated_pending.broker_order_id, status, risk, notify_risk_event)
@@ -6245,7 +6484,11 @@ class TradeExecutionService:
             and not updated_pending.extended_hours_cancel_requested
         ):
             if updated_pending.extended_hours_key is not None:
-                self._extended_hours_terminal_outcome(updated_pending.extended_hours_key, unsupported=True)
+                self._extended_hours_terminal_outcome(
+                    updated_pending.extended_hours_key,
+                    unsupported=True,
+                    notify_risk_event=notify_risk_event,
+                )
             self._handle_pending_order_timeout(
                 dataclass_replace(updated_pending, extended_hours_cancel_requested=True),
                 risk=risk, notifier=notifier,
@@ -6320,7 +6563,9 @@ class TradeExecutionService:
                     )
                 elif pending.extended_hours and pending.extended_hours_key is not None:
                     self._extended_hours_terminal_outcome(
-                        pending.extended_hours_key, unsupported=order_status.status == "REJECTED",
+                        pending.extended_hours_key,
+                        unsupported=False,
+                        notify_risk_event=notify_risk_event,
                     )
                 else:
                     self._pause_after_timed_out_terminal_order(
@@ -6380,7 +6625,9 @@ class TradeExecutionService:
                     )
                 elif pending.extended_hours and pending.extended_hours_key is not None:
                     self._extended_hours_terminal_outcome(
-                        pending.extended_hours_key, unsupported=cancel_status.status == "REJECTED",
+                        pending.extended_hours_key,
+                        unsupported=False,
+                        notify_risk_event=notify_risk_event,
                     )
                 else:
                     self._pause_after_timed_out_terminal_order(
@@ -6436,7 +6683,9 @@ class TradeExecutionService:
                     elif recovery_status.status in _FAILED_ORDER_STATUSES:
                         if pending.extended_hours and pending.extended_hours_key is not None:
                             self._extended_hours_terminal_outcome(
-                                pending.extended_hours_key, unsupported=recovery_status.status == "REJECTED",
+                                pending.extended_hours_key,
+                                unsupported=False,
+                                notify_risk_event=notify_risk_event,
                             )
                         else:
                             self._pause_after_timed_out_terminal_order(

@@ -53,6 +53,10 @@ class StrategyService:
         self.db = db
 
     def get_config(self) -> StrategyConfig:
+        """Return the latest row. Callers that need a forced refresh
+        call ``session.expire_all()`` first; this signature stays zero-arg
+        so test fakes that replace it keep working.
+        """
         config = self.db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
         if config is None:
             config = StrategyConfig()
@@ -65,7 +69,12 @@ class StrategyService:
         if data.get("short_selling"):
             logger.warning("forcing short_selling=false under the P0 live safety policy")
             data = {**data, "short_selling": False}
-        config = self.db.query(StrategyConfig).order_by(StrategyConfig.id.desc()).first()
+        config = (
+            self.db.query(StrategyConfig)
+            .order_by(StrategyConfig.id.desc())
+            .populate_existing()
+            .first()
+        )
         is_new = config is None
         if config is None:
             config = StrategyConfig()

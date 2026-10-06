@@ -1658,6 +1658,52 @@ class BrokerGateway:
             base_ms=settings.broker_retry_base_ms,
         )
 
+    @staticmethod
+    def _finite_positive_price(value: object) -> float | None:
+        try:
+            price = float(value)  # type: ignore[arg-type]
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if not math.isfinite(price) or price <= 0:
+            return None
+        return price
+
+    @classmethod
+    def _extended_session_last_trade(cls, item: Any) -> tuple[float, str]:
+        """Freshest positive last trade among main / pre / post.
+
+        During PRE/POST the SDK leaves ``last_done`` and ``timestamp`` at
+        the prior RTH close. The live print is on ``pre_market_quote`` or
+        ``post_market_quote`` (same naive timestamp convention). Overnight
+        stays unsupported and is never consulted. A timestamp tie prefers
+        main. Items without sub-quotes, including HK, keep today's pair.
+        """
+        candidates: list[tuple[object, float]] = []
+        main_price = cls._finite_positive_price(getattr(item, "last_done", 0))
+        main_timestamp = getattr(item, "timestamp", None)
+        if main_price is not None and main_timestamp is not None:
+            candidates.append((main_timestamp, main_price))
+        for attr in ("pre_market_quote", "post_market_quote"):
+            sub = getattr(item, attr, None)
+            if sub is None:
+                continue
+            price = cls._finite_positive_price(getattr(sub, "last_done", 0))
+            timestamp = getattr(sub, "timestamp", None)
+            if price is None or timestamp is None:
+                continue
+            if candidates and type(timestamp) is not type(candidates[0][0]):
+                # datetime vs str is not ordered; skip rather than raise
+                # or invent a conversion.
+                continue
+            if not candidates or timestamp > candidates[0][0]:
+                candidates = [(timestamp, price)]
+        if not candidates:
+            return float(getattr(item, "last_done", 0) or 0), str(
+                getattr(item, "timestamp", "")
+            )
+        chosen_timestamp, chosen_price = candidates[0]
+        return chosen_price, str(chosen_timestamp)
+
     def _get_quotes_inner(
         self,
         symbols: list[str],
@@ -1689,8 +1735,7 @@ class BrokerGateway:
                     logger.warning("broker did not return quote for symbol %s", fallback_symbol)
                     continue
                 symbol = str(getattr(item, "symbol", fallback_symbol))
-                last_price = float(getattr(item, "last_done", 0))
-                timestamp = str(getattr(item, "timestamp", ""))
+                last_price, timestamp = self._extended_session_last_trade(item)
                 bid = float(getattr(item, "bid", 0))
                 ask = float(getattr(item, "ask", 0))
                 if bid <= 0 or ask <= 0:

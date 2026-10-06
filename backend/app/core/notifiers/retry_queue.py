@@ -158,6 +158,7 @@ class NotificationRetryQueue:
         self._worker_thread = threading.Thread(
             target=self._run, name="notification-retry", daemon=True
         )
+        self._worker_thread._notification_retry_queue = self  # type: ignore[attr-defined]
         self._worker_thread.start()
 
     def _run(self) -> None:

@@ -1496,19 +1496,27 @@ class TestFundedMarginExceptionSettings:
         assert s.hard_entry_cutoff_minutes_before_close == 90
         assert s.hard_flatten_minutes_before_close == 30
 
-    def test_configured_forces_extended_hours_off(
+    def test_configured_does_not_force_extended_hours_off(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # Owner decision 2026-10-06, confirmed by research: the 15-minute
+        # forced liquidation applies only to the separate
+        # intraday-financing account, not this ordinary margin exception.
+        # Configured no longer clears the operator's extended-hours flag.
+        # Effectiveness is unchanged: on + not paper.
         self._arm(monkeypatch)
         monkeypatch.setenv(
             "AUTO_TRADE_EXTENDED_HOURS_TRADING_ENABLED", "true",
         )
+        monkeypatch.delenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", raising=False)
 
         s = Settings()
 
-        assert s.extended_hours_trading_enabled is False
-        assert s.extended_hours_trading_effective() is False
+        assert s.extended_hours_trading_enabled is True
+        assert s.extended_hours_trading_effective() is True
+        assert s.hard_entry_cutoff_minutes_before_close >= 90
+        assert s.hard_flatten_minutes_before_close >= 30
         # The protective-exits opt-in is NOT touched.
         assert s.extended_hours_protective_exits_enabled is False
 

@@ -326,6 +326,10 @@ class TestSettingsIntegration:
         assert settings.funded_margin_account_fingerprint == FP_FULL
         # Configured: enabled AND not paper AND valid fingerprint AND all
         # three requests > 0. The floors are raised by the validator.
+        # Extended hours is NOT forced off (owner decision 2026-10-06:
+        # the 15-minute forced liquidation is the separate
+        # intraday-financing account, not this ordinary margin exception).
+        # This env does not set the extended flag, so the default stays off.
         assert settings.hard_entry_cutoff_minutes_before_close == 90
         assert settings.hard_flatten_minutes_before_close == 30
         assert settings.extended_hours_trading_enabled is False

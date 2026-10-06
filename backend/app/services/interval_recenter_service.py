@@ -47,13 +47,15 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Callable
+from contextlib import AbstractContextManager
+from typing import Any, Callable, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.core.market_calendar import trade_day_for
+from app.core.execution_session import resolve_execution_session
+from app.core.market_calendar import is_trading_hours, trade_day_for
 from app.models import StrategyConfig, TradeEvent
 from app.services.trade_event_service import (
     encode_event_payload,
@@ -67,6 +69,7 @@ OUTCOME_NO_PRIMARY = "NO_PRIMARY_CONFIGURED"
 OUTCOME_WITHIN_BAND = "WITHIN_BAND"
 OUTCOME_STALE_PRICE = "STALE_REFERENCE_PRICE"
 OUTCOME_BLOCKED = "RECENTER_BLOCKED"
+OUTCOME_OUTSIDE_SESSION = "OUTSIDE_SESSION"
 OUTCOME_RECENTERED = "RECENTERED"
 
 # Durable provenance vocabulary. Operators grep these, so they must stay stable.
@@ -234,6 +237,18 @@ class IntervalRecenterService:
                 ),
             )
 
+        if not self._session_allows_recenter(config, market, observed_at):
+            # No trade_event and no daily-cap consumption: overnight this
+            # would otherwise fire every cron tick.
+            return IntervalRecenterResult(
+                OUTCOME_OUTSIDE_SESSION,
+                symbol=symbol,
+                reference_price=price,
+                previous_buy_low=buy_low,
+                previous_sell_high=sell_high,
+                detail="recentering is only allowed in an executable session",
+            )
+
         drift = _drift_pct(price, buy_low, sell_high)
         if drift < settings.interval_recenter_min_drift_pct:
             return IntervalRecenterResult(
@@ -274,22 +289,70 @@ class IntervalRecenterService:
 
         # The same gate a symbol switch passes. Moving buy_low while a position
         # is open would be an add-on in disguise, so this must precede the write.
-        try:
-            runner.assert_primary_switch_safe(symbol, market)
-        except Exception as exc:
-            detail = f"live safety gate refused: {exc}"
-            self._record_blocked(symbol, price, drift, detail)
-            logger.info("interval recenter blocked for %s: %s", symbol, exc)
-            return IntervalRecenterResult(
-                OUTCOME_BLOCKED,
-                symbol=symbol,
-                reference_price=price,
-                drift_pct=drift,
-                previous_buy_low=buy_low,
-                previous_sell_high=sell_high,
-                detail=detail,
+        # Commit and reload share the runner's reload lock so another reload
+        # cannot swap a band this call is about to roll back.
+        guard = getattr(runner, "strategy_reload_guard", None)
+        if not callable(guard):
+            try:
+                runner.assert_band_change_safe(symbol, market)
+            except Exception as exc:
+                detail = f"live safety gate refused: {exc}"
+                self._record_blocked(symbol, price, drift, detail)
+                return IntervalRecenterResult(
+                    OUTCOME_BLOCKED,
+                    symbol=symbol,
+                    reference_price=price,
+                    drift_pct=drift,
+                    previous_buy_low=buy_low,
+                    previous_sell_high=sell_high,
+                    detail=detail,
+                )
+            return self._commit_recenter(
+                runner, symbol, market, buy_low, sell_high,
+                new_buy_low, new_sell_high, price, drift,
+            )
+        with cast(AbstractContextManager[None], guard()):
+            fresh = self._db.scalar(
+                select(StrategyConfig)
+                .order_by(StrategyConfig.id.desc())
+                .execution_options(populate_existing=True)
+            )
+            if fresh is None or (
+                str(fresh.symbol or "").upper() != symbol
+                or str(fresh.market or "US").upper() != market
+                or float(fresh.buy_low or 0) != buy_low
+                or float(fresh.sell_high or 0) != sell_high
+            ):
+                return IntervalRecenterResult(
+                    OUTCOME_BLOCKED,
+                    symbol=symbol,
+                    reference_price=price,
+                    drift_pct=drift,
+                    previous_buy_low=buy_low,
+                    previous_sell_high=sell_high,
+                    detail="configured band changed before recenter commit",
+                )
+            try:
+                runner.assert_band_change_safe(symbol, market)
+            except Exception as exc:
+                detail = f"live safety gate refused: {exc}"
+                self._record_blocked(symbol, price, drift, detail)
+                return IntervalRecenterResult(
+                    OUTCOME_BLOCKED,
+                    symbol=symbol,
+                    reference_price=price,
+                    drift_pct=drift,
+                    previous_buy_low=buy_low,
+                    previous_sell_high=sell_high,
+                    detail=detail,
+                )
+            return self._commit_recenter(
+                runner, symbol, market, buy_low, sell_high,
+                new_buy_low, new_sell_high, price, drift,
             )
 
+    def _commit_recenter(self, runner, symbol, market, buy_low, sell_high, new_buy_low, new_sell_high, price, drift):
+        del market
         self._commit(
             runner,
             symbol=symbol,
@@ -312,6 +375,24 @@ class IntervalRecenterService:
         )
 
     # --- internals -------------------------------------------------------
+
+    @staticmethod
+    def _session_allows_recenter(
+        config: Any,
+        market: str,
+        instant: datetime,
+    ) -> bool:
+        """RTH, or executable US PRE/POST when ANY and extended is effective."""
+        if is_trading_hours(market, instant):
+            return True
+        mode = str(getattr(config, "trading_session_mode", "") or "ANY").upper()
+        if mode != "ANY":
+            return False
+        if not settings.extended_hours_trading_effective():
+            return False
+        return resolve_execution_session(
+            market, instant,
+        ).extended_hours_executable
 
     def _reference_price(
         self,
@@ -452,7 +533,9 @@ class IntervalRecenterService:
             if callable(reload_strategy):
                 # Borrow this service's session: opening a second connection
                 # here nests a checkout under the one _commit already holds.
-                reload_strategy(self._db)
+                # require_flat is call-local; the swap re-checks under the
+                # quote-evaluation lock.
+                reload_strategy(self._db, require_flat=True)
         except Exception as exc:
             logger.exception(
                 "interval recenter could not be completed for %s; rolling back",

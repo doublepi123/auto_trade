@@ -92,7 +92,15 @@ class _Runner:
         if self.block is not None:
             raise self.block
 
-    def reload_strategy(self, db: object = None) -> None:
+    def assert_band_change_safe(self, symbol: str, market: str) -> None:
+        self.assert_primary_switch_safe(symbol, market)
+
+    def reload_strategy(
+        self,
+        db: object = None,
+        *,
+        require_flat: bool = False,
+    ) -> None:
         self.reloads += 1
         if self.reload_error is not None and self.reloads == 1:
             raise self.reload_error
@@ -100,6 +108,10 @@ class _Runner:
 
 @pytest.fixture(autouse=True)
 def _enable(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.interval_recenter_service.is_trading_hours",
+        lambda *_args, **_kwargs: True,
+    )
     monkeypatch.setattr(settings, "interval_recenter_enabled", True, raising=False)
     monkeypatch.setattr(
         settings, "interval_recenter_min_drift_pct", 1.5, raising=False
@@ -242,7 +254,7 @@ class TestIntervalRecenter(_Base):
         seen: list[object] = []
         original = runner.reload_strategy
 
-        def spy(db_arg: object = None) -> None:
+        def spy(db_arg: object = None, **_kwargs: object) -> None:
             seen.append(db_arg)
             original(db_arg)
 

@@ -16,6 +16,7 @@ from app.core.market_calendar import is_trading_hours, trade_day_for
 from app.database import get_db
 from app.models import OrderRecord, StrategyConfig
 from app.runner import (
+    AppRunner,
     PrimarySwitchBlockedError,
     PrimarySwitchCheckError,
     get_runner,
@@ -67,7 +68,11 @@ def _reload_strategy_after_save(db: Session | None = None) -> None:
     """
     runner = get_runner()
     try:
-        runner.reload_strategy(**_reload_session_kwargs(runner, db))
+        borrowed = _reload_session_kwargs(runner, db).get("db")
+        if borrowed is None:
+            runner.reload_strategy()
+        else:
+            runner.reload_strategy(borrowed)
     except Exception:
         pause_preserving_operational = getattr(
             runner,
@@ -107,8 +112,33 @@ def update_strategy_with_runtime_reload(
     current: object,
     data: dict[str, Any],
 ) -> tuple[StrategyConfig, dict[str, Any]]:
-    """Validate, persist, and synchronously confirm the live runner update."""
-    merged = merge_and_validate_strategy_update(current, data)
+    """Validate, persist, and synchronously confirm the live runner update.
+
+    The merge, commit, reload and rollback run inside the runner reload
+    guard, after a forced-fresh read. An identity-map object loaded before
+    the guard must not be written back over a newer band.
+    """
+    runner = get_runner()
+    if isinstance(runner, AppRunner):
+        with runner.strategy_reload_guard():
+            return _update_strategy_locked(svc, current, data)
+    return _update_strategy_locked(svc, current, data)
+
+
+def _update_strategy_locked(
+    svc: StrategyService,
+    current: object,
+    data: dict[str, Any],
+) -> tuple[StrategyConfig, dict[str, Any]]:
+    # The save is not yet committed here, but every object this merge
+    # must not trust was committed by an earlier writer. expire_all
+    # forces the following zero-arg get_config() to refresh it.
+    # Every earlier writer has already committed. expire_all drops the
+    # identity-map copy so the zero-arg get_config() re-reads the row.
+    # Test fakes that replace get_config stay zero-arg.
+    svc.db.expire_all()
+    fresh = StrategyService(svc.db).get_config()
+    merged = merge_and_validate_strategy_update(fresh, data)
     runner = get_runner()
     new_symbol = str(merged["symbol"])
     new_market = str(merged["market"])
@@ -123,7 +153,7 @@ def update_strategy_with_runtime_reload(
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     previous = {
-        field_name: getattr(current, field_name, field_info.default)
+        field_name: getattr(fresh, field_name, field_info.default)
         for field_name, field_info in StrategyMergedSchema.model_fields.items()
     }
     config, diff = svc.update_config(merged)

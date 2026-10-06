@@ -422,6 +422,26 @@ class AutoPrimarySwitchService:
         from app.services.strategy_service import StrategyService
 
         svc = StrategyService(self._db)
+        from app.runner import AppRunner
+
+        if isinstance(runner, AppRunner):
+            with runner.strategy_reload_guard():
+                # The previous config write is already committed.
+                self._db.expire_all()
+                fresh = svc.get_config()
+                self._commit_switch_locked(runner, fresh, plan)
+                return
+        self._commit_switch_locked(runner, config, plan)
+
+    def _commit_switch_locked(
+        self,
+        runner: Any,
+        config: Any,
+        plan: _SwitchPlan,
+    ) -> None:
+        from app.services.strategy_service import StrategyService
+
+        svc = StrategyService(self._db)
         previous_symbol = (config.symbol or "").strip().upper()
         previous_market = (config.market or "US").strip().upper()
         previous_buy_low = float(config.buy_low or 0)

@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 
 import pytest
 
@@ -219,6 +220,24 @@ def _selected_modules(modules: set[str]) -> set[str] | None:
     return {
         module for module, shard in assignment.items() if shard == shard_index
     }
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_teardown(item: pytest.Item, nextitem: pytest.Item | None) -> None:
+    """Stop notifier retry workers before the next test captures logs.
+
+    A failed send starts a daemon named ``notification-retry``. If it logs
+    after its test has returned, the warning lands in a later test's caplog.
+    """
+    del item, nextitem
+    for thread in threading.enumerate():
+        if thread.name != "notification-retry" or thread is threading.current_thread():
+            continue
+        queue = getattr(thread, "_notification_retry_queue", None)
+        if queue is not None:
+            queue.stop(timeout=2)
+        else:
+            thread.join(timeout=2)
 
 
 # tryfirst: xdist's worker-side hook appends the group name to each nodeid, and

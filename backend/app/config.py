@@ -1571,12 +1571,16 @@ class Settings(BaseSettings):
             self.hard_entry_cutoff_minutes_before_close = (
                 self.hard_flatten_minutes_before_close
             )
-        # Funded full-margin exception (P3a): normalize the fingerprint and
-        # clamp the requests FIRST, then, only when CONFIGURED, raise the
-        # account-wide session floors and force extended-hours trading off
-        # (safer direction; the flatten anchor returns to the RTH close).
-        # Enabled-but-not-configured keeps flag-off behaviour + one warning.
-        # The hard_max_* sizing clamps above are NEVER touched by this.
+        # Funded full-margin exception (P3a/P3b): normalize the fingerprint
+        # and clamp the requests FIRST, then, only when CONFIGURED, raise
+        # the account-wide session floors (safer direction). Extended-hours
+        # trading is NOT forced off: the 15-minute forced liquidation
+        # applies only to the separate intraday-financing account, not this
+        # ordinary margin exception (owner decision, 2026-10-06).
+        # Effectiveness is unchanged — extended trading is effective only
+        # when enabled and not paper. Enabled-but-not-configured keeps
+        # flag-off behaviour + one warning. The hard_max_* sizing clamps
+        # above are NEVER touched by this.
         if self.funded_margin_enabled:
             if not _valid_funded_margin_fingerprint(
                 self.funded_margin_account_fingerprint,
@@ -1627,17 +1631,11 @@ class Settings(BaseSettings):
                 self.hard_entry_cutoff_minutes_before_close = (
                     self.hard_flatten_minutes_before_close
                 )
-            # No PRE/POST entries while the exception is active: flatten
-            # must anchor to the RTH close, not the 20:00 ET extended
-            # close. The protective-exits opt-in is deliberately NOT
+            # Extended-hours trading is left as the operator set it.
+            # When it is effective, cutoff/flatten already anchor to the
+            # extended close (20:00 ET), and the 90/30 floors above still
+            # apply. The protective-exits opt-in is deliberately NOT
             # touched (reduce-only protection stays available).
-            if self.extended_hours_trading_enabled:
-                logger.warning(
-                    "AUTO_TRADE_EXTENDED_HOURS_TRADING_ENABLED forced off: "
-                    "the funded-margin exception requires RTH-close-anchored "
-                    "flatten and forbids extended-hours entries"
-                )
-            self.extended_hours_trading_enabled = False
         if (
             self.universe_selection_min_realized_vol
             >= self.universe_selection_max_realized_vol
