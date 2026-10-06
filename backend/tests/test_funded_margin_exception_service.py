@@ -552,8 +552,8 @@ class TestFundedMarginPreSubmit(_ArmedMixin):
 class TestFundedMarginPendingCutoff:
     """Contract item G: a pending range BUY cannot outlive the cutoff.
 
-    A pending limit BUY submitted before the 90-minute cutoff must not
-    remain live into the 30-minute flatten window: the existing 30s
+    A pending limit BUY submitted before the entry cutoff must not
+    remain live into the flatten window: the existing 30s
     pending-timeout path cancels (or finalizes) it long before either
     window opens.
     """

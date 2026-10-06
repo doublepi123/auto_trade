@@ -1572,15 +1572,22 @@ class Settings(BaseSettings):
                 self.hard_flatten_minutes_before_close
             )
         # Funded full-margin exception (P3a/P3b): normalize the fingerprint
-        # and clamp the requests FIRST, then, only when CONFIGURED, raise
-        # the account-wide session floors (safer direction). Extended-hours
-        # trading is NOT forced off: the 15-minute forced liquidation
-        # applies only to the separate intraday-financing account, not this
-        # ordinary margin exception (owner decision, 2026-10-06).
-        # Effectiveness is unchanged — extended trading is effective only
-        # when enabled and not paper. Enabled-but-not-configured keeps
-        # flag-off behaviour + one warning. The hard_max_* sizing clamps
-        # above are NEVER touched by this.
+        # and clamp the requests. It does NOT raise the account-wide
+        # session floors: a configured exception uses the ordinary 45/15
+        # floors above (owner decision, 2026-10-07). The flatten<=cutoff
+        # fix-up already ran and is not repeated here; operator-raised
+        # values survive unchanged. Extended-hours trading is NOT forced
+        # off and is left as the operator set it: the 15-minute forced
+        # liquidation applies only to the separate intraday-financing
+        # account, not this ordinary margin exception (owner decision,
+        # 2026-10-06). When extended hours are effective, cutoff/flatten
+        # already anchor to the extended close (20:00 ET) at the ordinary
+        # floors. The protective-exits opt-in is deliberately NOT touched
+        # (reduce-only protection stays available). Effectiveness is
+        # unchanged — extended trading is effective only when enabled and
+        # not paper. Enabled-but-not-configured keeps flag-off behaviour
+        # + one warning. The hard_max_* sizing clamps above are NEVER
+        # touched by this.
         if self.funded_margin_enabled:
             if not _valid_funded_margin_fingerprint(
                 self.funded_margin_account_fingerprint,
@@ -1610,32 +1617,6 @@ class Settings(BaseSettings):
                 "is not configured (%s); behaving exactly as flag-off",
                 funded_margin.not_configured_reason,
             )
-        if funded_margin.configured:
-            # Account-wide, safer direction (design P3a §d): entries stop
-            # at least 90 minutes before the close and flatten starts at
-            # least 30 minutes before it, so the exception never races the
-            # broker's own liquidation at the close. flatten stays <=
-            # cutoff; operator-raised values survive via max().
-            self.hard_entry_cutoff_minutes_before_close = max(
-                self.hard_entry_cutoff_minutes_before_close,
-                90,
-            )
-            self.hard_flatten_minutes_before_close = max(
-                self.hard_flatten_minutes_before_close,
-                30,
-            )
-            if (
-                self.hard_flatten_minutes_before_close
-                > self.hard_entry_cutoff_minutes_before_close
-            ):
-                self.hard_entry_cutoff_minutes_before_close = (
-                    self.hard_flatten_minutes_before_close
-                )
-            # Extended-hours trading is left as the operator set it.
-            # When it is effective, cutoff/flatten already anchor to the
-            # extended close (20:00 ET), and the 90/30 floors above still
-            # apply. The protective-exits opt-in is deliberately NOT
-            # touched (reduce-only protection stays available).
         if (
             self.universe_selection_min_realized_vol
             >= self.universe_selection_max_realized_vol

@@ -1480,21 +1480,61 @@ class TestFundedMarginExceptionSettings:
         assert s.hard_flatten_minutes_before_close == 15
         assert s.extended_hours_trading_enabled is False
 
-    def test_configured_raises_cutoff_and_flatten_floors(
+    def test_configured_keeps_ordinary_cutoff_and_flatten_floors(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
     ) -> None:
+        # Owner decision 2026-10-07: a configured funded-margin exception
+        # no longer raises the account-wide session floors. They stay at
+        # the ordinary global floors (45/15). chdir isolates the read from
+        # a developer .env that would otherwise disarm the exception as PAPER.
         self._arm(monkeypatch)
+        monkeypatch.delenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", raising=False)
+        monkeypatch.delenv(
+            "AUTO_TRADE_HARD_ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE",
+            raising=False,
+        )
+        monkeypatch.delenv(
+            "AUTO_TRADE_HARD_FLATTEN_MINUTES_BEFORE_CLOSE",
+            raising=False,
+        )
+        monkeypatch.chdir(tmp_path)
 
         s = Settings()
 
+        assert s.funded_margin_configuration().configured is True
         # The exception never mutates the sizing clamps...
         assert s.hard_max_position_quantity == 100
         assert s.hard_max_position_notional == 5000
         assert s.hard_max_risk_per_trade == 250
-        # ...but the account-wide session floors rise (safer direction).
-        assert s.hard_entry_cutoff_minutes_before_close == 90
-        assert s.hard_flatten_minutes_before_close == 30
+        # ...and no longer raises the account-wide session floors.
+        assert s.hard_entry_cutoff_minutes_before_close == 45
+        assert s.hard_flatten_minutes_before_close == 15
+
+    def test_configured_keeps_operator_raised_cutoff_and_flatten(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        # Operator-raised values above the ordinary 45/15 floors still
+        # survive when the funded-margin exception is configured. They are
+        # not pulled back down, and they are not forced up to 90/30.
+        self._arm(monkeypatch)
+        monkeypatch.delenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", raising=False)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv(
+            "AUTO_TRADE_HARD_ENTRY_CUTOFF_MINUTES_BEFORE_CLOSE", "60",
+        )
+        monkeypatch.setenv(
+            "AUTO_TRADE_HARD_FLATTEN_MINUTES_BEFORE_CLOSE", "20",
+        )
+
+        s = Settings()
+
+        assert s.funded_margin_configuration().configured is True
+        assert s.hard_entry_cutoff_minutes_before_close == 60
+        assert s.hard_flatten_minutes_before_close == 20
 
     def test_configured_does_not_force_extended_hours_off(
         self,
@@ -1515,8 +1555,9 @@ class TestFundedMarginExceptionSettings:
 
         assert s.extended_hours_trading_enabled is True
         assert s.extended_hours_trading_effective() is True
-        assert s.hard_entry_cutoff_minutes_before_close >= 90
-        assert s.hard_flatten_minutes_before_close >= 30
+        # Configured no longer raises the session floors (2026-10-07).
+        assert s.hard_entry_cutoff_minutes_before_close == 45
+        assert s.hard_flatten_minutes_before_close == 15
         # The protective-exits opt-in is NOT touched.
         assert s.extended_hours_protective_exits_enabled is False
 

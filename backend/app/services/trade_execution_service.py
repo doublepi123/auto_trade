@@ -4376,7 +4376,7 @@ class TradeExecutionService:
             # session calendar is re-consulted AFTER every blocking step
             # (pre-submit boundary, capacity re-estimate, policy gates)
             # and immediately BEFORE the single broker mutation: a clock
-            # that crossed the RTH close or the 90-minute entry cutoff
+            # that crossed the RTH close or the entry cutoff
             # during those queries skips with SESSION and never submits.
             # Flag-off / paper / unbound / reductions resolve ineffective
             # => no new calendar call, identical behaviour and call shapes.

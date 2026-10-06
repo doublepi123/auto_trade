@@ -6,7 +6,8 @@ to the separate Longbridge intraday-financing account, not the ordinary
 margin account this exception binds. Configured + extended enabled stays
 enabled. The final-submit re-check allows an executable US PRE/POST phase
 when extended-hours trading is effective, and still skips inside the
-90-minute cutoff anchored to the extended close.
+entry cutoff anchored to the extended close. The configured exception
+uses the ordinary 45/15 floors (owner decision 2026-10-07).
 """
 
 from __future__ import annotations
@@ -216,8 +217,9 @@ class TestConfiguredExtendedHoursStaysEnabled:
         assert settings.funded_margin_configuration().configured is True
         assert settings.extended_hours_trading_enabled is True
         assert settings.extended_hours_trading_effective() is True
-        assert settings.hard_entry_cutoff_minutes_before_close == 90
-        assert settings.hard_flatten_minutes_before_close == 30
+        # Owner decision 2026-10-07: configured keeps the ordinary floors.
+        assert settings.hard_entry_cutoff_minutes_before_close == 45
+        assert settings.hard_flatten_minutes_before_close == 15
         assert settings.extended_hours_protective_exits_enabled is False
 
     def test_configured_plus_extended_disabled_stays_disabled(
@@ -231,8 +233,8 @@ class TestConfiguredExtendedHoursStaysEnabled:
 
         assert settings.extended_hours_trading_enabled is False
         assert settings.extended_hours_trading_effective() is False
-        assert settings.hard_entry_cutoff_minutes_before_close == 90
-        assert settings.hard_flatten_minutes_before_close == 30
+        assert settings.hard_entry_cutoff_minutes_before_close == 45
+        assert settings.hard_flatten_minutes_before_close == 15
 
     def test_configured_extended_on_paper_is_not_effective(
         self,
@@ -244,9 +246,8 @@ class TestConfiguredExtendedHoursStaysEnabled:
 
         settings = Settings()
 
-        # Paper attestation disarms the funded exception, so the 90/30
-        # floors do not apply. Extended stays operator-enabled but is not
-        # effective on a paper account.
+        # Paper attestation disarms the funded exception. Extended stays
+        # operator-enabled but is not effective on a paper account.
         assert settings.funded_margin_configuration().configured is False
         assert settings.extended_hours_trading_enabled is True
         assert settings.extended_hours_trading_effective() is False
