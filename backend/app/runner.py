@@ -522,6 +522,11 @@ class AppRunner:
         )
         self._last_order_sync_at = 0.0
         self._order_sync_interval_seconds = 15.0
+        # Set at the start of start(), before initialization or any sync.
+        # Pre-handover external orders are dropped only when created strictly
+        # before min(settings.ledger_epoch, this instant).
+        self._started_at: datetime | None = None
+        self._ignored_pre_epoch_order_ids: set[str] = set()
         self._last_order_sync_succeeded = False
         # Result of the last sync that actually finished. Readiness reads this
         # instead of the in-flight flag above, which is cleared at the start of
@@ -3180,6 +3185,8 @@ class AppRunner:
         self._observe_quote_subscription(True)
 
     def start(self, *, loop: asyncio.AbstractEventLoop | None = None) -> bool:
+        if self._started_at is None:
+            self._started_at = datetime.now(timezone.utc)
         with self._start_lock:
             if self._running:
                 return False
@@ -6469,6 +6476,7 @@ class AppRunner:
                 [_ORDER_SNAPSHOT_FETCH_ISSUE],
             )
             return 0, ()
+        broker_orders = self._drop_pre_epoch_external_orders(broker_orders)
         broker_representation_issues: dict[int, str] = {}
         broker_live_inventory: dict[str, list[str]] = {}
         for index, broker_order in enumerate(broker_orders):
@@ -6585,6 +6593,85 @@ class AppRunner:
             self._last_order_sync_succeeded = not representation_issues
         self._sync_risk_from_order_ledger()
         return changed, broker_orders
+
+    def _drop_pre_epoch_external_orders(
+        self,
+        broker_orders: Sequence[object],
+    ) -> list[object]:
+        """Ignore terminal owner orders that ended before the accounting period.
+
+        Cutoff is min(settings.ledger_epoch, runner start). An order is dropped
+        only when it is terminal, created strictly before that cutoff, and has
+        neither an OrderRecord nor an ORDER_SUBMITTED event. A failed provenance
+        read returns the list unchanged so today's latch still fires.
+        """
+        epoch = getattr(settings, "ledger_epoch", None)
+        started_at = self._started_at
+        if epoch is None or started_at is None:
+            return list(broker_orders)
+        cutoff = min(self._as_utc(epoch), self._as_utc(started_at))
+        candidates: list[tuple[object, str]] = []
+        for order in broker_orders:
+            status = str(getattr(order, "status", "") or "").upper()
+            if status not in _TERMINAL_ORDER_STATUSES:
+                continue
+            created_at = getattr(order, "created_at", None)
+            if not isinstance(created_at, datetime):
+                continue
+            if self._as_utc(created_at) >= cutoff:
+                continue
+            order_id = str(getattr(order, "broker_order_id", "") or "").strip()
+            if not order_id:
+                continue
+            candidates.append((order, order_id))
+        if not candidates:
+            return list(broker_orders)
+        ids = sorted({order_id for _, order_id in candidates})
+        try:
+            with self._db_session() as db:
+                owned_rows = (
+                    db.query(OrderRecord.broker_order_id)
+                    .filter(OrderRecord.broker_order_id.in_(ids))
+                    .all()
+                )
+                submitted_rows = (
+                    db.query(TradeEvent.broker_order_id)
+                    .filter(
+                        TradeEvent.event_type == "ORDER_SUBMITTED",
+                        TradeEvent.broker_order_id.in_(ids),
+                    )
+                    .all()
+                )
+        except Exception:
+            logger.exception(
+                "pre-epoch external order filter failed closed; keeping broker snapshot"
+            )
+            return list(broker_orders)
+        owned = {str(row[0]) for row in owned_rows if row[0]}
+        submitted = {str(row[0]) for row in submitted_rows if row[0]}
+        drop_ids = {
+            order_id
+            for _, order_id in candidates
+            if order_id not in owned and order_id not in submitted
+        }
+        if not drop_ids:
+            return list(broker_orders)
+        for order, order_id in candidates:
+            if order_id not in drop_ids or order_id in self._ignored_pre_epoch_order_ids:
+                continue
+            self._ignored_pre_epoch_order_ids.add(order_id)
+            logger.info(
+                "ignoring pre-epoch external order id=%s symbol=%s status=%s created_at=%s",
+                order_id,
+                getattr(order, "symbol", ""),
+                getattr(order, "status", ""),
+                getattr(order, "created_at", None),
+            )
+        return [
+            order
+            for order in broker_orders
+            if str(getattr(order, "broker_order_id", "") or "").strip() not in drop_ids
+        ]
 
     def _enrich_broker_order_costs(self, broker_orders: Sequence[object]) -> None:
         """Best-effort refresh for charges that settle after the fill."""

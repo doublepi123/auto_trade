@@ -604,3 +604,20 @@ def test_deploy_files_expose_funded_margin_exception_controls() -> None:
     assert Settings().funded_margin_max_position_quantity == 0
     assert Settings().funded_margin_max_position_notional == 0.0
     assert Settings().funded_margin_max_risk_per_trade == 0.0
+
+
+def test_deploy_files_expose_ledger_epoch() -> None:
+    """Compose must forward the ledger epoch or the container keeps None.
+
+    A Settings field absent from compose is silently ignored at runtime: the
+    container keeps the field default regardless of what the operator sets in
+    .env (recorded auto-primary-switch incident). The ``:-`` fallback must be
+    empty so an unset variable disables the filter.
+    """
+    compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+    dockerhub = (ROOT / "docker-compose.dockerhub.yaml").read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    expected = "AUTO_TRADE_LEDGER_EPOCH=${AUTO_TRADE_LEDGER_EPOCH:-}"
+    assert expected in compose
+    assert expected in dockerhub
+    assert "AUTO_TRADE_LEDGER_EPOCH=" in env_example

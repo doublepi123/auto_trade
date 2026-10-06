@@ -4,6 +4,7 @@ import logging
 import math
 import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -926,6 +927,42 @@ class Settings(BaseSettings):
         if isinstance(value, str) and not value.strip():
             return None
         return value
+    # Accounting-period start. Terminal broker orders created strictly before
+    # min(this instant, runner start), with no local OrderRecord and no
+    # ORDER_SUBMITTED provenance, are owner trades from before the handover
+    # and must not enter the bot ledger or latch reconciliation. Empty
+    # (compose `${VAR:-}`) disables the filter and keeps today's behaviour.
+    # A naive ISO value is UTC. An unparseable value fails startup.
+    ledger_epoch: datetime | None = Field(
+        default=None,
+        validation_alias="AUTO_TRADE_LEDGER_EPOCH",
+    )
+
+    @field_validator("ledger_epoch", mode="before")
+    @classmethod
+    def _parse_ledger_epoch(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            normalized = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+            try:
+                parsed = datetime.fromisoformat(normalized)
+            except ValueError as exc:
+                raise ValueError(
+                    "AUTO_TRADE_LEDGER_EPOCH must be an ISO-8601 datetime"
+                ) from exc
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        raise ValueError("AUTO_TRADE_LEDGER_EPOCH must be an ISO-8601 datetime")
+
     # Operator attestation that the connected brokerage account is a paper /
     # demo account. DEFAULT FALSE, and it grants nothing on its own — it only
     # makes ``paper_max_position_notional`` eligible to be honoured. Kept as a
