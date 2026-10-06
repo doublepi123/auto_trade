@@ -781,23 +781,82 @@ class TradeExecutionService:
             market, overnight_enabled=self._overnight_trading_effective(),
         ).extended_hours_executable
 
-    def _entry_cutoff_active(self, market: str) -> bool:
+    def _entry_cutoff_active(
+        self,
+        market: str,
+        *,
+        trading_session_mode: str | None = None,
+    ) -> bool:
         """Entry-cutoff predicate.
 
         Legacy: within ``entry_cutoff_minutes_before_close`` of the RTH close
-        while RTH is open. With the extended-hours trading flag effective
-        (on + not paper), the cutoff is measured instead from the end of the
-        last executable phase of the day (20:00 ET normally, RTH close on
-        half days): no new entries after 19:15 ET, NOT 15:15 ET.
+        while RTH is open. The extended close (20:00 ET, or 03:50 ET while
+        overnight is the current span) applies ONLY when the strategy mode is
+        ANY and extended trading is effective. RTH_ONLY keeps the RTH close
+        even if the flag is on.
         """
         minutes = self.entry_cutoff_minutes_before_close
-        if not (
-            self.extended_hours_trading_enabled
-            and not self.paper_account_confirmed
-        ):
+        mode = (
+            trading_session_mode
+            if trading_session_mode is not None
+            else self._execution_session_mode
+        )
+        if mode != "ANY" or not self._extended_hours_trading_effective():
             return is_closing_window(market, minutes)
         return is_extended_closing_window(
             market, minutes, overnight_enabled=self._overnight_trading_effective(),
+        )
+
+    def _approval_phase(self, symbol: str) -> str:
+        """Phase captured when this attempt was approved.
+
+        No extended context means the approval happened in RTH (or the flag
+        was off and this helper is not consulted).
+        """
+        context = self._extended_hours_context
+        if (
+            context is None
+            or len(context) < 2
+            or str(context[0]).upper() != symbol.upper()
+        ):
+            return "RTH"
+        return str(context[1])
+
+    def _current_execution_phase(self, market: str) -> str:
+        now = datetime.now(timezone.utc)
+        try:
+            in_rth = is_trading_hours(market, now)
+        except TypeError:
+            in_rth = is_trading_hours(market)
+        if in_rth:
+            return "RTH"
+        try:
+            return resolve_execution_session(
+                market, now, overnight_enabled=self._overnight_trading_effective(),
+            ).phase
+        except TypeError:
+            return resolve_execution_session(
+                market, overnight_enabled=self._overnight_trading_effective(),
+            ).phase
+
+    def _phase_mismatch(
+        self, symbol: str, action: str, market: str, approved: str,
+    ) -> OrderStatus | None:
+        """Refuse one attempt when the phase moved after approval.
+
+        Does not pause, consume the extended budget, or add a cooldown. The
+        next evaluation re-authorizes under the new phase.
+        """
+        if not self._extended_hours_trading_effective():
+            return None
+        current = self._current_execution_phase(market)
+        if approved == current:
+            return None
+        return self._skip_order(
+            symbol,
+            action,
+            f"execution session changed before submission: {approved} -> {current}",
+            skip_category="SESSION",
         )
 
     def _extended_hours_entry_decision(
@@ -2167,7 +2226,9 @@ class TradeExecutionService:
                     f"opening warmup for {market}",
                     skip_category="SESSION",
                 )
-        if action in _ENTRY_ACTIONS and self._entry_cutoff_active(market):
+        if action in _ENTRY_ACTIONS and self._entry_cutoff_active(
+            market, trading_session_mode=trading_session_mode,
+        ):
             return self._skip_order(
                 symbol,
                 action,
@@ -3606,6 +3667,17 @@ class TradeExecutionService:
         min_profit_amount: Decimal | float | int,
         fee_rate: Decimal | float | int,
     ) -> OrderStatus | None:
+        try:
+            bid_price = Decimal(str(bid))
+            ask_price = Decimal(str(ask))
+        except Exception:
+            bid_price = Decimal("0")
+            ask_price = Decimal("0")
+        overnight_spread = self._overnight_entry_spread_refusal(
+            symbol, bid_price, ask_price,
+        )
+        if overnight_spread is not None:
+            return overnight_spread
         if expected_exit_price is None:
             return None
         target = self._coerce_non_negative_decimal(expected_exit_price)
@@ -3616,12 +3688,6 @@ class TradeExecutionService:
                 "expected exit price is unavailable; fee-adjusted entry denied",
                 skip_category="FEE",
             )
-        try:
-            bid_price = Decimal(str(bid))
-            ask_price = Decimal(str(ask))
-        except Exception:
-            bid_price = Decimal("0")
-            ask_price = Decimal("0")
         if (
             not bid_price.is_finite()
             or not ask_price.is_finite()
@@ -3634,12 +3700,6 @@ class TradeExecutionService:
                 "valid BBO is unavailable; fee-adjusted entry denied",
                 skip_category="FEE",
             )
-        overnight_spread = self._overnight_entry_spread_refusal(
-            symbol, bid_price, ask_price,
-        )
-        if overnight_spread is not None:
-            return overnight_spread
-
         spread_cost = (ask_price - bid_price) * quantity
         slippage_cost = (
             entry_price
@@ -4525,6 +4585,7 @@ class TradeExecutionService:
                     ) from exc
 
             if approved_order.protective_commit_required:
+                approved_phase = self._approval_phase(approved_order.symbol)
                 with risk.protective_submission_guard():
                     commit_check = self._final_protective_exit_commit_check
                     if commit_check is None:
@@ -4560,6 +4621,15 @@ class TradeExecutionService:
                             str(protective_issue),
                             skip_category="RISK",
                         )
+                    phase_refusal = self._phase_mismatch(
+                        approved_order.symbol,
+                        approved_order.action,
+                        market_for_symbol(approved_order.symbol),
+                        approved_phase,
+                    )
+                    if phase_refusal is not None:
+                        risk.revoke_protective_exits()
+                        return phase_refusal
                     with risk.protective_permission_guard() as permitted:
                         if permitted:
                             broker_result = submit_approved_order()
@@ -5682,6 +5752,7 @@ class TradeExecutionService:
                 action,
                 risk_result.reason,
             )
+        approved_phase = self._approval_phase(symbol)
         outside_rth: str | None = None
         if self._extended_hours_context is not None:
             execution_market = market_for_symbol(symbol)
@@ -5720,6 +5791,11 @@ class TradeExecutionService:
                     self._extended_hours_context = (
                         symbol, decision.phase, now, "EXIT",
                     )
+        phase_refusal = self._phase_mismatch(
+            symbol, action, market, approved_phase,
+        )
+        if phase_refusal is not None:
+            return phase_refusal
         final_order = dataclass_replace(
             boundary_approval,
             price=(

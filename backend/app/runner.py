@@ -3503,11 +3503,6 @@ class AppRunner:
             ]
 
     def stop(self) -> None:
-        try:
-            self._notification_retry_queue.drain()
-        except Exception:
-            logger.exception("notification retry drain failed during stop")
-        self._notification_retry_queue.stop()
         with self._start_lock:
             defer_broker_close = False
             with self._protective_runtime_state_guard():
@@ -3533,12 +3528,36 @@ class AppRunner:
                     with self._state_lock:
                         self._trigger_in_flight = False
                     defer_broker_close = False
-            if defer_broker_close:
-                return
-            try:
-                self.broker.close()
-            except Exception as exc:
-                logger.warning("broker.close() during stop raised: %s", exc)
+            if not defer_broker_close:
+                try:
+                    self.broker.close()
+                except Exception as exc:
+                    logger.warning("broker.close() during stop raised: %s", exc)
+        self._drain_notifications_on_stop()
+
+    def _drain_notifications_on_stop(self) -> None:
+        """Drain after the runner is stopped, never longer than 5 seconds."""
+        deadline = time.monotonic() + 5.0
+        worker = threading.Thread(
+            target=self._notification_retry_queue.drain,
+            name="notification-stop-drain",
+            daemon=True,
+        )
+        try:
+            worker.start()
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                worker.join(timeout=remaining)
+            if worker.is_alive():
+                logger.warning(
+                    "notification retry drain exceeded the 5s stop bound",
+                )
+        except Exception:
+            logger.exception("notification retry drain failed during stop")
+        try:
+            self._notification_retry_queue.stop()
+        except Exception:
+            logger.exception("notification retry queue stop failed")
 
     def reload_credentials(self, *, broker_identity_change: bool = True) -> None:
         credentials = self._load_credentials()
@@ -4179,6 +4198,15 @@ class AppRunner:
                         # Funnel stage 3: price actually crossed an entry
                         # threshold (whether or not a trigger follows).
                         self.decision_funnel.record_threshold_crossing()
+                    if (
+                        prospective_entry_action
+                        and not self._entry_print_in_current_phase(
+                            quote, active_market,
+                        )
+                    ):
+                        active_engine.record_price(quote.last_price)
+                        decision.early_return = True
+                        return decision
                     crossing_block = (
                         self._validate_live_entry_crossing(
                             active_engine.params.symbol or quote.symbol,
@@ -4261,6 +4289,42 @@ class AppRunner:
                 ):
                     self.decision_funnel.record_skip("COOLDOWN")
         return decision
+
+    def _entry_print_in_current_phase(self, quote: Quote, market: str) -> bool:
+        """True unless an extended-phase ENTRY print predates that phase.
+
+        RTH entries and every exit skip this gate. A missing or unparseable
+        timestamp fails closed. Shared by the trigger decision and the final
+        entry quote check.
+        """
+        now = datetime.now(timezone.utc)
+        try:
+            in_rth = is_trading_hours(market, now)
+        except TypeError:
+            in_rth = is_trading_hours(market)
+        if in_rth or not self._extended_hours_trading_effective():
+            return True
+        try:
+            session = trade_execution_module.resolve_execution_session(
+                market,
+                now,
+                overnight_enabled=self._trade_svc._overnight_trading_effective(),
+            )
+        except TypeError:
+            session = trade_execution_module.resolve_execution_session(
+                market,
+                overnight_enabled=self._trade_svc._overnight_trading_effective(),
+            )
+        if session.phase not in ("PRE", "POST", "OVERNIGHT"):
+            return True
+        source_timestamp = parse_quote_source_timestamp(quote.timestamp)
+        if (
+            source_timestamp is None
+            or session.phase_started_at is None
+            or source_timestamp < session.phase_started_at
+        ):
+            return False
+        return True
 
     def _extended_take_profit_permitted(
         self,
@@ -6363,6 +6427,10 @@ class AppRunner:
             )
         ):
             return "fresh executable quote failed the final quality gate"
+        if action in _ENTRY_ACTIONS and not self._entry_print_in_current_phase(
+            quote, market_for_symbol(symbol),
+        ):
+            return "executable quote predates the current execution session"
         executable = Decimal(
             str(
                 quote.ask
@@ -11451,7 +11519,10 @@ class AppRunner:
         third argument, so tests monkeypatching either calendar function
         with 2-arg lambdas keep working.
         """
-        if not self._extended_hours_trading_effective():
+        if (
+            self._get_trading_session_mode() != "ANY"
+            or not self._extended_hours_trading_effective()
+        ):
             if instant is None:
                 return is_closing_window(market, minutes)
             return is_closing_window(market, minutes, instant)

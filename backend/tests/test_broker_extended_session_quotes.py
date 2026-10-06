@@ -10,6 +10,9 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from types import SimpleNamespace
+
+import pytest
 
 from app.core.broker import BrokerGateway, Quote
 
@@ -187,7 +190,12 @@ def test_missing_subquotes_zero_negative_and_none_timestamps_are_ignored() -> No
     assert gateway._last_trade_by_symbol["TSLA.US"] == (378.73, str(main_ts))
 
 
-def test_overnight_quote_is_selected_when_freshest() -> None:
+def test_overnight_quote_is_selected_when_freshest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.config import settings as live_settings
+
+    object.__setattr__(live_settings, "overnight_trading_effective", lambda: True)
     main_ts = datetime(2026, 10, 5, 16, 0, 0)
     gateway, _context = _gateway([
         _QuoteItem(

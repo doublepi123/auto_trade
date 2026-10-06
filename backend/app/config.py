@@ -1404,16 +1404,18 @@ class Settings(BaseSettings):
     def overnight_trading_effective(self) -> bool:
         """Overnight on only when extended hours, the flag, and the SDK env agree.
 
-        Flag on with LONGPORT_ENABLE_OVERNIGHT missing or not true/1 logs one
-        error per Settings instance and returns False. Paper accounts fail
-        closed through ``extended_hours_trading_effective``.
+        Flag on with LONGPORT_ENABLE_OVERNIGHT missing or not the exact raw
+        value ``true`` logs one error per Settings instance and returns False.
+        The SDK parses that env as exactly ``true``; ``1`` and ``True`` do
+        not enable overnight quotes. Paper accounts fail closed through
+        ``extended_hours_trading_effective``.
         """
         if not self.extended_hours_trading_effective():
             return False
         if not self.overnight_trading_enabled:
             return False
-        raw = os.environ.get("LONGPORT_ENABLE_OVERNIGHT", "").strip().lower()
-        if raw in {"true", "1"}:
+        raw = os.environ.get("LONGPORT_ENABLE_OVERNIGHT", "")
+        if raw == "true":
             return True
         if not getattr(self, "_overnight_env_warned", False):
             logger.error(

@@ -30,6 +30,7 @@ from app.core.broker import (
 from app.core.execution_session import (
     extended_last_executable_close,
     is_extended_closing_window,
+    is_extended_closing_window as _real_is_extended_closing_window,
     outside_rth_for_phase,
     resolve_execution_session,
 )
@@ -266,13 +267,37 @@ class _QuoteItem:
         self.ask = 101
 
 
-def test_freshest_print_selects_overnight_quote() -> None:
+def test_overnight_quote_ignored_unless_trading_effective(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "app.core.broker.settings",
+        SimpleNamespace(overnight_trading_effective=lambda: False),
+    )
     item = _QuoteItem(
         last_done=100.0,
         timestamp=datetime(2026, 10, 6, 16, 0),
         overnight_quote=_SubQuote(
             Decimal("111.5"), datetime(2026, 10, 6, 21, 15),
         ),
+    )
+    price, _timestamp = BrokerGateway._extended_session_last_trade(item)
+    assert price == 100.0
+
+
+def test_freshest_print_selects_overnight_quote(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    item = _QuoteItem(
+        last_done=100.0,
+        timestamp=datetime(2026, 10, 6, 16, 0),
+        overnight_quote=_SubQuote(
+            Decimal("111.5"), datetime(2026, 10, 6, 21, 15),
+        ),
+    )
+    monkeypatch.setattr(
+        "app.core.broker.settings",
+        SimpleNamespace(overnight_trading_effective=lambda: True),
     )
     price, timestamp = BrokerGateway._extended_session_last_trade(item)
     assert price == 111.5
@@ -328,9 +353,23 @@ def _pin_clock(monkeypatch: pytest.MonkeyPatch, instant: datetime) -> None:
     ) -> bool:
         return _real_is_closing_window(market, minutes, instant)
 
+    def is_extended_closing_window(
+        market: str,
+        minutes: int,
+        at: datetime | None = None,
+        *,
+        overnight_enabled: bool = False,
+    ) -> bool:
+        return _real_is_extended_closing_window(
+            market, minutes, instant, overnight_enabled=overnight_enabled,
+        )
+
     _FrozenDateTime._frozen = instant.astimezone(timezone.utc)
     monkeypatch.setattr(execution, "is_trading_hours", is_trading_hours)
     monkeypatch.setattr(execution, "is_closing_window", is_closing_window)
+    monkeypatch.setattr(
+        execution, "is_extended_closing_window", is_extended_closing_window,
+    )
     monkeypatch.setattr(execution, "datetime", _FrozenDateTime)
 
 
@@ -469,6 +508,30 @@ class TestOvernightSpreadCap:
         assert result.reason == "overnight spread too wide"
         assert broker.submissions == []
 
+    def test_wide_spread_checked_without_expected_exit(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _pin_clock(monkeypatch, _et("2026-10-06T21:00:00"))
+        service = _service(
+            extended_hours_trading_enabled=True,
+            overnight_trading_enabled=True,
+        )
+        broker = _FakeEntryBroker()
+        result = service.execute(
+            "BUY",
+            "TSLA.US",
+            Quote("TSLA.US", 100, 99.9, 100.1, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            market="US",
+            trading_session_mode="ANY",
+        )
+        assert result is not None and result.status == "SKIPPED"
+        assert result.reason == "overnight spread too wide"
+        assert broker.submissions == []
+
     def test_tight_overnight_entry_proceeds(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -567,6 +630,16 @@ class TestOvernightSettings:
         monkeypatch.setenv("AUTO_TRADE_OVERNIGHT_TRADING_ENABLED", "true")
         monkeypatch.setenv("AUTO_TRADE_EXTENDED_HOURS_TRADING_ENABLED", "true")
         monkeypatch.setenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", "true")
+        monkeypatch.setenv("LONGPORT_ENABLE_OVERNIGHT", "true")
+        settings = Settings()
+        assert settings.overnight_trading_effective() is False
+
+    def test_env_one_is_not_exact_true(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AUTO_TRADE_OVERNIGHT_TRADING_ENABLED", "true")
+        monkeypatch.setenv("AUTO_TRADE_EXTENDED_HOURS_TRADING_ENABLED", "true")
+        monkeypatch.delenv("AUTO_TRADE_PAPER_ACCOUNT_CONFIRMED", raising=False)
         monkeypatch.setenv("LONGPORT_ENABLE_OVERNIGHT", "1")
         settings = Settings()
         assert settings.overnight_trading_effective() is False

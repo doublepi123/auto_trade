@@ -1675,7 +1675,9 @@ class BrokerGateway:
         During PRE/POST/OVERNIGHT the SDK leaves ``last_done`` and
         ``timestamp`` at the prior RTH close. The live print is on
         ``pre_market_quote``, ``post_market_quote`` or ``overnight_quote``
-        (same naive timestamp convention). A timestamp tie prefers main.
+        (same naive timestamp convention). Overnight is consulted only when
+        overnight trading is effective; otherwise a stale overnight print
+        cannot displace the RTH/pre/post price. A timestamp tie prefers main.
         Items without sub-quotes, including HK, keep today's pair.
         """
         candidates: list[tuple[object, float]] = []
@@ -1683,7 +1685,10 @@ class BrokerGateway:
         main_timestamp = getattr(item, "timestamp", None)
         if main_price is not None and main_timestamp is not None:
             candidates.append((main_timestamp, main_price))
-        for attr in ("pre_market_quote", "post_market_quote", "overnight_quote"):
+        attrs = ["pre_market_quote", "post_market_quote"]
+        if settings.overnight_trading_effective():
+            attrs.append("overnight_quote")
+        for attr in attrs:
             sub = getattr(item, attr, None)
             if sub is None:
                 continue

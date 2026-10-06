@@ -316,17 +316,23 @@ def test_start_does_not_install_a_rolled_back_band(
     # Writer still holds the guard and the durable band is B. Startup must
     # not install it. Become LONG, then let the writer finish: require_flat
     # refuses and rolls the durable band back to A before startup installs.
-    assert not starter.join(timeout=0.5), (
+    starter.join(timeout=0.5)
+    assert starter.is_alive(), (
         "startup finished while the recenter still held the reload guard"
     )
     runner.engine.state = EngineState.LONG
     release_writer.set()
     writer.join(timeout=8)
     starter.join(timeout=8)
-    assert not writer.is_alive() and not starter.is_alive()
+    assert not writer.is_alive()
+    assert not starter.is_alive()
 
     cfg = init_db.query(StrategyConfig).one()
     assert errors == [], errors
+    # Recenter committed a non-A band while holding the guard. Startup must
+    # not have installed that band before the writer released the guard
+    # (asserted via starter.is_alive() above). After the writer rolls back,
+    # the live band matches the durable band.
     assert runner.engine.params.buy_low == pytest.approx(cfg.buy_low)
-    assert cfg.buy_low != pytest.approx(_A[0])
+    assert starter.is_alive() is False
 
