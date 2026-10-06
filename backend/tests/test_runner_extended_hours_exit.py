@@ -43,7 +43,9 @@ def _session(
     )
     for module in (runner_module, execution_module):
         monkeypatch.setattr(module, "is_trading_hours", lambda _: phase == "RTH")
-        monkeypatch.setattr(module, "resolve_execution_session", lambda *a: session, raising=False)
+        monkeypatch.setattr(
+            module, "resolve_execution_session", lambda *a, **kwargs: session, raising=False,
+        )
     return session
 
 

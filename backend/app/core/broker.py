@@ -1670,20 +1670,20 @@ class BrokerGateway:
 
     @classmethod
     def _extended_session_last_trade(cls, item: Any) -> tuple[float, str]:
-        """Freshest positive last trade among main / pre / post.
+        """Freshest positive last trade among main / pre / post / overnight.
 
-        During PRE/POST the SDK leaves ``last_done`` and ``timestamp`` at
-        the prior RTH close. The live print is on ``pre_market_quote`` or
-        ``post_market_quote`` (same naive timestamp convention). Overnight
-        stays unsupported and is never consulted. A timestamp tie prefers
-        main. Items without sub-quotes, including HK, keep today's pair.
+        During PRE/POST/OVERNIGHT the SDK leaves ``last_done`` and
+        ``timestamp`` at the prior RTH close. The live print is on
+        ``pre_market_quote``, ``post_market_quote`` or ``overnight_quote``
+        (same naive timestamp convention). A timestamp tie prefers main.
+        Items without sub-quotes, including HK, keep today's pair.
         """
         candidates: list[tuple[object, float]] = []
         main_price = cls._finite_positive_price(getattr(item, "last_done", 0))
         main_timestamp = getattr(item, "timestamp", None)
         if main_price is not None and main_timestamp is not None:
             candidates.append((main_timestamp, main_price))
-        for attr in ("pre_market_quote", "post_market_quote"):
+        for attr in ("pre_market_quote", "post_market_quote", "overnight_quote"):
             sub = getattr(item, attr, None)
             if sub is None:
                 continue
@@ -1870,15 +1870,19 @@ class BrokerGateway:
 
             session_kwargs: dict[str, object] = {}
             if outside_rth is not None:
-                if outside_rth != "ANY_TIME":
+                member_name = {
+                    "ANY_TIME": "AnyTime",
+                    "OVERNIGHT": "Overnight",
+                }.get(outside_rth)
+                if member_name is None:
                     raise ExtendedHoursUnsupportedError(
                         f"unsupported outside_rth session: {outside_rth}"
                     )
                 OutsideRTH = getattr(module, "OutsideRTH", None)
-                any_time = getattr(OutsideRTH, "AnyTime", None)
-                if any_time is None:
+                session_value = getattr(OutsideRTH, member_name, None)
+                if session_value is None:
                     raise ExtendedHoursUnsupportedError(
-                        "OutsideRTH.AnyTime not found in SDK"
+                        f"OutsideRTH.{member_name} not found in SDK"
                     )
                 try:
                     parameters = inspect.signature(self._trade_ctx.submit_order).parameters
@@ -1893,7 +1897,7 @@ class BrokerGateway:
                     raise ExtendedHoursUnsupportedError(
                         "SDK submit_order does not accept outside_rth"
                     )
-                session_kwargs["outside_rth"] = any_time
+                session_kwargs["outside_rth"] = session_value
 
             response = self._trade_ctx.submit_order(
                 symbol=symbol,

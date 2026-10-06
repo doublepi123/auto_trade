@@ -55,7 +55,7 @@ def _session(phase: str = "POST") -> ExecutionSessionDecision:
 class _Harness:
     def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(execution, "is_trading_hours", lambda _market: False)
-        monkeypatch.setattr(execution, "resolve_execution_session", lambda *args: _session())
+        monkeypatch.setattr(execution, "resolve_execution_session", lambda *args, **kwargs: _session())
         self.broker = _FakeBroker()
         self.risk = RiskController()
         self.restored: list[EngineSnapshot] = []
@@ -147,7 +147,7 @@ def test_paper_account_keeps_intent_zero_orders(monkeypatch: pytest.MonkeyPatch)
 
 def test_unavailable_phase_keeps_intent_zero_orders(monkeypatch: pytest.MonkeyPatch) -> None:
     h = _Harness(monkeypatch)
-    monkeypatch.setattr(execution, "resolve_execution_session", lambda *args: _session("UNAVAILABLE"))
+    monkeypatch.setattr(execution, "resolve_execution_session", lambda *args, **kwargs: _session("UNAVAILABLE"))
     result = h.execute()
     assert result.status == "SKIPPED"
     assert h.broker.submissions == []
@@ -156,7 +156,7 @@ def test_unavailable_phase_keeps_intent_zero_orders(monkeypatch: pytest.MonkeyPa
 def test_final_binding_rejects_when_session_closes_before_submit(monkeypatch: pytest.MonkeyPatch) -> None:
     h = _Harness(monkeypatch)
     phases = iter([_session(), _session("UNAVAILABLE")])
-    monkeypatch.setattr(execution, "resolve_execution_session", lambda *args: next(phases))
+    monkeypatch.setattr(execution, "resolve_execution_session", lambda *args, **kwargs: next(phases))
     result = h.execute()
     assert "closed before submission" in result.reason
     assert h.broker.submissions == []
@@ -304,7 +304,7 @@ def test_retry_backoff_cap_is_phase_and_day_scoped(monkeypatch: pytest.MonkeyPat
     now = datetime.now(timezone.utc)
     tomorrow = now + timedelta(days=1)
     assert h.service.extended_hours_exit_decision(action="SELL", symbol="TSLA.US", market="US", reduce_only=True, instant=tomorrow).permitted
-    monkeypatch.setattr(execution, "resolve_execution_session", lambda *args: ExecutionSessionDecision("US", "PRE", "supported pre-market", None, None))
+    monkeypatch.setattr(execution, "resolve_execution_session", lambda *args, **kwargs: ExecutionSessionDecision("US", "PRE", "supported pre-market", None, None))
     assert h.service.extended_hours_exit_decision(action="SELL", symbol="TSLA.US", market="US", reduce_only=True, instant=now).permitted
 
 

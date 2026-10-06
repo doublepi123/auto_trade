@@ -391,7 +391,9 @@ class IntervalRecenterService:
         if not settings.extended_hours_trading_effective():
             return False
         return resolve_execution_session(
-            market, instant,
+            market,
+            instant,
+            overnight_enabled=settings.overnight_trading_effective(),
         ).extended_hours_executable
 
     def _reference_price(

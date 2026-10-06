@@ -187,7 +187,7 @@ def test_missing_subquotes_zero_negative_and_none_timestamps_are_ignored() -> No
     assert gateway._last_trade_by_symbol["TSLA.US"] == (378.73, str(main_ts))
 
 
-def test_overnight_quote_is_ignored_even_when_freshest() -> None:
+def test_overnight_quote_is_selected_when_freshest() -> None:
     main_ts = datetime(2026, 10, 5, 16, 0, 0)
     gateway, _context = _gateway([
         _QuoteItem(
@@ -203,9 +203,10 @@ def test_overnight_quote_is_ignored_even_when_freshest() -> None:
 
     result = gateway.get_quotes(["TSLA.US"])
 
-    assert result[0].last_price == 378.73
-    assert result[0].timestamp == str(main_ts)
-    assert gateway._last_trade_by_symbol["TSLA.US"] == (378.73, str(main_ts))
+    overnight_ts = datetime(2026, 10, 6, 22, 0, 0)
+    assert result[0].last_price == 390.0
+    assert result[0].timestamp == str(overnight_ts)
+    assert gateway._last_trade_by_symbol["TSLA.US"] == (390.0, str(overnight_ts))
 
 
 def test_mixed_timestamp_types_skip_the_incomparable_subquote() -> None:

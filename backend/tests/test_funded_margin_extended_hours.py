@@ -106,7 +106,7 @@ def _pin(monkeypatch: pytest.MonkeyPatch, instant: datetime) -> None:
     monkeypatch.setattr(
         trade_svc_module,
         "resolve_execution_session",
-        lambda market, at=None: _real_resolve(market, instant),
+        lambda market, at=None, **kwargs: _real_resolve(market, instant, **kwargs),
     )
     monkeypatch.setattr(
         trade_svc_module,
@@ -118,8 +118,8 @@ def _pin(monkeypatch: pytest.MonkeyPatch, instant: datetime) -> None:
     monkeypatch.setattr(
         trade_svc_module,
         "is_extended_closing_window",
-        lambda market, minutes, at=None: _real_is_extended_closing_window(
-            market, minutes, instant,
+        lambda market, minutes, at=None, **kwargs: _real_is_extended_closing_window(
+            market, minutes, instant, **kwargs,
         ),
     )
     monkeypatch.setattr(
@@ -360,15 +360,17 @@ class TestRthToPostBoundary:
         def is_trading_hours(market: str, at=None) -> bool:
             return _real_is_trading_hours(market, phase["instant"])
 
-        def resolve_execution_session(market: str, at=None):
-            return _real_resolve(market, phase["instant"])
+        def resolve_execution_session(market: str, at=None, **kwargs):
+            return _real_resolve(market, phase["instant"], **kwargs)
 
         def is_closing_window(market: str, minutes: int, at=None) -> bool:
             return _real_is_closing_window(market, minutes, phase["instant"])
 
-        def is_extended_closing_window(market: str, minutes: int, at=None) -> bool:
+        def is_extended_closing_window(
+            market: str, minutes: int, at=None, **kwargs,
+        ) -> bool:
             return _real_is_extended_closing_window(
-                market, minutes, phase["instant"],
+                market, minutes, phase["instant"], **kwargs,
             )
 
         monkeypatch.setattr(trade_svc_module, "is_trading_hours", is_trading_hours)

@@ -29,6 +29,7 @@ from app.core.board_lot import BoardLotResolution, quantize_to_board_lot
 from app.core.broker import ExtendedHoursUnsupportedError
 from app.core.execution_session import (
     is_extended_closing_window,
+    outside_rth_for_phase,
     resolve_execution_session,
 )
 from app.core.fees import (
@@ -73,6 +74,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("auto_trade.services.trade_execution_service")
 
+# Overnight books are one-level and wider than RTH. A long entry whose
+# (ask-bid)/mid exceeds this percent is refused; exits are never blocked.
+_OVERNIGHT_ENTRY_MAX_SPREAD_PCT = Decimal("0.10")
 _REDUCTION_AVAILABILITY_LOG_WINDOW_SECONDS = 3600.0
 _REDUCTION_AVAILABILITY_LOG_THROTTLE = RepeatedLogThrottle(
     window_seconds=_REDUCTION_AVAILABILITY_LOG_WINDOW_SECONDS,
@@ -202,6 +206,7 @@ class OrderStatus:
     broker_submitted_at: datetime | None = None
     broker_updated_at: datetime | None = None
     outside_rth: str = ""
+    skip_category: str = ""
 
     @staticmethod
     def _positive(value: Optional[Decimal]) -> Decimal:
@@ -569,6 +574,7 @@ class TradeExecutionService:
         extended_hours_protective_exits_enabled: bool = False,
         paper_account_confirmed: bool = False,
         extended_hours_trading_enabled: bool = False,
+        overnight_trading_enabled: bool = False,
         passive_risk_policy_resolver: _PassiveRiskPolicyResolver | None = None,
         passive_submit_hooks: _PassiveSubmitHooks | None = None,
         passive_reduction_quarantine: Callable[[str], str | None] | None = None,
@@ -612,6 +618,7 @@ class TradeExecutionService:
         self.extended_hours_protective_exits_enabled = extended_hours_protective_exits_enabled
         self.paper_account_confirmed = paper_account_confirmed
         self.extended_hours_trading_enabled = extended_hours_trading_enabled
+        self.overnight_trading_enabled = overnight_trading_enabled
         self._passive_risk_policy_resolver = passive_risk_policy_resolver
         # Passive submit protocol v2: the all-or-nothing hook bundle. A
         # partially wired bundle is treated as absent — every passive marker
@@ -707,7 +714,9 @@ class TradeExecutionService:
         if self.paper_account_confirmed:
             return ExtendedHoursExitDecision(False, "UNKNOWN", "paper account does not support extended hours")
         now = instant if instant is not None else datetime.now(timezone.utc)
-        session = resolve_execution_session(market, now)
+        session = resolve_execution_session(
+            market, now, overnight_enabled=self._overnight_trading_effective(),
+        )
         if not session.extended_hours_executable:
             return ExtendedHoursExitDecision(False, session.phase, session.reason)
         key = (symbol.upper(), session.phase, trade_day_for(market, now), "EXIT")
@@ -732,6 +741,13 @@ class TradeExecutionService:
         return (
             self.extended_hours_trading_enabled
             and not self.paper_account_confirmed
+        )
+
+    def _overnight_trading_effective(self) -> bool:
+        """Overnight is a subset of effective extended-hours trading."""
+        return (
+            self._extended_hours_trading_effective()
+            and self.overnight_trading_enabled
         )
 
     def _final_submit_session_open(
@@ -761,7 +777,9 @@ class TradeExecutionService:
             return False
         if str(context[0]).upper() != symbol.upper():
             return False
-        return resolve_execution_session(market).extended_hours_executable
+        return resolve_execution_session(
+            market, overnight_enabled=self._overnight_trading_effective(),
+        ).extended_hours_executable
 
     def _entry_cutoff_active(self, market: str) -> bool:
         """Entry-cutoff predicate.
@@ -778,7 +796,9 @@ class TradeExecutionService:
             and not self.paper_account_confirmed
         ):
             return is_closing_window(market, minutes)
-        return is_extended_closing_window(market, minutes)
+        return is_extended_closing_window(
+            market, minutes, overnight_enabled=self._overnight_trading_effective(),
+        )
 
     def _extended_hours_entry_decision(
         self, *, symbol: str, market: str, instant: datetime | None = None,
@@ -798,7 +818,9 @@ class TradeExecutionService:
         ):
             return None
         now = instant if instant is not None else datetime.now(timezone.utc)
-        session = resolve_execution_session(market, now)
+        session = resolve_execution_session(
+            market, now, overnight_enabled=self._overnight_trading_effective(),
+        )
         if not session.extended_hours_executable:
             return ExtendedHoursExitDecision(False, session.phase, session.reason)
         key = (symbol.upper(), session.phase, trade_day_for(market, now), "ENTRY")
@@ -3540,6 +3562,38 @@ class TradeExecutionService:
             price=float(exit_price),
         )
 
+    def _overnight_entry_spread_refusal(
+        self,
+        symbol: str,
+        bid_price: Decimal,
+        ask_price: Decimal,
+    ) -> OrderStatus | None:
+        """Refuse a long OVERNIGHT entry when BBO is missing or wider than 0.10%.
+
+        Exits never reach this helper. PRE/POST/RTH are unaffected.
+        """
+        context = self._extended_hours_context
+        if context is None or len(context) < 2 or context[1] != "OVERNIGHT":
+            return None
+        mid = (ask_price + bid_price) / Decimal("2")
+        if (
+            not bid_price.is_finite()
+            or not ask_price.is_finite()
+            or bid_price <= 0
+            or ask_price <= 0
+            or not mid.is_finite()
+            or mid <= 0
+            or (ask_price - bid_price) / mid * Decimal("100")
+            > _OVERNIGHT_ENTRY_MAX_SPREAD_PCT
+        ):
+            return self._skip_order(
+                symbol,
+                "BUY",
+                "overnight spread too wide",
+                skip_category="FEE",
+            )
+        return None
+
     def _profit_guard_for_entry(
         self,
         *,
@@ -3580,6 +3634,11 @@ class TradeExecutionService:
                 "valid BBO is unavailable; fee-adjusted entry denied",
                 skip_category="FEE",
             )
+        overnight_spread = self._overnight_entry_spread_refusal(
+            symbol, bid_price, ask_price,
+        )
+        if overnight_spread is not None:
+            return overnight_spread
 
         spread_cost = (ask_price - bid_price) * quantity
         slippage_cost = (
@@ -3733,7 +3792,9 @@ class TradeExecutionService:
                 self._record_order_skipped(symbol, action, reason, full_payload)
             except Exception:
                 logger.exception("failed to record skipped order event for %s %s", action, symbol)
-        return OrderStatus("", _SKIPPED_ORDER_STATUS, reason=reason)
+        return OrderStatus(
+            "", _SKIPPED_ORDER_STATUS, reason=reason, skip_category=skip_category,
+        )
 
     @staticmethod
     def _exit_quantity_from_position(position: object) -> Decimal:
@@ -5640,7 +5701,7 @@ class TradeExecutionService:
                             + (entry_decision.reason if entry_decision else "extended-hours entries are not permitted"),
                             skip_category="SESSION",
                         )
-                    outside_rth = "ANY_TIME"
+                    outside_rth = outside_rth_for_phase(entry_decision.phase)
                     self._extended_hours_context = (
                         symbol, entry_decision.phase, now, "ENTRY",
                     )
@@ -5655,7 +5716,7 @@ class TradeExecutionService:
                             f"execution session closed before submission: {decision.reason}",
                             skip_category="SESSION",
                         )
-                    outside_rth = "ANY_TIME"
+                    outside_rth = outside_rth_for_phase(decision.phase)
                     self._extended_hours_context = (
                         symbol, decision.phase, now, "EXIT",
                     )
@@ -6478,9 +6539,15 @@ class TradeExecutionService:
             if effective_restore is not None and updated_pending.engine_snapshot is not None:
                 effective_restore(updated_pending.engine_snapshot)
             return
+        if updated_pending.extended_hours_key is not None:
+            expected_outside_rth = outside_rth_for_phase(
+                updated_pending.extended_hours_key[1],
+            )
+        else:
+            expected_outside_rth = "ANY_TIME"
         if (
             updated_pending.extended_hours
-            and order_status.outside_rth != "ANY_TIME"
+            and order_status.outside_rth != expected_outside_rth
             and not updated_pending.extended_hours_cancel_requested
         ):
             if updated_pending.extended_hours_key is not None:

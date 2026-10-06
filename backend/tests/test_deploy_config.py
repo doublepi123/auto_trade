@@ -546,6 +546,35 @@ def test_deploy_files_expose_extended_hours_trading_control() -> None:
     assert Settings().extended_hours_trading_enabled is False
 
 
+def test_deploy_files_expose_overnight_trading_controls() -> None:
+    """Compose must forward the overnight flag and the SDK quote switch.
+
+    Same incident class as the extended-hours flag: a Settings field absent
+    from compose is silently ignored at runtime. Both variables default false
+    so an unset environment ships fail-closed.
+    """
+    from app.config import Settings
+
+    compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+    dockerhub_compose = (
+        ROOT / "docker-compose.dockerhub.yaml"
+    ).read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+    for key in (
+        "AUTO_TRADE_OVERNIGHT_TRADING_ENABLED",
+        "LONGPORT_ENABLE_OVERNIGHT",
+    ):
+        assert f"{key}=" in compose, key
+        assert f"{key}=" in dockerhub_compose, key
+        assert f"{key}=" in env_example, key
+        expected = f"{key}=${{{key}:-false}}"
+        assert expected in compose
+        assert expected in dockerhub_compose
+
+    assert Settings().overnight_trading_enabled is False
+
+
 def test_deploy_files_expose_funded_margin_exception_controls() -> None:
     """Compose must forward every funded-margin exception variable.
 

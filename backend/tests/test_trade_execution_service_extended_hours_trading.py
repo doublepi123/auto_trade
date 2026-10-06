@@ -85,8 +85,15 @@ def _pin_clock(monkeypatch: pytest.MonkeyPatch, instant: datetime) -> None:
     def is_trading_hours(market: str, at: datetime | None = None) -> bool:
         return _real_is_trading_hours(market, instant)
 
-    def resolve_execution_session(market: str, at: datetime | None = None):
-        return _real_resolve(market, instant)
+    def resolve_execution_session(
+        market: str,
+        at: datetime | None = None,
+        *,
+        overnight_enabled: bool = False,
+    ):
+        return _real_resolve(
+            market, instant, overnight_enabled=overnight_enabled,
+        )
 
     def is_closing_window(
         market: str, minutes: int, at: datetime | None = None,
@@ -94,9 +101,15 @@ def _pin_clock(monkeypatch: pytest.MonkeyPatch, instant: datetime) -> None:
         return _real_is_closing_window(market, minutes, instant)
 
     def is_extended_closing_window(
-        market: str, minutes: int, at: datetime | None = None,
+        market: str,
+        minutes: int,
+        at: datetime | None = None,
+        *,
+        overnight_enabled: bool = False,
     ) -> bool:
-        return _real_is_extended_closing_window(market, minutes, instant)
+        return _real_is_extended_closing_window(
+            market, minutes, instant, overnight_enabled=overnight_enabled,
+        )
 
     monkeypatch.setattr(execution, "is_trading_hours", is_trading_hours)
     monkeypatch.setattr(

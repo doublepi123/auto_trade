@@ -177,7 +177,7 @@ def test_submit_limit_order_accepts_var_keyword_signature(
     assert called[0]["outside_rth"] is _FakeSessionModule.OutsideRTH.AnyTime
 
 
-@pytest.mark.parametrize("session", ["OVERNIGHT", "RTH_ONLY", "", "AnyTime"])
+@pytest.mark.parametrize("session", ["RTH_ONLY", "", "AnyTime", "NIGHT"])
 def test_submit_limit_order_rejects_unsupported_session_value(
     session_broker: tuple[BrokerGateway, list[dict[str, object]]], session: str,
 ) -> None:

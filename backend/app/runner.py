@@ -34,10 +34,7 @@ from app.core.board_lot import BoardLotCache
 from app.core.broker import BrokerGateway, Position, Quote
 from app.core.engine import EngineSnapshot, EngineState, StrategyEngine, StrategyParams, TriggerResult
 from app.core.exit_policy import ExitPolicyConfig, ExitQuote, PositionExitContext, ReductionCause, ReductionDecision, evaluate_exit_policy
-from app.core.execution_session import (
-    is_extended_closing_window,
-    resolve_execution_session,
-)
+from app.core.execution_session import is_extended_closing_window
 from app.core.exit_pricing import degraded_exit_limit, parse_quote_source_timestamp, select_reference_price
 from app.core.fees import one_side_fee_rate
 from app.core.log_throttle import RepeatedLogThrottle
@@ -76,6 +73,7 @@ from app.services.runtime_state_service import (
 from app.services.llm_order_policy import evaluate_llm_order_policy
 from app.services.strategy_service import StrategyService
 from app.services.trade_event_service import record_trade_event
+from app.services import trade_execution_service as trade_execution_module
 from app.services.trade_execution_service import (
     BrokerSubmissionUncertainError,
     EntryPolicyCheckResult,
@@ -474,6 +472,7 @@ class AppRunner:
             extended_hours_trading_enabled=(
                 settings.extended_hours_trading_enabled
             ),
+            overnight_trading_enabled=settings.overnight_trading_effective(),
         )
         self._state_svc = RuntimeStateService()
         self._primary_generation = 0
@@ -2112,6 +2111,9 @@ class AppRunner:
         # (possibly validator-forced-off) setting on every reload.
         self._trade_svc.extended_hours_trading_enabled = (
             settings.extended_hours_trading_enabled
+        )
+        self._trade_svc.overnight_trading_enabled = (
+            settings.overnight_trading_effective()
         )
         self._trade_svc.paper_account_confirmed = (
             settings.paper_account_confirmed
@@ -4280,7 +4282,10 @@ class AppRunner:
         tracked = self._trade_svc.tracked_position(symbol)
         if tracked is None or tracked.side != "LONG" or tracked.quantity <= 0:
             return False
-        return resolve_execution_session(market).extended_hours_executable
+        return trade_execution_module.resolve_execution_session(
+            market,
+            overnight_enabled=self._trade_svc._overnight_trading_effective(),
+        ).extended_hours_executable
 
     def _bind_exit_price_locked(self, decision: _QuoteTriggerDecision, quote: Quote) -> None:
         """Bind executable exit evidence without changing healthy quote pricing."""
@@ -6306,7 +6311,10 @@ class AppRunner:
                 ).permitted
                 or self._extended_take_profit_permitted(action, symbol, market)
             ):
-                session = resolve_execution_session(market)
+                session = trade_execution_module.resolve_execution_session(
+                    market,
+                    overnight_enabled=self._trade_svc._overnight_trading_effective(),
+                )
                 if not session.extended_hours_executable:
                     return "execution session is not executable"
                 if (
@@ -11448,7 +11456,12 @@ class AppRunner:
                 return is_closing_window(market, minutes)
             return is_closing_window(market, minutes, instant)
         now = instant if instant is not None else datetime.now(timezone.utc)
-        return is_extended_closing_window(market, minutes, now)
+        return is_extended_closing_window(
+            market,
+            minutes,
+            now,
+            overnight_enabled=self._trade_svc._overnight_trading_effective(),
+        )
 
     def _market_in_active_session(
         self,
@@ -11473,7 +11486,11 @@ class AppRunner:
         if not self._extended_hours_trading_effective():
             return False
         now = instant if instant is not None else datetime.now(timezone.utc)
-        return resolve_execution_session(market, now).extended_hours_executable
+        return trade_execution_module.resolve_execution_session(
+            market,
+            now,
+            overnight_enabled=self._trade_svc._overnight_trading_effective(),
+        ).extended_hours_executable
 
     def _refresh_trading_session_mode(self) -> None:
         try:

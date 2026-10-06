@@ -1367,6 +1367,20 @@ class Settings(BaseSettings):
             "extended-hours trading). Overnight stays unsupported."
         ),
     )
+    # Opt-in for the US overnight session (20:00-03:50 ET, trading day N).
+    # DEFAULT OFF. Effective only when extended-hours trading is itself
+    # effective AND the quote SDK is told to enable overnight prints.
+    # Flag on with LONGPORT_ENABLE_OVERNIGHT missing fails closed.
+    overnight_trading_enabled: bool = Field(
+        default=False,
+        validation_alias="AUTO_TRADE_OVERNIGHT_TRADING_ENABLED",
+        description=(
+            "Permit funded full-margin long entries and reduce-only exits "
+            "during the US overnight session (20:00-03:50 ET) via "
+            "outside_rth=OVERNIGHT. Requires extended-hours trading to be "
+            "effective and LONGPORT_ENABLE_OVERNIGHT=true. Default off."
+        ),
+    )
 
     def extended_hours_trading_effective(self) -> bool:
         """Flag effective only when enabled AND not on a paper-attested account.
@@ -1386,6 +1400,28 @@ class Settings(BaseSettings):
                 self._ext_hours_paper_warned = True
             return False
         return True
+
+    def overnight_trading_effective(self) -> bool:
+        """Overnight on only when extended hours, the flag, and the SDK env agree.
+
+        Flag on with LONGPORT_ENABLE_OVERNIGHT missing or not true/1 logs one
+        error per Settings instance and returns False. Paper accounts fail
+        closed through ``extended_hours_trading_effective``.
+        """
+        if not self.extended_hours_trading_effective():
+            return False
+        if not self.overnight_trading_enabled:
+            return False
+        raw = os.environ.get("LONGPORT_ENABLE_OVERNIGHT", "").strip().lower()
+        if raw in {"true", "1"}:
+            return True
+        if not getattr(self, "_overnight_env_warned", False):
+            logger.error(
+                "AUTO_TRADE_OVERNIGHT_TRADING_ENABLED ignored: "
+                "LONGPORT_ENABLE_OVERNIGHT must be true"
+            )
+            self._overnight_env_warned = True
+        return False
 
     llm_max_order_price_deviation_pct: float = Field(
         default=1.0,
