@@ -4,13 +4,14 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from contextlib import contextmanager
 from collections.abc import Iterator
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
 from app import database, runner as runner_module
-from app.core.broker import OrderResult, Position, Quote
+from app.core.broker import BrokerGateway, OrderResult, Position, Quote
 from app.core.engine import EngineState, StrategyParams
 from app.core.risk import DailyLossSnapshot
 from app.models import Base, RuntimeState
@@ -377,3 +378,361 @@ class TestFinalQuoteCheck:
         result = runner._validate_final_order_quote(runner.broker, "NVDA.US", "SELL", Decimal("100"))
         assert isinstance(result, str)
         assert "floor" in result
+
+
+class _Level:
+    def __init__(self, price: float) -> None:
+        self.price = price
+
+
+class _StaleBboQuoteContext:
+    """US quote has no bid/ask. Depth is the only live executable book.
+
+    The cache holds the trigger-time BBO. Production exits sit on the
+    push-callback thread long enough for that cache to still be inside
+    its 30 s window when the final check runs, so a cache-first read
+    submits the trigger price instead of the book now.
+    """
+
+    def __init__(
+        self,
+        *,
+        last_price: float,
+        depth_bid: float | None,
+        depth_ask: float | None,
+        depth_error: BaseException | None = None,
+        empty_book: bool = False,
+    ) -> None:
+        self.last_price = last_price
+        self.depth_bid = depth_bid
+        self.depth_ask = depth_ask
+        self.depth_error = depth_error
+        self.empty_book = empty_book
+        self.depth_calls = 0
+        self.quote_calls = 0
+
+    def quote(self, symbols: list[str]) -> list[SimpleNamespace]:
+        self.quote_calls += 1
+        assert symbols == ["NVDA.US"]
+        return [
+            SimpleNamespace(
+                symbol="NVDA.US",
+                last_done=self.last_price,
+                timestamp=datetime.now(timezone.utc).isoformat(),
+            )
+        ]
+
+    def depth(self, symbol: str) -> SimpleNamespace:
+        self.depth_calls += 1
+        assert symbol == "NVDA.US"
+        if self.depth_error is not None:
+            raise self.depth_error
+        if self.empty_book:
+            return SimpleNamespace(bids=[], asks=[])
+        return SimpleNamespace(
+            bids=[_Level(self.depth_bid or 0)],
+            asks=[_Level(self.depth_ask or 0)],
+        )
+
+
+class _ExitBroker(BrokerGateway):
+    def __init__(self, quote_ctx: _StaleBboQuoteContext) -> None:
+        super().__init__()
+        self._quote_ctx = quote_ctx
+        self._trade_ctx = object()
+        self.submitted: list[tuple[str, str, Decimal, Decimal]] = []
+
+    def get_positions(self) -> list[Position]:
+        return [Position("NVDA.US", "LONG", Decimal("5"), Decimal("100"))]
+
+    def submit_limit_order(
+        self,
+        symbol: str,
+        side: str,
+        quantity: Decimal,
+        price: Decimal,
+    ) -> OrderResult:
+        self.submitted.append((symbol, side, quantity, price))
+        return OrderResult("fresh-exit-bbo", symbol, side, quantity, price, "SUBMITTED")
+
+
+def _wire_stale_bbo_gateway(
+    runner: AppRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    quote_ctx: _StaleBboQuoteContext,
+    *,
+    cached_bid: float,
+    cached_ask: float,
+) -> _ExitBroker:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    sessions = sessionmaker(bind=engine)
+    broker = _ExitBroker(quote_ctx)
+    broker._remember_bbo("NVDA.US", cached_bid, cached_ask)
+    monkeypatch.setattr(runner_module, "SessionLocal", sessions)
+    monkeypatch.setattr(runner, "broker", broker)
+    monkeypatch.setattr(runner, "notifier", _FakeNotifier())
+    monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+    monkeypatch.setattr(runner._trade_svc, "_record_order", lambda *a, **kw: None)
+    monkeypatch.setattr(runner._trade_svc, "_update_order_status", lambda *a, **kw: None)
+    monkeypatch.setattr(runner._trade_svc, "_record_order_skipped", lambda *a, **kw: None)
+    return broker
+
+
+def _pin_final_check_rth(monkeypatch: pytest.MonkeyPatch, *, in_rth: bool) -> None:
+    """One-arg lambda: the runner must tolerate the existing test convention."""
+    monkeypatch.setattr(runner_module, "is_trading_hours", lambda _market: in_rth)
+
+
+class TestFinalCheckUsesLiveDepth:
+    def test_falling_market_submits_fresh_bid_not_cached_trigger_bid(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _pin_final_check_rth(monkeypatch, in_rth=True)
+        runner = _runner(monkeypatch)
+        quote_ctx = _StaleBboQuoteContext(
+            last_price=376.10, depth_bid=375.80, depth_ask=375.85,
+        )
+        broker = _wire_stale_bbo_gateway(
+            runner, monkeypatch, quote_ctx, cached_bid=376.30, cached_ask=376.35,
+        )
+
+        result = runner._validate_final_order_quote(
+            broker, "NVDA.US", "SELL", Decimal("376.30"),
+        )
+        status = runner._trade_svc.execute(
+            "SELL", "NVDA.US",
+            Quote("NVDA.US", 376.30, 376.30, 376.35, datetime.now(timezone.utc).isoformat()),
+            broker, runner.risk, runner.notifier, "USD",
+            allow_loss_exit=True, reduce_only=True,
+        )
+
+        assert isinstance(result, FinalOrderQuoteCheckResult)
+        assert result.executable_price == Decimal("375.80")
+        assert status is not None and status.status == "SUBMITTED"
+        assert broker.submitted == [("NVDA.US", "SELL", Decimal("5"), Decimal("375.80"))]
+        assert quote_ctx.depth_calls >= 1
+
+    def test_rising_market_submits_fresh_bid_not_cached_trigger_bid(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _pin_final_check_rth(monkeypatch, in_rth=True)
+        runner = _runner(monkeypatch)
+        quote_ctx = _StaleBboQuoteContext(
+            last_price=377.40, depth_bid=377.42, depth_ask=377.47,
+        )
+        broker = _wire_stale_bbo_gateway(
+            runner, monkeypatch, quote_ctx, cached_bid=377.31, cached_ask=377.36,
+        )
+
+        status = runner._trade_svc.execute(
+            "SELL", "NVDA.US",
+            Quote("NVDA.US", 377.31, 377.31, 377.36, datetime.now(timezone.utc).isoformat()),
+            broker, runner.risk, runner.notifier, "USD",
+            allow_loss_exit=True, reduce_only=True,
+        )
+
+        assert status is not None and status.status == "SUBMITTED"
+        assert broker.submitted == [("NVDA.US", "SELL", Decimal("5"), Decimal("377.42"))]
+
+    @pytest.mark.parametrize(
+        "quote_ctx",
+        [
+            _StaleBboQuoteContext(
+                last_price=376.10,
+                depth_bid=None,
+                depth_ask=None,
+                depth_error=RuntimeError("depth unavailable"),
+            ),
+            _StaleBboQuoteContext(
+                last_price=376.10,
+                depth_bid=None,
+                depth_ask=None,
+                empty_book=True,
+            ),
+        ],
+        ids=["depth-raises", "empty-book"],
+    )
+    def test_exit_depth_failure_falls_back_to_cached_bid(
+        self, monkeypatch: pytest.MonkeyPatch, quote_ctx: _StaleBboQuoteContext,
+    ) -> None:
+        _pin_final_check_rth(monkeypatch, in_rth=True)
+        runner = _runner(monkeypatch)
+        broker = _wire_stale_bbo_gateway(
+            runner, monkeypatch, quote_ctx, cached_bid=376.30, cached_ask=376.35,
+        )
+
+        result = runner._validate_final_order_quote(
+            broker, "NVDA.US", "SELL", Decimal("376.30"),
+        )
+        status = runner._trade_svc.execute(
+            "SELL", "NVDA.US",
+            Quote("NVDA.US", 376.30, 376.30, 376.35, datetime.now(timezone.utc).isoformat()),
+            broker, runner.risk, runner.notifier, "USD",
+            allow_loss_exit=True, reduce_only=True,
+        )
+
+        assert isinstance(result, FinalOrderQuoteCheckResult)
+        assert result.executable_price == Decimal("376.30")
+        assert status is not None and status.status == "SUBMITTED"
+        assert broker.submitted == [("NVDA.US", "SELL", Decimal("5"), Decimal("376.30"))]
+        assert broker._cached_bbo("NVDA.US") == (376.30, 376.35)
+
+    def test_exit_depth_failure_warning_is_throttled(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        _pin_final_check_rth(monkeypatch, in_rth=True)
+        runner = _runner(monkeypatch)
+        quote_ctx = _StaleBboQuoteContext(
+            last_price=376.10, depth_bid=None, depth_ask=None, empty_book=True,
+        )
+        broker = _wire_stale_bbo_gateway(
+            runner, monkeypatch, quote_ctx, cached_bid=376.30, cached_ask=376.35,
+        )
+
+        with caplog.at_level("WARNING", logger="auto_trade.runner"):
+            first = runner._validate_final_order_quote(
+                broker, "NVDA.US", "SELL", Decimal("376.30"),
+            )
+            second = runner._validate_final_order_quote(
+                broker, "NVDA.US", "SELL", Decimal("376.30"),
+            )
+
+        warnings = [
+            record for record in caplog.records
+            if "strict executable quote unavailable" in record.message
+        ]
+        assert isinstance(first, FinalOrderQuoteCheckResult)
+        assert isinstance(second, FinalOrderQuoteCheckResult)
+        assert len(warnings) == 1
+        assert "suppressed=0" in warnings[0].message
+        assert runner._strict_executable_quote_log_throttle.suppressed_count == 1
+
+    def test_entry_depth_failure_fails_closed(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _pin_final_check_rth(monkeypatch, in_rth=True)
+        runner = _runner(monkeypatch)
+        runner.engine.state = EngineState.FLAT
+        quote_ctx = _StaleBboQuoteContext(
+            last_price=376.10, depth_bid=None, depth_ask=None, empty_book=True,
+        )
+        broker = _wire_stale_bbo_gateway(
+            runner, monkeypatch, quote_ctx, cached_bid=376.05, cached_ask=376.10,
+        )
+
+        result = runner._validate_final_order_quote(
+            broker, "NVDA.US", "BUY", Decimal("376.10"),
+        )
+
+        assert result == "fresh executable quote failed the final quality gate"
+
+    def test_entry_approval_uses_fresh_depth_ask_not_cached_ask(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _pin_final_check_rth(monkeypatch, in_rth=True)
+        runner = _runner(monkeypatch)
+        runner.engine.state = EngineState.FLAT
+        quote_ctx = _StaleBboQuoteContext(
+            last_price=376.20, depth_bid=376.15, depth_ask=376.25,
+        )
+        broker = _wire_stale_bbo_gateway(
+            runner, monkeypatch, quote_ctx, cached_bid=376.05, cached_ask=376.10,
+        )
+
+        result = runner._validate_final_order_quote(
+            broker, "NVDA.US", "BUY", Decimal("376.10"),
+        )
+
+        assert isinstance(result, FinalOrderQuoteCheckResult)
+        assert result.executable_price == Decimal("376.25")
+        assert result.ask == Decimal("376.25")
+
+    def test_ordinary_get_quotes_still_prefers_cached_bbo(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runner = _runner(monkeypatch)
+        quote_ctx = _StaleBboQuoteContext(
+            last_price=376.10, depth_bid=375.80, depth_ask=375.85,
+        )
+        broker = _wire_stale_bbo_gateway(
+            runner, monkeypatch, quote_ctx, cached_bid=376.30, cached_ask=376.35,
+        )
+
+        ordinary = broker.get_quotes(["NVDA.US"])
+
+        assert ordinary[0].bid == 376.30
+        assert ordinary[0].ask == 376.35
+        assert quote_ctx.depth_calls == 0
+
+
+class TestFinalCheckIgnoresUnattributedDepthOutsideRth:
+    """A pulled book has no session timestamp. Outside RTH it is unverified.
+
+    PRE/POST/OVERNIGHT must keep today's push-fed cache path. A non-current
+    book that still looks usable would otherwise price a protective exit
+    away from the market, or fail an entry closed, with no fallback.
+    """
+
+    def test_outside_rth_reduce_only_sell_uses_cached_bid_and_skips_depth(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _pin_final_check_rth(monkeypatch, in_rth=False)
+        runner = _runner(monkeypatch)
+        quote_ctx = _StaleBboQuoteContext(
+            last_price=376.10, depth_bid=375.80, depth_ask=375.85,
+        )
+        broker = _wire_stale_bbo_gateway(
+            runner, monkeypatch, quote_ctx, cached_bid=376.30, cached_ask=376.35,
+        )
+
+        result = runner._validate_final_order_quote(
+            broker, "NVDA.US", "SELL", Decimal("376.30"),
+        )
+
+        assert isinstance(result, FinalOrderQuoteCheckResult)
+        assert result.executable_price == Decimal("376.30")
+        assert result.bid == Decimal("376.30")
+        assert quote_ctx.depth_calls == 0
+
+    def test_outside_rth_entry_uses_cached_path_when_depth_would_be_empty(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _pin_final_check_rth(monkeypatch, in_rth=False)
+        runner = _runner(monkeypatch)
+        runner.engine.state = EngineState.FLAT
+        quote_ctx = _StaleBboQuoteContext(
+            last_price=376.10, depth_bid=None, depth_ask=None, empty_book=True,
+        )
+        broker = _wire_stale_bbo_gateway(
+            runner, monkeypatch, quote_ctx, cached_bid=376.05, cached_ask=376.10,
+        )
+
+        result = runner._validate_final_order_quote(
+            broker, "NVDA.US", "BUY", Decimal("376.10"),
+        )
+
+        assert isinstance(result, FinalOrderQuoteCheckResult)
+        assert result.executable_price == Decimal("376.10")
+        assert result.ask == Decimal("376.10")
+        assert quote_ctx.depth_calls == 0
+
+    def test_inside_rth_falling_market_still_yields_fresh_depth_bid(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _pin_final_check_rth(monkeypatch, in_rth=True)
+        runner = _runner(monkeypatch)
+        quote_ctx = _StaleBboQuoteContext(
+            last_price=376.10, depth_bid=375.80, depth_ask=375.85,
+        )
+        broker = _wire_stale_bbo_gateway(
+            runner, monkeypatch, quote_ctx, cached_bid=376.30, cached_ask=376.35,
+        )
+
+        result = runner._validate_final_order_quote(
+            broker, "NVDA.US", "SELL", Decimal("376.30"),
+        )
+
+        assert isinstance(result, FinalOrderQuoteCheckResult)
+        assert result.executable_price == Decimal("375.80")
+        assert quote_ctx.depth_calls >= 1

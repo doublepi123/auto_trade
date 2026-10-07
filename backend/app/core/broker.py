@@ -4,6 +4,8 @@ import inspect
 import json
 import logging
 import math
+import os
+import selectors
 import subprocess
 import sys
 import threading
@@ -16,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 from app.config import settings
 from app.core.cash_evidence import CashEvidenceUnavailable, UsdCashSnapshot
+from app.core.log_throttle import RepeatedLogThrottle
 from app.core.position_probe_diagnostics import (
     POSITION_PROBE_MESSAGE_LIMIT,
     POSITION_PROBE_STDERR_LIMIT,
@@ -82,6 +85,8 @@ _DEPTH_NO_PERMISSION_MARKER = "code=301604"
 _POSITION_PROBE_LOCK = threading.Lock()
 _POSITION_PROBE_COMMAND = (sys.executable, "-m", "app.core.position_probe")
 _POSITION_PROBE_MAX_OUTPUT_BYTES = 1_048_576
+_POSITION_PROBE_STDERR_BUFFER_BYTES = 65_536
+_POSITION_PROBE_POLL_SLICE_SECONDS = 0.05
 _HISTORY_BOUNDARY_TIMEZONES = {
     "US": ZoneInfo("America/New_York"),
     "HK": ZoneInfo("Asia/Hong_Kong"),
@@ -181,6 +186,9 @@ class OrderResult:
     status: str
 
 
+_QUANTITY_NOT_SUPPLIED = object()
+
+
 @dataclass
 class OrderStatusResult:
     broker_order_id: str
@@ -192,6 +200,40 @@ class OrderStatusResult:
     broker_submitted_at: datetime | None = None
     broker_updated_at: datetime | None = None
     outside_rth: str = ""
+    executed_quantity_reported: bool = False
+
+    def __init__(
+        self,
+        broker_order_id: str,
+        status: str,
+        executed_quantity: Decimal | object = _QUANTITY_NOT_SUPPLIED,
+        executed_price: Decimal = Decimal("0"),
+        actual_fee: Decimal | None = None,
+        fee_currency: str = "",
+        broker_submitted_at: datetime | None = None,
+        broker_updated_at: datetime | None = None,
+        outside_rth: str = "",
+        executed_quantity_reported: bool | None = None,
+    ) -> None:
+        quantity_supplied = executed_quantity is not _QUANTITY_NOT_SUPPLIED
+        self.broker_order_id = broker_order_id
+        self.status = status
+        self.executed_quantity = (
+            executed_quantity if isinstance(executed_quantity, Decimal) else Decimal("0")
+        )
+        self.executed_price = executed_price
+        self.actual_fee = actual_fee
+        self.fee_currency = fee_currency
+        self.broker_submitted_at = broker_submitted_at
+        self.broker_updated_at = broker_updated_at
+        self.outside_rth = outside_rth
+        # Supplying a quantity is itself a report, including an explicit zero.
+        # The status normalizers pass False when the SDK field is absent so a
+        # manufactured zero is not proof of no fill.
+        if executed_quantity_reported is None:
+            self.executed_quantity_reported = quantity_supplied
+        else:
+            self.executed_quantity_reported = executed_quantity_reported
 
 
 @dataclass
@@ -514,6 +556,22 @@ def _fetch_position_snapshot_payload_from_env() -> list[dict[str, str | None]]:
                 )
 
 
+def _open_persistent_position_context() -> Any:
+    """Build the child's one TradeContext. Positions are never retained here."""
+    module = _import_openapi()
+    return module.TradeContext(module.Config.from_env())
+
+
+def _fetch_position_snapshot_from_context(
+    trade_ctx: Any,
+) -> list[dict[str, str | None]]:
+    response = trade_ctx.stock_positions()
+    return [
+        _position_to_primitive(position)
+        for position in _normalize_position_response(response)
+    ]
+
+
 def _decode_position_probe_output(
     output: str,
     *,
@@ -637,6 +695,408 @@ def _decode_position_probe_output(
         return _normalize_position_response(raw_positions)
     except (RuntimeError, ValueError) as exc:
         raise protocol_error(type(exc).__name__) from exc
+
+
+def _position_probe_line_is_error(output: str) -> bool:
+    try:
+        payload = json.loads(output)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(payload, dict) and payload.get("status") == "error"
+
+
+class _PositionProbeWorkerClosed(RuntimeError):
+    """close() invalidated this worker before its child could be used."""
+
+
+class _PositionProbeWorker:
+    """One persistent isolated child. The context is warm; positions are not cached.
+
+    close() marks the worker closed and kills a live child. If no request is
+    in flight, close() reaps. Otherwise the request thread reaps in its
+    finally block, so pipes are never closed out from under a reader.
+    """
+
+    def __init__(self) -> None:
+        self._state_lock = threading.Lock()
+        self._closed = False
+        self._in_flight = False
+        self._process: subprocess.Popen[bytes] | None = None
+        self._request_seq = 0
+        self._pending_request_id = 0
+        self._stderr = bytearray()
+        self._stderr_thread: threading.Thread | None = None
+        self._stderr_lock = threading.Lock()
+        self._stderr_closed = threading.Event()
+
+    def request(
+        self,
+        *,
+        deadline: float,
+        started_at: float,
+        timeout_seconds: float,
+    ) -> tuple[str, int, str]:
+        if not self._begin_request():
+            raise _PositionProbeWorkerClosed(
+                "broker position snapshot probe worker was closed"
+            )
+        try:
+            return self._request_in_flight(
+                deadline=deadline,
+                started_at=started_at,
+                timeout_seconds=timeout_seconds,
+            )
+        finally:
+            self._finish_request()
+
+    def _request_in_flight(
+        self,
+        *,
+        deadline: float,
+        started_at: float,
+        timeout_seconds: float,
+    ) -> tuple[str, int, str]:
+        self._ensure_started(deadline=deadline, started_at=started_at, timeout_seconds=timeout_seconds)
+        process = self._process
+        if process is None or process.stdin is None or process.stdout is None:
+            raise _PositionProbeWorkerClosed(
+                "broker position snapshot probe worker was closed"
+            )
+        try:
+            self._write_request(process, deadline)
+            output = self._read_response(process, deadline)
+            output = self._accept_request_id(output)
+        except TimeoutError:
+            stderr = self.stderr_text()
+            self.discard()
+            raise _position_probe_timeout_error(
+                "broker position snapshot exceeded "
+                f"{timeout_seconds:g}s timeout",
+                started_at=started_at,
+                stderr=stderr,
+            ) from None
+        except (OSError, ValueError):
+            stderr = self.stderr_text()
+            exit_code = self.discard()
+            if time.monotonic() >= deadline:
+                raise _position_probe_timeout_error(
+                    "broker position snapshot exceeded "
+                    f"{timeout_seconds:g}s timeout",
+                    started_at=started_at,
+                    stderr=stderr,
+                ) from None
+            return "", exit_code if exit_code is not None else 1, stderr
+        if self._is_closed():
+            self.discard()
+            raise _PositionProbeWorkerClosed(
+                "broker position snapshot probe worker was closed"
+            )
+        if not _position_probe_line_is_error(output):
+            if process.poll() is None:
+                return output, 0, self.stderr_text()
+            self._capture_remaining_stderr(process)
+            exit_code = self.discard()
+            return output, exit_code if exit_code not in (None, 0) else 1, self.stderr_text()
+        if _position_probe_line_is_error(output):
+            remaining = deadline - time.monotonic()
+            if remaining > 0 and process.poll() is None:
+                try:
+                    process.wait(timeout=remaining)
+                except subprocess.TimeoutExpired:
+                    pass
+            if process.poll() is None:
+                self.discard()
+                return output, 1, self.stderr_text()
+        self._capture_remaining_stderr(process)
+        stderr = self.stderr_text()
+        exit_code = self.discard()
+        if exit_code in (None, 0):
+            exit_code = 1
+        return output, exit_code, stderr
+
+    def close(self) -> None:
+        with self._state_lock:
+            self._closed = True
+            in_flight = self._in_flight
+            process = self._process
+        if process is not None and process.poll() is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        if not in_flight:
+            self.discard()
+
+    def _begin_request(self) -> bool:
+        with self._state_lock:
+            if self._closed:
+                return False
+            self._in_flight = True
+            return True
+
+    def _finish_request(self) -> None:
+        with self._state_lock:
+            self._in_flight = False
+            closed = self._closed
+        if closed:
+            self.discard()
+
+    def discard(self) -> int | None:
+        with self._state_lock:
+            self._closed = True
+            process = self._process
+            self._process = None
+        if process is None:
+            return None
+        self._close_pipes(process)
+        if process.poll() is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        try:
+            process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "position probe worker pid=%s did not exit after SIGKILL",
+                process.pid,
+            )
+        self._join_stderr_thread()
+        return process.returncode
+
+    def _is_closed(self) -> bool:
+        with self._state_lock:
+            return self._closed
+
+    def _next_request_id(self) -> int:
+        with self._state_lock:
+            self._request_seq += 1
+            self._pending_request_id = self._request_seq
+            return self._request_seq
+
+    def _accept_request_id(self, output: str) -> str:
+        try:
+            payload = json.loads(output)
+        except (TypeError, ValueError) as exc:
+            raise OSError("position probe response was not a single payload") from exc
+        if not isinstance(payload, dict):
+            raise OSError("position probe response was not an object")
+        with self._state_lock:
+            expected = self._pending_request_id
+        if payload.get("request_id") != expected:
+            raise OSError("position probe response id did not match the request")
+        payload.pop("request_id")
+        return json.dumps(payload, separators=(",", ":"))
+
+    @staticmethod
+    def _kill_and_reap(process: subprocess.Popen[bytes]) -> None:
+        if process.poll() is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+        try:
+            process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            logger.warning(
+                "position probe worker pid=%s did not exit after SIGKILL",
+                process.pid,
+            )
+        _PositionProbeWorker._close_pipes(process)
+
+    def stderr_text(self) -> str:
+        with self._stderr_lock:
+            return bytes(self._stderr).decode("utf-8", errors="replace")
+
+    def _ensure_started(
+        self,
+        *,
+        deadline: float,
+        started_at: float,
+        timeout_seconds: float,
+    ) -> None:
+        process = self._process
+        if process is not None and process.poll() is None:
+            return
+        if process is not None:
+            self.discard()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _position_probe_timeout_error(
+                "broker position snapshot exceeded "
+                f"{timeout_seconds:g}s timeout",
+                started_at=started_at,
+                stderr=self.stderr_text(),
+            )
+        if self._is_closed():
+            raise _PositionProbeWorkerClosed(
+                "broker position snapshot probe worker was closed"
+            )
+        self._stderr = bytearray()
+        self._stderr_closed = threading.Event()
+        try:
+            process = subprocess.Popen(
+                _POSITION_PROBE_COMMAND,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                bufsize=0,
+            )
+        except OSError as exc:
+            raise _position_probe_timeout_error(
+                "broker position snapshot probe worker failed to start",
+                started_at=started_at,
+                stderr=str(exc),
+            ) from None
+        with self._state_lock:
+            if self._closed:
+                self._kill_and_reap(process)
+                raise _PositionProbeWorkerClosed(
+                    "broker position snapshot probe worker was closed"
+                )
+            self._process = process
+        stderr = process.stderr
+        if stderr is not None:
+            self._stderr_thread = threading.Thread(
+                target=self._drain_stderr,
+                args=(stderr,),
+                name=f"position-probe-stderr-{process.pid}",
+                daemon=True,
+            )
+            self._stderr_thread.start()
+
+    def _write_request(self, process: subprocess.Popen[bytes], deadline: float) -> None:
+        stdin = process.stdin
+        if stdin is None:
+            raise OSError("position probe worker stdin is closed")
+        payload = f"{self._next_request_id()}\n".encode("ascii")
+        selector = selectors.DefaultSelector()
+        try:
+            selector.register(stdin, selectors.EVENT_WRITE)
+            while payload:
+                remaining = deadline - time.monotonic()
+                if self._is_closed():
+                    raise _PositionProbeWorkerClosed(
+                        "broker position snapshot probe worker was closed"
+                    )
+                if remaining <= 0 or process.poll() is not None:
+                    raise TimeoutError("position probe request write timed out")
+                events = selector.select(min(remaining, _POSITION_PROBE_POLL_SLICE_SECONDS))
+                if not events:
+                    continue
+                written = os.write(stdin.fileno(), payload)
+                if written <= 0:
+                    raise OSError("position probe request write failed")
+                payload = payload[written:]
+        finally:
+            selector.close()
+
+    def _read_response(self, process: subprocess.Popen[bytes], deadline: float) -> str:
+        stdout = process.stdout
+        if stdout is None:
+            raise OSError("position probe worker stdout is closed")
+        chunks = bytearray()
+        selector = selectors.DefaultSelector()
+        try:
+            selector.register(stdout, selectors.EVENT_READ)
+            while True:
+                if self._is_closed():
+                    raise _PositionProbeWorkerClosed(
+                        "broker position snapshot probe worker was closed"
+                    )
+                if len(chunks) > _POSITION_PROBE_MAX_OUTPUT_BYTES:
+                    raise OSError("position probe output exceeded byte limit")
+                if b"\n" in chunks:
+                    line, _separator, pending = bytes(chunks).partition(b"\n")
+                    if pending:
+                        raise OSError("position probe returned more than one payload line")
+                    if self._is_closed():
+                        raise _PositionProbeWorkerClosed(
+                            "broker position snapshot probe worker was closed"
+                        )
+                    return line.decode("utf-8", errors="replace")
+                remaining = deadline - time.monotonic()
+                if self._is_closed():
+                    raise _PositionProbeWorkerClosed(
+                        "broker position snapshot probe worker was closed"
+                    )
+                if remaining <= 0:
+                    raise TimeoutError("position probe response read timed out")
+                if process.poll() is not None and not selector.select(0):
+                    if chunks:
+                        return bytes(chunks).decode("utf-8", errors="replace")
+                    raise OSError("position probe worker exited before responding")
+                events = selector.select(min(remaining, _POSITION_PROBE_POLL_SLICE_SECONDS))
+                if self._is_closed():
+                    raise _PositionProbeWorkerClosed(
+                        "broker position snapshot probe worker was closed"
+                    )
+                if not events:
+                    continue
+                chunk = os.read(stdout.fileno(), 65_536)
+                if not chunk:
+                    if chunks:
+                        return bytes(chunks).decode("utf-8", errors="replace")
+                    raise OSError("position probe worker closed stdout")
+                chunks.extend(chunk)
+        finally:
+            selector.close()
+
+    def _capture_remaining_stderr(self, process: subprocess.Popen[bytes]) -> None:
+        stderr = process.stderr
+        if stderr is None:
+            return
+        try:
+            os.set_blocking(stderr.fileno(), False)
+        except OSError:
+            return
+        while True:
+            try:
+                chunk = os.read(stderr.fileno(), 4096)
+            except BlockingIOError:
+                return
+            except OSError:
+                return
+            if not chunk:
+                return
+            with self._stderr_lock:
+                self._stderr.extend(chunk)
+                overflow = len(self._stderr) - _POSITION_PROBE_STDERR_BUFFER_BYTES
+                if overflow > 0:
+                    del self._stderr[:overflow]
+
+    def _drain_stderr(self, stderr: Any) -> None:
+        try:
+            while True:
+                chunk = os.read(stderr.fileno(), 4096)
+                if not chunk:
+                    return
+                with self._stderr_lock:
+                    self._stderr.extend(chunk)
+                    overflow = len(self._stderr) - _POSITION_PROBE_STDERR_BUFFER_BYTES
+                    if overflow > 0:
+                        del self._stderr[:overflow]
+        except OSError:
+            return
+        finally:
+            self._stderr_closed.set()
+
+    def _join_stderr_thread(self) -> None:
+        thread = self._stderr_thread
+        self._stderr_thread = None
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            self._stderr_closed.wait(timeout=0.2)
+            thread.join(timeout=0.2)
+
+    @staticmethod
+    def _close_pipes(process: subprocess.Popen[bytes]) -> None:
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if pipe is None:
+                continue
+            try:
+                pipe.close()
+            except OSError:
+                continue
 
 
 def _position_probe_timeout_error(
@@ -829,6 +1289,36 @@ def _risk_level_attr(item: Any) -> int:
         return int(Decimal(str(value)))
     except (ValueError, TypeError, AttributeError, _DecimalInvalidOp):
         return 0
+
+
+def _reported_nonnegative_decimal(
+    item: Any,
+    *names: str,
+) -> tuple[Decimal, bool]:
+    """Return a quantity and whether the source actually reported it.
+
+    A missing or null SDK field is not the same evidence as an explicit zero.
+    Callers that only need arithmetic keep ``_nonnegative_decimal_attr``.
+    """
+    for name in names:
+        if isinstance(item, dict):
+            if name not in item:
+                continue
+            value = item[name]
+        elif not hasattr(item, name):
+            continue
+        else:
+            value = getattr(item, name)
+        if value is None:
+            continue
+        try:
+            parsed = Decimal(str(value))
+        except (ValueError, TypeError, AttributeError, _DecimalInvalidOp) as exc:
+            raise ValueError(f"broker returned invalid {name}") from exc
+        if not parsed.is_finite() or parsed < 0:
+            raise ValueError(f"broker returned invalid {name}")
+        return parsed, True
+    return Decimal("0"), False
 
 
 def _nonnegative_decimal_attr(item: Any, *names: str) -> Decimal:
@@ -1068,6 +1558,11 @@ class BrokerGateway:
             tuple[str, str, tuple[tuple[str, ...], ...]],
             None,
         ] = {}
+        self._position_probe_worker: _PositionProbeWorker | None = None
+        self._position_probe_worker_guard = threading.Lock()
+        # A latched exit retries the strict read on every quote. One line per
+        # symbol per window; suppressed counts are reported, not dropped.
+        self._strict_depth_log_throttle = RepeatedLogThrottle(window_seconds=60)
 
     @staticmethod
     def _best_depth_price(levels: Any, *, side: str) -> float:
@@ -1167,6 +1662,46 @@ class BrokerGateway:
             return self._cached_bbo(symbol)
         self._remember_bbo(symbol, bid, ask)
         return bid, ask
+
+    def _pull_bbo_strict(self, symbol: str) -> tuple[float, float]:
+        """Read the book now. Never fall back to, or poison, the cache.
+
+        The final pre-submit check is the only caller. A depth push can be
+        stalled for the whole position probe, so a still-valid cached BBO
+        is not an executable price. Unsupported depth, an exception, an
+        empty book, or an invalid/crossed BBO all fail closed as zeros.
+        ``_remember_bbo`` already refuses those zeros, so a failed pull
+        leaves the ordinary quote cache untouched.
+        """
+        depth_reader = getattr(self._quote_ctx, "depth", None)
+        if not callable(depth_reader):
+            self._warn_strict_depth(symbol, "depth reader unavailable")
+            return 0.0, 0.0
+        try:
+            bid, ask = self._bbo_from_depth(depth_reader(symbol))
+        except Exception as exc:
+            self._warn_strict_depth(symbol, f"fetch failed: {exc}")
+            return 0.0, 0.0
+        self._remember_bbo(symbol, bid, ask)
+        if (
+            not math.isfinite(bid)
+            or not math.isfinite(ask)
+            or bid <= 0
+            or ask <= 0
+            or ask < bid
+        ):
+            return 0.0, 0.0
+        return bid, ask
+
+    def _warn_strict_depth(self, symbol: str, detail: str) -> None:
+        if not self._strict_depth_log_throttle.should_log(symbol):
+            return
+        logger.warning(
+            "broker strict depth read failed for %s: %s; suppressed=%s",
+            symbol,
+            detail,
+            self._strict_depth_log_throttle.take_suppressed_count(),
+        )
 
     def probe_depth_permission(self, symbol: str) -> str:
         """Probe whether ``depth(symbol)`` is permitted for this account.
@@ -1658,6 +2193,51 @@ class BrokerGateway:
             base_ms=settings.broker_retry_base_ms,
         )
 
+    def get_executable_quote(self, symbol: str) -> Quote:
+        """Last trade as today, but bid/ask from a depth pull right now.
+
+        Used only by the final pre-submit quote check, and only during
+        regular trading hours. A pulled book has no timestamp and no
+        session attribution, so a caller outside RTH must not treat it as
+        the current session's executable price. Ordinary ``get_quotes``
+        still prefers a cached BBO and falls back to the cache when depth
+        fails; this read does neither.
+        """
+        return self._call_with_retry(
+            lambda: self._get_executable_quote_inner(symbol),
+            op="get_executable_quote",
+            max_retries=settings.broker_quote_retry_max,
+            base_ms=settings.broker_retry_base_ms,
+        )
+
+    def _get_executable_quote_inner(self, symbol: str) -> Quote:
+        with self._lock:
+            self._init_clients()
+            response = self._quote_ctx.quote([symbol])
+            items = response if isinstance(response, list) else [response]
+            item = next(
+                (
+                    candidate
+                    for candidate in items
+                    if str(getattr(candidate, "symbol", "")) == symbol
+                ),
+                items[0] if len(items) == 1 else None,
+            )
+            if item is None:
+                raise RuntimeError(f"broker returned no quote for {symbol}")
+            resolved = str(getattr(item, "symbol", symbol)) or symbol
+            last_price, timestamp = self._extended_session_last_trade(item)
+            bid, ask = self._pull_bbo_strict(resolved)
+            if last_price > 0:
+                self._last_trade_by_symbol[resolved] = (last_price, timestamp)
+            return Quote(
+                symbol=resolved,
+                last_price=last_price,
+                bid=bid,
+                ask=ask,
+                timestamp=timestamp,
+            )
+
     @staticmethod
     def _finite_positive_price(value: object) -> float | None:
         try:
@@ -1941,14 +2521,16 @@ class BrokerGateway:
                     "RTHONLY": "RTH_ONLY",
                     "OVERNIGHT": "OVERNIGHT",
                 }.get(session_name.upper().replace("_", ""), "")
+                executed_quantity, quantity_reported = _reported_nonnegative_decimal(
+                    detail,
+                    "executed_quantity",
+                    "filled_quantity",
+                )
                 return OrderStatusResult(
                     broker_order_id=_require_matching_order_id(detail, order_id),
                     status=_normalize_order_status(_get_value(detail, "status", "SUBMITTED")),
-                    executed_quantity=_nonnegative_decimal_attr(
-                        detail,
-                        "executed_quantity",
-                        "filled_quantity",
-                    ),
+                    executed_quantity=executed_quantity,
+                    executed_quantity_reported=quantity_reported,
                     executed_price=_nonnegative_decimal_attr(
                         detail,
                         "executed_price",
@@ -2073,30 +2655,34 @@ class BrokerGateway:
                 # Longport's cancel_order contract returns None after accepting
                 # the request. Acceptance is not terminal proof: the order may
                 # fill before cancellation reaches the venue.
+                executed_quantity, quantity_reported = _reported_nonnegative_decimal(
+                    response,
+                    "executed_quantity",
+                    "filled_quantity",
+                )
                 return OrderStatusResult(
                     broker_order_id=order_id,
                     status="SUBMITTED",
-                    executed_quantity=_nonnegative_decimal_attr(
-                        response,
-                        "executed_quantity",
-                        "filled_quantity",
-                    ),
+                    executed_quantity=executed_quantity,
+                    executed_quantity_reported=quantity_reported,
                     executed_price=_nonnegative_decimal_attr(
                         response,
                         "executed_price",
                         "filled_price",
                     ),
                 )
+            executed_quantity, quantity_reported = _reported_nonnegative_decimal(
+                detail,
+                "executed_quantity",
+                "filled_quantity",
+            )
             return OrderStatusResult(
                 broker_order_id=_require_matching_order_id(detail, order_id),
                 status=_normalize_order_status(
                     _get_value(detail, "status", "SUBMITTED")
                 ),
-                executed_quantity=_nonnegative_decimal_attr(
-                    detail,
-                    "executed_quantity",
-                    "filled_quantity",
-                ),
+                executed_quantity=executed_quantity,
+                executed_quantity_reported=quantity_reported,
                 executed_price=_nonnegative_decimal_attr(
                     detail,
                     "executed_price",
@@ -2146,6 +2732,7 @@ class BrokerGateway:
                 f"{timeout_seconds:g}s timeout",
                 started_at=started_at,
             )
+        worker: _PositionProbeWorker | None = None
         try:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -2154,36 +2741,64 @@ class BrokerGateway:
                     f"{timeout_seconds:g}s timeout",
                     started_at=started_at,
                 )
+            with self._position_probe_worker_guard:
+                if self._position_probe_worker is None:
+                    self._position_probe_worker = _PositionProbeWorker()
+                worker = self._position_probe_worker
             try:
-                completed = subprocess.run(
-                    _POSITION_PROBE_COMMAND,
-                    check=False,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    timeout=remaining,
-                )
-            except subprocess.TimeoutExpired as exc:
-                raise _position_probe_timeout_error(
-                    "broker position snapshot exceeded "
-                    f"{timeout_seconds:g}s timeout",
+                output, returncode, stderr = worker.request(
+                    deadline=deadline,
                     started_at=started_at,
-                    stderr=exc.stderr,
+                    timeout_seconds=timeout_seconds,
+                )
+            except _PositionProbeWorkerClosed:
+                self._discard_position_probe_worker(worker)
+                raise _position_probe_timeout_error(
+                    "broker position snapshot probe worker was closed",
+                    started_at=started_at,
                 ) from None
-            return _decode_position_probe_output(
-                completed.stdout,
-                returncode=completed.returncode,
-                stderr=completed.stderr or "",
-                probe_duration_ms=max(
-                    0.0,
-                    (time.monotonic() - started_at) * 1_000,
-                ),
-            )
+            except PositionProbeTimeoutError:
+                self._discard_position_probe_worker(worker)
+                raise
+            except (OSError, ValueError):
+                self._discard_position_probe_worker(worker)
+                raise
+            try:
+                return _decode_position_probe_output(
+                    output,
+                    returncode=returncode,
+                    stderr=stderr,
+                    probe_duration_ms=max(
+                        0.0,
+                        (time.monotonic() - started_at) * 1_000,
+                    ),
+                )
+            except (
+                PositionProbeProtocolError,
+                PositionProbeRuntimeError,
+                PositionProbeConnectionError,
+            ):
+                self._discard_position_probe_worker(worker)
+                raise
         finally:
             _POSITION_PROBE_LOCK.release()
 
+    def _discard_position_probe_worker(
+        self,
+        worker: _PositionProbeWorker | None,
+    ) -> None:
+        with self._position_probe_worker_guard:
+            if worker is None or self._position_probe_worker is not worker:
+                return
+            self._position_probe_worker = None
+        worker.discard()
+
     def close(self) -> None:
+        with self._position_probe_worker_guard:
+            worker = self._position_probe_worker
+            self._position_probe_worker = None
+        if worker is not None:
+            worker.close()
         with self._subscription_lock:
             with self._lock:
                 contexts = (self._quote_ctx, self._trade_ctx)

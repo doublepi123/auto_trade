@@ -19,6 +19,8 @@ from app.core.broker import (
     Position,
     Quote,
 )
+from app.core.engine import EngineSnapshot, EngineState
+from app.core.engine import EngineSnapshot, EngineState
 from app.core.accounting_fees import (
     ACCOUNTING_FEE_MODEL_US_SEC98,
     order_fee,
@@ -761,6 +763,925 @@ class TestTradeExecutionServiceBasics:
         assert any("failed to cancel timed-out order order-timeout-fails" in msg for msg in messages)
         assert any("failed to recover partial fill after timeout for order-timeout-fails" in msg for msg in messages)
         assert not any(rec.levelno >= logging.ERROR for rec in caplog.records)
+
+    def _confirmed_unfilled_cancel(self, order_id: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            broker_order_id=order_id,
+            status="CANCELLED",
+            executed_quantity=Decimal("0"),
+            executed_price=Decimal("0"),
+        )
+
+    def _assert_unfilled_cancel_timeout_is_auto_resumable(
+        self,
+        risk: RiskController,
+        events: list[str],
+        notifications: list[tuple[str, str]],
+        *,
+        order_id: str,
+    ) -> None:
+        operational = trade_svc_module._OPERATIONAL_PAUSE_PREFIXES
+        assert risk.paused is True
+        assert risk.pause_auto_resumable is True
+        assert risk.pause_reason.startswith("ORDER_TIMEOUT_CANCELLED_UNFILLED:")
+        assert not risk.pause_reason.startswith(operational)
+        assert "pending order" not in risk.pause_reason
+        assert order_id in risk.pause_reason
+        assert "CANCELLED" in risk.pause_reason
+        assert "executed_quantity=0" in risk.pause_reason
+        assert events == [risk.pause_reason]
+        assert notifications == [("ORDER_TIMEOUT", risk.pause_reason)]
+
+    def test_entry_timeout_cancel_with_explicit_zero_fill_is_auto_resumable(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "order-timeout-cancel-zero"
+        broker = MagicMock()
+        broker.get_order_status.return_value = SimpleNamespace(
+            broker_order_id=order_id,
+            status="SUBMITTED",
+            executed_quantity=Decimal("0"),
+            executed_price=Decimal("0"),
+        )
+        broker.cancel_order.return_value = self._confirmed_unfilled_cancel(order_id)
+        risk = RiskController()
+        events: list[str] = []
+        notifications: list[tuple[str, str]] = []
+        restored: list[object] = []
+        snapshot = EngineSnapshot(EngineState.FLAT, 100.0, None)
+        svc._record_risk_event = events.append
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=snapshot,
+            next_status_check_at=0.0,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+        svc.load_pending_orders([pending])
+
+        svc._handle_pending_order_timeout(
+            pending,
+            risk=risk,
+            notify_risk_event=lambda event, reason: notifications.append((event, reason)),
+            restore_engine_snapshot=restored.append,
+        )
+
+        self._assert_unfilled_cancel_timeout_is_auto_resumable(
+            risk,
+            events,
+            notifications,
+            order_id=order_id,
+        )
+        assert svc.has_pending_order is False
+        assert restored == [snapshot]
+        assert risk.protective_exit_permitted is False
+
+    def test_entry_timeout_already_cancelled_with_explicit_zero_fill_is_auto_resumable(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "order-already-cancelled-zero"
+        broker = MagicMock()
+        broker.get_order_status.return_value = self._confirmed_unfilled_cancel(order_id)
+        risk = RiskController()
+        events: list[str] = []
+        notifications: list[tuple[str, str]] = []
+        restored: list[object] = []
+        snapshot = EngineSnapshot(EngineState.FLAT, 100.0, None)
+        svc._record_risk_event = events.append
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=snapshot,
+            next_status_check_at=0.0,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+        svc.load_pending_orders([pending])
+
+        svc._handle_pending_order_timeout(
+            pending,
+            risk=risk,
+            notify_risk_event=lambda event, reason: notifications.append((event, reason)),
+            restore_engine_snapshot=restored.append,
+        )
+
+        self._assert_unfilled_cancel_timeout_is_auto_resumable(
+            risk,
+            events,
+            notifications,
+            order_id=order_id,
+        )
+        broker.cancel_order.assert_not_called()
+        assert svc.has_pending_order is False
+        assert restored == [snapshot]
+
+    def test_entry_timeout_recovery_query_cancelled_with_explicit_zero_fill_is_auto_resumable(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "order-recovery-cancelled-zero"
+        broker = MagicMock()
+        broker.get_order_status.side_effect = [
+            RuntimeError("status query unavailable"),
+            self._confirmed_unfilled_cancel(order_id),
+        ]
+        broker.cancel_order.side_effect = RuntimeError("cancel outcome unknown")
+        risk = RiskController()
+        events: list[str] = []
+        notifications: list[tuple[str, str]] = []
+        restored: list[object] = []
+        snapshot = EngineSnapshot(EngineState.FLAT, 100.0, None)
+        svc._record_risk_event = events.append
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=snapshot,
+            next_status_check_at=0.0,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+        svc.load_pending_orders([pending])
+
+        svc._handle_pending_order_timeout(
+            pending,
+            risk=risk,
+            notify_risk_event=lambda event, reason: notifications.append((event, reason)),
+            restore_engine_snapshot=restored.append,
+        )
+
+        self._assert_unfilled_cancel_timeout_is_auto_resumable(
+            risk,
+            events,
+            notifications,
+            order_id=order_id,
+        )
+        assert broker.get_order_status.call_count == 2
+        broker.cancel_order.assert_called_once_with(order_id)
+        assert svc.has_pending_order is False
+        assert restored == [snapshot]
+
+    def test_reduce_only_sell_is_permitted_after_unfilled_cancel_timeout(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "order-exit-timeout-cancel-zero"
+        broker = MagicMock()
+        broker.get_order_status.return_value = self._confirmed_unfilled_cancel(order_id)
+        risk = RiskController()
+        events: list[str] = []
+        svc._record_risk_event = events.append
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="SELL",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            next_status_check_at=0.0,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+        svc.load_pending_orders([pending])
+
+        svc._handle_pending_order_timeout(pending, risk=risk)
+
+        assert risk.paused is True
+        assert risk.pause_auto_resumable is True
+        assert risk.protective_exit_permitted is False
+        assert TradeExecutionService._risk_rejection_allows_action(
+            "SELL",
+            risk,
+            reduce_only=True,
+        ) is True
+        assert TradeExecutionService._risk_rejection_allows_action(
+            "BUY",
+            risk,
+            reduce_only=False,
+        ) is False
+        assert events == [risk.pause_reason]
+
+    def test_cancelled_timeout_without_executed_quantity_keeps_hard_pause(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "order-cancel-qty-missing"
+        broker = MagicMock()
+        broker.get_order_status.return_value = SimpleNamespace(
+            broker_order_id=order_id,
+            status="CANCELLED",
+        )
+        risk = RiskController()
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            next_status_check_at=0.0,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+        svc.load_pending_orders([pending])
+
+        svc._handle_pending_order_timeout(pending, risk=risk)
+
+        assert risk.paused is True
+        assert risk.pause_auto_resumable is False
+        assert risk.pause_reason.startswith(
+            trade_svc_module.ORDER_EXECUTION_BLOCKED_PREFIX
+        )
+        assert "terminal status CANCELLED" in risk.pause_reason
+
+    def test_rejected_timeout_with_explicit_zero_fill_keeps_hard_pause(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "order-rejected-zero"
+        broker = MagicMock()
+        broker.get_order_status.return_value = SimpleNamespace(
+            broker_order_id=order_id,
+            status="REJECTED",
+            executed_quantity=Decimal("0"),
+            executed_price=Decimal("0"),
+        )
+        risk = RiskController()
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            next_status_check_at=0.0,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+        svc.load_pending_orders([pending])
+
+        svc._handle_pending_order_timeout(pending, risk=risk)
+
+        assert risk.paused is True
+        assert risk.pause_auto_resumable is False
+        assert risk.pause_reason.startswith(
+            trade_svc_module.ORDER_EXECUTION_BLOCKED_PREFIX
+        )
+        assert "terminal status REJECTED" in risk.pause_reason
+
+    def test_partial_fill_timeout_finalizes_without_unfilled_cancel_pause(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "order-partial-cancel"
+        broker = MagicMock()
+        broker.get_order_status.return_value = SimpleNamespace(
+            broker_order_id=order_id,
+            status="CANCELLED",
+            executed_quantity=Decimal("4"),
+            executed_price=Decimal("100"),
+        )
+        risk = RiskController()
+        fills: list[str] = []
+        svc._finalize_pending_fill = (
+            lambda pending, *_args, **_kwargs: fills.append(pending.broker_order_id)
+        )
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            next_status_check_at=0.0,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+        svc.load_pending_orders([pending])
+
+        svc._handle_pending_order_timeout(pending, risk=risk)
+
+        assert fills == [order_id]
+        assert risk.paused is False
+        assert svc.has_pending_order is False
+
+    def _live_status(self, order_id: str, status: str = "SUBMITTED") -> SimpleNamespace:
+        return SimpleNamespace(
+            broker_order_id=order_id,
+            status=status,
+            executed_quantity=Decimal("0"),
+            executed_price=Decimal("0"),
+        )
+
+    def _script_timeout_then_cancel(
+        self,
+        broker: MagicMock,
+        order_id: str,
+        terminal: SimpleNamespace,
+    ) -> None:
+        """First timeout pass stays live; the next poll sees the terminal status.
+
+        ``get_order_status`` is also the recovery query, so the first pass
+        consumes two live responses before the later poll may return terminal.
+        """
+        responses = [
+            self._live_status(order_id),
+            self._live_status(order_id),
+            terminal,
+        ]
+
+        def status(_order_id: str) -> SimpleNamespace:
+            if responses:
+                return responses.pop(0)
+            return terminal
+
+        broker.get_order_status.side_effect = status
+        broker.cancel_order.return_value = self._live_status(order_id)
+
+    def test_funded_margin_second_pass_downgrades_unconfirmed_timeout_pause(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "1292480417340895232"
+        broker = MagicMock()
+        self._script_timeout_then_cancel(
+            broker,
+            order_id,
+            self._confirmed_unfilled_cancel(order_id),
+        )
+        risk = RiskController()
+        events: list[str] = []
+        notifications: list[tuple[str, str]] = []
+        svc._record_risk_event = events.append
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_id,
+            symbol="NVDA.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            next_status_check_at=0.0,
+            submitted_at=time.monotonic() - 60,
+            funded_margin_entry=True,
+        )
+        svc._order_status_timeout_seconds = 30
+        svc._order_status_poll_interval_seconds = 0
+        svc.load_pending_orders([pending])
+
+        svc.reconcile(
+            risk=risk,
+            notify_risk_event=lambda event, reason: notifications.append((event, reason)),
+        )
+
+        uncertain = (
+            "ORDER_RECONCILIATION_UNCERTAIN: pending order "
+            f"{order_id} timed out after 30s"
+        )
+        assert risk.pause_reason == uncertain
+        assert risk.pause_auto_resumable is False
+        assert svc.has_pending_order is True
+
+        svc.reconcile(
+            risk=risk,
+            notify_risk_event=lambda event, reason: notifications.append((event, reason)),
+        )
+
+        assert risk.pause_reason.startswith("ORDER_TIMEOUT_CANCELLED_UNFILLED:")
+        assert risk.pause_auto_resumable is True
+        assert order_id in risk.pause_reason
+        assert "pending order" not in risk.pause_reason
+        assert svc.has_pending_order is False
+        assert events == [uncertain, risk.pause_reason]
+        assert notifications == [
+            ("ORDER_TIMEOUT", uncertain),
+            ("ORDER_TIMEOUT", risk.pause_reason),
+        ]
+
+    def test_reduce_only_sell_poll_downgrades_unconfirmed_timeout_pause(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "order-exit-wait-then-cancel"
+        broker = MagicMock()
+        self._script_timeout_then_cancel(
+            broker,
+            order_id,
+            self._confirmed_unfilled_cancel(order_id),
+        )
+        risk = RiskController()
+        events: list[str] = []
+        svc._record_risk_event = events.append
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="SELL",
+            quantity=Decimal("4"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            next_status_check_at=0.0,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+        svc._order_status_poll_interval_seconds = 0
+        svc.load_pending_orders([pending])
+
+        svc.reconcile(risk=risk)
+        assert risk.pause_reason.startswith("ORDER_RECONCILIATION_UNCERTAIN:")
+        assert risk.pause_auto_resumable is False
+
+        svc.reconcile(risk=risk)
+
+        assert risk.pause_reason.startswith("ORDER_TIMEOUT_CANCELLED_UNFILLED:")
+        assert risk.pause_auto_resumable is True
+        assert risk.protective_exit_permitted is False
+        assert TradeExecutionService._risk_rejection_allows_action(
+            "SELL",
+            risk,
+            reduce_only=True,
+        ) is True
+        assert TradeExecutionService._risk_rejection_allows_action(
+            "BUY",
+            risk,
+            reduce_only=False,
+        ) is False
+        assert svc.has_pending_order is False
+        assert events[-1] == risk.pause_reason
+
+    def test_confirmed_unfilled_cancel_does_not_replace_other_operational_pause(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "order-other-operational"
+        incumbent = "ORDER_PERSISTENCE_UNCERTAIN: order other-1 submitted but local record failed"
+        broker = MagicMock()
+        broker.get_order_status.return_value = self._confirmed_unfilled_cancel(order_id)
+        risk = RiskController()
+        risk.pause(incumbent, auto_resumable=False)
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            next_status_check_at=0.0,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+        svc.load_pending_orders([pending])
+
+        svc._handle_pending_order_timeout(pending, risk=risk)
+
+        assert risk.pause_reason == incumbent
+        assert risk.pause_auto_resumable is False
+
+    def test_confirmed_unfilled_cancel_does_not_downgrade_kill_switch(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "order-kill-switch"
+        incumbent = (
+            "ORDER_RECONCILIATION_UNCERTAIN: pending order "
+            f"{order_id} timed out after 30s"
+        )
+        broker = MagicMock()
+        broker.get_order_status.return_value = self._confirmed_unfilled_cancel(order_id)
+        risk = RiskController()
+        risk.pause(incumbent, auto_resumable=False)
+        risk.enable_kill_switch("manual")
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            next_status_check_at=0.0,
+            submitted_at=time.monotonic() - 60,
+            timeout_recovery_attempted=True,
+            funded_margin_entry=True,
+        )
+        svc._order_status_timeout_seconds = 30
+        svc.load_pending_orders([pending])
+
+        svc.reconcile(risk=risk)
+
+        assert risk.kill_switch is True
+        assert risk.pause_reason == incumbent
+        assert risk.pause_auto_resumable is False
+
+    def test_broker_initiated_cancel_without_timeout_keeps_failed_order_pause(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "order-broker-cancel"
+        broker = MagicMock()
+        broker.get_order_status.return_value = self._confirmed_unfilled_cancel(order_id)
+        risk = RiskController()
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            next_status_check_at=0.0,
+            submitted_at=time.monotonic(),
+        )
+        svc._order_status_timeout_seconds = 30
+        svc.load_pending_orders([pending])
+
+        svc.reconcile(risk=risk)
+
+        assert risk.pause_auto_resumable is False
+        assert risk.pause_reason == (
+            f"{trade_svc_module.ORDER_EXECUTION_BLOCKED_PREFIX} "
+            f"order {order_id} ended with status CANCELLED"
+        )
+        broker.cancel_order.assert_not_called()
+
+    def test_second_pass_cancel_without_executed_quantity_keeps_hard_pause(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "order-second-pass-qty-missing"
+        broker = MagicMock()
+        self._script_timeout_then_cancel(
+            broker,
+            order_id,
+            SimpleNamespace(broker_order_id=order_id, status="CANCELLED"),
+        )
+        risk = RiskController()
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="SELL",
+            quantity=Decimal("4"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            next_status_check_at=0.0,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+        svc._order_status_poll_interval_seconds = 0
+        svc.load_pending_orders([pending])
+
+        svc.reconcile(risk=risk)
+        uncertain = risk.pause_reason
+        assert uncertain.startswith("ORDER_RECONCILIATION_UNCERTAIN:")
+
+        svc.reconcile(risk=risk)
+
+        assert risk.pause_auto_resumable is False
+        assert risk.pause_reason == (
+            f"{trade_svc_module.ORDER_EXECUTION_BLOCKED_PREFIX} "
+            f"order {order_id} ended with status CANCELLED"
+        )
+        assert not risk.pause_reason.startswith("ORDER_TIMEOUT_CANCELLED_UNFILLED:")
+
+    def test_second_pass_partial_fill_finalizes_without_downgrade(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "order-second-pass-partial"
+        broker = MagicMock()
+        self._script_timeout_then_cancel(
+            broker,
+            order_id,
+            SimpleNamespace(
+                broker_order_id=order_id,
+                status="CANCELLED",
+                executed_quantity=Decimal("2"),
+                executed_price=Decimal("100"),
+            ),
+        )
+        risk = RiskController()
+        fills: list[str] = []
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="SELL",
+            quantity=Decimal("4"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            next_status_check_at=0.0,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+        svc._order_status_poll_interval_seconds = 0
+        svc.load_pending_orders([pending])
+
+        svc.reconcile(risk=risk)
+        uncertain = risk.pause_reason
+        svc._finalize_pending_fill = (
+            lambda pending, *_args, **_kwargs: fills.append(pending.broker_order_id)
+        )
+        svc.reconcile(risk=risk)
+
+        assert fills == [order_id]
+        assert risk.pause_reason == uncertain
+        assert risk.pause_auto_resumable is False
+        assert svc.has_pending_order is False
+
+    def _gateway_for_detail(self, detail: object) -> BrokerGateway:
+        class TradeContext:
+            def order_detail(self, _order_id: str) -> object:
+                return detail
+
+            def cancel_order(self, _order_id: str) -> None:
+                return None
+
+        gateway = BrokerGateway()
+        gateway._quote_ctx = object()
+        gateway._trade_ctx = TradeContext()
+        return gateway
+
+    def test_gateway_missing_quantity_cancel_keeps_hard_pause(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "gateway-missing-qty"
+        detail = SimpleNamespace(order_id=order_id, status="Canceled")
+        gateway = self._gateway_for_detail(detail)
+        risk = RiskController()
+        pending = _PendingOrder(
+            broker=gateway,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+
+        svc._handle_pending_order_timeout(pending, risk=risk)
+
+        assert risk.pause_auto_resumable is False
+        assert risk.pause_reason.startswith(
+            trade_svc_module.ORDER_EXECUTION_BLOCKED_PREFIX
+        )
+        assert "terminal status CANCELLED" in risk.pause_reason
+
+    def test_gateway_none_quantity_cancel_keeps_hard_pause(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "gateway-none-qty"
+        detail = SimpleNamespace(
+            order_id=order_id,
+            status="Canceled",
+            executed_quantity=None,
+        )
+        gateway = self._gateway_for_detail(detail)
+        risk = RiskController()
+        pending = _PendingOrder(
+            broker=gateway,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+
+        svc._handle_pending_order_timeout(pending, risk=risk)
+
+        assert risk.pause_auto_resumable is False
+        assert risk.pause_reason.startswith(
+            trade_svc_module.ORDER_EXECUTION_BLOCKED_PREFIX
+        )
+
+    def test_gateway_explicit_zero_cancel_is_auto_resumable(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "gateway-zero-qty"
+        detail = SimpleNamespace(
+            order_id=order_id,
+            status="Canceled",
+            executed_quantity="0",
+        )
+        gateway = self._gateway_for_detail(detail)
+        risk = RiskController()
+        pending = _PendingOrder(
+            broker=gateway,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+
+        svc._handle_pending_order_timeout(pending, risk=risk)
+
+        assert risk.pause_auto_resumable is True
+        assert risk.pause_reason.startswith("ORDER_TIMEOUT_CANCELLED_UNFILLED:")
+
+    def test_gateway_positive_quantity_cancel_finalizes_partial(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "gateway-partial-qty"
+        detail = SimpleNamespace(
+            order_id=order_id,
+            status="Canceled",
+            executed_quantity="3",
+            executed_price="100",
+        )
+        gateway = self._gateway_for_detail(detail)
+        risk = RiskController()
+        fills: list[str] = []
+        svc._finalize_pending_fill = (
+            lambda pending, *_args, **_kwargs: fills.append(pending.broker_order_id)
+        )
+        pending = _PendingOrder(
+            broker=gateway,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+
+        svc._handle_pending_order_timeout(pending, risk=risk)
+
+        assert fills == [order_id]
+        assert risk.paused is False
+
+    def test_manual_pause_survives_confirmed_unfilled_cancel(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "order-manual-pause"
+        broker = MagicMock()
+        broker.get_order_status.return_value = self._confirmed_unfilled_cancel(order_id)
+        risk = RiskController()
+        risk.pause("manual pause", auto_resumable=False)
+        _, before_generation = risk.pause_verification_snapshot()
+        events: list[str] = []
+        notifications: list[tuple[str, str]] = []
+        svc._record_risk_event = events.append
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+
+        svc._handle_pending_order_timeout(
+            pending,
+            risk=risk,
+            notify_risk_event=lambda event, reason: notifications.append((event, reason)),
+        )
+
+        assert risk.pause_reason == "manual pause"
+        assert risk.pause_auto_resumable is False
+        _, after_generation = risk.pause_verification_snapshot()
+        assert after_generation == before_generation
+        assert events
+        assert notifications[0][0] == "ORDER_TIMEOUT"
+
+    def test_unrelated_protective_permission_survives_confirmed_unfilled_cancel(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "order-protective-incumbent"
+        incumbent = "ORDER_PERSISTENCE_UNCERTAIN: unrelated"
+        broker = MagicMock()
+        broker.get_order_status.return_value = self._confirmed_unfilled_cancel(order_id)
+        risk = RiskController()
+        risk.pause(incumbent, auto_resumable=False)
+        assert risk.permit_protective_exits() is True
+        _, before_generation = risk.pause_verification_snapshot()
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="SELL",
+            quantity=Decimal("4"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+
+        svc._handle_pending_order_timeout(pending, risk=risk)
+
+        assert risk.pause_reason == incumbent
+        assert risk.protective_exit_permitted is True
+        _, after_generation = risk.pause_verification_snapshot()
+        assert after_generation == before_generation
+
+    def test_stop_cooldown_survives_confirmed_unfilled_cancel(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "order-stop-cooldown"
+        cooldown = "PRICE_STOP: stop filled; entries paused"
+        broker = MagicMock()
+        broker.get_order_status.return_value = self._confirmed_unfilled_cancel(order_id)
+        risk = RiskController()
+        risk.pause(cooldown, auto_resumable=True)
+        _, before_generation = risk.pause_verification_snapshot()
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+
+        svc._handle_pending_order_timeout(pending, risk=risk)
+
+        assert risk.pause_reason == cooldown
+        assert risk.pause_auto_resumable is True
+        _, after_generation = risk.pause_verification_snapshot()
+        assert after_generation == before_generation
+
+    def test_unknown_timeout_status_keeps_reconciliation_pause(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        order_id = "order-unknown-live"
+        broker = MagicMock()
+        broker.get_order_status.return_value = SimpleNamespace(
+            broker_order_id=order_id,
+            status="SUBMITTED",
+            executed_quantity=Decimal("0"),
+            executed_price=Decimal("0"),
+        )
+        broker.cancel_order.return_value = SimpleNamespace(
+            broker_order_id=order_id,
+            status="SUBMITTED",
+            executed_quantity=Decimal("0"),
+            executed_price=Decimal("0"),
+        )
+        risk = RiskController()
+        pending = _PendingOrder(
+            broker=broker,
+            broker_order_id=order_id,
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+            next_status_check_at=0.0,
+            submitted_at=time.monotonic() - 60,
+        )
+        svc._order_status_timeout_seconds = 30
+        svc.load_pending_orders([pending])
+
+        svc._handle_pending_order_timeout(pending, risk=risk)
+
+        assert risk.paused is True
+        assert risk.pause_auto_resumable is False
+        assert risk.pause_reason.startswith("ORDER_RECONCILIATION_UNCERTAIN:")
+        assert f"pending order {order_id} timed out after" in risk.pause_reason
+        assert svc.has_pending_order is True
 
     def test_persist_failure_pauses_and_attempts_cancel(self, svc: TradeExecutionService) -> None:
         from app.core.broker import BrokerGateway

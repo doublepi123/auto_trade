@@ -76,6 +76,7 @@ class _FakeBroker:
         positions: list[Position] | None = None,
         today_orders: list[object] | None = None,
         order_status_response: object | None = None,
+        cancel_response: object | None = None,
         account_info: AccountInfo | None = None,
         get_positions_exc: BaseException | None = None,
         get_today_orders_exc: BaseException | None = None,
@@ -83,6 +84,7 @@ class _FakeBroker:
         self.positions = list(positions or [])
         self.today_orders = list(today_orders or [])
         self._order_status_response = order_status_response
+        self._cancel_response = cancel_response
         self._account_info = account_info
         self._get_positions_exc = get_positions_exc
         self._get_today_orders_exc = get_today_orders_exc
@@ -134,6 +136,8 @@ class _FakeBroker:
 
     def cancel_order(self, order_id: str) -> object:
         self.cancelled.append(order_id)
+        if self._cancel_response is not None:
+            return self._cancel_response
         return SimpleNamespace(
             broker_order_id=order_id,
             status="CANCELLED",
@@ -1867,6 +1871,78 @@ class TestE2ERestartPausesOnUnresolvedOrder:
 # ---------------------------------------------------------------------------
 # Scenario 3: pending order timeout pauses and emits ORDER_TIMEOUT
 # ---------------------------------------------------------------------------
+def _run_pending_timeout_reconcile(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    cancel_response: object,
+    clear_startup_pause: bool,
+) -> tuple[AppRunner, _RecordingNotifier, str]:
+    """Time out one pending BUY whose cancel returns ``cancel_response``.
+
+    Returns the runner, the notifier, and the pause reason that startup
+    latched for the seeded live order.
+    """
+    _seed_strategy(symbol="AAPL.US")
+    db = SessionLocal()
+    try:
+        db.add(
+            OrderRecord(
+                broker_order_id="order-old-pending",
+                symbol="AAPL.US",
+                side="BUY",
+                quantity=10.0,
+                price=150.0,
+                status="SUBMITTED",
+                created_at=datetime.now(timezone.utc) - timedelta(seconds=99999),
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    fake_broker = _FakeBroker(
+        order_status_response=SimpleNamespace(
+            broker_order_id="order-old-pending",
+            status="SUBMITTED",
+            executed_quantity=Decimal("0"),
+            executed_price=Decimal("0"),
+        ),
+        cancel_response=cancel_response,
+    )
+    _install_fake_broker(monkeypatch, fake_broker)
+    notifier = _RecordingNotifier()
+    runner = get_runner()
+    runner.notifier = notifier
+    runner._initialize_runner()
+    startup_reason = runner.risk.pause_reason
+    if clear_startup_pause:
+        runner.risk.resume()
+
+    pending = _PendingOrder(
+        broker=fake_broker,
+        broker_order_id="order-old-pending",
+        symbol="AAPL.US",
+        action="BUY",
+        quantity=Decimal("10"),
+        price=Decimal("150"),
+        engine_snapshot=None,
+        avg_price=None,
+        next_status_check_at=0.0,
+        submitted_at=time.monotonic() - 99999,
+    )
+    with runner._trade_svc._state_lock:
+        runner._trade_svc._pending_order = pending
+        runner._trade_svc._order_status_timeout_seconds = 1
+        runner._trade_svc._order_status_poll_interval_seconds = 0
+    runner._trade_svc.reconcile(
+        runner.risk,
+        notifier,
+        runner.engine.restore,
+        notifier.notify_risk_event,
+    )
+    return runner, notifier, startup_reason
+
+
 class TestE2EPendingOrderTimeout:
     def test_e2e_pending_order_timeout_pauses_and_records_event(
         self, fresh_runner, monkeypatch
@@ -1900,7 +1976,16 @@ class TestE2EPendingOrderTimeout:
                 status="SUBMITTED",
                 executed_quantity=Decimal("0"),
                 executed_price=Decimal("0"),
-            )
+            ),
+            # The cancel reaches a terminal status but the broker reports no
+            # fill quantity. That is not proof of zero fill, so the hard,
+            # manually resumed timeout pause still applies.
+            cancel_response=SimpleNamespace(
+                broker_order_id="order-old-pending",
+                status="CANCELLED",
+                executed_quantity=None,
+                executed_price=None,
+            ),
         )
         _install_fake_broker(monkeypatch, fake_broker)
 
@@ -1971,6 +2056,70 @@ class TestE2EPendingOrderTimeout:
             assert timeout_paused, "expected a RISK_PAUSED event with timeout message"
         finally:
             db.close()
+
+    def test_e2e_confirmed_unfilled_timeout_cancel_pauses_auto_resumably(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        runner, notifier, _startup_reason = _run_pending_timeout_reconcile(
+            monkeypatch,
+            cancel_response=SimpleNamespace(
+                broker_order_id="order-old-pending",
+                status="CANCELLED",
+                executed_quantity=Decimal("0"),
+                executed_price=Decimal("0"),
+            ),
+            clear_startup_pause=True,
+        )
+
+        reason = runner.risk.pause_reason
+        assert runner.risk.paused is True
+        assert reason.startswith(
+            "ORDER_TIMEOUT_CANCELLED_UNFILLED: order order-old-pending "
+        )
+        assert runner.risk.pause_auto_resumable is True
+        assert runner._trade_svc.has_pending_order is False
+        timeout_events = [
+            e for e in notifier.risk_events if e[0] == "ORDER_TIMEOUT"
+        ]
+        assert [e[1] for e in timeout_events] == [reason]
+        db = SessionLocal()
+        try:
+            assert any(
+                reason in event.message
+                for event in db.query(TradeEvent)
+                .filter(TradeEvent.event_type == "RISK_PAUSED")
+                .all()
+            )
+        finally:
+            db.close()
+
+    def test_e2e_confirmed_unfilled_timeout_cancel_keeps_startup_reconciliation_pause(
+        self, fresh_runner, monkeypatch
+    ) -> None:
+        runner, notifier, startup_reason = _run_pending_timeout_reconcile(
+            monkeypatch,
+            cancel_response=SimpleNamespace(
+                broker_order_id="order-old-pending",
+                status="CANCELLED",
+                executed_quantity=Decimal("0"),
+                executed_price=Decimal("0"),
+            ),
+            clear_startup_pause=False,
+        )
+
+        # Startup demanded manual reconciliation. Confirming one cancel must
+        # not turn that pause into the transient auto-resuming one.
+        assert startup_reason.startswith("ORDER_RECONCILIATION_UNCERTAIN:")
+        assert runner.risk.paused is True
+        assert runner.risk.pause_reason == startup_reason
+        assert runner.risk.pause_auto_resumable is False
+        timeout_events = [
+            e for e in notifier.risk_events if e[0] == "ORDER_TIMEOUT"
+        ]
+        assert len(timeout_events) == 1
+        assert timeout_events[0][1].startswith(
+            "ORDER_TIMEOUT_CANCELLED_UNFILLED: order order-old-pending "
+        )
 
 
 # ---------------------------------------------------------------------------

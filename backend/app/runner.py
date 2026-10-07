@@ -366,6 +366,9 @@ class AppRunner:
         self._board_lot_log_throttle = RepeatedLogThrottle(window_seconds=300)
         self._fee_enrichment_log_throttle = RepeatedLogThrottle(window_seconds=3600)
         self._degraded_exit_log_throttle = RepeatedLogThrottle(window_seconds=60)
+        self._strict_executable_quote_log_throttle = RepeatedLogThrottle(
+            window_seconds=60,
+        )
         self._extended_hours_exit_log_throttle = RepeatedLogThrottle(window_seconds=60)
         # Pre-market watchlist quotes routinely carry wide spreads; one line per
         # symbol per window is enough to see it, and suppressed counts survive.
@@ -4587,6 +4590,98 @@ class AppRunner:
             },
         )
 
+    def _load_final_order_quote(
+        self,
+        broker: BrokerGateway,
+        symbol: str,
+        action: str,
+    ) -> Quote | str:
+        """Strict depth during RTH only. Outside RTH, today's cached path.
+
+        A depth pull has no timestamp and no trading-session attribution.
+        Pull behaviour is verified in RTH (and PRE) only; POST and OVERNIGHT
+        are unverified. A non-current book can still look usable, so a
+        protective exit would be priced away from the market and miss with
+        no fallback, and an entry could be refused or mispriced. Outside
+        regular hours both entries and exits therefore take exactly the
+        push-fed cache path, with no strict call.
+
+        During RTH a proven reduction may fall back when the book is
+        unusable; an entry may not. Metadata uncertainty must not by itself
+        block a reduction that today's cached quote would still submit. A
+        missing, empty, or unusable book is that kind of uncertainty. An
+        exception is not swallowed: the caller already treats a raised
+        quote read as a skip.
+        """
+        market = market_for_symbol(symbol)
+        now = datetime.now(timezone.utc)
+        # One-arg lambdas are the existing test convention for this helper.
+        try:
+            in_rth = is_trading_hours(market, now)
+        except TypeError:
+            in_rth = is_trading_hours(market)
+        if not in_rth:
+            return self._load_cached_final_order_quote(broker, symbol)
+        strict_quote = getattr(broker, "get_executable_quote", None)
+        if not callable(strict_quote):
+            return self._load_cached_final_order_quote(broker, symbol)
+        loaded = strict_quote(symbol)
+        if not isinstance(loaded, Quote) or loaded.symbol != symbol:
+            if action not in _POSITION_REDUCING_ACTIONS:
+                return "fresh quote for the submitted symbol is unavailable"
+            self._warn_strict_executable_fallback(symbol, action, "mismatched quote")
+            return self._load_cached_final_order_quote(broker, symbol)
+        if (
+            action in _POSITION_REDUCING_ACTIONS
+            and not self._strict_executable_side_usable(loaded, action)
+        ):
+            self._warn_strict_executable_fallback(symbol, action, "unusable BBO")
+            return self._load_cached_final_order_quote(broker, symbol)
+        return loaded
+
+    def _warn_strict_executable_fallback(
+        self,
+        symbol: str,
+        action: str,
+        reason: str,
+    ) -> None:
+        key = f"{symbol}:{action}"
+        if not self._strict_executable_quote_log_throttle.should_log(key):
+            return
+        logger.warning(
+            "strict executable quote unavailable, using cached quote: "
+            "symbol=%s action=%s reason=%s suppressed=%s",
+            symbol,
+            action,
+            reason,
+            self._strict_executable_quote_log_throttle.take_suppressed_count(),
+        )
+
+    @staticmethod
+    def _strict_executable_side_usable(quote: Quote, action: str) -> bool:
+        bid = float(quote.bid)
+        ask = float(quote.ask)
+        if (
+            not math.isfinite(bid)
+            or not math.isfinite(ask)
+            or bid <= 0
+            or ask <= 0
+            or ask < bid
+        ):
+            return False
+        executable = bid if action == "SELL" else ask
+        return math.isfinite(executable) and executable > 0
+
+    @staticmethod
+    def _load_cached_final_order_quote(
+        broker: BrokerGateway,
+        symbol: str,
+    ) -> Quote | str:
+        quotes = broker.get_quotes([symbol])
+        if len(quotes) != 1 or quotes[0].symbol != symbol:
+            return "fresh quote for the submitted symbol is unavailable"
+        return quotes[0]
+
     def _validate_final_order_quote(
         self,
         broker: BrokerGateway,
@@ -4594,10 +4689,9 @@ class AppRunner:
         action: str,
         limit_price: Decimal,
     ) -> FinalOrderQuoteCheckResult | str:
-        quotes = broker.get_quotes([symbol])
-        if len(quotes) != 1 or quotes[0].symbol != symbol:
-            return "fresh quote for the submitted symbol is unavailable"
-        quote = quotes[0]
+        quote = self._load_final_order_quote(broker, symbol, action)
+        if isinstance(quote, str):
+            return quote
         quality = self._evaluate_quote_quality(
             {
                 "last_price": quote.last_price,

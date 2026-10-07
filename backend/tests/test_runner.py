@@ -7988,6 +7988,116 @@ class TestAppRunner:
             assert event is not None
             assert "order-late-fill" in event.message
 
+    def test_unfilled_cancel_timeout_pause_auto_resumes_after_configured_delay(
+        self,
+    ) -> None:
+        runner = AppRunner()
+        now = datetime(2026, 10, 8, 14, 3, tzinfo=timezone.utc)
+        reason = (
+            "ORDER_TIMEOUT_CANCELLED_UNFILLED: order order-cancel-zero "
+            "cancelled unfilled after 30s; terminal status CANCELLED; "
+            "executed_quantity=0"
+        )
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US",
+            buy_low=100.0,
+            sell_high=200.0,
+            auto_resume_minutes=3,
+        )
+        runner.risk.pause(
+            reason,
+            auto_resumable=True,
+            paused_at=now - timedelta(minutes=3, seconds=1),
+        )
+
+        assert runner._auto_resume_pause_if_due(
+            now=now - timedelta(seconds=2)
+        ) is False
+        assert runner.risk.paused is True
+
+        resumed = runner._auto_resume_pause_if_due(now=now)
+
+        assert resumed is True
+        assert runner.risk.paused is False
+        assert runner.risk.pause_reason == ""
+
+    def test_reduce_only_sell_is_permitted_under_unfilled_cancel_timeout_pause(
+        self,
+    ) -> None:
+        runner = AppRunner()
+        reason = (
+            "ORDER_TIMEOUT_CANCELLED_UNFILLED: order order-exit-cancel-zero "
+            "cancelled unfilled after 30s; terminal status CANCELLED; "
+            "executed_quantity=0"
+        )
+        runner.risk.pause(reason, auto_resumable=True)
+
+        assert runner.risk.protective_exit_permitted is False
+        assert runner._risk_rejection_allows_action("SELL") is True
+        assert runner._risk_rejection_allows_action("BUY") is False
+
+    def test_operational_pending_timeout_pause_still_blocks_reduce_only_sell(
+        self,
+    ) -> None:
+        runner = AppRunner()
+        runner.risk.pause(
+            "ORDER_EXECUTION_BLOCKED: pending order order-1 timed out after 30s; "
+            "terminal status CANCELLED",
+            auto_resumable=False,
+        )
+
+        assert runner.risk.protective_exit_permitted is False
+        assert runner._risk_rejection_allows_action("SELL") is False
+        assert runner._risk_rejection_allows_action("BUY") is False
+
+    def test_downgraded_unfilled_cancel_pause_auto_resumes_entries(self) -> None:
+        runner = AppRunner()
+        now = datetime(2026, 10, 8, 13, 40, tzinfo=timezone.utc)
+        order_id = "1292480417340895232"
+        uncertain = (
+            "ORDER_RECONCILIATION_UNCERTAIN: pending order "
+            f"{order_id} timed out after 30s"
+        )
+        downgraded = (
+            "ORDER_TIMEOUT_CANCELLED_UNFILLED: order "
+            f"{order_id} cancelled unfilled after 30s; "
+            "terminal status CANCELLED; executed_quantity=0"
+        )
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            buy_low=100.0,
+            sell_high=200.0,
+            auto_resume_minutes=3,
+        )
+        runner.risk.pause(
+            uncertain,
+            auto_resumable=False,
+            paused_at=now - timedelta(minutes=10),
+        )
+
+        assert runner._auto_resume_pause_if_due(now=now) is False
+        assert runner.risk.paused is True
+
+        replaced = runner.risk.replace_confirmed_unfilled_cancel_pause(
+            uncertain,
+            downgraded,
+        )
+        assert replaced is True
+        runner.risk.pause(
+            downgraded,
+            auto_resumable=True,
+            paused_at=now,
+        )
+        assert runner._auto_resume_pause_if_due(now=now) is False
+        assert runner.risk.paused is True
+
+        resumed = runner._auto_resume_pause_if_due(
+            now=now + timedelta(minutes=3, seconds=1)
+        )
+
+        assert resumed is True
+        assert runner.risk.paused is False
+
     def test_pending_timeout_resume_commit_failure_keeps_pause(
         self,
         monkeypatch,

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import tempfile
 
 import pytest
@@ -21,6 +20,7 @@ if os.environ.get("AUTO_TRADE_DATABASE_URL") != _DB_URL:
 from app import database
 from app.core import broker as broker_module
 from app.core.broker import BrokerGateway
+from tests.test_broker import _ScriptedPositionProbe
 from app.core.engine import StrategyParams
 from app.core.notifiers.multi_channel import MultiChannelNotifier
 from app.core.position_probe_diagnostics import (
@@ -87,12 +87,12 @@ def test_position_probe_parent_captures_bounded_retry_diagnostics(
     def fake_run(
         command: tuple[str, ...],
         **_kwargs,
-    ) -> subprocess.CompletedProcess[str]:
+    ) -> _ScriptedPositionProbe:
         nonlocal calls
         calls += 1
-        return subprocess.CompletedProcess(
+        return _ScriptedPositionProbe(
             command,
-            17,
+            returncode=17,
             stdout=child_payload,
             stderr=(
                 "Authorization: Bearer parent-secret-value\n"
@@ -107,7 +107,7 @@ def test_position_probe_parent_captures_bounded_retry_diagnostics(
     )
     monkeypatch.setattr(broker_module.settings, "broker_retry_max", 2)
     monkeypatch.setattr(broker_module.settings, "broker_retry_base_ms", 0)
-    monkeypatch.setattr(broker_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(broker_module.subprocess, "Popen", fake_run)
 
     # When
     with pytest.raises((RuntimeError, ConnectionError)) as captured:
@@ -147,10 +147,10 @@ def test_position_probe_diagnostics_persist_in_reconciliation_incident(
     def fake_run(
         command: tuple[str, ...],
         **_kwargs,
-    ) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(
+    ) -> _ScriptedPositionProbe:
+        return _ScriptedPositionProbe(
             command,
-            1,
+            returncode=1,
             stdout=child_payload,
             stderr="access_token=incident-secret sdk failure",
         )
@@ -162,7 +162,7 @@ def test_position_probe_diagnostics_persist_in_reconciliation_incident(
     )
     monkeypatch.setattr(broker_module.settings, "broker_retry_max", 3)
     monkeypatch.setattr(broker_module.settings, "broker_retry_base_ms", 0)
-    monkeypatch.setattr(broker_module.subprocess, "run", fake_run)
+    monkeypatch.setattr(broker_module.subprocess, "Popen", fake_run)
     database.init_db()
     with database.SessionLocal() as db:
         db.query(ReconciliationIncident).delete()

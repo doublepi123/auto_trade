@@ -800,6 +800,169 @@ class TestRiskController:
         ) is False
         assert ctrl.paused is True
 
+    def test_confirmed_unfilled_cancel_replacement_revokes_protective_permission(
+        self,
+    ) -> None:
+        ctrl = RiskController()
+        expected = (
+            "ORDER_RECONCILIATION_UNCERTAIN: pending order order-1 "
+            "timed out after 30s"
+        )
+        replacement = (
+            "ORDER_TIMEOUT_CANCELLED_UNFILLED: order order-1 "
+            "cancelled unfilled after 30s; terminal status CANCELLED; "
+            "executed_quantity=0"
+        )
+        ctrl.pause(expected, auto_resumable=False)
+        ctrl.permit_protective_exits()
+        before_reason, before_generation = ctrl.pause_verification_snapshot()
+
+        replaced = ctrl.replace_confirmed_unfilled_cancel_pause(
+            expected,
+            replacement,
+        )
+
+        assert replaced is True
+        assert ctrl.paused is True
+        assert ctrl.pause_reason == replacement
+        assert ctrl.pause_auto_resumable is True
+        assert ctrl.paused_at is not None
+        assert ctrl.protective_exit_permitted is False
+        _, after_generation = ctrl.pause_verification_snapshot()
+        assert after_generation == before_generation + 1
+        assert before_reason == expected
+
+    def test_confirmed_unfilled_cancel_does_not_replace_under_kill_switch(
+        self,
+    ) -> None:
+        ctrl = RiskController()
+        expected = "ORDER_RECONCILIATION_UNCERTAIN: pending order order-1 timed out after 30s"
+        ctrl.pause(expected)
+        ctrl.enable_kill_switch("manual")
+        _, before_generation = ctrl.pause_verification_snapshot()
+
+        replaced = ctrl.replace_confirmed_unfilled_cancel_pause(
+            expected,
+            "ORDER_TIMEOUT_CANCELLED_UNFILLED: order order-1",
+        )
+
+        assert replaced is False
+        assert ctrl.kill_switch is True
+        assert ctrl.pause_reason == expected
+        assert ctrl.pause_auto_resumable is False
+        _, after_generation = ctrl.pause_verification_snapshot()
+        assert after_generation == before_generation
+
+    def test_confirmed_unfilled_cancel_does_not_replace_during_entry_reconciliation(
+        self,
+    ) -> None:
+        ctrl = RiskController()
+        expected = "ORDER_RECONCILIATION_UNCERTAIN: pending order order-1 timed out after 30s"
+        ctrl.pause(expected)
+        ctrl.begin_entry_reconciliation("post-fill PnL reconciliation in progress")
+        _, before_generation = ctrl.pause_verification_snapshot()
+
+        replaced = ctrl.replace_confirmed_unfilled_cancel_pause(
+            expected,
+            "ORDER_TIMEOUT_CANCELLED_UNFILLED: order order-1",
+        )
+
+        assert replaced is False
+        assert ctrl.entry_reconciliation_pending is True
+        assert ctrl.pause_reason == expected
+        assert ctrl.pause_auto_resumable is False
+        _, after_generation = ctrl.pause_verification_snapshot()
+        assert after_generation == before_generation
+
+    def test_confirmed_unfilled_cancel_does_not_replace_manual_pause(self) -> None:
+        ctrl = RiskController()
+        ctrl.pause("manual pause", auto_resumable=False)
+        _, before_generation = ctrl.pause_verification_snapshot()
+
+        changed = ctrl.replace_confirmed_unfilled_cancel_pause(
+            "ORDER_RECONCILIATION_UNCERTAIN: pending order order-1 timed out after 30s",
+            "ORDER_TIMEOUT_CANCELLED_UNFILLED: order order-1",
+        )
+
+        assert changed is False
+        assert ctrl.pause_reason == "manual pause"
+        assert ctrl.pause_auto_resumable is False
+        _, after_generation = ctrl.pause_verification_snapshot()
+        assert after_generation == before_generation
+
+    def test_confirmed_unfilled_cancel_keeps_unrelated_protective_permission(self) -> None:
+        ctrl = RiskController()
+        incumbent = "ORDER_PERSISTENCE_UNCERTAIN: unrelated"
+        ctrl.pause(incumbent, auto_resumable=False)
+        assert ctrl.permit_protective_exits() is True
+        _, before_generation = ctrl.pause_verification_snapshot()
+
+        changed = ctrl.replace_confirmed_unfilled_cancel_pause(
+            "ORDER_RECONCILIATION_UNCERTAIN: pending order order-1 timed out after 30s",
+            "ORDER_TIMEOUT_CANCELLED_UNFILLED: order order-1",
+        )
+
+        assert changed is False
+        assert ctrl.pause_reason == incumbent
+        assert ctrl.protective_exit_permitted is True
+        _, after_generation = ctrl.pause_verification_snapshot()
+        assert after_generation == before_generation
+
+    def test_confirmed_unfilled_cancel_does_not_replace_stop_cooldown(self) -> None:
+        ctrl = RiskController()
+        cooldown = "PRICE_STOP: stop filled; entries paused"
+        ctrl.pause(cooldown, auto_resumable=True)
+        _, before_generation = ctrl.pause_verification_snapshot()
+
+        changed = ctrl.replace_confirmed_unfilled_cancel_pause(
+            "ORDER_RECONCILIATION_UNCERTAIN: pending order order-1 timed out after 30s",
+            "ORDER_TIMEOUT_CANCELLED_UNFILLED: order order-1",
+        )
+
+        assert changed is False
+        assert ctrl.pause_reason == cooldown
+        assert ctrl.pause_auto_resumable is True
+        _, after_generation = ctrl.pause_verification_snapshot()
+        assert after_generation == before_generation
+
+    def test_confirmed_unfilled_cancel_pauses_when_running(self) -> None:
+        ctrl = RiskController()
+        _, before_generation = ctrl.pause_verification_snapshot()
+        replacement = "ORDER_TIMEOUT_CANCELLED_UNFILLED: order order-1"
+
+        changed = ctrl.replace_confirmed_unfilled_cancel_pause(
+            "ORDER_RECONCILIATION_UNCERTAIN: pending order order-1 timed out after 30s",
+            replacement,
+        )
+
+        assert changed is True
+        assert ctrl.paused is True
+        assert ctrl.pause_reason == replacement
+        assert ctrl.pause_auto_resumable is True
+        _, after_generation = ctrl.pause_verification_snapshot()
+        assert after_generation == before_generation + 1
+
+    def test_confirmed_unfilled_cancel_replaces_exact_timeout_reason(self) -> None:
+        ctrl = RiskController()
+        expected = (
+            "ORDER_RECONCILIATION_UNCERTAIN: pending order order-1 "
+            "timed out after 30s"
+        )
+        replacement = "ORDER_TIMEOUT_CANCELLED_UNFILLED: order order-1"
+        ctrl.pause(expected, auto_resumable=False)
+        _, before_generation = ctrl.pause_verification_snapshot()
+
+        changed = ctrl.replace_confirmed_unfilled_cancel_pause(
+            expected,
+            replacement,
+        )
+
+        assert changed is True
+        assert ctrl.pause_reason == replacement
+        assert ctrl.pause_auto_resumable is True
+        _, after_generation = ctrl.pause_verification_snapshot()
+        assert after_generation == before_generation + 1
+
 
 class TestTradingState:
     def test_enum_has_exactly_three_members(self) -> None:

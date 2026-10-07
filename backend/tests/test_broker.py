@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 import threading
+import time
 from decimal import Decimal
 from enum import Enum
 from types import SimpleNamespace
@@ -14,7 +16,15 @@ import pytest
 
 from datetime import datetime, timezone
 
+_OMITTED = object()
+
+
 from app.core import broker as broker_module
+from app.core.position_probe_diagnostics import (
+    PositionProbeConnectionError,
+    PositionProbeProtocolError,
+    PositionProbeRuntimeError,
+)
 from app.core.broker import (
     AccountInfo,
     BrokerCandle,
@@ -40,6 +50,108 @@ from app.core.broker import (
     _parse_candle_timestamp,
     _SIDE_MAP,
 )
+
+
+_REAL_SUBPROCESS_POPEN = subprocess.Popen
+
+
+class _ScriptedPositionProbe:
+    """A real child that speaks the persistent probe protocol with a fixed payload."""
+
+    def __init__(
+        self,
+        command: tuple[str, ...],
+        returncode: int = 0,
+        stdout: str = "",
+        stderr: str = "",
+        hang: bool = False,
+        exit_delay_seconds: float = 0.0,
+        read_gate: bool = False,
+        **kwargs: object,
+    ) -> None:
+        del command, kwargs
+        self.args = broker_module._POSITION_PROBE_COMMAND
+        script = (
+            "import os,sys,time\n"
+            "payload = os.environ['POSITION_PROBE_SCRIPTED_STDOUT']\n"
+            "err = os.environ.get('POSITION_PROBE_SCRIPTED_STDERR', '')\n"
+            "code = int(os.environ['POSITION_PROBE_SCRIPTED_CODE'])\n"
+            "hang = os.environ['POSITION_PROBE_SCRIPTED_HANG'] == '1'\n"
+            "delay = float(os.environ.get('POSITION_PROBE_SCRIPTED_EXIT_DELAY', '0'))\n"
+            "while True:\n"
+            "    request = sys.stdin.readline()\n"
+            "    if request == '':\n"
+            "        raise SystemExit(0)\n"
+            "    if err:\n"
+            "        sys.stderr.write(err)\n"
+            "        sys.stderr.flush()\n"
+            "    if hang:\n"
+            "        time.sleep(30)\n"
+            "    import json\n"
+            "    lines = [line for line in payload.splitlines() if line.strip()]\n"
+            "    if not hasattr(sys, '_probe_lines'):\n"
+            "        sys._probe_lines = lines\n"
+            "    if not sys._probe_lines:\n"
+            "        sys._probe_lines = lines\n"
+            "    body = json.loads(sys._probe_lines.pop(0))\n"
+            "    request_id = request.strip()\n"
+            "    body['request_id'] = int(request_id) if request_id.isdecimal() else 0\n"
+            "    encoded = json.dumps(body, separators=(',', ':')).encode() + b'\\n'\n"
+            "    if sys._probe_lines:\n"
+            "        extra = json.loads(sys._probe_lines.pop(0))\n"
+            "        extra['request_id'] = body['request_id']\n"
+            "        encoded += json.dumps(extra, separators=(',', ':')).encode() + b'\\n'\n"
+            "    gate = os.environ.get('POSITION_PROBE_READ_GATE')\n"
+            "    release_path = os.environ.get('POSITION_PROBE_READ_RELEASE')\n"
+            "    if gate and release_path:\n"
+            "        import pathlib\n"
+            "        pathlib.Path(gate).write_text('reading', encoding='utf-8')\n"
+            "        while not pathlib.Path(release_path).exists():\n"
+            "            time.sleep(0.01)\n"
+            "    sys.stdout.buffer.write(encoded)\n"
+            "    sys.stdout.buffer.flush()\n"
+            "    if code:\n"
+            "        if delay:\n"
+            "            time.sleep(delay)\n"
+            "        os._exit(code)\n"
+        )
+        env = os.environ.copy()
+        env["POSITION_PROBE_SCRIPTED_STDOUT"] = stdout
+        env["POSITION_PROBE_SCRIPTED_STDERR"] = stderr
+        env["POSITION_PROBE_SCRIPTED_CODE"] = str(returncode)
+        env["POSITION_PROBE_SCRIPTED_HANG"] = "1" if hang else "0"
+        env["POSITION_PROBE_SCRIPTED_EXIT_DELAY"] = str(exit_delay_seconds)
+        if not read_gate:
+            env.pop("POSITION_PROBE_READ_GATE", None)
+            env.pop("POSITION_PROBE_READ_RELEASE", None)
+        self._process = _REAL_SUBPROCESS_POPEN(
+            [sys.executable, "-c", script],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            bufsize=0,
+        )
+        self.stdin = self._process.stdin
+        self.stdout = self._process.stdout
+        self.stderr = self._process.stderr
+
+    @property
+    def pid(self) -> int:
+        return self._process.pid
+
+    @property
+    def returncode(self) -> int | None:
+        return self._process.returncode
+
+    def poll(self) -> int | None:
+        return self._process.poll()
+
+    def kill(self) -> None:
+        self._process.kill()
+
+    def wait(self, timeout: float | None = None) -> int:
+        return self._process.wait(timeout=timeout)
 
 
 class _FakeSessionModule:
@@ -808,6 +920,50 @@ class TestBrokerGateway:
         assert result.status == "CANCELLED"
         assert result.executed_quantity == Decimal("0")
         assert result.executed_price == Decimal("0")
+        assert result.executed_quantity_reported is False
+
+    def test_order_status_marks_only_a_present_executed_quantity(self) -> None:
+        class Detail:
+            def __init__(self, quantity: object) -> None:
+                self.order_id = "order-qty"
+                self.status = "Canceled"
+                if quantity is not _OMITTED:
+                    self.executed_quantity = quantity
+
+        class TradeContext:
+            def __init__(self, quantity: object) -> None:
+                self.quantity = quantity
+
+            def order_detail(self, _order_id: str) -> Detail:
+                return Detail(self.quantity)
+
+        omitted = BrokerGateway()
+        omitted._quote_ctx = object()
+        omitted._trade_ctx = TradeContext(_OMITTED)
+        missing = omitted.get_order_status("order-qty")
+        assert missing.executed_quantity == Decimal("0")
+        assert missing.executed_quantity_reported is False
+
+        absent = BrokerGateway()
+        absent._quote_ctx = object()
+        absent._trade_ctx = TradeContext(None)
+        unreported = absent.get_order_status("order-qty")
+        assert unreported.executed_quantity == Decimal("0")
+        assert unreported.executed_quantity_reported is False
+
+        zero = BrokerGateway()
+        zero._quote_ctx = object()
+        zero._trade_ctx = TradeContext("0")
+        reported_zero = zero.get_order_status("order-qty")
+        assert reported_zero.executed_quantity == Decimal("0")
+        assert reported_zero.executed_quantity_reported is True
+
+        filled = BrokerGateway()
+        filled._quote_ctx = object()
+        filled._trade_ctx = TradeContext("4")
+        reported_fill = filled.get_order_status("order-qty")
+        assert reported_fill.executed_quantity == Decimal("4")
+        assert reported_fill.executed_quantity_reported is True
 
     def test_get_today_orders_normalizes_trade_context_orders(self) -> None:
         class Detail:
@@ -1208,6 +1364,33 @@ class TestBrokerGateway:
         assert all(result.bid == 0.0 for result in results)
         assert all(result.ask == 0.0 for result in results)
         assert quote_ctx.depth_calls == 0
+
+    def test_strict_depth_failures_log_one_throttled_warning(
+        self,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        class DepthFails:
+            def depth(self, _symbol: str) -> object:
+                raise RuntimeError("depth unavailable")
+
+        gateway = BrokerGateway()
+        gateway._quote_ctx = DepthFails()
+
+        with caplog.at_level("WARNING", logger="auto_trade.broker"):
+            first = gateway._pull_bbo_strict("NVDA.US")
+            second = gateway._pull_bbo_strict("NVDA.US")
+
+        warnings = [
+            record
+            for record in caplog.records
+            if record.name == "auto_trade.broker"
+            and "strict depth" in record.getMessage()
+        ]
+        assert first == (0.0, 0.0)
+        assert second == (0.0, 0.0)
+        assert len(warnings) == 1
+        assert "suppressed=0" in warnings[0].getMessage()
+        assert gateway._strict_depth_log_throttle.suppressed_count == 1
 
     def test_get_quotes_batch_can_pull_missing_depth_explicitly(self) -> None:
         class QuoteItem:
@@ -2302,7 +2485,7 @@ class TestBrokerGateway:
 
         def fake_run(command: tuple[str, ...], **kwargs):
             calls.append((command, kwargs))
-            return subprocess.CompletedProcess(
+            return _ScriptedPositionProbe(
                 command,
                 0,
                 stdout=(
@@ -2311,7 +2494,7 @@ class TestBrokerGateway:
                     '"avg_price":"180.25","available_quantity":"10"},'
                     '{"symbol":"700.HK","side":"SHORT","quantity":"3",'
                     '"avg_price":null,"available_quantity":null}'
-                    "]}"
+                    "]}\n"
                 ),
             )
 
@@ -2326,7 +2509,7 @@ class TestBrokerGateway:
             2.0,
         )
         monkeypatch.setenv("LONGPORT_ACCESS_TOKEN", "must-not-enter-command")
-        monkeypatch.setattr(broker_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(broker_module.subprocess, "Popen", fake_run)
         gw = BrokerGateway()
 
         positions = gw.get_positions()
@@ -2353,6 +2536,7 @@ class TestBrokerGateway:
         assert "must-not-enter-command" not in " ".join(calls[0][0])
         assert "env" not in calls[0][1]
         assert calls[0][1]["stderr"] is subprocess.PIPE
+        assert calls[0][1]["stdin"] is subprocess.PIPE
 
     def test_get_positions_isolated_timeout_retries_and_releases_probe_lock(
         self,
@@ -2364,11 +2548,10 @@ class TestBrokerGateway:
             nonlocal calls
             calls += 1
             if calls == 1:
-                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
-            return subprocess.CompletedProcess(
+                return _ScriptedPositionProbe(command, hang=True)
+            return _ScriptedPositionProbe(
                 command,
-                0,
-                stdout='{"status":"ok","positions":[]}',
+                stdout='{"status":"ok","positions":[]}\n',
             )
 
         monkeypatch.setattr(
@@ -2383,7 +2566,7 @@ class TestBrokerGateway:
         )
         monkeypatch.setattr(broker_module.settings, "broker_retry_max", 1)
         monkeypatch.setattr(broker_module.settings, "broker_retry_base_ms", 0)
-        monkeypatch.setattr(broker_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(broker_module.subprocess, "Popen", fake_run)
         gw = BrokerGateway()
 
         assert gw.get_positions() == []
@@ -2400,7 +2583,7 @@ class TestBrokerGateway:
         def fake_run(command, **kwargs):
             nonlocal calls
             calls += 1
-            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+            return _ScriptedPositionProbe(command, hang=True)
 
         monkeypatch.setattr(
             broker_module.settings,
@@ -2414,7 +2597,7 @@ class TestBrokerGateway:
         )
         monkeypatch.setattr(broker_module.settings, "broker_retry_max", 2)
         monkeypatch.setattr(broker_module.settings, "broker_retry_base_ms", 0)
-        monkeypatch.setattr(broker_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(broker_module.subprocess, "Popen", fake_run)
 
         with pytest.raises(TimeoutError, match="exceeded 1s timeout"):
             BrokerGateway().get_positions()
@@ -2570,13 +2753,15 @@ class TestBrokerGateway:
         def fake_run(command, **_kwargs):
             nonlocal calls
             calls += 1
-            return subprocess.CompletedProcess(
+            return _ScriptedPositionProbe(
                 command,
-                1,
                 stdout=(
                     '{"status":"error","error_type":"OpenApiException",'
-                    '"retryable":false}'
+                    '"retryable":false,"sdk_error_code":"",'
+                    '"sdk_error_category":"RUNTIME",'
+                    '"error_message":"rejected"}\n'
                 ),
+                returncode=1,
             )
 
         monkeypatch.setattr(
@@ -2586,7 +2771,7 @@ class TestBrokerGateway:
         )
         monkeypatch.setattr(broker_module.settings, "broker_retry_max", 3)
         monkeypatch.setattr(broker_module.settings, "broker_retry_base_ms", 0)
-        monkeypatch.setattr(broker_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(broker_module.subprocess, "Popen", fake_run)
 
         with pytest.raises(
             RuntimeError,
@@ -2605,18 +2790,19 @@ class TestBrokerGateway:
             nonlocal calls
             calls += 1
             if calls == 1:
-                return subprocess.CompletedProcess(
+                return _ScriptedPositionProbe(
                     command,
-                    1,
                     stdout=(
                         '{"status":"error","error_type":"OpenApiException",'
-                        '"retryable":true}'
+                        '"retryable":true,"sdk_error_code":"",'
+                        '"sdk_error_category":"TIMEOUT",'
+                        '"error_message":"temporary timeout"}\n'
                     ),
+                    returncode=1,
                 )
-            return subprocess.CompletedProcess(
+            return _ScriptedPositionProbe(
                 command,
-                0,
-                stdout='{"status":"ok","positions":[]}',
+                stdout='{"status":"ok","positions":[]}\n',
             )
 
         monkeypatch.setattr(
@@ -2626,7 +2812,7 @@ class TestBrokerGateway:
         )
         monkeypatch.setattr(broker_module.settings, "broker_retry_max", 1)
         monkeypatch.setattr(broker_module.settings, "broker_retry_base_ms", 0)
-        monkeypatch.setattr(broker_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(broker_module.subprocess, "Popen", fake_run)
 
         assert BrokerGateway().get_positions() == []
         assert calls == 2
@@ -2643,7 +2829,7 @@ class TestBrokerGateway:
                 '"available_quantity":"1"}]}',
                 0,
             ),
-            ('{"status":"ok","positions":[]}', 1),
+            ('{"status":"ok","positions":[],"extra":1}', 0),
             ('{"status":"error","error_type":"bad value"}', 1),
             (
                 '{"status":"error","error_type":"OpenApiException",'
@@ -2665,19 +2851,33 @@ class TestBrokerGateway:
         )
         monkeypatch.setattr(
             broker_module.subprocess,
-            "run",
-            lambda command, **_kwargs: subprocess.CompletedProcess(
+            "Popen",
+            lambda command, **_kwargs: _ScriptedPositionProbe(
                 command,
-                returncode,
-                stdout=output,
+                stdout=output if output.endswith("\n") else output + "\n",
+                returncode=returncode,
             ),
         )
 
+        gateway = BrokerGateway()
+        try:
+            with pytest.raises(
+                RuntimeError,
+                match="malformed broker position probe payload",
+            ):
+                gateway.get_positions()
+        finally:
+            gateway.close()
+
+    def test_ok_payload_with_nonzero_exit_is_a_protocol_error(self) -> None:
         with pytest.raises(
             RuntimeError,
             match="malformed broker position probe payload",
         ):
-            BrokerGateway().get_positions()
+            broker_module._decode_position_probe_output(
+                '{"status":"ok","positions":[]}',
+                returncode=1,
+            )
 
     def test_position_snapshot_child_uses_env_config_and_trade_context_only(
         self,
@@ -2733,6 +2933,697 @@ class TestBrokerGateway:
             "stock_positions",
             "close",
         ]
+
+
+def _write_warm_probe_sdk(
+    package_dir,
+    *,
+    hang_on_call: int | None = None,
+    error_on_call: int | None = None,
+    malformed_on_call: int | None = None,
+    init_marker: str = "context-init",
+) -> None:
+    """A fake longport SDK the isolated probe child imports instead of the real one."""
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    hang_literal = "None" if hang_on_call is None else str(hang_on_call)
+    error_literal = "None" if error_on_call is None else str(error_on_call)
+    malformed_literal = (
+        "None" if malformed_on_call is None else str(malformed_on_call)
+    )
+    (package_dir / "openapi.py").write_text(
+        "\n".join(
+            [
+                "import os",
+                "import time",
+                "from pathlib import Path",
+                "",
+                "class OpenApiException(OSError):",
+                "    pass",
+                "",
+                "class Config:",
+                "    @staticmethod",
+                "    def from_env():",
+                "        mode = os.environ.get('POSITION_PROBE_INIT_MODE', '')",
+                "        if mode == 'retryable':",
+                "            raise OpenApiException('connect timeout')",
+                "        if mode == 'fatal':",
+                "            raise RuntimeError('invalid credentials')",
+                "        return object()",
+                "",
+                "class TradeContext:",
+                "    constructions = 0",
+                "",
+                "    def __init__(self, _config):",
+                "        TradeContext.constructions += 1",
+                "        counter = Path(os.environ['POSITION_PROBE_CONTEXT_FILE'])",
+                "        built = int(counter.read_text()) if counter.exists() else 0",
+                "        counter.write_text(str(built + 1), encoding='utf-8')",
+                f"        Path(os.environ['POSITION_PROBE_INIT_LOG']).write_text({init_marker!r}, encoding='utf-8')",
+                "",
+                "    def stock_positions(self):",
+                "        call_file = Path(os.environ['POSITION_PROBE_CALL_FILE'])",
+                "        seen = int(call_file.read_text()) if call_file.exists() else 0",
+                "        call_no = seen + 1",
+                "        call_file.write_text(str(call_no), encoding='utf-8')",
+                "        Path(os.environ['POSITION_PROBE_PID_FILE']).write_text(",
+                "            str(os.getpid()), encoding='utf-8'",
+                "        )",
+                f"        if call_no == {hang_literal}:",
+                "            time.sleep(30)",
+                f"        if call_no == {error_literal}:",
+                "            print('access_token=probe-secret-value', flush=True)",
+                "            raise OpenApiException('temporary connection timeout')",
+                f"        if call_no == {malformed_literal}:",
+                "            print('not-a-position-payload', flush=True)",
+                "            os._exit(0)",
+                "        return [{'symbol': 'AAPL.US', 'quantity': str(call_no),",
+                "                 'available_quantity': str(call_no),",
+                "                 'cost_price': '150'}]",
+                "",
+                "    def submit_order(self, *_args, **_kwargs):",
+                "        raise AssertionError('position probe must not call order APIs')",
+                "",
+                "    def close(self):",
+                "        pass",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _enable_isolated_probe(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    timeout_seconds: float = 2.0,
+    retry_max: int = 0,
+) -> None:
+    monkeypatch.setattr(
+        broker_module.settings,
+        "broker_position_snapshot_isolation_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        broker_module.settings,
+        "broker_position_snapshot_timeout_seconds",
+        timeout_seconds,
+    )
+    monkeypatch.setattr(broker_module.settings, "broker_retry_max", retry_max)
+    monkeypatch.setattr(broker_module.settings, "broker_retry_base_ms", 0)
+
+
+def _install_warm_probe_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+    **sdk_options: object,
+) -> dict[str, object]:
+    _write_warm_probe_sdk(tmp_path / "longport", **sdk_options)
+    context_file = tmp_path / "contexts.txt"
+    call_file = tmp_path / "calls.txt"
+    pid_file = tmp_path / "probe.pid"
+    init_log = tmp_path / "init.log"
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    monkeypatch.setenv("POSITION_PROBE_CONTEXT_FILE", str(context_file))
+    monkeypatch.setenv("POSITION_PROBE_CALL_FILE", str(call_file))
+    monkeypatch.setenv("POSITION_PROBE_PID_FILE", str(pid_file))
+    monkeypatch.setenv("POSITION_PROBE_INIT_LOG", str(init_log))
+    return {
+        "context_file": context_file,
+        "call_file": call_file,
+        "pid_file": pid_file,
+        "init_log": init_log,
+    }
+
+
+def _assert_production_reaped(process: subprocess.Popen[bytes] | _ScriptedPositionProbe) -> None:
+    """Prove production reaped the child without calling poll, wait, or waitpid."""
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        if process.returncode is not None:
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError(
+            f"position probe child pid={process.pid} returncode was never set"
+        )
+    try:
+        os.kill(process.pid, 0)
+    except ProcessLookupError:
+        pass
+    else:
+        raise AssertionError(
+            f"position probe child pid={process.pid} is still a zombie or running"
+        )
+    assert process.stdin is not None and process.stdin.closed
+    assert process.stdout is not None and process.stdout.closed
+
+
+class TestWarmIsolatedPositionProbe:
+    def test_consecutive_snapshots_are_fresh_from_one_warm_context(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        files = _install_warm_probe_sdk(monkeypatch, tmp_path)
+        _enable_isolated_probe(monkeypatch)
+        spawns: list[tuple[str, ...]] = []
+        real_popen = subprocess.Popen
+
+        def counting_popen(*args, **kwargs):
+            command = args[0] if args else kwargs.get("args")
+            spawns.append(tuple(command))
+            return real_popen(*args, **kwargs)
+
+        monkeypatch.setattr(broker_module.subprocess, "Popen", counting_popen)
+        gateway = BrokerGateway()
+        try:
+            first = gateway.get_positions()
+            second = gateway.get_positions()
+        finally:
+            gateway.close()
+
+        assert first[0].quantity == Decimal("1")
+        assert second[0].quantity == Decimal("2")
+        assert first != second
+        assert len(spawns) == 1
+        assert spawns[0] == broker_module._POSITION_PROBE_COMMAND
+        assert files["context_file"].read_text(encoding="utf-8") == "1"
+        assert files["call_file"].read_text(encoding="utf-8") == "2"
+        assert gateway._quote_ctx is None
+        assert gateway._trade_ctx is None
+
+    def test_hung_request_is_bounded_then_fresh_worker_succeeds(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        files = _install_warm_probe_sdk(monkeypatch, tmp_path, hang_on_call=2)
+        _enable_isolated_probe(monkeypatch, timeout_seconds=0.4, retry_max=0)
+        gateway = BrokerGateway()
+        try:
+            first = gateway.get_positions()
+            assert first[0].quantity == Decimal("1")
+            hung_pid = int(files["pid_file"].read_text(encoding="utf-8"))
+            started = time.monotonic()
+            with pytest.raises(TimeoutError, match="exceeded 0.4s timeout"):
+                gateway.get_positions()
+            elapsed = time.monotonic() - started
+            assert elapsed < 2.0
+            assert broker_module._POSITION_PROBE_LOCK.acquire(timeout=0.2)
+            broker_module._POSITION_PROBE_LOCK.release()
+            assert gateway._position_probe_worker is None
+            recovered = gateway.get_positions()
+        finally:
+            gateway.close()
+
+        assert recovered[0].quantity == Decimal("3")
+        assert files["context_file"].read_text(encoding="utf-8") == "2"
+        assert int(files["pid_file"].read_text(encoding="utf-8")) != hung_pid
+
+    def test_error_payload_discards_worker_and_keeps_redacted_diagnostics(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        files = _install_warm_probe_sdk(monkeypatch, tmp_path, error_on_call=2)
+        _enable_isolated_probe(monkeypatch, retry_max=0)
+        gateway = BrokerGateway()
+        try:
+            assert gateway.get_positions()[0].quantity == Decimal("1")
+            warm_pid = int(files["pid_file"].read_text(encoding="utf-8"))
+            with pytest.raises(ConnectionError) as captured:
+                gateway.get_positions()
+            assert gateway._position_probe_worker is None
+            recovered = gateway.get_positions()
+        finally:
+            gateway.close()
+
+        diagnostics = captured.value.diagnostics
+        assert diagnostics.error_type == "OpenApiException"
+        assert diagnostics.exit_code == 1
+        assert diagnostics.retry_count == 0
+        assert diagnostics.probe_duration_ms >= 0
+        assert "probe-secret-value" not in diagnostics.stderr
+        assert "[REDACTED]" in diagnostics.stderr
+        assert recovered[0].quantity == Decimal("3")
+        assert files["context_file"].read_text(encoding="utf-8") == "2"
+        assert int(files["pid_file"].read_text(encoding="utf-8")) != warm_pid
+
+    def test_malformed_output_discards_worker_before_the_next_snapshot(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        files = _install_warm_probe_sdk(
+            monkeypatch,
+            tmp_path,
+            malformed_on_call=2,
+        )
+        _enable_isolated_probe(monkeypatch, retry_max=0)
+        gateway = BrokerGateway()
+        try:
+            assert gateway.get_positions()[0].quantity == Decimal("1")
+            warm_pid = int(files["pid_file"].read_text(encoding="utf-8"))
+            with pytest.raises(
+                RuntimeError,
+                match="malformed broker position probe payload",
+            ) as captured:
+                gateway.get_positions()
+            assert gateway._position_probe_worker is None
+            recovered = gateway.get_positions()
+        finally:
+            gateway.close()
+
+        diagnostics = captured.value.diagnostics
+        assert diagnostics.error_type
+        assert diagnostics.exit_code == 0
+        assert "probe-secret-value" not in diagnostics.stderr
+        assert recovered[0].quantity == Decimal("3")
+        assert files["context_file"].read_text(encoding="utf-8") == "2"
+        assert int(files["pid_file"].read_text(encoding="utf-8")) != warm_pid
+
+    def test_close_terminates_and_reaps_the_worker(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        files = _install_warm_probe_sdk(monkeypatch, tmp_path)
+        _enable_isolated_probe(monkeypatch)
+        gateway = BrokerGateway()
+        gateway.get_positions()
+        pid = int(files["pid_file"].read_text(encoding="utf-8"))
+        os.kill(pid, 0)
+
+        gateway.close()
+
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.01)
+        else:
+            raise AssertionError(f"position probe child {pid} is still alive")
+        assert gateway._position_probe_worker is None
+
+    def test_second_snapshot_does_not_pay_context_init_again(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        files = _install_warm_probe_sdk(monkeypatch, tmp_path)
+        _enable_isolated_probe(monkeypatch)
+        inits = {"count": 0}
+        real_popen = subprocess.Popen
+
+        def counting_popen(*args, **kwargs):
+            inits["count"] += 1
+            return real_popen(*args, **kwargs)
+
+        monkeypatch.setattr(broker_module.subprocess, "Popen", counting_popen)
+        gateway = BrokerGateway()
+        try:
+            gateway.get_positions()
+            contexts_after_first = int(
+                files["context_file"].read_text(encoding="utf-8")
+            )
+            spawns_after_first = inits["count"]
+            gateway.get_positions()
+        finally:
+            gateway.close()
+
+        assert contexts_after_first == 1
+        assert spawns_after_first == 1
+        assert inits["count"] == 1
+        assert files["context_file"].read_text(encoding="utf-8") == "1"
+        assert files["init_log"].read_text(encoding="utf-8") == "context-init"
+
+    def test_slow_error_exit_stays_retryable_instead_of_protocol_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls = 0
+
+        def fake_popen(command, **kwargs):
+            nonlocal calls
+            del kwargs
+            calls += 1
+            return _ScriptedPositionProbe(
+                command,
+                stdout=(
+                    '{"status":"error","error_type":"OpenApiException",'
+                    '"retryable":true,"sdk_error_code":"",'
+                    '"sdk_error_category":"TIMEOUT",'
+                    '"error_message":"connect timeout"}\n'
+                ),
+                returncode=1,
+                exit_delay_seconds=0.8,
+            )
+
+        _enable_isolated_probe(monkeypatch, timeout_seconds=2.0, retry_max=1)
+        monkeypatch.setattr(broker_module.subprocess, "Popen", fake_popen)
+        gateway = BrokerGateway()
+        try:
+            with pytest.raises(PositionProbeConnectionError) as captured:
+                gateway.get_positions()
+        finally:
+            gateway.close()
+
+        assert not isinstance(captured.value, PositionProbeProtocolError)
+        assert captured.value.diagnostics.exit_code not in (None, 0)
+        assert captured.value.diagnostics.retry_count == 1
+        assert calls == 2
+
+    def test_slow_nonretryable_error_exit_is_runtime_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def fake_popen(command, **kwargs):
+            del kwargs
+            return _ScriptedPositionProbe(
+                command,
+                stdout=(
+                    '{"status":"error","error_type":"OpenApiException",'
+                    '"retryable":false,"sdk_error_code":"401",'
+                    '"sdk_error_category":"AUTHENTICATION",'
+                    '"error_message":"access token expired"}\n'
+                ),
+                returncode=1,
+                exit_delay_seconds=0.8,
+            )
+
+        _enable_isolated_probe(monkeypatch, timeout_seconds=2.0, retry_max=3)
+        monkeypatch.setattr(broker_module.subprocess, "Popen", fake_popen)
+        gateway = BrokerGateway()
+        try:
+            with pytest.raises(PositionProbeRuntimeError) as captured:
+                gateway.get_positions()
+        finally:
+            gateway.close()
+
+        assert not isinstance(captured.value, PositionProbeProtocolError)
+        assert captured.value.diagnostics.exit_code not in (None, 0)
+        assert captured.value.diagnostics.retry_count == 0
+
+    def test_ok_payload_returns_without_waiting_for_child_exit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        children: list[_ScriptedPositionProbe] = []
+
+        def fake_popen(command, **kwargs):
+            del kwargs
+            child = _ScriptedPositionProbe(
+                command,
+                stdout='{"status":"ok","positions":[]}\n',
+                exit_delay_seconds=30.0,
+            )
+            children.append(child)
+            return child
+
+        _enable_isolated_probe(monkeypatch, timeout_seconds=1.0, retry_max=0)
+        monkeypatch.setattr(broker_module.subprocess, "Popen", fake_popen)
+        gateway = BrokerGateway()
+        try:
+            started = time.monotonic()
+            assert gateway.get_positions() == []
+            assert time.monotonic() - started < 0.5
+            assert len(children) == 1
+            try:
+                os.kill(children[0].pid, 0)
+            except ProcessLookupError as exc:
+                raise AssertionError("warm worker exited after an ok snapshot") from exc
+            assert gateway.get_positions() == []
+            assert len(children) == 1
+        finally:
+            gateway.close()
+
+    def test_close_before_start_does_not_leave_a_worker(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        spawned: list[subprocess.Popen[bytes]] = []
+        real_popen = subprocess.Popen
+
+        def counting_popen(*args, **kwargs):
+            process = real_popen(*args, **kwargs)
+            spawned.append(process)
+            return process
+
+        _enable_isolated_probe(monkeypatch, timeout_seconds=1.0, retry_max=0)
+        monkeypatch.setattr(broker_module.subprocess, "Popen", counting_popen)
+        gateway = BrokerGateway()
+        gateway.close()
+        monkeypatch.setattr(
+            broker_module.subprocess,
+            "Popen",
+            lambda command, **kwargs: _ScriptedPositionProbe(
+                command,
+                stdout='{"status":"ok","positions":[]}\n',
+            ),
+        )
+        try:
+            assert gateway.get_positions() == []
+        finally:
+            gateway.close()
+
+    def test_close_between_publication_and_popen_kills_the_child(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        entered = threading.Event()
+        release = threading.Event()
+        spawned: list[subprocess.Popen[bytes]] = []
+        real_popen = subprocess.Popen
+
+        def gated_popen(*args, **kwargs):
+            entered.set()
+            assert release.wait(timeout=2.0)
+            process = real_popen(*args, **kwargs)
+            spawned.append(process)
+            return process
+
+        _enable_isolated_probe(monkeypatch, timeout_seconds=2.0, retry_max=0)
+        monkeypatch.setattr(broker_module.subprocess, "Popen", gated_popen)
+        gateway = BrokerGateway()
+        outcome: list[BaseException | None] = []
+
+        def request() -> None:
+            try:
+                gateway.get_positions()
+                outcome.append(None)
+            except BaseException as exc:
+                outcome.append(exc)
+
+        thread = threading.Thread(target=request)
+        thread.start()
+        assert entered.wait(timeout=2.0)
+        deadline = time.monotonic() + 2.0
+        while gateway._position_probe_worker is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        gateway.close()
+        release.set()
+        thread.join(timeout=3.0)
+
+        assert not thread.is_alive()
+        assert outcome and outcome[0] is not None
+        assert spawned
+        _assert_production_reaped(spawned[0])
+        assert gateway._position_probe_worker is None
+        monkeypatch.setattr(
+            broker_module.subprocess,
+            "Popen",
+            lambda command, **kwargs: _ScriptedPositionProbe(
+                command,
+                stdout='{"status":"ok","positions":[]}\n',
+            ),
+        )
+        assert gateway.get_positions() == []
+        gateway.close()
+
+    def test_close_during_read_kills_the_child_and_rejects_the_result(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        reading = tmp_path / "reading"
+        release = tmp_path / "release"
+        monkeypatch.setenv("POSITION_PROBE_READ_GATE", str(reading))
+        monkeypatch.setenv("POSITION_PROBE_READ_RELEASE", str(release))
+        spawned: list[_ScriptedPositionProbe] = []
+
+        def gated_popen(command, **kwargs):
+            del kwargs
+            process = _ScriptedPositionProbe(
+                command,
+                stdout='{"status":"ok","positions":[]}\n',
+                read_gate=True,
+            )
+            spawned.append(process)
+            return process
+
+        _enable_isolated_probe(monkeypatch, timeout_seconds=5.0, retry_max=0)
+        monkeypatch.setattr(broker_module.subprocess, "Popen", gated_popen)
+        gateway = BrokerGateway()
+        outcome: list[BaseException | None] = []
+
+        def request() -> None:
+            try:
+                gateway.get_positions()
+                outcome.append(None)
+            except BaseException as exc:
+                outcome.append(exc)
+
+        thread = threading.Thread(target=request)
+        thread.start()
+        deadline = time.monotonic() + 2.0
+        while not reading.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert reading.exists()
+        started = time.monotonic()
+        gateway.close()
+        release.write_text("go", encoding="utf-8")
+        thread.join(timeout=1.0)
+        elapsed = time.monotonic() - started
+
+        assert elapsed < 1.0
+        assert not thread.is_alive()
+        assert outcome and outcome[0] is not None
+        assert spawned
+        _assert_production_reaped(spawned[0])
+        assert gateway._position_probe_worker is None
+        assert gateway.get_positions() == []
+
+    def test_close_then_get_positions_starts_a_fresh_reaped_worker(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        spawned: list[_ScriptedPositionProbe] = []
+
+        def fake_popen(command, **kwargs):
+            del kwargs
+            child = _ScriptedPositionProbe(
+                command,
+                stdout='{"status":"ok","positions":[]}\n',
+            )
+            spawned.append(child)
+            return child
+
+        _enable_isolated_probe(monkeypatch, timeout_seconds=2.0, retry_max=0)
+        monkeypatch.setattr(broker_module.subprocess, "Popen", fake_popen)
+        gateway = BrokerGateway()
+        try:
+            assert gateway.get_positions() == []
+            old = spawned[0]
+            old_pid = old.pid
+            gateway.close()
+            _assert_production_reaped(old)
+            assert gateway.get_positions() == []
+        finally:
+            gateway.close()
+
+        assert len(spawned) == 2
+        assert spawned[1].pid != old_pid
+
+    def test_close_idle_worker_reaps_before_returning(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        spawned: list[_ScriptedPositionProbe] = []
+
+        def fake_popen(command, **kwargs):
+            del kwargs
+            child = _ScriptedPositionProbe(
+                command,
+                stdout='{"status":"ok","positions":[]}\n',
+            )
+            spawned.append(child)
+            return child
+
+        _enable_isolated_probe(monkeypatch, timeout_seconds=2.0, retry_max=0)
+        monkeypatch.setattr(broker_module.subprocess, "Popen", fake_popen)
+        gateway = BrokerGateway()
+        assert gateway.get_positions() == []
+        child = spawned[0]
+
+        gateway.close()
+
+        _assert_production_reaped(child)
+        assert gateway._position_probe_worker is None
+
+    def test_retryable_context_init_failure_is_retried_not_protocol_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        _install_warm_probe_sdk(monkeypatch, tmp_path)
+        monkeypatch.setenv("POSITION_PROBE_INIT_MODE", "retryable")
+        _enable_isolated_probe(monkeypatch, timeout_seconds=2.0, retry_max=1)
+        gateway = BrokerGateway()
+        try:
+            with pytest.raises(PositionProbeConnectionError) as captured:
+                gateway.get_positions()
+        finally:
+            gateway.close()
+
+        assert not isinstance(captured.value, PositionProbeProtocolError)
+        assert captured.value.diagnostics.retry_count == 1
+        assert captured.value.diagnostics.exit_code not in (None, 0)
+
+    def test_nonretryable_context_init_failure_is_runtime_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path,
+    ) -> None:
+        _install_warm_probe_sdk(monkeypatch, tmp_path)
+        monkeypatch.setenv("POSITION_PROBE_INIT_MODE", "fatal")
+        _enable_isolated_probe(monkeypatch, timeout_seconds=2.0, retry_max=3)
+        gateway = BrokerGateway()
+        try:
+            with pytest.raises(PositionProbeRuntimeError) as captured:
+                gateway.get_positions()
+        finally:
+            gateway.close()
+
+        assert not isinstance(captured.value, PositionProbeProtocolError)
+        assert captured.value.diagnostics.retry_count == 0
+
+    def test_stray_line_from_previous_request_is_not_the_next_snapshot(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls = {"count": 0}
+
+        def fake_popen(command, **kwargs):
+            del command, kwargs
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return _ScriptedPositionProbe(
+                    broker_module._POSITION_PROBE_COMMAND,
+                    stdout=(
+                        '{"status":"ok","positions":[]}\n'
+                        '{"status":"ok","positions":[{"symbol":"AAPL.US",'
+                        '"side":"LONG","quantity":"99","avg_price":"1",'
+                        '"available_quantity":"99"}]}\n'
+                    ),
+                )
+            return _ScriptedPositionProbe(
+                broker_module._POSITION_PROBE_COMMAND,
+                stdout='{"status":"ok","positions":[]}\n',
+            )
+
+        _enable_isolated_probe(monkeypatch, timeout_seconds=1.0, retry_max=0)
+        monkeypatch.setattr(broker_module.subprocess, "Popen", fake_popen)
+        gateway = BrokerGateway()
+        try:
+            with pytest.raises(RuntimeError, match="malformed broker position probe payload"):
+                gateway.get_positions()
+            assert gateway.get_positions() == []
+        finally:
+            gateway.close()
+
+        assert calls["count"] == 2
 
 
 class TestBrokerImports:

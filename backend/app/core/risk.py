@@ -353,6 +353,34 @@ class RiskController:
             self._paused_at = paused_at or datetime.now(timezone.utc)
             self._pause_auto_resumable = auto_resumable
 
+    def replace_confirmed_unfilled_cancel_pause(
+        self,
+        expected_reason: str,
+        new_reason: str,
+    ) -> bool:
+        """Latch a confirmed unfilled cancel without touching another pause.
+
+        The only legal transitions are a running controller, or a pause whose
+        reason is exactly the pending-timeout diagnosis for this order. A
+        manual pause, cooldown, unrelated operational pause, kill switch, or
+        in-flight reconciliation is left byte-for-byte unchanged, including
+        its safety generation and protective-exit permission.
+        """
+        with self._lock:
+            if self.kill_switch or self._entry_reconciliation_count > 0:
+                return False
+            if self.paused and self._pause_reason != expected_reason:
+                return False
+            if not self.paused and self._pause_reason != "":
+                return False
+            self._safety_generation += 1
+            self._protective_exit_pause_reason = ""
+            self.paused = True
+            self._pause_reason = new_reason
+            self._paused_at = datetime.now(timezone.utc)
+            self._pause_auto_resumable = True
+            return True
+
     def pause_unless_operational(
         self,
         reason: str,

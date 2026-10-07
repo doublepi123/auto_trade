@@ -118,6 +118,7 @@ class BrokerSubmissionUncertainError(RuntimeError):
 _LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
 _FAILED_ORDER_STATUSES = {"REJECTED", "CANCELLED"}
 ORDER_EXECUTION_BLOCKED_PREFIX = "ORDER_EXECUTION_BLOCKED:"
+ORDER_TIMEOUT_CANCELLED_UNFILLED_PREFIX = "ORDER_TIMEOUT_CANCELLED_UNFILLED:"
 ORDER_PERSISTENCE_UNCERTAIN_PREFIX = "ORDER_PERSISTENCE_UNCERTAIN:"
 ORDER_STATUS_PERSISTENCE_UNCERTAIN_PREFIX = "ORDER_STATUS_PERSISTENCE_UNCERTAIN:"
 PNL_RECONCILIATION_UNCERTAIN_PREFIX = "PNL_RECONCILIATION_UNCERTAIN:"
@@ -4610,6 +4611,15 @@ class TradeExecutionService:
                     unsupported=False,
                     notify_risk_event=notify_risk_event,
                 )
+            elif (
+                updated_pending.timeout_recovery_attempted
+                and self._confirmed_unfilled_cancel(order_status)
+            ):
+                self._pause_after_confirmed_unfilled_cancel(
+                    updated_pending.broker_order_id,
+                    risk,
+                    notify_risk_event,
+                )
             else:
                 self._pause_after_failed_order(updated_pending.broker_order_id, status, risk, notify_risk_event)
             self._clear_pending_order(updated_pending.broker_order_id)
@@ -4667,11 +4677,7 @@ class TradeExecutionService:
                 self._pending_orders_by_id[pending.broker_order_id] = pending
                 self._rebuild_pending_orders_by_symbol_locked()
         effective_restore = pending.restore_engine_snapshot_fn or restore_engine_snapshot
-        reason = (
-            "ORDER_RECONCILIATION_UNCERTAIN: pending order "
-            f"{pending.broker_order_id} timed out after "
-            f"{self._order_status_timeout_seconds:.0f}s"
-        )
+        reason = self._pending_timeout_pause_reason(pending.broker_order_id)
         logger.warning(reason)
         try:
             order_status = self._coerce_order_status(
@@ -4714,7 +4720,7 @@ class TradeExecutionService:
                 else:
                     self._pause_after_timed_out_terminal_order(
                         pending.broker_order_id,
-                        order_status.status,
+                        order_status,
                         reason,
                         risk,
                         notify_risk_event,
@@ -4776,7 +4782,7 @@ class TradeExecutionService:
                 else:
                     self._pause_after_timed_out_terminal_order(
                         pending.broker_order_id,
-                        cancel_status.status,
+                        cancel_status,
                         reason,
                         risk,
                         notify_risk_event,
@@ -4834,7 +4840,7 @@ class TradeExecutionService:
                         else:
                             self._pause_after_timed_out_terminal_order(
                                 pending.broker_order_id,
-                                recovery_status.status,
+                                recovery_status,
                                 reason,
                                 risk,
                                 notify_risk_event,
@@ -5300,18 +5306,86 @@ class TradeExecutionService:
             except Exception:
                 logger.exception("failed to send order failure notification for %s", order_id)
 
+    def _pending_timeout_pause_reason(self, order_id: str) -> str:
+        return (
+            "ORDER_RECONCILIATION_UNCERTAIN: pending order "
+            f"{order_id} timed out after "
+            f"{self._order_status_timeout_seconds:.0f}s"
+        )
+
+    def _confirmed_unfilled_cancel_reason(self, order_id: str) -> str:
+        # Avoid the runner's pending-timeout fill matcher. This pause is
+        # non-operational, so a later fill of a different order must not
+        # clear it, and a reduction must not wait for protective proof.
+        timeout_seconds = f"{self._order_status_timeout_seconds:.0f}"
+        return (
+            f"{ORDER_TIMEOUT_CANCELLED_UNFILLED_PREFIX} order {order_id} "
+            f"cancelled unfilled after {timeout_seconds}s; "
+            "terminal status CANCELLED; executed_quantity=0"
+        )
+
+    def _pause_after_confirmed_unfilled_cancel(
+        self,
+        order_id: str,
+        risk: RiskController | None,
+        notify_risk_event: _NotifyRiskEvent | None,
+    ) -> None:
+        reason = self._confirmed_unfilled_cancel_reason(order_id)
+        if risk is not None:
+            risk.replace_confirmed_unfilled_cancel_pause(
+                self._pending_timeout_pause_reason(order_id),
+                reason,
+            )
+        try:
+            self._record_risk_event(reason)
+        except Exception:
+            logger.exception("failed to record timed-out order %s", order_id)
+        if notify_risk_event is not None:
+            try:
+                notify_risk_event("ORDER_TIMEOUT", reason)
+            except Exception:
+                logger.exception("failed to send timeout notification for %s", order_id)
+
+    @staticmethod
+    def _confirmed_unfilled_cancel(order_status: OrderStatus) -> bool:
+        return (
+            order_status.status == "CANCELLED"
+            and TradeExecutionService._explicit_zero_executed_quantity(order_status)
+        )
+
+    @staticmethod
+    def _explicit_zero_executed_quantity(order_status: OrderStatus) -> bool:
+        """True only when the broker reported an executed quantity of exactly zero.
+
+        ``OrderStatus._positive`` and ``_resolved_decimal`` treat a missing
+        quantity as zero. That is correct for fill math, but it is not proof
+        that the venue confirmed no fill. A confirmed unfilled cancel is the
+        only timeout terminal outcome that may use the transient pause.
+        """
+        reported = order_status.executed_quantity
+        if not isinstance(reported, Decimal):
+            return False
+        return reported.is_finite() and reported == 0
+
     def _pause_after_timed_out_terminal_order(
         self,
         order_id: str,
-        status: str,
+        order_status: OrderStatus,
         timeout_reason: str,
         risk: RiskController | None,
         notify_risk_event: _NotifyRiskEvent | None,
     ) -> None:
+        if self._confirmed_unfilled_cancel(order_status):
+            self._pause_after_confirmed_unfilled_cancel(
+                order_id,
+                risk,
+                notify_risk_event,
+            )
+            return
         detail = timeout_reason.split(":", 1)[-1].strip()
         reason = (
             f"{ORDER_EXECUTION_BLOCKED_PREFIX} {detail}; "
-            f"terminal status {status}"
+            f"terminal status {order_status.status}"
         )
         if risk is not None:
             risk.pause(reason, auto_resumable=False)
@@ -5675,21 +5749,22 @@ class TradeExecutionService:
                 f"expected {default_order_id}, got {broker_order_id}"
             )
         status = getattr(result, "status", "SUBMITTED")
-        # Use None (not 0) when the broker did not report a fill. The runner's
-        # _update_order_status only overwrites executed_* when the new value
-        # is non-None, so passing 0 would clobber a previously-recorded partial
-        # fill and drop the order from daily PnL.
         raw_qty = getattr(result, "executed_quantity", None)
         raw_price = getattr(result, "executed_price", None)
-        # Use None (not 0) when the broker did not report a fill. The runner's
-        # _update_order_status only overwrites executed_* when the new value
-        # is non-None, so passing 0 would clobber a previously-recorded partial
-        # fill and drop the order from daily PnL.
+        # A gateway result distinguishes a missing quantity from an explicit
+        # zero. Test doubles have no flag, so their explicit zero still counts.
+        # An invalid quantity is not proof of either a fill or a zero fill.
+        quantity_reported = getattr(result, "executed_quantity_reported", None)
         executed_qty: Decimal | None
-        if raw_qty is None or raw_qty == 0:
+        if quantity_reported is False or raw_qty is None:
             executed_qty = None
         else:
-            executed_qty = TradeExecutionService._resolved_decimal(result, "executed_quantity", Decimal("0"))
+            try:
+                parsed_qty = Decimal(str(raw_qty))
+            except Exception:
+                executed_qty = None
+            else:
+                executed_qty = parsed_qty if parsed_qty.is_finite() and parsed_qty >= 0 else None
         executed_price: Decimal | None
         if raw_price is None or raw_price == 0:
             executed_price = None
