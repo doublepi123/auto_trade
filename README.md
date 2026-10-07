@@ -91,7 +91,7 @@ flowchart LR
 
 ### 券商韧性
 - `BrokerGateway._call_with_retry` 分档退避：订单（默认 3 次）全量指数退避；行情（默认 1 次）轻量重试；K 线响应含非法 OHLCV 时也先按同一上限重拉，仍异常才过滤坏行并保留有效行
-- 每次重试写 `audit_logs.action=BROKER_RETRY`；重试耗尽走原 `_is_auto_resumable_pause_reason` → pause 路径
+- 每次重试写 `audit_logs.action=BROKER_RETRY`；重试耗尽走既有 pause 路径
 
 ### 回测
 - CSV 历史价格回测（`POST /api/backtest/run`），验证区间参数与风控规则

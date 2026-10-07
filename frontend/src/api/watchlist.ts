@@ -51,16 +51,6 @@ export async function getWatchlistSnapshots(): Promise<WatchlistSnapshot[]> {
   return resp.data
 }
 
-export interface ScoredWatchlistSnapshot extends WatchlistSnapshot {
-  score: number
-  is_stale: boolean
-}
-
-export async function getWatchlistScoredSnapshots(): Promise<ScoredWatchlistSnapshot[]> {
-  const resp = await api.get('/api/watchlist/scored-snapshots')
-  return resp.data
-}
-
 export async function scoreWatchlistSymbol(data: { symbol: string; market: 'US' | 'HK'; ttl_minutes?: number }): Promise<WatchlistScore> {
   const resp = await api.post('/api/watchlist/score', data)
   return resp.data

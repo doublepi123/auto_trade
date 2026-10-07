@@ -1822,7 +1822,7 @@ class TestDailyPnlService:
         db.close()
 
     def test_unclosed_remainder_logs_warning(self, caplog: LogCaptureFixture) -> None:
-        """G1-3: _apply_fill logs warning when close exceeds tracked position."""
+        """G1-3: calculate logs warning when close exceeds tracked position."""
         self._cleanup()
         trade_day = date(2026, 5, 22)
         db = self._get_db()

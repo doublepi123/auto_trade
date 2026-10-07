@@ -312,21 +312,6 @@ class DurableFillReconciliationError(RuntimeError):
     """Raised when recent fills cannot be proved from the durable ledger."""
 
 
-class _EmptyPassiveSnapshot:
-    """Clear passive recovery view (no rows, nothing quarantined)."""
-
-    hard_reasons: tuple[str, ...] = ()
-    quarantined_symbols: frozenset[str] = frozenset()
-    pending_refs: dict[str, str] = {}
-    decisions: tuple[Any, ...] = ()
-    complete = True
-    order_live = False
-
-
-def _EMPTY_PASSIVE_SNAPSHOT() -> "_EmptyPassiveSnapshot":  # noqa: N802
-    return _EmptyPassiveSnapshot()
-
-
 def _raw_strategy_cap_int(value: object) -> int | None:
     """RAW strategy quantity cap or None; never raises (round-2 finding 1).
 
@@ -508,10 +493,6 @@ class AppRunner:
         # stream as broken too. Armed at every successful (re)subscription so
         # a fresh stream gets one threshold of grace.
         self._last_trusted_push_quote_at = 0.0
-        # Per-pending reconcile tracking. Set just before each pending is
-        # reconciled so the restore_engine_snapshot closure can resolve the
-        # correct per-symbol engine. Best-effort — see TODO in _run_loop.
-        self._current_reconcile_symbol: str | None = None
         self._last_active_quote_refresh_at = 0.0
         self._active_quote_refresh_interval_seconds = 15.0
         self._quote_resubscribe_threshold_seconds = 90.0
@@ -5629,9 +5610,6 @@ class AppRunner:
     def _cash_currency_for_market(market: str) -> str:
         return "HKD" if market == "HK" else "USD"
 
-    def _live_fee_rate(self) -> Decimal:
-        return self._live_fee_rate_for_market(self.engine.params.market)
-
     @staticmethod
     def _fee_rate_for_params(
         params: StrategyParams,
@@ -8252,33 +8230,6 @@ class AppRunner:
                 snapshot.persisted,
                 snapshot.pre_submit_risk_check_invocations,
             )
-
-    @staticmethod
-    def _is_auto_resumable_pause_reason(reason: str) -> bool:
-        normalized = reason.lower()
-        transient_markers = (
-            "429",
-            "rate limit",
-            "rate_limit",
-            "too many requests",
-            "too frequent",
-            "throttle",
-            "throttled",
-            "frequency",
-            "限流",
-            "频率",
-            "请求过于频繁",
-            # Network/broker transient timeouts. The bare word "timeout" is
-            # intentionally NOT included here — too many persistence/lifecycle
-            # pauses contain that substring (e.g. ``order status timeout``,
-            # ``pending order timed out``) and must NOT auto-resume.
-            "rate limit timeout",
-            "broker timeout",
-            "request timeout",
-            "read timeout",
-            "connect timeout",
-        )
-        return any(marker in normalized for marker in transient_markers)
 
     def _sync_engine_state_with_positions(
         self,

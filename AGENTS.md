@@ -37,7 +37,6 @@ FastAPI (async lifespan) ─── mount 90+ routers
    │   │                       signal_edge (edge gate ahead of parameter tuning)]
    │   ├── universe_selection/[catalog, selector, rotation walk-forward]
    │   ├── watchlist_quant_v6/[quote-only historical evaluation + evidence publication]
-   │   ├── llm_interval_forward/
    │   ├── opening_momentum*  [opening path / extension pure logic]
    │   └── analysis|sentiment|performance|experiment
    │

@@ -1,6 +1,6 @@
 """Platform analytics module catalog service (read-only introspection).
 
-Surfaces the 258+ analytics modules living under ``backend/app/platform/`` as a
+Surfaces the analytics modules living under ``backend/app/platform/`` as a
 queryable catalog. Each module file is parsed with Python's :mod:`ast` module
 (never imported — avoids side effects, broker-SDK imports, heavy deps) so the
 catalog is safe to call from any read-only API path.

@@ -15,7 +15,7 @@ database.init_db()
 class TestPairRoundTrips:
     """Closed round-trip pairing (entry <-> exit) via DailyPnlService.pair_round_trips.
 
-    Pure read-only FIFO lot ledger; does not touch calculate() / _apply_fill.
+    Pure read-only FIFO lot ledger; does not touch calculate() / _apply_fill_net.
     """
 
     def _get_db(self):

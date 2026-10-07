@@ -583,12 +583,6 @@ class TradeExecutionService:
     ) -> None:
         self._record_order = record_order
         self._update_order_status = update_order_status
-        self._record_order_accepts_metadata = self._accepts_positional_args(
-            record_order, 10
-        )
-        self._update_order_accepts_metadata = self._accepts_positional_args(
-            update_order_status, 6
-        )
         self._record_risk_event = record_risk_event
         self._record_order_skipped = record_order_skipped
         self._persist_entry = persist_entry

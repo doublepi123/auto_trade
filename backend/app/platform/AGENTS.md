@@ -1,7 +1,7 @@
 # `backend/app/platform/` — Research / Plugin Layer
 
 ## OVERVIEW
-259 files, ~52k lines, flat namespace: one module per analytic, exposed under `/api/platform/*`. Pure computation plus a paper-trading runtime. Never touches the live order path.
+242 files, flat namespace: one module per analytic, exposed under `/api/platform/*`. Pure computation plus a paper-trading runtime. Never touches the live order path.
 
 ## THREE-WAY NAME CORRESPONDENCE
 `/api/platform/kelly` ↔ `platform/kelly.py` ↔ `tests/platform/test_kelly.py`. Keep all three in sync when adding an analytic.
@@ -30,7 +30,7 @@ Reference implementation: the `/kelly` handler. Shared payload parsers: `_to_ret
 - **Zero numpy / scipy / pandas** — grep confirms 0 importing files. Pure stdlib (`math`, `statistics`, `decimal`); `stat_utils.py` hand-rolls Hyndman-Fan type-7 quantiles.
 - Module skeleton: `from __future__ import annotations` → `P###` docstring with citations → `__all__` → `ValueError` on bad input → dataclass report with `to_dict()`.
 - Deterministic pure functions: no I/O, no globals, no clock reads (pass time in).
-- Tests: one `test_<module>.py` per module (264 files). Pure-function tests assert known analytic solutions and `pytest.raises(ValueError)`. Endpoint tests override auth via `app.dependency_overrides[require_api_key] = lambda: None` and assert **both** a 200 shape and a 422 rejection.
+- Tests: one `test_<module>.py` per module. Pure-function tests assert known analytic solutions and `pytest.raises(ValueError)`. Endpoint tests override auth via `app.dependency_overrides[require_api_key] = lambda: None` and assert **both** a 200 shape and a 422 rejection.
 
 ## ANTI-PATTERNS (THIS DIR)
 - Importing `TradeExecutionService`, `BrokerGateway`, or `longport` — today the only match in this tree is a docstring in `runner.py`. Keep it that way.

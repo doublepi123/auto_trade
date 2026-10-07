@@ -41,7 +41,6 @@ The load-bearing safety distinction (P0): **`trade_execution_service.py` is the 
 | File | Role |
 |---|---|
 | `trade_event_service.py` | `record_trade_event()` — sole writer of `trade_events` (Decision Timeline source) |
-| `fill_settlement_service.py` | `FillSettlementLedger.record_or_get(SettlementIntent)` — idempotent accounting receipts; repeat fills matched via `domain.fill_settlement.compare_repeat`, conflicts raise `FillSettlementConflict` |
 | `order_terminal_callback_service.py` | `claim/complete/release` receipts in `order_terminal_callbacks` — dedupes broker terminal callbacks |
 | `daily_pnl_service.py` | FIFO round-trip pairing, PnL replay, `reconcile_risk_state()`; **refuses incomplete replay** (fail-closed, preserves live risk state) |
 | `position_pnl_service.py` | Open-position mark-to-market via injected `QuoteProvider` |
@@ -92,9 +91,9 @@ One service per `/api/<metric>` page: `asymmetry`, `autocorrelation`, `benchmark
 
 **Live entry (quote hot path).** Broker WS push → `runner._on_quote` → `_evaluate_quote_trigger` (under `_state_lock`; snapshots engine, `StrategyEngine.update_price() -> TriggerResult`) → `_execute_triggered_order` → `TradeExecutionService.execute(...)` → `pre_submit_risk_check()` returns a frozen `ApprovedOrder` (side derived from action; approved price = `max(request, fresh executable)`) or a rejection → `_submit_limit_order` submits **that** price, persists, and handles immediate live/terminal/filled outcomes under `submission_guard()` + `risk.protective_submission_guard()`. HK quantities are board-lot-normalized after sizing and *before* the pre-submit boundary using an injected resolver; the sizing path never touches the network.
 
-**Fill settlement.** Broker terminal event → `OrderTerminalCallbackService.claim()` (dedupe receipt) → `SettlementIntent` built with attribution decided *before* any durable write → `FillSettlementLedger.record_or_get()` inside the caller's accounting transaction → `tracked_entries` update → runner's `post-fill-persist` daemon thread runs `DailyPnlService.calculate()`; incomplete replay pauses trading with a post-fill reason and preserves live risk state (fail-closed); unattributable fills become `UNCERTAIN`, never `FAILED`.
+**Fill settlement.** Broker terminal event → `OrderTerminalCallbackService.claim()` (dedupe receipt) → `SettlementIntent` built with attribution decided *before* any durable write → `domain.fill_settlement` planning inside the caller's accounting transaction → `tracked_entries` update → runner's `post-fill-persist` daemon thread runs `DailyPnlService.calculate()`; incomplete replay pauses trading with a post-fill reason and preserves live risk state (fail-closed); unattributable fills become `UNCERTAIN`, never `FAILED`.
 
-**Pending reconciliation.** Runner 5s loop → `TradeExecutionService.reconcile()` (under submission guard) → on uncertain outcome: `ReconciliationIncidentService.record_failure()` + `ReconciliationBackoff` capped alerts → `POSITION_RECONCILIATION_UNCERTAIN` pause → `record_recovery()` on verified recovery. Today-order sync writes the `orders` table only; cost basis comes solely from `fill_settlement_service` receipts.
+**Pending reconciliation.** Runner 5s loop → `TradeExecutionService.reconcile()` (under submission guard) → on uncertain outcome: `ReconciliationIncidentService.record_failure()` + `ReconciliationBackoff` capped alerts → `POSITION_RECONCILIATION_UNCERTAIN` pause → `record_recovery()` on verified recovery. Today-order sync writes the `orders` table only; cost basis comes solely from confirmed-position snapshots or locally-submitted orders reaching terminal state.
 
 **LLM interval.** Cron → `LLMAdvisorService.analyze()` (prompt plugins from `domain/prompt/`) → `evaluate_llm_order_policy()` (SHADOW-pinned) → human/config-gated `IntervalApplicationService.apply_suggestion()`; outcome recorded by `LLMInteractionService`.
 

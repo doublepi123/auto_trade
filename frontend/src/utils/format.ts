@@ -78,29 +78,6 @@ export function formatPercent(value: number | null | undefined, digits = 2): str
   return `${(value ?? 0).toFixed(digits)}%`
 }
 
-/** Sign-prefixed plain number (no currency / percent), e.g. `+3.50`. */
-export function formatSigned(value: number | null | undefined, digits = 2): string {
-  const normalized = value ?? 0
-  const amount = Math.abs(normalized).toFixed(digits)
-  if (normalized > 0) return `+${amount}`
-  if (normalized < 0) return `-${amount}`
-  return amount
-}
-
-/**
- * Compact large numbers for tight UI: 1234 → '1.2k', 1.5e6 → '1.5M', 3e9 →
- * '3.0B'. Smaller numbers render with no suffix. Sign is preserved.
- */
-export function formatCompact(value: number | null | undefined): string {
-  const n = value ?? 0
-  const abs = Math.abs(n)
-  const sign = n < 0 ? '-' : ''
-  if (abs >= 1e9) return `${sign}${(abs / 1e9).toFixed(1)}B`
-  if (abs >= 1e6) return `${sign}${(abs / 1e6).toFixed(1)}M`
-  if (abs >= 1e3) return `${sign}${(abs / 1e3).toFixed(1)}k`
-  return `${sign}${abs.toFixed(0)}`
-}
-
 /**
  * Human byte size: 512 → '512 B', 2048 → '2.0 KB', 3.5e6 → '3.4 MB'.
  * null/undefined → '—' so optional backend fields render honestly.

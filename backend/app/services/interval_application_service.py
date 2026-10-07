@@ -114,64 +114,6 @@ class IntervalApplicationService:
             **self._edge_audit_fields(policy),
         }
 
-    def apply_direct_suggestion(
-        self,
-        db: Any,
-        current_price: float,
-        suggestion: dict[str, Any],
-        reference_quantity: float = 1.0,
-        runtime_reload: Callable[[], None] | None = None,
-    ) -> dict[str, Any]:
-        """Apply both suggested interval bounds after guardrail validation."""
-        svc = StrategyService(db)
-        config = svc.get_config()
-
-        policy = self._evaluate_policy(
-            current_price,
-            suggestion.get("suggested_buy_low"),
-            suggestion.get("suggested_sell_high"),
-            suggestion.get("confidence_score"),
-            min_profit_amount=config.min_profit_amount,
-            reference_quantity=reference_quantity,
-            one_side_fee_rate=self._fee_rate(config),
-            round_trip_slippage_bps=settings.entry_round_trip_slippage_bps,
-            minimum_edge_cost_ratio=settings.min_entry_edge_cost_ratio,
-        )
-        now = datetime.now(timezone.utc)
-        if policy.disposition != LLMIntervalDisposition.ALLOW:
-            return self._record_non_application(db, config, policy)
-
-        buy_low = policy.buy_low
-        sell_high = policy.sell_high
-
-        if buy_low is None or sell_high is None:
-            raise RuntimeError("validated LLM suggestion is missing interval bounds")
-
-        old_buy_low = config.buy_low
-        old_sell_high = config.sell_high
-        previous = self._application_snapshot(config)
-        config.buy_low = buy_low
-        config.sell_high = sell_high
-        config.llm_applied_buy_low = config.buy_low
-        config.llm_applied_sell_high = config.sell_high
-        config.llm_applied_at = now
-        config.llm_reject_reason = None
-        db.commit()
-        self._confirm_or_rollback(db, config, previous, runtime_reload)
-
-        return {
-            "success": True,
-            "applied": config.buy_low != old_buy_low or config.sell_high != old_sell_high,
-            "reason": "LLM suggestion applied to buy_low and sell_high",
-            "buy_low": config.buy_low,
-            "sell_high": config.sell_high,
-            "applied_at": now.isoformat(),
-            "policy_status": policy.disposition.value,
-            "policy_code": policy.code,
-            "deviation_pct": policy.deviation_pct,
-            **self._edge_audit_fields(policy),
-        }
-
     @staticmethod
     def _application_snapshot(config: Any) -> dict[str, Any]:
         return {

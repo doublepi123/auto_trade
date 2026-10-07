@@ -62,12 +62,11 @@ core imports nothing upward.  Known leaks (do not extend): services→api (_acti
 | `backend/app/domain/prompt/` | LLM prompt plugin architecture: `PromptModule` + `PromptBuilder` + `FeatureSelector` | [View Map](backend/app/domain/prompt/codemap.md) |
 | `backend/app/domain/universe_selection/` | Candidate catalog, point-in-time selection, rotation walk-forward | [View Map](backend/app/domain/universe_selection/codemap.md) |
 | `backend/app/domain/watchlist_quant_v6/` | Quote-only historical evaluation with tamper-evident published artifacts | [View Map](backend/app/domain/watchlist_quant_v6/codemap.md) |
-| `backend/app/domain/llm_interval_forward/` | Frozen contract + paired replay for counterfactual evidence on rejected LLM intervals | [View Map](backend/app/domain/llm_interval_forward/codemap.md) |
 | `backend/app/domain/analysis/` | Technical indicators + market-state detector | [View Map](backend/app/domain/analysis/codemap.md) |
 | `backend/app/domain/sentiment/` | Price-derived sentiment score for the LLM advisor | [View Map](backend/app/domain/sentiment/codemap.md) |
 | `backend/app/domain/experiment/` | LLM prompt A/B testing (documented ORM purity exception) | [View Map](backend/app/domain/experiment/codemap.md) |
 | `backend/app/domain/performance/` | LLM prediction experiment comparison/recommendations | [View Map](backend/app/domain/performance/codemap.md) |
-| `backend/app/platform/` | Read-only research layer: 259 pure analytic modules, paper broker, portfolio, `PlatformRunner`, `/api/platform/*` (202 routes) | [View Map](backend/app/platform/codemap.md) |
+| `backend/app/platform/` | Read-only research layer: 242 pure analytic modules, paper broker, portfolio, `PlatformRunner`, `/api/platform/*` (202 routes) | [View Map](backend/app/platform/codemap.md) |
 | `backend/app/platform/sdk/` | Plugin contract: frozen `OrderIntent` + `Strategy` Protocol | [View Map](backend/app/platform/sdk/codemap.md) |
 | `backend/app/strategies/` | Research strategy plugins (interval, breakout, trend, mean reversion); **not** the live strategy | [View Map](backend/app/strategies/codemap.md) |
 | `backend/app/cli/` | `python -m app.cli.<module>` ops helpers (config validation, LLM storage maintenance, opening research) | [View Map](backend/app/cli/codemap.md) |

@@ -1468,18 +1468,6 @@ class Settings(BaseSettings):
         validation_alias="AUTO_TRADE_CORS_ORIGINS",
     )
 
-    default_strategy: dict[str, Any] = Field(default_factory=lambda: {
-        "symbol": "",
-        "market": "US",
-        "buy_low": 0.0,
-        "sell_high": 0.0,
-        "short_selling": False,
-    })
-
-    default_risk: dict[str, Any] = Field(default_factory=lambda: {
-        "max_consecutive_losses": 3,
-    })
-
     platform_mode: bool = Field(default=False, validation_alias="AUTO_TRADE_PLATFORM_MODE")
 
     @model_validator(mode="after")

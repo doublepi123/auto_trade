@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import math
-import time as time_mod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -83,9 +82,6 @@ def hard_floor_int(value: object, hard_value: int) -> int:
 
 
 class RuntimeStateService:
-    def __init__(self) -> None:
-        self._last_snapshot_log_at: float = 0.0
-        self._last_snapshot_state: tuple = ()
     def load(self, db: Any, engine: StrategyEngine, risk: RiskController) -> Any:
         from app.services.strategy_service import StrategyService
 
@@ -454,58 +450,6 @@ class RuntimeStateService:
             db.execute(insert(RuntimeState), batch)
         for batch in _batched_by_shape(snapshots):
             db.execute(insert(RuntimeStateSnapshot), batch)
-
-    def record_snapshot(self, db: Any, engine: StrategyEngine, risk: RiskController, *, symbol: str = "") -> None:
-        from app.models import RuntimeStateSnapshot
-        from app.services.strategy_service import StrategyService
-
-        runtime_state = StrategyService(db).get_runtime_state(symbol=symbol)
-        captured_at = datetime.now(timezone.utc)
-
-        snapshot = RuntimeStateSnapshot(
-            symbol=symbol,
-            engine_state=engine.state.value,
-            paused=risk.paused,
-            kill_switch=risk.kill_switch,
-            daily_pnl=risk.daily_pnl,
-            consecutive_losses=risk.consecutive_losses,
-            last_price=engine.last_price,
-            last_trigger_price=engine.last_trigger_price,
-            execution_state=getattr(runtime_state, "execution_state", "IDLE"),
-            reduction_reason=getattr(runtime_state, "reduction_reason", ""),
-            created_at=captured_at,
-        )
-        self._stage_snapshot_if_needed(db, snapshot)
-        db.commit()
-
-        now = time_mod.monotonic()
-        current_state = (
-            engine.state.value,
-            risk.paused,
-            risk.kill_switch,
-            risk.daily_pnl,
-            risk.consecutive_losses,
-            getattr(runtime_state, "execution_state", "IDLE"),
-            getattr(runtime_state, "reconciliation_gate", ""),
-        )
-        if (
-            current_state != self._last_snapshot_state
-            or now - self._last_snapshot_log_at >= 300.0
-        ):
-            self._last_snapshot_log_at = now
-            self._last_snapshot_state = current_state
-            logger.info(
-                "reconciliation snapshot restored: engine=%s paused=%s kill=%s "
-                "pnl=%.2f losses=%d exec=%s gate=%s symbol=%s",
-                engine.state.value,
-                risk.paused,
-                risk.kill_switch,
-                risk.daily_pnl,
-                risk.consecutive_losses,
-                getattr(runtime_state, "execution_state", "IDLE"),
-                getattr(runtime_state, "reconciliation_gate", ""),
-                (symbol or "primary"),
-            )
 
     @classmethod
     def _stage_snapshot_if_needed(

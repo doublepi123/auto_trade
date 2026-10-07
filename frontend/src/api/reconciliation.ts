@@ -1,13 +1,8 @@
 import { api } from './client'
-import type { ReconciliationStatus, ReconciliationEvidenceSurface } from '../types'
+import type { ReconciliationStatus } from '../types'
 
 export async function getReconciliationStatus(): Promise<ReconciliationStatus> {
   const resp = await api.get('/api/reconciliation/status')
-  return resp.data
-}
-
-export async function getReconciliationEvidenceSurface(): Promise<ReconciliationEvidenceSurface> {
-  const resp = await api.get('/api/reconciliation/evidence-surface')
   return resp.data
 }
 

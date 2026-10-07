@@ -9,12 +9,6 @@ from typing import Any
 from app.core.broker import BrokerCandle, BrokerGateway
 from app.domain.analysis.market_state import MarketStateDetector
 from app.domain.analysis.technical_indicators import TechnicalIndicators
-from app.domain.prompt.context_module import ContextModule
-from app.domain.prompt.output_module import OutputModule
-from app.domain.prompt.prompt_builder import PromptBuilder
-from app.domain.prompt.sentiment_module import SentimentModule
-from app.domain.prompt.strategy_module import StrategyModule
-from app.domain.prompt.system_module import SystemModule
 from app.domain.sentiment.market_sentiment import MarketSentimentAnalyzer
 
 logger = logging.getLogger("auto_trade.data_aggregator")
@@ -297,71 +291,6 @@ class DataAggregator:
         if analysis:
             lines.append(f"分析摘要: {analysis}")
         return "\n".join(lines)
-
-    @staticmethod
-    def build_prompt(
-        symbol: str,
-        market: str,
-        current_price: float,
-        current_buy_low: float,
-        current_sell_high: float,
-        short_selling: bool,
-        daily_candles: list[dict[str, Any]],
-        minute_candles: list[dict[str, Any]],
-        atr: float | None,
-        bb_upper: float | None,
-        bb_middle: float | None,
-        bb_lower: float | None,
-        current_position: str,
-        recent_trades: list[dict[str, Any]],
-        position_quantity: float = 0.0,
-        position_avg_price: float = 0.0,
-        unrealized_pnl_pct: float = 0.0,
-        min_profit_amount: float = 0.0,
-        recent_prices: list[dict[str, Any]] | None = None,
-        recent_analysis: dict[str, Any] | None = None,
-        account_context: dict[str, Any] | None = None,
-        rsi: float | None = None,
-        macd: dict[str, float] | None = None,
-        volume_analysis: dict[str, Any] | None = None,
-        sentiment: dict[str, Any] | None = None,
-    ) -> str:
-        """Build LLM prompt using modular PromptBuilder."""
-        context: dict[str, Any] = {
-            "symbol": symbol,
-            "market": market,
-            "current_price": current_price,
-            "current_buy_low": current_buy_low,
-            "current_sell_high": current_sell_high,
-            "short_selling": short_selling,
-            "daily_candles": daily_candles,
-            "minute_candles": minute_candles,
-            "atr": atr,
-            "bb_upper": bb_upper,
-            "bb_middle": bb_middle,
-            "bb_lower": bb_lower,
-            "current_position": current_position,
-            "recent_trades": recent_trades,
-            "position_quantity": position_quantity,
-            "position_avg_price": position_avg_price,
-            "unrealized_pnl_pct": unrealized_pnl_pct,
-            "min_profit_amount": min_profit_amount,
-            "rsi": rsi,
-            "macd": macd or {"macd": 0.0, "signal": 0.0, "histogram": 0.0},
-            "volume_analysis": volume_analysis or {"avg_volume": 0.0, "volume_ratio": 0.0, "trend": "unknown"},
-            "sentiment": sentiment or {"sentiment": "neutral", "score": 0.0, "description": "无"},
-            "account_context_text": DataAggregator._format_account_context(account_context),
-            "recent_price_context": DataAggregator._format_recent_prices(recent_prices),
-            "recent_analysis_context": DataAggregator._format_recent_analysis(recent_analysis),
-        }
-
-        builder = PromptBuilder()
-        builder.add_module(SystemModule())
-        builder.add_module(ContextModule())
-        builder.add_module(SentimentModule())
-        builder.add_module(StrategyModule())
-        builder.add_module(OutputModule())
-        return builder.build(context)
 
 
 def _candle_to_dict_daily(candle: BrokerCandle) -> dict[str, Any]:

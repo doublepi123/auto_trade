@@ -174,7 +174,7 @@ def extended_last_executable_close(
 
     Lives here — NOT in market_calendar.py — because that module's source is
     hashed into frozen research digests (strategy_v2 forward semantics,
-    watchlist_quant_v6, llm_interval_forward) which must not drift.
+    watchlist_quant_v6) which must not drift.
     """
     code = market.upper()
     session = get_session(code)

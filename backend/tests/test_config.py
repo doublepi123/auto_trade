@@ -265,11 +265,6 @@ class TestSettings:
         with pytest.raises(ValidationError):
             Settings()
 
-    def test_default_strategy_empty(self) -> None:
-        s = Settings()
-        assert s.default_strategy["symbol"] == ""
-        assert s.default_strategy["market"] == "US"
-
     def test_notification_dedup_window_defaults_and_reads_env(
         self,
         monkeypatch: pytest.MonkeyPatch,

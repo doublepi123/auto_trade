@@ -115,66 +115,6 @@ class TestFetchMarketData:
         assert result["atr"] is None
         assert result["bb_upper"] is None
 
-    def test_prompt_renders_real_daily_table(self) -> None:
-        daily = _build_candles(200.0, 7)
-        minute = _build_candles(200.0, 5)
-        broker = _FakeBroker(daily=daily, minute=minute, quote_price=201.0)
-        aggregator = DataAggregator(broker=broker)
-        market_data = aggregator.fetch_market_data("AAPL.US", "US")
-
-        prompt = aggregator.build_prompt(
-            symbol="AAPL.US",
-            market="US",
-            current_price=201.0,
-            current_buy_low=195.0,
-            current_sell_high=205.0,
-            short_selling=False,
-            daily_candles=market_data["daily_candles"],
-            minute_candles=market_data["minute_candles"],
-            atr=market_data["atr"],
-            bb_upper=market_data["bb_upper"],
-            bb_middle=market_data["bb_middle"],
-            bb_lower=market_data["bb_lower"],
-            current_position="FLAT",
-            recent_trades=[],
-            rsi=market_data["rsi"],
-            macd=market_data["macd"],
-            volume_analysis=market_data["volume_analysis"],
-        )
-
-        assert "暂无可用历史日 K 数据" not in prompt
-        assert "暂无可用 1 分钟 K 数据" not in prompt
-        assert daily[-1].timestamp.date().isoformat() in prompt
-        # 7 daily rows + 1 header + 1 separator row = 9 lines starting with `|`
-        daily_section = prompt.split("市场数据（最近日 K 线）")[1].split("市场数据（最近 1 分钟 K 线）")[0]
-        assert daily_section.count("\n|") >= 7
-
-    def test_prompt_shows_placeholder_when_no_candles(self) -> None:
-        aggregator = DataAggregator(broker=_FakeBroker(raise_on={"Day", "Min_1"}, quote_error=True))
-        data = aggregator.fetch_market_data("AAPL.US", "US")
-        prompt = aggregator.build_prompt(
-            symbol="AAPL.US",
-            market="US",
-            current_price=0.0,
-            current_buy_low=180.0,
-            current_sell_high=220.0,
-            short_selling=False,
-            daily_candles=data["daily_candles"],
-            minute_candles=data["minute_candles"],
-            atr=data["atr"],
-            bb_upper=data["bb_upper"],
-            bb_middle=data["bb_middle"],
-            bb_lower=data["bb_lower"],
-            current_position="FLAT",
-            recent_trades=[],
-            rsi=data["rsi"],
-            macd=data["macd"],
-            volume_analysis=data["volume_analysis"],
-        )
-        assert "暂无可用历史日 K 数据" in prompt
-        assert "暂无可用 1 分钟 K 数据" in prompt
-
-
 class TestNewIndicators:
     def test_fetch_market_data_includes_rsi_macd_volume(self) -> None:
         broker = _FakeBroker(

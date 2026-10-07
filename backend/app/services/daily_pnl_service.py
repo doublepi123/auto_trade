@@ -503,7 +503,7 @@ class DailyPnlService:
         than logged: analytics endpoints call this method frequently, and a
         historical data-quality issue must not emit a fresh operational alert
         on every read. This method writes nothing and never calls ``calculate``
-        / ``_apply_fill``, so the risk controller's source of truth is
+        / ``_apply_fill_net``, so the risk controller's source of truth is
         untouched.
         """
         from app.models import OrderRecord
@@ -1642,30 +1642,6 @@ class DailyPnlService:
                 order_id, price,
             )
         return price
-
-    @staticmethod
-    def _apply_fill(position: _LedgerPosition, fill: _Fill) -> tuple[Decimal, Decimal]:
-        if fill.side == "BUY":
-            DailyPnlService._open_long(position, fill.quantity, fill.price)
-            return _ZERO, _ZERO
-        if fill.side == "BUY_TO_COVER":
-            unclosed, matched_quantity, pnl = DailyPnlService._close_short(position, fill.quantity, fill.price)
-            if unclosed > _ZERO:
-                DailyPnlService._warn_unclosed_remainder_once(fill, unclosed)
-            return matched_quantity, pnl
-        if fill.side == "SELL":
-            unclosed, matched_quantity, pnl = DailyPnlService._close_long(position, fill.quantity, fill.price)
-            if unclosed > _ZERO:
-                DailyPnlService._warn_unclosed_remainder_once(fill, unclosed)
-            return matched_quantity, pnl
-        if fill.side == "SELL_SHORT":
-            DailyPnlService._open_short(position, fill.quantity, fill.price)
-            return _ZERO, _ZERO
-        return _ZERO, _ZERO
-
-    @staticmethod
-    def _is_authoritative_exit(fill: _Fill) -> bool:
-        return DailyPnlService._authoritative_outcome(fill) is not None
 
     @staticmethod
     def _authoritative_outcome(

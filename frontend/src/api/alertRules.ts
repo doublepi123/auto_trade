@@ -48,10 +48,3 @@ export async function getAlertRuleHistory(
   const resp = await api.get(`/api/alert-rules/${id}/history`, { params })
   return resp.data
 }
-
-export async function listAlertFirings(
-  params: { rule_id?: number; limit?: number } = {},
-): Promise<AlertFiringPage> {
-  const resp = await api.get('/api/alert-firings', { params })
-  return resp.data
-}

@@ -1,30 +1,6 @@
 import { api } from './client'
 import type { ReportResponse, ReportSchedulePreviewResponse, ReportScheduleStatusResponse } from '../types'
 
-export async function getDailyReport(params: {
-  symbol: string
-  date: string
-}): Promise<ReportResponse> {
-  const resp = await api.get<ReportResponse>('/api/reports/daily', { params })
-  return resp.data
-}
-
-export async function getWeeklyReport(params: {
-  symbol: string
-  week_start: string
-}): Promise<ReportResponse> {
-  const resp = await api.get<ReportResponse>('/api/reports/weekly', { params })
-  return resp.data
-}
-
-export async function getMonthlyReport(params: {
-  symbol: string
-  month: string
-}): Promise<ReportResponse> {
-  const resp = await api.get<ReportResponse>('/api/reports/monthly', { params })
-  return resp.data
-}
-
 export async function getRangeReport(params: {
   symbol: string
   from_date: string

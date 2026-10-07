@@ -64,24 +64,10 @@ export const optionalString: Validator<string | null | undefined> = (value, path
   return value
 }
 
-export const number: Validator<number> = (value, path = '$') => {
-  if (typeof value !== 'number' || Number.isNaN(value)) {
-    throw new ValidationError(path, `expected number, got ${typeof value}`)
-  }
-  return value
-}
-
 export const optionalNumber: Validator<number | null | undefined> = (value, path = '$') => {
   if (value === undefined || value === null) return value
   if (typeof value !== 'number' || Number.isNaN(value)) {
     throw new ValidationError(path, `expected number|null, got ${typeof value}`)
-  }
-  return value
-}
-
-export const boolean: Validator<boolean> = (value, path = '$') => {
-  if (typeof value !== 'boolean') {
-    throw new ValidationError(path, `expected boolean, got ${typeof value}`)
   }
   return value
 }
@@ -111,18 +97,6 @@ export const optionalObject: Validator<Record<string, unknown> | null | undefine
     throw new ValidationError(path, `expected object|null, got ${Array.isArray(value) ? 'array' : typeof value}`)
   }
   return value as Record<string, unknown>
-}
-
-export function enumOf<T extends string>(allowed: readonly T[]): Validator<T> {
-  return (value, path = '$') => {
-    if (typeof value !== 'string' || !allowed.includes(value as T)) {
-      throw new ValidationError(
-        path,
-        `expected one of [${allowed.join(', ')}], got ${JSON.stringify(value)}`,
-      )
-    }
-    return value as T
-  }
 }
 
 /** Try the validator, returning null on failure (for use in non-critical paths). */

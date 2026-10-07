@@ -1,7 +1,7 @@
 # `backend/app/domain/` — Pure Computation Layer
 
 ## OVERVIEW
-56 files, ~24k lines, 9 subpackages. The cleanest layer in the repo: **zero imports from `app.services`**, verified by AST scan. Depends only on `app.core` calendar utilities (26 imports of `market_calendar` / `holiday_calendar`).
+~52 files, 8 subpackages. The cleanest layer in the repo: **zero imports from `app.services`**, verified by AST scan. Depends only on `app.core` calendar utilities (26 imports of `market_calendar` / `holiday_calendar`).
 
 ## STRUCTURE
 ```
@@ -11,7 +11,6 @@ domain/
 │                           trusted_frozen_assessment (1749), PREREGISTRATION.md
 ├── universe_selection/      7 files, 4986 — catalog, selector, rotation walk-forward,
 │                           data/ index-membership snapshots + THIRD_PARTY_NOTICES.md
-├── llm_interval_forward/    4 files, 4030 — replay.py (2164) + contract
 ├── watchlist_quant_v6/      5 files, 3350 — quote-only historical evaluation
 ├── prompt/                 10 files,  566 — see prompt/AGENTS.md
 ├── analysis/ sentiment/ performance/ experiment/   small helper packages

@@ -16,7 +16,7 @@ LLM prompt plugin architecture: assembles the DeepSeek/MiniMax advisor prompt fr
 
 ### Adaptive indicator gating (two-way)
 
-`SelectionModule` tells the LLM which indicators it may use → the LLM returns `selected_indicators` in its JSON response → `FeatureSelector.parse_selection()` (tolerant of empty/partial/unknown keys; falls back to the suggested set silently, never raises) → `filter_context()` prunes the *next* interval's context so only chosen indicators render. This keeps prompts small without dropping the LLM's own tool choices.
+`SelectionModule` tells the LLM which indicators it may use → the LLM returns `selected_indicators` in its JSON response → `FeatureSelector.parse_selection()` (tolerant of empty/partial/unknown keys; falls back to the suggested set silently, never raises).
 
 ### Module-by-module notes
 
@@ -30,7 +30,7 @@ LLM prompt plugin architecture: assembles the DeepSeek/MiniMax advisor prompt fr
 | `selection_module.py` | 51 | Tells the LLM which indicators to use |
 | `sentiment_module.py` | 23 | `MarketSentimentAnalyzer` output block |
 | `output_module.py` | 46 | LLM-facing JSON output schema specification |
-| `feature_selector.py` | 123 | Selection parsing + context filtering |
+| `feature_selector.py` | ~80 | Selection parsing |
 
 `context_module.py` owns all data rendering: daily and minute K-line tables (`_render_daily_table` / `_render_minute_table`), indicator blocks, position cost, and sentiment values. It is the only file >100 lines — it tolerates roughly a third of the directory's LOC, and new indicator blocks belong there, not in new modules. It guards `prompt_price <= 0` (pinned by an A4.2 test), short-circuiting before the DeepSeek call. Bilingual prompt text is hardcoded as f-strings — one Chinese string per logical block, no I18N layer; English is reserved for JSON keys.
 
@@ -47,7 +47,7 @@ LLM prompt plugin architecture: assembles the DeepSeek/MiniMax advisor prompt fr
 
 1. `llm_advisor_service` gathers context (K-line rows, indicator values, strategy state, sentiment result) into a dict — all I/O (fetching bars, reading settings, model transport) happens here, before any module runs.
 2. `PromptBuilder.build(context)` constructs fresh module instances and concatenates the six renders in fixed order → the prompt string (stored as the `prompt` column of the `llm_interactions` row).
-3. The model responds; `FeatureSelector.parse_selection` extracts `selected_indicators` from the response (scraping JSON objects out of free-form text via `_json_object_candidates`) and `filter_context` prunes the next interval's context, so the loop is: suggest → select → narrow → suggest.
+3. The model responds; `FeatureSelector.parse_selection` extracts `selected_indicators` from the response (scraping JSON objects out of free-form text via `_json_object_candidates`).
 4. The advisor's `_parse_response` validates the reply against the schema `output_module.py` specified; parse failures degrade to "no recommendation", never an exception in the trading loop.
 
 Adding a module is a 2-step change — new file subclassing `PromptModule`, plus one line at the right position in `PromptBuilder.build()`; skipping step 2 leaves the module unreachable.

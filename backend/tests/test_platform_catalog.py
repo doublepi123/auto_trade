@@ -45,7 +45,7 @@ def client() -> TestClient:
 
 
 def test_list_modules_returns_non_empty(service: PlatformCatalogService) -> None:
-    """The platform package ships 258+ modules, so the catalog must not be empty."""
+    """The platform package ships analytics modules, so the catalog must not be empty."""
     modules = service.list_modules()
     assert isinstance(modules, list)
     assert len(modules) > 0
@@ -94,8 +94,8 @@ def test_list_modules_includes_known_module(service: PlatformCatalogService) -> 
         ("risk_metrics", "Risk"),
         ("backtest_diagnostics", "Backtest"),
         ("portfolio_allocator", "Portfolio"),
-        ("signal_decay", "Signal"),
-        ("execution_algorithms", "Execution"),
+        ("signal_combination", "Signal"),
+        ("execution_cost", "Execution"),
         ("drawdown_analysis", "Drawdown"),
         ("correlation_network", "Correlation"),
         ("heston", "General"),

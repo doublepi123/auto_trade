@@ -14,7 +14,7 @@ prompt/
 ├── selection_module.py  # 49 lines  — Tells LLM which indicators to use
 ├── sentiment_module.py  # 23 lines  — MarketSentimentAnalyzer output block
 ├── output_module.py     # 44 lines  — JSON output schema spec
-├── feature_selector.py  # 82 lines  — Parses LLM-returned selected_indicators, filters context
+├── feature_selector.py  # Parses LLM-returned selected_indicators
 └── __init__.py          # empty
 ```
 
@@ -25,7 +25,7 @@ prompt/
 | Add new technical indicator | `context_module.py` | Renders in dedicated block; `FeatureSelector.parse_selection` validates |
 | Change output JSON schema | `output_module.py` | LLM-facing schema spec; `_parse_response` in `llm_advisor_service` consumes |
 | Reorder module assembly | `prompt_builder.py` | `build()` calls modules in fixed sequence — order matters for prompt coherence |
-| Adaptive indicator gating | `feature_selector.py` + `selection_module.py` | Two-way: LLM returns list → `FeatureSelector` filters next call's `context_module` |
+| Adaptive indicator gating | `feature_selector.py` + `selection_module.py` | LLM returns list → `FeatureSelector.parse_selection` validates it |
 | Change quant role/rules | `system_module.py` | Pure Chinese prompt; English reserved for JSON keys |
 
 ## CONVENTIONS

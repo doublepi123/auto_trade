@@ -30,7 +30,7 @@ from app.runner import AppRunner
 from app.schemas import DiagnosticsResponse
 from app.services.decision_funnel_service import (
     DecisionFunnelTracker,
-    persist_session_summary,
+    add_session_counts,
 )
 from app.services.trade_execution_service import OrderStatus
 
@@ -335,12 +335,10 @@ class TestDecisionFunnelSessionPersistence:
         assert closed[0].skips_by_category["RISK"] == 1
         assert tracker.drain_closed_sessions() == []
 
-        # And: persisting it — even twice — yields exactly one durable row.
+        # And: the live writer upserts one row for the closed session.
         db = database.SessionLocal()
         try:
-            persist_session_summary(db, closed[0], symbol="TSLA.US", market="US")
-            db.commit()
-            persist_session_summary(db, closed[0], symbol="TSLA.US", market="US")
+            add_session_counts(db, closed[0], symbol="TSLA.US", market="US")
             db.commit()
             rows = (
                 db.query(DecisionFunnelSessionSummary)
@@ -371,7 +369,7 @@ class TestDecisionFunnelSessionPersistence:
         closed = tracker.drain_closed_sessions()
         db = database.SessionLocal()
         try:
-            persist_session_summary(db, closed[0], symbol="TSLA.US", market="US")
+            add_session_counts(db, closed[0], symbol="TSLA.US", market="US")
             db.commit()
             row = db.query(DecisionFunnelSessionSummary).one()
 
@@ -392,7 +390,7 @@ class TestDecisionFunnelSessionPersistence:
             db.commit()
 
             # When: the normal writer persists the new session and both are read.
-            persist_session_summary(db, tracker.snapshot(), symbol="NVDA.US", market="US")
+            add_session_counts(db, tracker.snapshot(), symbol="NVDA.US", market="US")
             db.commit()
             rows = db.query(DecisionFunnelSessionSummary).order_by(
                 DecisionFunnelSessionSummary.session_date
@@ -452,7 +450,7 @@ class TestDecisionFunnelRestartDurability:
         for _ in range(regime):
             tracker.record_skip("REGIME")
         with database.SessionLocal() as db:
-            persist_session_summary(db, tracker.snapshot(), symbol=symbol, market="US")
+            add_session_counts(db, tracker.snapshot(), symbol=symbol, market="US")
             db.commit()
 
     def _stored_regime(self, symbol: str, day: date | None = None) -> int | None:
