@@ -94,8 +94,9 @@ jobs:
 
       # These spawn their own compute processes and assert elapsed bounds, so
       # they need the whole runner rather than one of four xdist workers.
-      # WALL_CLOCK_MODULES may be empty. pytest then collects nothing and
-      # exits 5; that is success for this lane only. Any other exit still fails.
+      # Exit 5 means pytest collected nothing. Accept that only when
+      # WALL_CLOCK_MODULES is empty; a non-empty lane that collects nothing
+      # is a selection bug and must still fail. Any other exit fails.
       - name: Run pytest
         env:
           COVERAGE_FILE: .coverage.shard-realtime
@@ -110,7 +111,8 @@ jobs:
           status=$?
           set -e
           if [ "$status" -eq 5 ]; then
-            echo "realtime lane collected no tests; treating exit 5 as success"
+            python -c "from tests.conftest import WALL_CLOCK_MODULES; import sys; sys.exit(0 if not WALL_CLOCK_MODULES else 1)"
+            echo "realtime lane is empty; treating pytest exit 5 as success"
             exit 0
           fi
           exit "$status"
@@ -155,8 +157,10 @@ jobs:
       # Each shard runs part of the suite, so only the combined data can be
       # measured against the threshold the whole suite used to meet. The
       # realtime file is optional: an empty WALL_CLOCK_MODULES lane uploads
-      # nothing. Numbered shard files are still required, and 80% is enforced
-      # on whatever was combined.
+      # nothing. This step only refuses a completely empty download; the
+      # numbered shard files are guaranteed by ``needs: [backend-test, ...]``,
+      # whose upload step fails if a shard file is missing. 80% is enforced
+      # on the combined result.
       - name: Combine and enforce threshold
         run: |
           shopt -s nullglob

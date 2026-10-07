@@ -2451,6 +2451,16 @@ def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
                 "ALTER TABLE strategy_v2_shadow_config "
                 "ADD COLUMN universe_managed BOOLEAN NOT NULL DEFAULT 0"
             )
+        # Compatibility column. Business logic does not read it, but the ORM
+        # still maps it. Very old databases predate the column; add it
+        # idempotently so those reads and inserts do not fail. Default 0
+        # matches the retired-lane mapping (False), not the historical 1.
+        if "opening_momentum_execution_eligible" not in config_columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE strategy_v2_shadow_config "
+                "ADD COLUMN opening_momentum_execution_eligible "
+                "BOOLEAN NOT NULL DEFAULT 0"
+            )
         if "holding_deadline" not in trade_columns:
             connection.exec_driver_sql(
                 "ALTER TABLE strategy_v2_shadow_trades ADD COLUMN holding_deadline DATETIME"

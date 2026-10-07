@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from tests.conftest import (
@@ -60,6 +62,22 @@ class TestRealtimeLaneIsSeparated:
 
     def test_wall_clock_modules_are_never_freed_to_test_level(self) -> None:
         assert not (TEST_LEVEL_SAFE_MODULES & WALL_CLOCK_MODULES)
+
+    def test_realtime_workflow_accepts_exit_5_only_when_lane_is_empty(
+        self,
+    ) -> None:
+        workflow = (
+            Path(__file__).resolve().parents[2]
+            / ".github"
+            / "workflows"
+            / "dockerhub.yml"
+        ).read_text(encoding="utf-8")
+        assert (
+            "from tests.conftest import WALL_CLOCK_MODULES"
+            in workflow
+        )
+        assert "sys.exit(0 if not WALL_CLOCK_MODULES else 1)" in workflow
+        assert "if [ \"$status\" -eq 5 ]; then" in workflow
 
 
 def _shardable(modules: frozenset[str]) -> set[str]:

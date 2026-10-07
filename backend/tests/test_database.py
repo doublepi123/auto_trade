@@ -610,6 +610,73 @@ def test_legacy_shadow_config_not_null_column_still_accepts_orm_insert(
     engine.dispose()
 
 
+def test_legacy_shadow_config_without_eligible_column_is_migrated(
+    tmp_path,
+) -> None:
+    """A pre-column shadow config must gain the compatibility column.
+
+    models.py still maps ``opening_momentum_execution_eligible``. An old
+    table that never received the ALTER cannot be read or inserted through
+    the ORM until ``_ensure_strategy_v2_shadow_tables`` adds it.
+    """
+    db_path = tmp_path / "pre_eligible_shadow.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE strategy_v2_shadow_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol VARCHAR(50) NOT NULL UNIQUE,
+                enabled BOOLEAN NOT NULL DEFAULT 0,
+                universe_managed BOOLEAN NOT NULL DEFAULT 0,
+                zscore_window_1m_bars INTEGER NOT NULL DEFAULT 30,
+                zscore_window_5m_bars INTEGER NOT NULL DEFAULT 12,
+                breach_zscore FLOAT NOT NULL DEFAULT -2.0,
+                reclaim_zscore FLOAT NOT NULL DEFAULT -1.0,
+                five_minute_zscore_max FLOAT NOT NULL DEFAULT -0.5,
+                adx_period INTEGER NOT NULL DEFAULT 14,
+                max_adx FLOAT NOT NULL DEFAULT 20.0,
+                realized_vol_window_bars INTEGER NOT NULL DEFAULT 30,
+                min_realized_vol FLOAT NOT NULL DEFAULT 0.10,
+                max_realized_vol FLOAT NOT NULL DEFAULT 0.80,
+                stop_loss_pct FLOAT NOT NULL DEFAULT 0.75,
+                profit_target_pct FLOAT NOT NULL DEFAULT 0.50,
+                max_holding_minutes INTEGER NOT NULL DEFAULT 60,
+                entry_cutoff_minutes_before_close INTEGER NOT NULL DEFAULT 45,
+                flatten_minutes_before_close INTEGER NOT NULL DEFAULT 15,
+                arm_ttl_bars INTEGER NOT NULL DEFAULT 10,
+                max_entries_per_day INTEGER NOT NULL DEFAULT 2,
+                entry_cooldown_minutes INTEGER NOT NULL DEFAULT 15,
+                slippage_bps FLOAT NOT NULL DEFAULT 2.0,
+                estimated_fee_rate_us FLOAT NOT NULL DEFAULT 0.0005,
+                estimated_fee_rate_hk FLOAT NOT NULL DEFAULT 0.003,
+                updated_at DATETIME
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            "INSERT INTO strategy_v2_shadow_config (symbol, enabled) "
+            "VALUES ('NVDA.US', 1)"
+        )
+
+    database._ensure_strategy_v2_shadow_tables(engine)
+    database._ensure_strategy_v2_shadow_tables(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        existing = db.query(StrategyV2ShadowConfig).filter_by(
+            symbol="NVDA.US"
+        ).one()
+        assert existing.enabled is True
+        assert existing.opening_momentum_execution_eligible is False
+        db.add(StrategyV2ShadowConfig(symbol="AAPL.US", enabled=False))
+        db.commit()
+        inserted = db.query(StrategyV2ShadowConfig).filter_by(
+            symbol="AAPL.US"
+        ).one()
+        assert inserted.opening_momentum_execution_eligible is False
+    engine.dispose()
+
+
 def test_strategy_v2_shadow_table_migration_is_complete_and_idempotent(tmp_path) -> None:
     db_path = tmp_path / "strategy_v2_shadow.db"
     engine = create_engine(f"sqlite:///{db_path}")
