@@ -78,9 +78,17 @@ class FakeNotifier:
 
 
 class FakeThread:
-    def __init__(self, target: object = None, daemon: bool = False) -> None:
+    # Mirrors the threading.Thread keywords the runner passes (``name`` is
+    # used by the bounded notification drain in stop()).
+    def __init__(
+        self,
+        target: object = None,
+        daemon: bool = False,
+        name: str | None = None,
+    ) -> None:
         self.target = target
         self.daemon = daemon
+        self.name = name
         self.started = False
 
     def start(self) -> None:
