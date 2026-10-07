@@ -2372,9 +2372,11 @@ class TradeExecutionService:
 
         with self._state_lock:
             pending = self._pending_orders.get(symbol)
-            if pending is not None:
-                logger.warning("execute skipped: pending order %s still live for %s", pending.broker_order_id, symbol)
-                return self._skip_order(symbol, action, "pending order in flight", skip_category="PENDING")
+        if pending is not None:
+            # _skip_order calls the runner, which takes runner._state_lock.
+            # Doing that inside this lock inverts the quote-path order.
+            logger.warning("execute skipped: pending order %s still live for %s", pending.broker_order_id, symbol)
+            return self._skip_order(symbol, action, "pending order in flight", skip_category="PENDING")
 
         if action == "BUY":
             return self._execute_buy(
@@ -7003,19 +7005,25 @@ class TradeExecutionService:
             notify_risk_event=notify_risk_event,
         )
         key = settlement_key(pending.broker_order_id)
+        # Claim the dedupe key before releasing the lock. Every caller of
+        # this tail already holds _submission_lock, so a second finalizer
+        # cannot observe the claim and return while this tail is still
+        # running. The runner callbacks below take runner._state_lock;
+        # calling them under this lock inverts runner._state_lock ->
+        # TES._state_lock and deadlocks the quote path.
         with self._state_lock:
             if key is not None and key in self._fill_tail_completed:
                 return
             facts = receipt.intent.facts
-            self._safe_notify_order(
-                notifier, facts.action, facts.symbol, str(facts.quantity),
-                str(facts.price), pending.broker_order_id,
-            )
-            self._mark_fill_processed(facts.symbol, facts.action)
-            if facts.action in _POSITION_REDUCING_ACTIONS:
-                self._notify_reduction_fill(facts.symbol, facts.action, facts.quantity)
             if key is not None:
                 self._fill_tail_completed.add(key)
+        self._safe_notify_order(
+            notifier, facts.action, facts.symbol, str(facts.quantity),
+            str(facts.price), pending.broker_order_id,
+        )
+        self._mark_fill_processed(facts.symbol, facts.action)
+        if facts.action in _POSITION_REDUCING_ACTIONS:
+            self._notify_reduction_fill(facts.symbol, facts.action, facts.quantity)
 
     def _plan_authoritative_exit_outcome(
         self,
