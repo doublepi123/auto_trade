@@ -2410,19 +2410,16 @@ class TradeExecutionService:
                 is_funnel_primary=is_funnel_primary,
             )
         if action == "SELL_SHORT":
-            return self._execute_sell_short(
+            # P0: short entries are permanently forbidden. The live-safety
+            # gate above already returns this same reason whenever
+            # short_entries_enabled is false. Reaching here means a caller
+            # forced that flag; the mandatory boundary still rejects, and
+            # there is no short-entry implementation left to size or submit.
+            return self._skip_order(
                 symbol,
-                quote,
-                broker,
-                risk,
-                notifier,
-                cash_currency,
-                engine_snapshot=engine_snapshot,
-                restore_engine_snapshot=restore_engine_snapshot,
-                notify_risk_event=notify_risk_event,
-                final_entry_policy_check=entry_policy_check,
-                market=market,
-                is_funnel_primary=is_funnel_primary,
+                action,
+                "short entries are disabled by the live safety policy",
+                skip_category="RISK",
             )
         if action == "BUY_TO_COVER":
             return self._execute_buy_to_cover(
@@ -4260,83 +4257,6 @@ class TradeExecutionService:
             pending, order_status, risk=risk, notifier=notifier,
             notify_risk_event=notify_risk_event,
         )
-        return order_status
-
-    def _execute_sell_short(
-        self,
-        symbol: str,
-        quote: Quote,
-        broker: BrokerGateway,
-        risk: RiskController,
-        notifier: "NotifierInterface",
-        cash_currency: str,
-        *,
-        engine_snapshot: EngineSnapshot | None = None,
-        restore_engine_snapshot: Callable[[EngineSnapshot], None] | None = None,
-        notify_risk_event: _NotifyRiskEvent | None = None,
-        final_entry_policy_check: EntryPolicyCheck | None = None,
-        market: str = "US",
-        is_funnel_primary: bool = False,
-    ) -> OrderStatus | None:
-        price = self._normalize_limit_price(symbol, "SELL_SHORT", Decimal(str(quote.last_price)))
-        if price <= 0:
-            logger.warning("SELL_SHORT: price <= 0, price=%s", price)
-            return None
-
-        qty = Decimal(self._entry_quantity_from_margin_power(broker, symbol, "SELL", price, cash_currency))
-        if qty <= 0:
-            return self._skip_order(
-                symbol,
-                "SELL_SHORT",
-                "entry quantity is zero after buying-power and position checks",
-                skip_category="POSITION",
-            )
-
-        self._record_positive_sizing(is_funnel_primary)
-        norm = self._normalize_board_lot_quantity(symbol, "SELL_SHORT", qty)
-        if norm.issue is not None:
-            return self._skip_order(symbol, "SELL_SHORT", norm.issue, skip_category=norm.skip_category)
-        qty = norm.quantity
-        order_status = self._submit_limit_order(
-            "SELL_SHORT",
-            symbol,
-            Decimal(qty),
-            price,
-            broker,
-            risk,
-            notifier,
-            engine_snapshot=engine_snapshot,
-            restore_engine_snapshot=restore_engine_snapshot,
-            notify_risk_event=notify_risk_event,
-            final_entry_policy_check=final_entry_policy_check,
-            market=market,
-        )
-        if (
-            order_status is None
-            or order_status.status != "FILLED"
-            or order_status.fill_finalized
-        ):
-            return order_status
-
-        fill_price = OrderStatus._positive(order_status.executed_price) or price
-        fill_qty = OrderStatus._positive(order_status.executed_quantity) or Decimal(qty)
-        pending = _PendingOrder(
-            broker=broker,
-            broker_order_id=order_status.broker_order_id,
-            symbol=symbol,
-            action="SELL_SHORT",
-            quantity=Decimal(qty),
-            price=price,
-            engine_snapshot=engine_snapshot,
-            fee_model=str(
-                self._active_execution_context.get("accounting_fee_model", "") or ""
-            ),
-        )
-        self._finalize_pending_fill_once(
-            pending, order_status, risk=risk, notifier=notifier,
-            notify_risk_event=notify_risk_event,
-        )
-        logger.info("SELL_SHORT: %s qty=%s price=%s", symbol, fill_qty, fill_price)
         return order_status
 
     def _execute_buy_to_cover(

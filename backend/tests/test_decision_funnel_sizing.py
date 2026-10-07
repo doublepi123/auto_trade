@@ -165,17 +165,20 @@ def test_exit_fee_skip_counts_positive_position_sizing(monkeypatch: pytest.Monke
     assert broker.submissions == []
 
 
-def test_direct_short_sizing_counts_before_mandatory_veto(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Given: the otherwise unreachable short branch still has truthful accounting.
+def test_forced_short_entry_is_rejected_before_sizing(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Given: short entries have no execution implementation. Forcing the
+    # compatibility flag must reject before sizing or the mandatory boundary.
     runner, broker = _scenario(monkeypatch)
+    runner._trade_svc.short_entries_enabled = True
     # When
-    status = runner._trade_svc._execute_sell_short("NVDA.US", Quote("NVDA.US", 100, 99.99, 100.01, ""), broker, runner.risk, runner.notifier, "USD", is_funnel_primary=True)
+    status = runner._trade_svc.execute("SELL_SHORT", "NVDA.US", Quote("NVDA.US", 100, 99.99, 100.01, ""), broker, runner.risk, runner.notifier, "USD", is_funnel_primary=True)
     # Then
     assert status is not None and status.status == "SKIPPED"
+    assert "short entries are disabled by the live safety policy" in status.reason
     snapshot = runner.decision_funnel.snapshot()
-    assert snapshot.pre_submit_risk_check_invocations == 1
+    assert snapshot.pre_submit_risk_check_invocations == 0
     assert snapshot.skips_by_category["RISK"] == 1
-    assert snapshot.sized_quantity_positive == 1
+    assert snapshot.sized_quantity_positive == 0
     assert broker.submissions == []
 
 

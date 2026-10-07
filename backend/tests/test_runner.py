@@ -3997,103 +3997,6 @@ class TestAppRunner:
         assert result.status == "FILLED"
         assert broker.submitted_price == Decimal("214.73")
 
-    @pytest.mark.parametrize(
-        ("action", "engine_state", "position_side", "bid", "ask", "order_price", "expected_price"),
-        [
-            ("SELL", EngineState.LONG, "LONG", 98.0, 98.1, 98.4, Decimal("98.00")),
-            (
-                "BUY_TO_COVER",
-                EngineState.SHORT,
-                "SHORT",
-                101.0,
-                101.1,
-                101.5,
-                Decimal("101.10"),
-            ),
-        ],
-    )
-    def test_llm_reduction_rebinds_submission_to_fresh_bbo(
-        self,
-        action: str,
-        engine_state: EngineState,
-        position_side: str,
-        bid: float,
-        ask: float,
-        order_price: float,
-        expected_price: Decimal,
-    ) -> None:
-        class Broker:
-            submitted_price: Decimal | None = None
-
-            def get_positions(self) -> list[Position]:
-                return [
-                    Position(
-                        "AAPL.US",
-                        position_side,
-                        Decimal("2"),
-                        Decimal("100"),
-                        available_quantity=Decimal("2"),
-                    )
-                ]
-
-            def get_quotes(self, symbols: list[str]) -> list[Quote]:
-                return [
-                    Quote(
-                        symbols[0],
-                        (bid + ask) / 2,
-                        bid,
-                        ask,
-                        _fresh_timestamp(),
-                    )
-                ]
-
-            def submit_limit_order(
-                self,
-                symbol: str,
-                side: str,
-                quantity: Decimal,
-                price: Decimal,
-            ) -> OrderResult:
-                self.submitted_price = price
-                return OrderResult(
-                    "llm-reduce-only",
-                    symbol,
-                    side,
-                    quantity,
-                    price,
-                    "SUBMITTED",
-                )
-
-        runner = AppRunner()
-        broker = Broker()
-        runner.engine.params = StrategyParams(symbol="AAPL.US", market="US")
-        runner.engine.state = engine_state
-        runner.broker = cast(Any, broker)
-        runner.notifier = _NoopNotifier()
-        runner._trade_svc._record_order = lambda *args: None
-        runner._trade_svc._update_order_status = lambda *args, **kwargs: None
-        runner._trade_svc._record_risk_event = lambda reason: None
-        runner._trade_svc._record_order_skipped = lambda *args: None
-        runner._trade_svc.load_tracked_entries(
-            {
-                "AAPL.US": (
-                    Decimal("2"),
-                    Decimal("200"),
-                    position_side,
-                    datetime.now(timezone.utc) - timedelta(minutes=5),
-                )
-            }
-        )
-
-        result = runner._execute_llm_trade_action(
-            action,
-            order_price,
-            allow_loss_exit=True,
-        )
-
-        assert result["status"] == "SUBMITTED"
-        assert broker.submitted_price == expected_price
-
     @pytest.mark.parametrize("pnl_source", ["LEDGER_REPLAY", "UNKNOWN", ""])
     def test_execution_outcome_recompute_preserves_non_authoritative_pnl_source(
         self,
@@ -5988,271 +5891,6 @@ class TestAppRunner:
         }
         assert snapshot["buying_power_usage_mode"] == "GUARDED"
 
-    def test_execute_llm_order_decision_submits_buy_now(self) -> None:
-        class Broker:
-            def __init__(self) -> None:
-                self.submitted = []
-
-            def get_quotes(self, symbols: list[str]) -> list[Quote]:
-                return [Quote(s, 222.0, 221.9, 222.1, _fresh_timestamp()) for s in symbols]
-
-            def estimate_margin_max_quantity(self, symbol: str, side: str, price: Decimal, currency=None) -> Decimal:
-                return Decimal("10")
-
-            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
-                self.submitted.append((symbol, side, quantity, price))
-                return OrderResult("order-llm-buy", symbol, side, quantity, price, "FILLED")
-
-        runner = AppRunner()
-        runner._running = True
-        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=218, sell_high=225)
-        runner.broker = Broker()
-        runner.notifier = _NoopNotifier()
-        self._stub_trade_callbacks(runner)
-
-        result = runner.execute_llm_order_decision({
-            "order_action": "BUY_NOW",
-            "order_price": 221.75,
-            "confidence_score": 0.9,
-            "order_reason": "strong signal",
-        })
-
-        assert {key: result[key] for key in ("executed", "status", "order_id", "action")} == {
-            "executed": True,
-            "status": "FILLED",
-            "order_id": "order-llm-buy",
-            "action": "BUY",
-        }
-        assert result["policy_disposition"] == "ALLOW"
-        assert runner.broker.submitted == [("NVDA.US", "BUY", Decimal("9"), Decimal("221.75"))]
-        assert runner.engine.state == EngineState.LONG
-
-    def test_execute_llm_order_decision_cancel_replace(self) -> None:
-        from app.core.broker import OrderStatusResult
-
-        class Broker:
-            def __init__(self) -> None:
-                self.cancelled = []
-                self.submitted = []
-                self.filled = False
-
-            def cancel_order(self, order_id: str) -> OrderStatusResult:
-                self.cancelled.append(order_id)
-                return OrderStatusResult(order_id, "CANCELLED")
-
-            def get_quotes(self, symbols: list[str]) -> list[Quote]:
-                return [Quote(s, 225.0, 225.0-0.1, 225.0+0.1, _fresh_timestamp()) for s in symbols]
-
-            def get_positions(self) -> list[Position]:
-                if self.filled:
-                    return []
-                return [Position("NVDA.US", "LONG", Decimal("5"), Decimal("220"))]
-
-            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
-                self.submitted.append((symbol, side, quantity, price))
-                self.filled = True
-                return OrderResult("order-llm-sell", symbol, side, quantity, price, "FILLED")
-
-        broker = Broker()
-        runner = AppRunner()
-        runner._running = True
-        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=218, sell_high=225)
-        runner.engine.state = EngineState.LONG
-        runner.broker = broker
-        runner.notifier = _NoopNotifier()
-        self._stub_trade_callbacks(runner)
-        runner._trade_svc._final_order_quote_check = runner._validate_final_order_quote
-        runner._trade_svc._track_pending_order(
-            "BUY",
-            OrderResult("order-pending", "NVDA.US", "BUY", Decimal("5"), Decimal("221"), "SUBMITTED"),
-            broker,
-            runner.engine.snapshot(),
-        )
-
-        result = runner.execute_llm_order_decision({
-            "order_action": "CANCEL_REPLACE",
-            "replacement_action": "SELL_NOW",
-            "replacement_price": 225.0,
-            "confidence_score": 0.9,
-            "order_reason": "replace stale buy with exit",
-        })
-
-        assert {key: result[key] for key in ("executed", "status", "order_id", "action")} == {
-            "executed": True,
-            "status": "FILLED",
-            "order_id": "order-llm-sell",
-            "action": "SELL",
-        }
-        assert result["policy_disposition"] == "ALLOW"
-        assert broker.cancelled == ["order-pending"]
-        assert broker.submitted == [("NVDA.US", "SELL", Decimal("5"), Decimal("224.90"))]
-        assert runner._trade_svc.has_pending_order is False
-        assert runner.engine.state == EngineState.FLAT
-
-    def test_execute_llm_order_decision_replaces_pending_order_for_new_action(self) -> None:
-        from app.core.broker import OrderStatusResult
-
-        class Broker:
-            def __init__(self) -> None:
-                self.cancelled = []
-                self.submitted = []
-
-            def cancel_order(self, order_id: str) -> OrderStatusResult:
-                self.cancelled.append(order_id)
-                return OrderStatusResult(order_id, "CANCELLED")
-
-            def get_quotes(self, symbols: list[str]) -> list[Quote]:
-                return [Quote(s, 222.0, 222.0-0.1, 222.0+0.1, _fresh_timestamp()) for s in symbols]
-
-            def estimate_margin_max_quantity(self, symbol: str, side: str, price: Decimal, currency=None) -> Decimal:
-                return Decimal("12")
-
-            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
-                self.submitted.append((symbol, side, quantity, price))
-                return OrderResult("order-llm-new-buy", symbol, side, quantity, price, "FILLED")
-
-        broker = Broker()
-        runner = AppRunner()
-        runner._running = True
-        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=218, sell_high=226)
-        runner.engine.state = EngineState.LONG
-        runner.broker = broker
-        runner.notifier = _NoopNotifier()
-        self._stub_trade_callbacks(runner)
-        runner._trade_svc._track_pending_order(
-            "BUY",
-            OrderResult("order-old-buy", "NVDA.US", "BUY", Decimal("10"), Decimal("221.0"), "SUBMITTED"),
-            broker,
-            EngineSnapshot(state=EngineState.FLAT, last_trigger_price=0.0, last_trigger_at=None),
-        )
-
-        result = runner.execute_llm_order_decision({
-            "order_action": "BUY_NOW",
-            "order_price": 221.88,
-            "confidence_score": 0.9,
-            "order_reason": "US price moved, refresh the resting order",
-        })
-
-        assert {key: result[key] for key in (
-            "executed", "status", "order_id", "action", "replaced_order_id"
-        )} == {
-            "executed": True,
-            "status": "FILLED",
-            "order_id": "order-llm-new-buy",
-            "action": "BUY",
-            "replaced_order_id": "order-old-buy",
-        }
-        assert result["policy_disposition"] == "ALLOW"
-        assert broker.cancelled == ["order-old-buy"]
-        assert broker.submitted == [("NVDA.US", "BUY", Decimal("10"), Decimal("221.88"))]
-        assert runner._trade_svc.has_pending_order is False
-        assert runner.engine.state == EngineState.LONG
-
-    def test_execute_llm_order_decision_stop_loss_sell_bypasses_profit_guard(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        class Broker:
-            def __init__(self) -> None:
-                self.submitted = []
-                self.filled = False
-
-            def get_quotes(self, symbols: list[str]) -> list[Quote]:
-                return [Quote(s, 215.0, 215.0-0.1, 215.0+0.1, _fresh_timestamp()) for s in symbols]
-
-            def get_positions(self) -> list[Position]:
-                if self.filled:
-                    return []
-                return [Position("NVDA.US", "LONG", Decimal("8"), Decimal("220"))]
-
-            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
-                self.submitted.append((symbol, side, quantity, price))
-                self.filled = True
-                return OrderResult("order-stop-loss", symbol, side, quantity, price, "FILLED")
-
-        runner = AppRunner()
-        runner._running = True
-        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=218, sell_high=225, min_profit_amount=50)
-        runner.engine.state = EngineState.LONG
-        runner.broker = Broker()
-        runner.notifier = _NoopNotifier()
-        runner._trade_svc._record_order = lambda *args: None
-        runner._trade_svc._update_order_status = lambda *args, **kwargs: None
-        runner._trade_svc._record_risk_event = lambda reason: None
-        runner._trade_svc._record_order_skipped = lambda *args: None
-        runner._llm_order_execution_enabled = True
-        monkeypatch.setattr(
-            runner,
-            "_entry_reference_quantity_for_exit",
-            lambda *_args: pytest.fail(
-                "stop-loss execution must not query entry reference history"
-            ),
-        )
-
-        result = runner.execute_llm_order_decision({
-            "order_action": "STOP_LOSS_SELL_NOW",
-            "order_price": 215.0,
-            "confidence_score": 0.9,
-            "order_reason": "支撑失效并开始崩盘",
-        })
-
-        assert {key: result[key] for key in ("executed", "status", "order_id", "action")} == {
-            "executed": True,
-            "status": "FILLED",
-            "order_id": "order-stop-loss",
-            "action": "SELL",
-        }
-        assert result["policy_disposition"] == "ALLOW"
-        assert runner.broker.submitted == [("NVDA.US", "SELL", Decimal("8"), Decimal("214.90"))]
-        assert runner.engine.state == EngineState.FLAT
-        assert runner.last_action_message == "LLM SELL FILLED: order-stop-loss"
-
-    def test_execute_llm_stop_loss_sell_allowed_while_paused(self) -> None:
-        class Broker:
-            def __init__(self) -> None:
-                self.submitted = []
-                self.filled = False
-
-            def get_quotes(self, symbols: list[str]) -> list[Quote]:
-                return [Quote(s, 193.0, 192.9, 193.1, _fresh_timestamp()) for s in symbols]
-
-            def get_positions(self) -> list[Position]:
-                if self.filled:
-                    return []
-                return [Position("NVDA.US", "LONG", Decimal("10"), Decimal("197.74"))]
-
-            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
-                self.submitted.append((symbol, side, quantity, price))
-                self.filled = True
-                return OrderResult("order-stop-loss-paused", symbol, side, quantity, price, "FILLED")
-
-        runner = AppRunner()
-        runner._running = True
-        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=196, sell_high=199)
-        runner.engine.state = EngineState.LONG
-        runner.broker = Broker()
-        runner.notifier = _NoopNotifier()
-        runner.risk.pause("pending order order-entry timed out after 30s")
-        self._stub_trade_callbacks(runner)
-        runner._trade_svc._final_order_quote_check = runner._validate_final_order_quote
-
-        result = runner.execute_llm_order_decision({
-            "order_action": "STOP_LOSS_SELL_NOW",
-            "order_price": 193.0,
-            "confidence_score": 0.9,
-            "order_reason": "跌破支撑，先减风险",
-        })
-
-        assert {key: result[key] for key in ("executed", "status", "order_id", "action")} == {
-            "executed": True,
-            "status": "FILLED",
-            "order_id": "order-stop-loss-paused",
-            "action": "SELL",
-        }
-        assert result["policy_disposition"] == "ALLOW"
-        assert runner.broker.submitted == [("NVDA.US", "SELL", Decimal("10"), Decimal("192.90"))]
-        assert runner.engine.state == EngineState.FLAT
-
     def _runner_with_pending_buy(self, price: Decimal) -> AppRunner:
         from app.core.broker import OrderStatusResult
 
@@ -6279,177 +5917,6 @@ class TestAppRunner:
             runner.engine.snapshot(),
         )
         return runner
-
-    def test_llm_cancel_replace_below_repricing_threshold_preserves_pending(self) -> None:
-        runner = self._runner_with_pending_buy(price=Decimal("221.00"))
-        runner.engine.params.min_repricing_pct = 0.003
-        skipped: list[tuple[Any, ...]] = []
-        runner._record_order_skipped = lambda *args: skipped.append(args)
-
-        result = runner.execute_llm_order_decision({
-            "order_action": "CANCEL_REPLACE",
-            "replacement_action": "BUY_NOW",
-            "replacement_price": 221.20,
-            "confidence_score": 0.9,
-        })
-
-        assert result["status"] == "SKIPPED"
-        assert runner.broker.cancelled == []
-        assert runner._trade_svc.has_pending_order is True
-        assert skipped[0][3]["skip_category"] == "REPRICING"
-
-    def test_llm_cooldown_rejection_preserves_pending_before_cancel(self, monkeypatch) -> None:
-        runner = self._runner_with_pending_buy(price=Decimal("221.00"))
-        runner.engine.params.llm_action_cooldown_seconds = 60
-        runner._last_llm_action_at[("NVDA.US", "BUY")] = 100.0
-        runner._record_order_skipped = lambda *args: None
-        monkeypatch.setattr(runner_module.time, "monotonic", lambda: 120.0)
-
-        result = runner.execute_llm_order_decision({
-            "order_action": "BUY_NOW",
-            "order_price": 222.00,
-            "confidence_score": 0.9,
-        })
-
-        assert result["status"] == "SKIPPED"
-        assert runner.broker.cancelled == []
-        assert runner._trade_svc.has_pending_order is True
-
-    def test_successful_llm_submission_records_broker_side_cooldown(self, monkeypatch) -> None:
-        class Broker:
-            def get_quotes(self, symbols: list[str]) -> list[Quote]:
-                return [Quote(s, 222.0, 222.0-0.1, 222.0+0.1, _fresh_timestamp()) for s in symbols]
-
-            def estimate_margin_max_quantity(self, symbol: str, side: str, price: Decimal, currency=None) -> Decimal:
-                return Decimal("10")
-
-            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal) -> OrderResult:
-                return OrderResult("order-llm-buy", symbol, side, quantity, price, "FILLED")
-
-        runner = AppRunner()
-        runner._running = True
-        runner.engine.params = StrategyParams(symbol="NVDA.US", market="US", buy_low=218, sell_high=225)
-        runner.broker = Broker()
-        runner.notifier = _NoopNotifier()
-        self._stub_trade_callbacks(runner)
-        monkeypatch.setattr(runner_module.time, "monotonic", lambda: 100.0)
-        result = runner.execute_llm_order_decision({
-            "order_action": "BUY_NOW",
-            "order_price": 221.75,
-            "confidence_score": 0.9,
-        })
-        assert result["executed"] is True
-        assert runner._last_llm_action_at[("NVDA.US", "BUY")] == 100.0
-
-    def test_llm_pre_submit_estimate_failure_does_not_latch_uncertainty(
-        self,
-    ) -> None:
-        # Given
-        class Broker:
-            def __init__(self) -> None:
-                self.submit_entered = False
-
-            def get_quotes(self, symbols: list[str]) -> list[Quote]:
-                return [
-                    Quote(symbol, 222.0, 221.9, 222.1, _fresh_timestamp())
-                    for symbol in symbols
-                ]
-
-            def get_positions(self) -> list[Position]:
-                return []
-
-            def estimate_margin_max_quantity(self, *_args: object) -> Decimal:
-                raise RuntimeError("margin estimate unavailable")
-
-            def submit_limit_order(
-                self,
-                symbol: str,
-                side: str,
-                quantity: Decimal,
-                price: Decimal,
-            ) -> OrderResult:
-                self.submit_entered = True
-                return OrderResult("must-not-submit", symbol, side, quantity, price, "SUBMITTED")
-
-        runner = AppRunner()
-        broker = Broker()
-        runner._running = True
-        runner.engine.params = StrategyParams(
-            symbol="NVDA.US",
-            market="US",
-            buy_low=218,
-            sell_high=225,
-        )
-        runner.broker = broker
-        runner.notifier = _NoopNotifier()
-        self._stub_trade_callbacks(runner)
-
-        # When
-        result = runner.execute_llm_order_decision({
-            "order_action": "BUY_NOW",
-            "order_price": 221.75,
-            "confidence_score": 0.9,
-        })
-
-        # Then
-        assert result["status"] == "SKIPPED"
-        assert broker.submit_entered is False
-        assert runner.risk.paused is False
-        assert runner.risk.pause_auto_resumable is False
-
-    def test_llm_broker_submit_failure_still_latches_uncertainty(self) -> None:
-        # Given
-        class Broker:
-            def __init__(self) -> None:
-                self.submit_entered = False
-
-            def get_quotes(self, symbols: list[str]) -> list[Quote]:
-                return [
-                    Quote(symbol, 222.0, 221.9, 222.1, _fresh_timestamp())
-                    for symbol in symbols
-                ]
-
-            def get_positions(self) -> list[Position]:
-                return []
-
-            def estimate_margin_max_quantity(self, *_args: object) -> Decimal:
-                return Decimal("10")
-
-            def submit_limit_order(
-                self,
-                _symbol: str,
-                _side: str,
-                _quantity: Decimal,
-                _price: Decimal,
-            ) -> OrderResult:
-                self.submit_entered = True
-                raise RuntimeError("broker acknowledgement missing")
-
-        runner = AppRunner()
-        broker = Broker()
-        runner._running = True
-        runner.engine.params = StrategyParams(
-            symbol="NVDA.US",
-            market="US",
-            buy_low=218,
-            sell_high=225,
-        )
-        runner.broker = broker
-        runner.notifier = _NoopNotifier()
-        self._stub_trade_callbacks(runner)
-
-        # When
-        result = runner.execute_llm_order_decision({
-            "order_action": "BUY_NOW",
-            "order_price": 221.75,
-            "confidence_score": 0.9,
-        })
-
-        # Then
-        assert result["status"] == "ORDER_SUBMISSION_UNCERTAIN"
-        assert broker.submit_entered is True
-        assert runner.risk.paused is True
-        assert runner.risk.pause_auto_resumable is False
 
     def test_llm_order_decision_targets_secondary_symbol_runtime(self, monkeypatch) -> None:
         class Broker:
@@ -6577,7 +6044,11 @@ class TestAppRunner:
             "confidence_score": 0.9,
         })
 
+        # Invalid replacement price is rejected by the order policy before
+        # the shadow disposition, and before any cancel. The pending order
+        # is preserved either way.
         assert result["status"] == "POLICY_REJECTED"
+        assert result["executed"] is False
         assert result["policy_code"] == "INVALID_ORDER_PRICE"
         assert runner.broker.cancelled == []
         assert runner._trade_svc.has_pending_order is True
@@ -10910,10 +10381,17 @@ class TestRecentQuotesDequeBound:
         assert runner.engine.state == EngineState.FLAT
         assert runner.broker.submitted == []
 
-    def test_existing_reduction_blocks_llm_order_before_state_transition(self, monkeypatch) -> None:
+    def test_forced_live_llm_flags_still_stay_shadow_without_state_transition(self, monkeypatch) -> None:
         class Broker:
+            def __init__(self) -> None:
+                self.cancelled: list[str] = []
+
             def get_quotes(self, symbols: list[str]) -> list[Quote]:
                 return [Quote(symbol, 100, 99.9, 100.1, _fresh_timestamp()) for symbol in symbols]
+
+            def cancel_order(self, order_id: str):
+                self.cancelled.append(order_id)
+                raise AssertionError("shadow LLM decision must not cancel")
 
         runner = AppRunner()
         runner._running = True
@@ -10924,13 +10402,15 @@ class TestRecentQuotesDequeBound:
         monkeypatch.setattr(runner_module.settings, "llm_shadow_mode", False)
 
         result = runner.execute_llm_order_decision({
-            "order_action": "BUY_NOW",
-            "order_price": 100,
+            "order_action": "CANCEL_PENDING",
             "confidence_score": 0.9,
         })
 
-        assert result["status"] == "REDUCING"
+        assert result["status"] == "SHADOW_ONLY"
+        assert result["executed"] is False
+        assert result["policy_code"] == "SHADOW_MODE"
         assert runner.engine.state == EngineState.FLAT
+        assert runner.broker.cancelled == []
 
 
 class TestDurableFillReconciliationFailure:

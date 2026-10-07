@@ -107,15 +107,6 @@ _BOARD_LOT_EVENT_TYPES = IncidentEventTypes(
     "HK_BOARD_LOT_RESIDUAL_RECOVERED",
 )
 
-_LLM_ORDER_ACTION_MAP = {
-    "BUY_NOW": "BUY",
-    "SELL_NOW": "SELL",
-    "SELL_SHORT_NOW": "SELL_SHORT",
-    "BUY_TO_COVER_NOW": "BUY_TO_COVER",
-    "STOP_LOSS_SELL_NOW": "SELL",
-    "STOP_LOSS_COVER_NOW": "BUY_TO_COVER",
-}
-_LLM_STOP_LOSS_ACTIONS = {"STOP_LOSS_SELL_NOW", "STOP_LOSS_COVER_NOW"}
 _LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
 _TERMINAL_ORDER_STATUSES = {"FILLED", "REJECTED", "CANCELLED"}
 _ENTRY_ACTIONS = {"BUY", "SELL_SHORT"}
@@ -5191,7 +5182,7 @@ class AppRunner:
         runtime = self._runtime_for_symbol(requested_symbol)
         if runtime is None:
             return {"executed": False, "status": "UNKNOWN_SYMBOL", "order_id": None, "action": ""}
-        target_symbol, target_market, target_engine = runtime
+        target_symbol = runtime[0]
 
         reference_quote = (
             None if action == "CANCEL_PENDING" else self._trusted_quote_for_llm_policy(target_symbol)
@@ -5208,160 +5199,24 @@ class AppRunner:
         )
         if not policy.allowed:
             return policy.to_result(action)
-        policy_fields = {
-            "policy_code": policy.code,
-            "policy_disposition": policy.disposition.value,
+        # P0 pins llm_shadow_mode True, so a production decision is rejected
+        # above. The cancel / replace / trade implementation that used to
+        # live here is gone. A test or caller that forces the pin off still
+        # gets the existing shadow protocol and never places, cancels, or
+        # modifies a live order.
+        return {
+            "executed": False,
+            "status": "SHADOW_ONLY",
+            "order_id": None,
+            "action": action,
+            "policy_code": "SHADOW_MODE",
+            "policy_disposition": "SHADOW",
+            "reason": "LLM order action recorded in shadow mode",
             "confidence": policy.confidence,
             "reference_price": policy.reference_price,
             "candidate_price": policy.candidate_price,
             "deviation_pct": policy.deviation_pct,
         }
-
-        def with_policy(result: dict[str, Any]) -> dict[str, Any]:
-            return {**result, **policy_fields}
-
-        with self._state_lock:
-            if target_symbol in self._reduction_intents and action != "CANCEL_PENDING":
-                return with_policy({
-                    "executed": False,
-                    "status": "REDUCING",
-                    "order_id": None,
-                    "action": action,
-                    "reason": "deterministic position reduction is already active",
-                })
-
-        with self._state_lock:
-            if self._trigger_in_flight:
-                return with_policy(
-                    {"executed": False, "status": "BUSY", "order_id": None, "action": ""}
-                )
-            self._trigger_in_flight = True
-
-        try:
-            if action in {"CANCEL_PENDING", "CANCEL_REPLACE"}:
-                if action == "CANCEL_PENDING":
-                    cancel_status = self._trade_svc.cancel_pending_order_for_symbol(
-                        target_symbol,
-                        risk=self.risk,
-                        notifier=self.notifier,
-                        restore_engine_snapshot=lambda snapshot: target_engine.restore(snapshot),
-                        notify_risk_event=self.notifier.notify_risk_event,
-                    )
-                    return with_policy({
-                        "executed": cancel_status.status == "CANCELLED",
-                        "status": cancel_status.status,
-                        "order_id": cancel_status.broker_order_id or None,
-                        "action": "CANCEL_PENDING",
-                    })
-                replacement_action = str(decision.get("replacement_action") or "NONE").upper()
-                mapped_action = _LLM_ORDER_ACTION_MAP.get(replacement_action)
-                if mapped_action is None:
-                    return with_policy({
-                        "executed": False,
-                        "status": "UNKNOWN_ACTION",
-                        "order_id": None,
-                        "action": "CANCEL_REPLACE",
-                    })
-                proposed_price = decision.get("replacement_price") or decision.get("order_price")
-                pending = self._trade_svc.pending_order_for(target_symbol)
-                skipped = self._precheck_llm_action(
-                    mapped_action,
-                    proposed_price,
-                    pending,
-                    symbol=target_symbol,
-                    engine=target_engine,
-                )
-                if skipped is not None:
-                    return with_policy(skipped)
-                session_skipped = self._check_trading_session(
-                    mapped_action, symbol=target_symbol, market=target_market
-                )
-                if session_skipped is not None:
-                    return with_policy(session_skipped)
-                cancel_status = self._trade_svc.cancel_pending_order_for_symbol(
-                    target_symbol,
-                    risk=self.risk,
-                    notifier=self.notifier,
-                    restore_engine_snapshot=lambda snapshot: target_engine.restore(snapshot),
-                    notify_risk_event=self.notifier.notify_risk_event,
-                )
-                if cancel_status.status not in {"CANCELLED", "NO_PENDING_ORDER"}:
-                    return with_policy({
-                        "executed": False,
-                        "status": cancel_status.status,
-                        "order_id": cancel_status.broker_order_id or None,
-                        "action": "CANCEL_REPLACE",
-                    })
-                return with_policy(self._execute_llm_trade_action(
-                    mapped_action,
-                    proposed_price,
-                    allow_loss_exit=replacement_action in _LLM_STOP_LOSS_ACTIONS,
-                    symbol=target_symbol,
-                    market=target_market,
-                    engine=target_engine,
-                    reference_quote=reference_quote,
-                ))
-
-            mapped_action = _LLM_ORDER_ACTION_MAP.get(action)
-            if mapped_action is None:
-                return with_policy(
-                    {"executed": False, "status": "UNKNOWN_ACTION", "order_id": None, "action": action}
-                )
-            pending = self._trade_svc.pending_order_for(target_symbol)
-            skipped = self._precheck_llm_action(
-                mapped_action,
-                decision.get("order_price"),
-                pending,
-                symbol=target_symbol,
-                engine=target_engine,
-            )
-            if skipped is not None:
-                return with_policy(skipped)
-            if pending is not None:
-                session_skipped = self._check_trading_session(
-                    mapped_action, symbol=target_symbol, market=target_market
-                )
-                if session_skipped is not None:
-                    return with_policy(session_skipped)
-                cancel_status = self._trade_svc.cancel_pending_order_for_symbol(
-                    target_symbol,
-                    risk=self.risk,
-                    notifier=self.notifier,
-                    restore_engine_snapshot=lambda snapshot: target_engine.restore(snapshot),
-                    notify_risk_event=self.notifier.notify_risk_event,
-                )
-                replaced_order_id = cancel_status.broker_order_id or None
-                if cancel_status.status not in {"CANCELLED", "NO_PENDING_ORDER"}:
-                    return with_policy({
-                        "executed": False,
-                        "status": cancel_status.status,
-                        "order_id": replaced_order_id,
-                        "action": mapped_action,
-                    })
-                result = self._execute_llm_trade_action(
-                    mapped_action,
-                    decision.get("order_price"),
-                    allow_loss_exit=action in _LLM_STOP_LOSS_ACTIONS,
-                    symbol=target_symbol,
-                    market=target_market,
-                    engine=target_engine,
-                    reference_quote=reference_quote,
-                )
-                if replaced_order_id is not None:
-                    result["replaced_order_id"] = replaced_order_id
-                return with_policy(result)
-            return with_policy(self._execute_llm_trade_action(
-                mapped_action,
-                decision.get("order_price"),
-                allow_loss_exit=action in _LLM_STOP_LOSS_ACTIONS,
-                symbol=target_symbol,
-                market=target_market,
-                engine=target_engine,
-                reference_quote=reference_quote,
-            ))
-        finally:
-            with self._state_lock:
-                self._trigger_in_flight = False
 
     def cancel_order_by_id(self, order_id: str):
         pending = self._trade_svc.pending_order_by_broker_id(order_id)
@@ -5379,164 +5234,6 @@ class AppRunner:
             restore_engine_snapshot=restore_fn,
             notify_risk_event=self.notifier.notify_risk_event,
         )
-
-    def _execute_llm_trade_action(
-        self,
-        action: str,
-        price: Any = None,
-        *,
-        allow_loss_exit: bool = False,
-        symbol: str | None = None,
-        market: str | None = None,
-        engine: StrategyEngine | None = None,
-        reference_quote: Quote | None = None,
-    ) -> dict[str, Any]:
-        risk_result = self.risk.check()
-        if not risk_result.approved and not self._risk_rejection_allows_action(action):
-            return {"executed": False, "status": "RISK_REJECTED", "order_id": None, "action": action}
-        if not risk_result.approved:
-            logger.info("allowing LLM position-reducing %s despite risk rejection: %s", action, risk_result.reason)
-
-        if symbol is not None and engine is not None:
-            target_symbol = symbol
-            target_market = market or self.engine.params.market
-            target_engine = engine
-        else:
-            runtime = self._runtime_for_symbol(symbol)
-            if runtime is None:
-                return {"executed": False, "status": "UNKNOWN_SYMBOL", "order_id": None, "action": action}
-            target_symbol, target_market, target_engine = runtime
-        if not target_symbol:
-            return {"executed": False, "status": "NO_SYMBOL", "order_id": None, "action": action}
-
-        engine_snapshot = target_engine.snapshot()
-        state_status = target_engine.transition_for_action(action)
-        if state_status != "OK":
-            return {"executed": False, "status": state_status, "order_id": None, "action": action}
-
-        quote = self._quote_for_llm_order(target_symbol, price, reference_quote=reference_quote)
-        if quote is None:
-            target_engine.restore(engine_snapshot)
-            return {"executed": False, "status": "NO_QUOTE", "order_id": None, "action": action}
-
-        try:
-            target_params = dataclass_replace(target_engine.params)
-            entry_reference_quantity = None
-            if not allow_loss_exit and target_params.min_profit_amount > 0:
-                entry_reference_quantity = (
-                    self._entry_reference_quantity_for_exit(
-                        target_symbol,
-                        action,
-                    )
-                )
-            llm_decision = _QuoteTriggerDecision(
-                result=TriggerResult(
-                    triggered=True,
-                    action=action,
-                    description="LLM trade action",
-                ),
-                trigger_symbol=target_symbol,
-                trigger_engine=target_engine,
-                trigger_params=target_params,
-                trigger_market=target_market,
-                allow_loss_exit=allow_loss_exit,
-                reduce_only=action in _POSITION_REDUCING_ACTIONS,
-                reduction_cause=(
-                    "LLM_STOP_LOSS" if allow_loss_exit else "LLM"
-                ),
-            )
-            order_status = self._trade_svc.execute(
-                action=action,
-                symbol=target_symbol,
-                quote=quote,
-                broker=self.broker,
-                risk=self.risk,
-                notifier=self.notifier,
-                cash_currency=self._cash_currency_for_market(target_market),
-                market=target_market,
-                trading_session_mode=self._get_trading_session_mode(),
-                min_profit_amount=target_params.min_profit_amount,
-                allow_loss_exit=allow_loss_exit,
-                fee_rate=self._fee_rate_for_params(
-                    target_params,
-                    target_market,
-                ),
-                expected_exit_price=(
-                    target_params.sell_high
-                    if action == "BUY"
-                    else None
-                ),
-                entry_reference_quantity=entry_reference_quantity,
-                engine_snapshot=engine_snapshot,
-                restore_engine_snapshot=lambda snapshot: target_engine.restore(snapshot),
-                notify_risk_event=self.notifier.notify_risk_event,
-                reduce_only=llm_decision.reduce_only,
-                execution_context=self._execution_ledger_context(
-                    llm_decision,
-                    quote,
-                    "LLM trade action",
-                    initiator="LLM",
-                ),
-            )
-        except BrokerSubmissionUncertainError:
-            target_engine.restore(engine_snapshot)
-            reason = (
-                f"{_ORDER_SUBMISSION_UNCERTAIN_PREFIX} LLM order submission "
-                f"outcome is unknown for symbol={target_symbol} action={action}"
-            )
-            self.risk.pause(reason, auto_resumable=False)
-            self._set_last_action_message(reason)
-            self._persist_risk_pause_best_effort()
-            try:
-                self._record_risk_event(reason)
-            except Exception:
-                logger.exception("failed to record uncertain LLM order submission")
-            logger.exception("LLM order submission outcome is unknown; trading paused")
-            return {
-                "executed": False,
-                "status": "ORDER_SUBMISSION_UNCERTAIN",
-                "order_id": None,
-                "action": action,
-            }
-        except Exception as exc:
-            target_engine.restore(engine_snapshot)
-            reason = (
-                f"PRE_SUBMIT_EXECUTION_FAILED: LLM order check failed for "
-                f"symbol={target_symbol} action={action}: {exc}"
-            )
-            self._set_last_action_message(f"{action} skipped: {reason}")
-            try:
-                self._record_risk_event(reason)
-            except Exception:
-                logger.exception("failed to record rejected LLM pre-submit check")
-            logger.exception("LLM pre-submit check failed closed")
-            return {
-                "executed": False,
-                "status": "SKIPPED",
-                "order_id": None,
-                "action": action,
-            }
-        if order_status is None:
-            target_engine.restore(engine_snapshot)
-            return {"executed": False, "status": "NO_ORDER", "order_id": None, "action": action}
-        if order_status.status in {"SKIPPED", "REJECTED", "CANCELLED"}:
-            target_engine.restore(engine_snapshot)
-        elif order_status.status == "FILLED" and action in _POSITION_REDUCING_ACTIONS:
-            self._on_reduction_fill(
-                target_symbol,
-                action,
-                Decimal(str(order_status.executed_quantity or 0)),
-            )
-        result = {
-            "executed": order_status.status in {"FILLED", "SUBMITTED", "PARTIAL_FILLED"},
-            "status": order_status.status,
-            "order_id": order_status.broker_order_id or None,
-            "action": action,
-        }
-        if result["executed"]:
-            side = self._broker_side_for_action(action)
-            self._last_llm_action_at[(target_symbol, side)] = time.monotonic()
-        return result
 
     def _record_llm_order_result(self, result: dict[str, Any]) -> None:
         action = str(result.get("action") or "").upper()
@@ -5570,29 +5267,6 @@ class AppRunner:
         reference = (bid + ask) / 2
         if reference <= 0 or (ask - bid) / reference >= _QUOTE_SPREAD_THRESHOLD_PCT:
             return None
-        return quote
-
-    def _quote_for_llm_order(
-        self,
-        symbol: str,
-        price: Any = None,
-        *,
-        reference_quote: Quote | None = None,
-    ) -> Quote | None:
-        override_price = self._coerce_positive_float(price)
-        quote = reference_quote
-        if quote is None:
-            quote = self._trusted_quote_for_llm_policy(symbol)
-        if quote is None:
-            return None
-        if override_price > 0:
-            return Quote(
-                symbol=quote.symbol,
-                last_price=override_price,
-                bid=quote.bid,
-                ask=quote.ask,
-                timestamp=quote.timestamp,
-            )
         return quote
 
     @staticmethod
@@ -11601,72 +11275,6 @@ class AppRunner:
             "order_id": None,
             "action": action,
         }
-
-    def _skip_llm_action(
-        self,
-        action: str,
-        reason: str,
-        *,
-        symbol: str | None = None,
-        **payload: object,
-    ) -> dict[str, Any]:
-        self._record_order_skipped(symbol or self.engine.params.symbol, action, reason, payload)
-        return {"executed": False, "status": "SKIPPED", "order_id": None, "action": action}
-
-    def _precheck_llm_action(
-        self,
-        action: str,
-        proposed_price: Any,
-        pending: _PendingOrder | None,
-        *,
-        symbol: str | None = None,
-        engine: StrategyEngine | None = None,
-    ) -> dict[str, Any] | None:
-        if symbol is not None and engine is not None:
-            target_symbol = symbol
-            target_engine = engine
-        else:
-            runtime = self._runtime_for_symbol(symbol)
-            if runtime is None:
-                return {"executed": False, "status": "UNKNOWN_SYMBOL", "order_id": None, "action": action}
-            target_symbol, _, target_engine = runtime
-        side = self._broker_side_for_action(action)
-        params = target_engine.params
-        if pending is not None and (params.min_repricing_pct or 0) > 0:
-            normalized_price = self._coerce_positive_float(proposed_price)
-            if normalized_price <= 0:
-                return {"executed": False, "status": "NO_QUOTE", "order_id": None, "action": action}
-            old_price = pending.price
-            new_price = Decimal(str(normalized_price))
-            if old_price <= 0:
-                repricing_pct = Decimal("1")
-            else:
-                repricing_pct = abs(new_price - old_price) / old_price
-            min_repricing = Decimal(str(params.min_repricing_pct or 0))
-            if min_repricing > 0 and repricing_pct < min_repricing:
-                return self._skip_llm_action(
-                    action,
-                    "replacement price movement is below minimum threshold",
-                    symbol=target_symbol,
-                    skip_category="REPRICING",
-                    old_price=float(old_price),
-                    new_price=float(new_price),
-                    repricing_pct=float(repricing_pct),
-                )
-        cooldown = params.llm_action_cooldown_seconds or 0
-        last_at = self._last_llm_action_at.get((target_symbol, side))
-        if cooldown > 0 and last_at is not None:
-            remaining = cooldown - (time.monotonic() - last_at)
-            if remaining > 0:
-                return self._skip_llm_action(
-                    action,
-                    "LLM action remains in cooldown",
-                    symbol=target_symbol,
-                    skip_category="COOLDOWN",
-                    cooldown_remaining_seconds=remaining,
-                )
-        return None
-
 
 _runner: AppRunner | None = None
 _runner_lock = threading.Lock()

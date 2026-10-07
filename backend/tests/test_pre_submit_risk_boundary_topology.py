@@ -111,17 +111,22 @@ def test_buy_submission_path_traverses_the_mandatory_boundary(
     assert len(broker.submissions) == 1
 
 
-def test_sell_short_submission_path_traverses_and_is_rejected_by_the_boundary(
+def test_sell_short_submission_path_is_rejected_before_the_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Given
+    # Given: the short-entry implementation is gone. Forcing the
+    # compatibility flag must still reject with the live-safety reason,
+    # without sizing, without crossing the boundary, and without a broker
+    # mutation.
     service = _service()
+    service.short_entries_enabled = True
     broker = _TopologyBroker()
     invocations: list[str] = []
     _install_boundary_spy(service, monkeypatch, invocations)
 
     # When
-    status = service._execute_sell_short(
+    status = service.execute(
+        "SELL_SHORT",
         "AAPL.US",
         Quote("AAPL.US", 100, 99.99, 100.01, ""),
         broker,
@@ -133,7 +138,8 @@ def test_sell_short_submission_path_traverses_and_is_rejected_by_the_boundary(
     # Then
     assert status is not None
     assert status.status == "SKIPPED"
-    assert invocations == ["called"]
+    assert "short entries are disabled by the live safety policy" in status.reason
+    assert invocations == []
     assert broker.submissions == []
 
 

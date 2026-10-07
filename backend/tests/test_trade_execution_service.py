@@ -3021,19 +3021,16 @@ class TestTradeExecutionServiceBasics:
         assert svc.has_pending_order is True
         broker.get_order_status.assert_not_called()
 
-    def test_execute_sell_short_sizes_but_boundary_rejects_short_entry(
+    def test_execute_sell_short_rejects_before_sizing_even_if_flag_forced(
         self,
         svc: TradeExecutionService,
-        monkeypatch,
     ) -> None:
-        from app.core.broker import OrderResult, Quote
+        from app.core.broker import Quote
         from app.core.risk import RiskController
         from app.core.notify import ServerChanNotifier
 
         broker = MagicMock()
         svc.short_entries_enabled = True
-        broker.estimate_margin_max_quantity.return_value = Decimal("50")
-        broker.submit_limit_order.return_value = OrderResult("order-2", "NVDA.US", "SELL", Decimal("45"), Decimal("225"), "FILLED")
 
         status = svc.execute(
             "SELL_SHORT",
@@ -3047,7 +3044,8 @@ class TestTradeExecutionServiceBasics:
 
         assert status is not None
         assert status.status == "SKIPPED"
-        broker.estimate_margin_max_quantity.assert_called_once_with("NVDA.US", "SELL", Decimal("225"), "USD")
+        assert "short entries are disabled by the live safety policy" in status.reason
+        broker.estimate_margin_max_quantity.assert_not_called()
         broker.get_cash.assert_not_called()
         broker.submit_limit_order.assert_not_called()
 
