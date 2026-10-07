@@ -146,6 +146,10 @@ if TYPE_CHECKING:
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("auto_trade.main")
+# httpx logs every request line at INFO with the full URL. Notifier URLs carry
+# credentials in the path (ServerChan SendKey, Telegram bot token), so at INFO
+# each notification wrote the key into the container log. Warnings still pass.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 # Healthcheck probes (/api/ready, /api/live every ~30s) are container noise,
 # not operator signal — measured 32%+ of container log volume.
 logging.getLogger("uvicorn.access").addFilter(HealthcheckAccessFilter())
