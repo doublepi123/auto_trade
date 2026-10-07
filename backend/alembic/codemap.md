@@ -52,9 +52,10 @@ directly — `init_db()` alone keeps a dev DB converged.
 ## Integration
 
 - `app/models` — `Base.metadata` is the migration target.
-- `app/database.py` — runtime `_ensure_*` counterpart; its
-  `WATCHLIST_QUANT_V6_TABLE_NAMES` / `_watchlist_quant_v6_schema_issues`
-  are imported by the entrypoint's stamp routine.
+- `app/database.py` — runtime `_ensure_*` counterpart. The entrypoint's
+  stamp routine still imports `WATCHLIST_QUANT_V6_TABLE_NAMES` so an
+  already-migrated database can be recognised by table presence; startup no
+  longer creates those tables and no longer compares them to ORM metadata.
 - `docker-entrypoint.sh` / `Dockerfile` — the only prod driver ([`../codemap.md`](../codemap)).
 - `tests/` — migration integrity tests run the chain against scratch SQLite
   files (`tests/AGENTS.md`).

@@ -2446,6 +2446,79 @@ class TestTradeExecutionServiceBasics:
         broker.estimate_margin_max_quantity.assert_not_called()
         broker.submit_limit_order.assert_not_called()
 
+    def test_range_entry_with_zero_stop_is_rejected_at_pre_submit(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        """Ordinary RANGE entry must not pass a zero stop.
+
+        Migrated from the retired passive suite: a zero stop is a
+        misconfigured range limit, not an allowed no-stop lane.
+        """
+        svc.stop_loss_pct = 0.0
+        broker = MagicMock()
+        result = svc.pre_submit_risk_check(
+            _PreSubmitRiskRequest(
+                action="BUY",
+                symbol="AAPL.US",
+                quantity=Decimal("10"),
+                price=Decimal("100"),
+            ),
+            broker,
+        )
+
+        assert isinstance(result, OrderStatus)
+        assert result.status == "SKIPPED"
+        assert (
+            "stop distance is unavailable" in result.reason
+            or "stop_loss_pct must be configured" in result.reason
+        )
+        broker.submit_limit_order.assert_not_called()
+
+    def test_range_settlement_failure_pauses_with_persistence_uncertain(
+        self,
+        svc: TradeExecutionService,
+    ) -> None:
+        """Ordinary RANGE settlement failure keeps the original pause reason.
+
+        Migrated from the retired passive suite. A fill that cannot be
+        booked must pause with ORDER_STATUS_PERSISTENCE_UNCERTAIN and the
+        broker order id, then re-raise the settlement error.
+        """
+        pending = _PendingOrder(
+            broker=MagicMock(),
+            broker_order_id="range-1",
+            symbol="AAPL.US",
+            action="BUY",
+            quantity=Decimal("10"),
+            price=Decimal("100"),
+            engine_snapshot=None,
+        )
+
+        def broken_settle(_intent: object) -> object:
+            raise RuntimeError("AAPL settlement DB down")
+
+        svc._settle_fill = broken_settle  # type: ignore[method-assign]
+        risk = RiskController()
+        with pytest.raises(RuntimeError, match="AAPL settlement DB down"):
+            svc._finalize_pending_fill(
+                pending,
+                OrderStatus(
+                    "range-1",
+                    "FILLED",
+                    Decimal("10"),
+                    Decimal("100"),
+                ),
+                risk=risk,
+            )
+
+        assert risk.paused is True
+        assert risk.pause_auto_resumable is False
+        assert risk.pause_reason.startswith(
+            "ORDER_STATUS_PERSISTENCE_UNCERTAIN:"
+        )
+        assert "range-1" in risk.pause_reason
+
     def test_execute_blocks_short_entry_but_keeps_cover_path_available(
         self,
         svc: TradeExecutionService,

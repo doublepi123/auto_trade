@@ -20,7 +20,7 @@ Declare `ref`s at **module top level**, not inside the composable function; ever
 ## API CLIENTS
 `src/api/client.ts` is three lines: `axios.create({ baseURL: '', timeout: 10000 })`. No interceptors, no error normalization, no auth — the API key is injected server-side by the Vite proxy in dev and by nginx in Docker.
 
-One file per backend domain exporting `async function getX(): Promise<Typed>` that returns `resp.data`; query params stay snake_case; CSV export uses `responseType: 'blob'`. Filenames are camelCase except four that mirror backend module names: `llm_advisor.ts`, `strategy_shadow.ts`, `opening_momentum_shadow.ts`, `strategy_experiments.ts`. `index.ts` re-exports everything, so both `from '../api'` and `from '../api/edgeQuality'` work.
+One file per backend domain exporting `async function getX(): Promise<Typed>` that returns `resp.data`; query params stay snake_case; CSV export uses `responseType: 'blob'`. Filenames are camelCase except three that mirror backend module names: `llm_advisor.ts`, `strategy_shadow.ts`, `strategy_experiments.ts`. `index.ts` re-exports everything, so both `from '../api'` and `from '../api/edgeQuality'` work.
 
 `views/Watchlist.vue` imports `axios` directly — a lone exception, not a pattern to copy.
 

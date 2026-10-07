@@ -344,24 +344,6 @@ class TestFundedMarginBindingFailClosed(_ArmedMixin):
         assert legacy_broker.margin_calls == modern_broker.margin_calls
         assert len(modern_broker.margin_calls) == 1
 
-    def test_passive_lane_never_uses_the_exception(self) -> None:
-        svc = _make_service(raw_caps=(1000, 25000.0, 250.0))
-        svc._active_execution_context = {"passive_lane": "SPY_PASSIVE"}
-
-        assert svc._range_entry_limits_for("TSLA.US", "BUY", "US") is None
-        # The binding itself stays MATCHED; the lane is simply excluded.
-        assert (
-            svc.funded_margin_diagnostics()["binding_status"] == "MATCHED"
-        )
-
-    def test_opening_momentum_source_never_uses_the_exception(self) -> None:
-        svc = _make_service(raw_caps=(1000, 25000.0, 250.0))
-        svc._active_execution_context = {
-            "strategy_source": "OPENING_MOMENTUM",
-        }
-
-        assert svc._range_entry_limits_for("TSLA.US", "BUY", "US") is None
-
     def test_sell_short_never_uses_the_exception(self) -> None:
         svc = _make_service(raw_caps=(1000, 25000.0, 250.0))
 

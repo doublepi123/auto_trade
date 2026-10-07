@@ -16,7 +16,6 @@ from app.database import get_db
 from app.models import (
     Base,
     LLMInteraction,
-    OpeningMomentumShadowRun,
     StrategyConfig,
     StrategyV2ShadowTrade,
     TradeEvent,
@@ -68,7 +67,6 @@ class _Base:
                 TradeEvent,
                 StrategyConfig,
                 StrategyV2ShadowTrade,
-                OpeningMomentumShadowRun,
                 WatchlistScore,
                 LLMInteraction,
             ):
@@ -310,27 +308,6 @@ class TestSignalConsensusApi(_Base):
         rows = resp.json()
         assert len(rows) == 1
         assert rows[0]["symbol"] == "X.US"
-
-    def test_opening_momentum_bullish_when_candidate_entered(self) -> None:
-        db = self._db()
-        db.add(OpeningMomentumShadowRun(
-            session_date=_NOW.date(),
-            algorithm_version="v1",
-            config_version="v1",
-            status="ENTERED",
-            reason="",
-            signal_at=_NOW,
-            observed_at=_NOW,
-            universe_size=1,
-            candidate_symbol="COKE.US",
-            estimated_cost_bps=5.0,
-        ))
-        db.commit()
-        db.close()
-
-        rows = SignalConsensusService(self._db()).get_matrix(["COKE.US"])
-        row = rows[0]
-        assert row["sources"]["opening_momentum"]["signal"] == "BULLISH"
 
     def test_strategy_v2_shadow_open_is_bullish(self) -> None:
         db = self._db()

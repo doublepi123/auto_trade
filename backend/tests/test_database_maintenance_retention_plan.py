@@ -16,13 +16,11 @@ from app.models import (
     Base,
     StrategyV2ForwardReplayArtifact,
     StrategyV2ShadowDecision,
-    WatchlistQuantV6Artifact,
 )
 
 
 _NOW = datetime(2026, 9, 5, 12, tzinfo=timezone.utc)
 _PLAN_CASES = (
-    ("_quant_v6_plan", "artifacts"),
     ("_forward_replay_plan", "artifacts"),
     ("_diagnostic_wait_plan", "decisions"),
 )
@@ -61,17 +59,6 @@ def database(tmp_path: Path) -> Iterator[tuple[Session, Path, Engine]]:
 def _seed_rows(session: Session, *ages: timedelta) -> None:
     for index, age in enumerate(ages, start=1):
         created_at = _NOW - age
-        session.add(WatchlistQuantV6Artifact(
-            digest_sha256=f"{index:064x}",
-            schema_version=1,
-            kind="WATCHLIST_QUANT_V6_ASSESSMENT",
-            codec="zlib",
-            compression_level=9,
-            raw_size=1,
-            compressed_size=1,
-            payload=b"x",
-            created_at=created_at,
-        ))
         session.add(StrategyV2ForwardReplayArtifact(
             digest_sha256=f"{index + 100:064x}",
             schema_version=1,
@@ -193,11 +180,6 @@ def test_preview_projects_no_reduction_when_all_windows_are_disabled(
     _seed_rows(session, timedelta(days=60))
     monkeypatch.setattr(
         maintenance.settings,
-        "watchlist_quant_v6_artifact_retention_days",
-        0,
-    )
-    monkeypatch.setattr(
-        maintenance.settings,
         "strategy_v2_forward_replay_artifact_retention_days",
         0,
     )
@@ -218,7 +200,7 @@ def test_preview_projects_no_reduction_when_all_windows_are_disabled(
     payload = json.loads(capsys.readouterr().out)
 
     assert exit_code == 0
-    assert payload["retention"]["watchlist_quant_v6"]["artifacts"] == 0
+    assert "watchlist_quant_v6" not in payload["retention"]
     assert payload["retention"]["strategy_v2_forward_replay"]["artifacts"] == 0
     assert payload["retention"]["strategy_v2_diagnostic_wait"]["decisions"] == 0
     assert payload["projection"]["est_freed_bytes"] == 0

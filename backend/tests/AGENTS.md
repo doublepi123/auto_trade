@@ -69,8 +69,11 @@ needs a distinct `COVERAGE_FILE`, log, and captured exit code. Finish ordinary
 shards before the realtime lane on a shared machine. Follow the existing CI
 coverage-combine step and enforce 80% only on the complete combined result.
 
-The realtime lane is intentionally serial: these tests spawn compute processes
-and assert wall-clock deadlines. Run from `backend/`:
+The realtime lane is intentionally serial: it selects `WALL_CLOCK_MODULES`.
+That set is empty after the quant-v6 wall-clock tests were retired; the
+selector stays so a future module that spawns compute processes and asserts
+elapsed bounds can be excluded from the numbered shards without a new
+mechanism. Run from `backend/`:
 
 ```bash
 AUTO_TRADE_ENV=test AUTO_TRADE_TEST_REALTIME_ONLY=1 \

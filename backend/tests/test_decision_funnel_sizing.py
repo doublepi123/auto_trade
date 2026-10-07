@@ -65,7 +65,6 @@ def _scenario(monkeypatch: pytest.MonkeyPatch) -> tuple[AppRunner, _FakeBroker]:
     monkeypatch.setattr(runner, "_check_reconciliation_gate", lambda: True)
     monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
     monkeypatch.setattr(runner, "_execution_ledger_context", lambda *_args: {})
-    monkeypatch.setattr(runner, "_opening_execution_ledger_context", lambda _symbol, context: context)
     service = runner._trade_svc
     monkeypatch.setattr(service, "_record_order", lambda *_args: None)
     monkeypatch.setattr(service, "_record_risk_event", lambda *_args: None)

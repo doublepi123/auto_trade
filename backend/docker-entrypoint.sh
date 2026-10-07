@@ -13,7 +13,6 @@ from sqlalchemy import create_engine, inspect, text
 from app.config import settings
 from app.database import (
     WATCHLIST_QUANT_V6_TABLE_NAMES,
-    _watchlist_quant_v6_schema_issues,
 )
 
 INITIAL_REVISION = '41e077353669'
@@ -258,15 +257,17 @@ def mark_migrated_if_needed():
         )
         quant_table_names = set(WATCHLIST_QUANT_V6_TABLE_NAMES)
         present_quant_tables = tables & quant_table_names
-        quant_schema_complete = False
-        if present_quant_tables:
-            quant_issues = _watchlist_quant_v6_schema_issues(engine)
-            if quant_issues:
-                raise RuntimeError(
-                    'partial watchlist quant-v6 schema; refusing to stamp: '
-                    + '; '.join(quant_issues)
-                )
-            quant_schema_complete = True
+        # Presence only. The writer and ORM models are retired, so a column
+        # signature can no longer be compared against Base.metadata. A partial
+        # set still refuses the stamp; a complete set is historical storage
+        # and is neither created nor dropped here.
+        if present_quant_tables and present_quant_tables != quant_table_names:
+            missing = sorted(quant_table_names - present_quant_tables)
+            raise RuntimeError(
+                'partial watchlist quant-v6 schema; refusing to stamp: '
+                'missing tables ' + ', '.join(missing)
+            )
+        quant_schema_complete = present_quant_tables == quant_table_names
         lease_schema_complete = False
         if 'durable_job_leases' in tables:
             lease_issues = durable_job_lease_schema_issues(inspector, conn)
@@ -419,10 +420,10 @@ def mark_migrated_if_needed():
                 return
             if recorded_revision == WATCHLIST_QUANT_V6_REVISION:
                 if not quant_schema_complete:
-                    quant_issues = _watchlist_quant_v6_schema_issues(engine)
+                    missing = sorted(quant_table_names - present_quant_tables)
                     raise RuntimeError(
                         'alembic_version is quant-v6 but its schema is '
-                        'incomplete: ' + '; '.join(quant_issues)
+                        'incomplete: missing tables ' + ', '.join(missing)
                     )
                 return
             if quant_schema_complete:

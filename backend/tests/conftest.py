@@ -85,25 +85,14 @@ _RELIABILITY_DB_MODULES = frozenset(
     }
 )
 
-WALL_CLOCK_MODULES = frozenset(
-    {
-        "tests/test_watchlist_quant_v6_cron.py",
-        "tests/test_watchlist_quant_v6_publication_service.py",
-        "tests/test_watchlist_quant_v6_spawn_supervisor.py",
-    }
-)
+WALL_CLOCK_MODULES: frozenset[str] = frozenset()
 """Modules that spawn compute processes and assert on elapsed wall-clock.
 
-Bounds like `2.5 <= elapsed < 8` hold serially and miss under `-n 4` on a
-4-vCPU runner, where four xdist workers plus each test's own spawned workers
-oversubscribe the CPU. CI runs these in one serial job so they get the machine;
-the numbered shards skip them.
-
-Only the three modules that have actually failed that way are listed: run
-33418588994 lost cron, publication_service and spawn_supervisor, and run
-33533855333 lost cron and spawn_supervisor again. deadline, evaluation_service
-and historical_provider assert on elapsed time too but have never missed, and
-serialising them as well would cost more than it buys.
+The only members were the retired quant-v6 cron, publication, and spawn
+supervisor tests. The lane stays: ``AUTO_TRADE_TEST_REALTIME_ONLY`` still
+selects this set, and a future wall-clock module is added here rather than
+inventing a second mechanism. An empty set means the realtime job collects
+nothing and the numbered shards keep every remaining module.
 """
 
 _DURATIONS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".test_durations")
@@ -111,7 +100,6 @@ _DURATIONS_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".tes
 TEST_LEVEL_SAFE_MODULES: frozenset[str] = frozenset(
     {
         "tests/test_strategy_v2_shadow_service.py",
-        "tests/test_opening_momentum_shadow_service.py",
         "tests/test_trade_execution_service.py",
         "tests/test_universe_selection_service.py",
         "tests/test_research_observation_health_service.py",

@@ -43,9 +43,6 @@ from app.api.notifications import router as notifications_router
 from app.api.credentials import router as credentials_router
 from app.api.experiments import router as experiments_router
 from app.api.metrics import router as metrics_router
-from app.api.opening_momentum_shadow import (
-    router as opening_momentum_shadow_router,
-)
 from app.api.indicators import router as indicators_router
 from app.api.performance import router as performance_router
 from app.api.llm_advisor import router as llm_advisor_router
@@ -58,7 +55,6 @@ from app.api.strategy_experiments import router as strategy_experiments_router
 from app.api.trade import router as trade_router
 from app.api.universe import router as universe_router
 from app.api.watchlist import router as watchlist_router
-from app.api.watchlist_quant_v6 import router as watchlist_quant_v6_router
 from app.api.ws import router as ws_router
 from app.api.ws import manager as ws_manager
 from app.core.liveness import (
@@ -140,10 +136,6 @@ from app import __version__ as APP_VERSION
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
 
-    from app.services.watchlist_quant_v6_deadline import (
-        QuantV6EvaluationDeadline,
-    )
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 logger = logging.getLogger("auto_trade.main")
 # httpx logs every request line at INFO with the full URL. Notifier URLs carry
@@ -168,35 +160,18 @@ _llm_analysis_lock = asyncio.Lock()
 _report_schedule_lock = asyncio.Lock()
 _alert_rules_lock = asyncio.Lock()
 _strategy_v2_shadow_lock = asyncio.Lock()
-_opening_momentum_shadow_lock = asyncio.Lock()
 _universe_selection_lock = asyncio.Lock()
 _watchlist_quant_lock = asyncio.Lock()
-_watchlist_quant_v6_evaluation_lock = asyncio.Lock()
 _llm_globals_lock = threading.Lock()
 _watchlist_quant_sync_lock = threading.Lock()
-_watchlist_quant_v6_evaluation_sync_lock = threading.Lock()
 _WATCHLIST_QUANT_POLL_SECONDS = 60
-_WATCHLIST_QUANT_V6_INITIAL_DELAY_SECONDS = 120
-_OPENING_MOMENTUM_POLL_SECONDS = 15
-_OPENING_MOMENTUM_PRIORITY_POLL_SECONDS = 5
 _OPENING_RESEARCH_DEFER_RETRY_SECONDS = 60
 _OPENING_RESEARCH_DEFERRED = object()
-# quant-v6 historical evaluation writes multi-second atomic publication
-# bundles; while any live-traded market is in regular hours those writes can
-# stall live-path writers (runtime state, order persistence), so the tick
-# defers entirely out of RTH and rechecks on the fast retry cadence.
-_MARKET_RTH_DEFERRED = object()
 _T = TypeVar("_T")
 _JOB_LEASE_RETRY_SECONDS = 60
 _JOB_LEASE_BUSY_DEFERRED = object()
-# An over-budget database stays over budget for days, so this defer waits the
-# regular research interval rather than the fast retry the transient defers use.
-_DATABASE_SIZE_BUDGET_DEFERRED = object()
 _LLM_STORAGE_MAINTENANCE_LEASE_KEY = (
     LLM_STORAGE_MAINTENANCE_LEASE_KEY
-)
-_WATCHLIST_QUANT_V6_EVALUATION_LEASE_KEY = (
-    "watchlist_quant_v6_evaluation"
 )
 _LLM_SECONDARY_ACTION_PRIORITY = {
     "CANDIDATE": 0,
@@ -214,12 +189,10 @@ _CRON_REPORT_SCHEDULE = "report_schedule"
 _CRON_ALERT_RULES = "alert_rules"
 _CRON_LLM_STORAGE_MAINTENANCE = "llm_storage_maintenance"
 _CRON_STRATEGY_V2_SHADOW = "strategy_v2_shadow"
-_CRON_OPENING_MOMENTUM_SHADOW = "opening_momentum_shadow"
 _CRON_UNIVERSE_SELECTION = "universe_selection"
 _CRON_AUTO_PRIMARY_SWITCH = "auto_primary_switch"
 _CRON_INTERVAL_RECENTER = "interval_recenter"
 _CRON_WATCHLIST_QUANT = "watchlist_quant"
-_CRON_WATCHLIST_QUANT_V6_EVALUATION = "watchlist_quant_v6_evaluation"
 _CRON_WS_CLEANUP = "ws_cleanup"
 
 _CRON_QUOTE_ENTITLEMENT = "quote_entitlement"
@@ -264,11 +237,6 @@ def _register_cron_health_jobs() -> None:
             enabled_provider=lambda: True,
         )
         service.register(
-            _CRON_OPENING_MOMENTUM_SHADOW,
-            expected_interval_seconds=float(_OPENING_MOMENTUM_POLL_SECONDS),
-            enabled_provider=lambda: True,
-        )
-        service.register(
             _CRON_UNIVERSE_SELECTION,
             expected_interval_seconds=float(
                 settings.universe_selection_interval_minutes * 60
@@ -294,15 +262,6 @@ def _register_cron_health_jobs() -> None:
             expected_interval_seconds=float(_WATCHLIST_QUANT_POLL_SECONDS),
             enabled_provider=lambda: bool(
                 settings.watchlist_quant_auto_score_enabled
-            ),
-        )
-        service.register(
-            _CRON_WATCHLIST_QUANT_V6_EVALUATION,
-            expected_interval_seconds=float(
-                settings.watchlist_quant_v6_evaluation_interval_minutes * 60
-            ),
-            enabled_provider=lambda: bool(
-                settings.watchlist_quant_v6_evaluation_enabled
             ),
         )
         service.register(
@@ -376,26 +335,6 @@ def _cron_record_failure(name: str, exc: BaseException) -> None:
         logger.debug("cron-health record_failure failed", exc_info=True)
 
 
-def _opening_execution_priority_window(
-    now: datetime | None = None,
-) -> bool:
-    """Reserve market-data and DB capacity for the causal opening entry."""
-    from app.services.opening_momentum_execution_service import (
-        opening_execution_reservation_window,
-    )
-
-    return opening_execution_reservation_window(now)
-
-
-def _live_market_in_rth() -> bool:
-    """True while a live-traded market is in regular trading hours.
-
-    Covers both markets this deployment can trade; the shared SQLite writer
-    lock makes research writes during either session a live-path hazard.
-    """
-    from app.core.market_calendar import is_trading_hours
-
-    return is_trading_hours("US") or is_trading_hours("HK")
 
 
 def _opening_research_quiet_window(
@@ -407,16 +346,6 @@ def _opening_research_quiet_window(
     )
 
     return is_opening_research_quiet_window(now)
-
-
-def _opening_momentum_poll_seconds(
-    now: datetime | None = None,
-) -> int:
-    return (
-        _OPENING_MOMENTUM_PRIORITY_POLL_SECONDS
-        if _opening_execution_priority_window(now)
-        else _OPENING_MOMENTUM_POLL_SECONDS
-    )
 
 
 def _price_drift_pct(current_price: float, last_price: float) -> float:
@@ -1298,19 +1227,6 @@ def _llm_storage_maintenance_tick_sync() -> object | None:
                 transaction_fence=lease_guard.fence_in_transaction,
                 operation_checkpoint=lease_guard.checkpoint,
             )
-            quant_v6_pruned = _run_stage(
-                "quant_v6_artifact_prune",
-                lambda: artifact_retention.prune_expired_quant_v6_publication_payloads(
-                    retention_days=(
-                        settings.watchlist_quant_v6_artifact_retention_days
-                    ),
-                    batch_size=(
-                        settings.watchlist_quant_v6_artifact_maintenance_batch_size
-                    ),
-                    max_batches=8,
-                ),
-                SimpleNamespace(bindings_deleted=0, artifacts_deleted=0, batches=0),
-            )
             replay_pruned = _run_stage(
                 "forward_replay_artifact_prune",
                 lambda: artifact_retention.prune_expired_forward_replay_artifacts(
@@ -1363,14 +1279,6 @@ def _llm_storage_maintenance_tick_sync() -> object | None:
                     "deleted=%d batches=%d",
                     diagnostic_pruned.deleted,
                     diagnostic_pruned.batches,
-                )
-            if quant_v6_pruned.bindings_deleted or quant_v6_pruned.artifacts_deleted:
-                logger.info(
-                    "quant v6 artifact maintenance: "
-                    "bindings_deleted=%d artifacts_deleted=%d batches=%d",
-                    quant_v6_pruned.bindings_deleted,
-                    quant_v6_pruned.artifacts_deleted,
-                    quant_v6_pruned.batches,
                 )
             if replay_pruned.bindings_deleted or replay_pruned.artifacts_deleted:
                 logger.info(
@@ -1624,57 +1532,6 @@ async def _strategy_v2_shadow_cron() -> None:
                 _cron_record_failure(_CRON_STRATEGY_V2_SHADOW, sys.exc_info()[1])  # type: ignore[arg-type]
 
 
-def _opening_momentum_shadow_tick_sync() -> None:
-    """Advance opening-momentum execution and its shadow observers."""
-    from app.services.opening_momentum_execution_service import (
-        OpeningMomentumExecutionService,
-    )
-    from app.services.opening_momentum_shadow_service import (
-        OpeningMomentumShadowService,
-    )
-
-    db = SessionLocal()
-    try:
-        runner = get_runner()
-        try:
-            OpeningMomentumExecutionService(
-                db,
-                runner.broker,
-                runner,
-            ).tick()
-        except Exception:
-            db.rollback()
-            logger.exception("opening momentum execution tick failed")
-        try:
-            OpeningMomentumShadowService(
-                db,
-                runner.broker,
-            ).tick()
-        except Exception:
-            db.rollback()
-            logger.exception("opening momentum shadow tick failed")
-    finally:
-        db.close()
-
-
-async def _opening_momentum_shadow_cron() -> None:
-    """Poll the frozen daily opening-momentum shadow variants."""
-    while True:
-        await asyncio.sleep(_opening_momentum_poll_seconds())
-        async with _opening_momentum_shadow_lock:
-            _cron_record_start(_CRON_OPENING_MOMENTUM_SHADOW)
-            try:
-                await asyncio.to_thread(
-                    _opening_momentum_shadow_tick_sync
-                )
-                _cron_record_success(_CRON_OPENING_MOMENTUM_SHADOW)
-            except Exception:
-                logger.exception(
-                    "opening momentum shadow cron failed"
-                )
-                _cron_record_failure(_CRON_OPENING_MOMENTUM_SHADOW, sys.exc_info()[1])  # type: ignore[arg-type]
-
-
 def _watchlist_quant_tick_sync() -> None:
     """Refresh due deterministic watchlist scores during open sessions."""
     if not settings.watchlist_quant_auto_score_enabled:
@@ -1762,315 +1619,6 @@ async def _watchlist_quant_cron() -> None:
                 logger.exception("automatic watchlist quant scoring failed")
                 _cron_record_failure(_CRON_WATCHLIST_QUANT, sys.exc_info()[1])  # type: ignore[arg-type]
         await asyncio.sleep(_WATCHLIST_QUANT_POLL_SECONDS)
-
-
-def _watchlist_quant_v6_evaluation_tick_sync(
-    evaluation_deadline: QuantV6EvaluationDeadline | None = None,
-) -> object | None:
-    """Publish one quote-only historical cohort without execution authority."""
-    if not settings.watchlist_quant_v6_evaluation_enabled:
-        return None
-    if _opening_research_quiet_window():
-        logger.debug(
-            "quant-v6 evaluation deferred during opening research quiet window"
-        )
-        return _OPENING_RESEARCH_DEFERRED
-    if _live_market_in_rth():
-        logger.debug(
-            "quant-v6 evaluation deferred while a live market is in RTH"
-        )
-        return _MARKET_RTH_DEFERRED
-    from app.services.watchlist_quant_v6_deadline import (
-        QuantV6EvaluationDeadline,
-        QuantV6EvaluationStoppedError,
-    )
-    from app.services.durable_job_lease_service import (
-        DurableJobLeaseService,
-    )
-    from app.services.watchlist_quant_v6_evaluation_service import (
-        build_latest_quant_v6_registration_plan,
-    )
-    from app.services.watchlist_quant_v6_historical_provider import (
-        QuantV6HistoricalBarProvider,
-    )
-    from app.services.watchlist_quant_v6_publication_service import (
-        WatchlistQuantV6PublicationService,
-    )
-    from app.services.watchlist_quant_v6_spawn_supervisor import (
-        QuantV6DatabaseSizeFence,
-        QuantV6PipelineMemoryFence,
-        QuantV6SpawnResourceLimitError,
-    )
-
-    deadline = evaluation_deadline or QuantV6EvaluationDeadline(
-        settings.watchlist_quant_v6_evaluation_timeout_seconds
-    )
-    while not _watchlist_quant_v6_evaluation_sync_lock.acquire(
-        timeout=min(0.1, deadline.remaining_seconds())
-    ):
-        pass
-    try:
-        # Re-check after waiting for another direct/manual tick. Keeping all
-        # imports and resource construction below the enable gate makes the
-        # default-disabled path side-effect free.
-        if not settings.watchlist_quant_v6_evaluation_enabled:
-            return None
-        if _opening_research_quiet_window():
-            logger.debug(
-                "quant-v6 evaluation deferred during opening research quiet window"
-            )
-            return _OPENING_RESEARCH_DEFERRED
-        if _live_market_in_rth():
-            logger.debug(
-                "quant-v6 evaluation deferred while a live market is in RTH"
-            )
-            return _MARKET_RTH_DEFERRED
-        lease_service = DurableJobLeaseService(
-            session_factory=SessionLocal,
-            default_ttl_seconds=settings.job_lease_ttl_seconds,
-        )
-        lease = lease_service.try_acquire(
-            _WATCHLIST_QUANT_V6_EVALUATION_LEASE_KEY,
-        )
-        if lease is None:
-            logger.debug(
-                "quant-v6 evaluation deferred because another process owns "
-                "the durable job lease"
-            )
-            return _JOB_LEASE_BUSY_DEFERRED
-        with lease_service.keepalive(
-            lease,
-            interval_seconds=settings.job_lease_heartbeat_seconds,
-            on_lost=lambda _exc: deadline.cancel(),
-        ) as lease_guard:
-            try:
-                lease_guard.checkpoint()
-                deadline.checkpoint()
-                try:
-                    QuantV6DatabaseSizeFence.capture(
-                        size_budget_mb=(
-                            settings.watchlist_quant_v6_db_size_budget_mb
-                        ),
-                        session_factory=SessionLocal,
-                    ).checkpoint()
-                except QuantV6SpawnResourceLimitError as exc:
-                    logger.warning(
-                        "quant-v6 evaluation skipped: %s. Published evidence "
-                        "is kept intact; nothing is deleted or vacuumed.",
-                        exc,
-                    )
-                    return _DATABASE_SIZE_BUDGET_DEFERRED
-                except Exception:
-                    # Fail closed: a database whose size cannot be read cannot
-                    # be shown to be within budget, and the live trading loop
-                    # shares this file.
-                    logger.warning(
-                        "quant-v6 evaluation skipped: database size could not "
-                        "be measured",
-                        exc_info=True,
-                    )
-                    return _DATABASE_SIZE_BUDGET_DEFERRED
-                pipeline_memory_fence = QuantV6PipelineMemoryFence.capture(
-                    memory_limit_mib=(
-                        settings.watchlist_quant_v6_pipeline_memory_limit_mib
-                    ),
-                )
-                plan = build_latest_quant_v6_registration_plan(
-                    observed_at=datetime.now(timezone.utc),
-                )
-                lease_guard.checkpoint()
-                deadline.checkpoint()
-                pipeline_memory_fence.checkpoint()
-                provider = QuantV6HistoricalBarProvider(
-                    evaluation_deadline=deadline,
-                )
-                try:
-                    def _fence_publication(session: Session) -> None:
-                        lease_guard.fence_in_transaction(session)
-
-                    receipt = WatchlistQuantV6PublicationService(
-                        SessionLocal,
-                        transaction_fence=_fence_publication,
-                    ).register_provider_evaluate_publish(
-                        plan=plan,
-                        provider=provider,
-                        evaluation_deadline=deadline,
-                        compute_workers=(
-                            settings.watchlist_quant_v6_compute_workers
-                        ),
-                        pipeline_memory_limit_mib=(
-                            settings
-                            .watchlist_quant_v6_pipeline_memory_limit_mib
-                        ),
-                        pipeline_memory_fence=pipeline_memory_fence,
-                    )
-                    logger.info(
-                        "quant-v6 historical publication id=%d "
-                        "registration=%d members=%d bindings=%d "
-                        "created=%s manifest=%s",
-                        receipt.publication_id,
-                        receipt.registration_id,
-                        len(plan.members),
-                        receipt.binding_count,
-                        receipt.created,
-                        receipt.manifest_sha256,
-                    )
-                    return receipt
-                finally:
-                    provider.close()
-            except QuantV6EvaluationStoppedError:
-                # A failed heartbeat cancels provider I/O immediately. Prefer
-                # the durable lease error when cancellation was lease-driven,
-                # while preserving operator/deadline cancellation otherwise.
-                lease_guard.checkpoint()
-                raise
-    finally:
-        _watchlist_quant_v6_evaluation_sync_lock.release()
-
-
-async def _join_quant_v6_worker_cancellation_resistant(
-    worker: asyncio.Task[object | None],
-) -> object | None:
-    """Join a shielded worker despite repeated caller cancellation."""
-    while True:
-        try:
-            return await asyncio.shield(worker)
-        except asyncio.CancelledError:
-            if worker.done():
-                return worker.result()
-
-
-async def _run_watchlist_quant_v6_evaluation_tick() -> object | None:
-    """Run one bounded historical tick and always join its worker."""
-    if not settings.watchlist_quant_v6_evaluation_enabled:
-        return None
-    if _opening_research_quiet_window():
-        logger.debug(
-            "quant-v6 evaluation deferred during opening research quiet window"
-        )
-        return _OPENING_RESEARCH_DEFERRED
-    from app.services.watchlist_quant_v6_deadline import (
-        QuantV6EvaluationDeadline,
-        QuantV6EvaluationStoppedError,
-    )
-
-    deadline = QuantV6EvaluationDeadline(
-        settings.watchlist_quant_v6_evaluation_timeout_seconds
-    )
-    worker = asyncio.create_task(
-        asyncio.to_thread(
-            _watchlist_quant_v6_evaluation_tick_sync,
-            deadline,
-        )
-    )
-    try:
-        return await asyncio.wait_for(
-            asyncio.shield(worker),
-            timeout=deadline.remaining_seconds(),
-        )
-    except TimeoutError:
-        # If the timer wins before the pre-commit checkpoint, the worker rolls
-        # back. If an atomic commit already started, its successful receipt wins.
-        deadline.expire()
-        try:
-            result = await asyncio.shield(worker)
-        except asyncio.CancelledError:
-            # Shutdown can race the post-timeout join. Keep the thread task
-            # shielded until quote/SQLite cleanup finishes, then propagate the
-            # application's cancellation instead of abandoning the worker.
-            deadline.cancel()
-            try:
-                await _join_quant_v6_worker_cancellation_resistant(worker)
-            except QuantV6EvaluationStoppedError:
-                pass
-            except Exception:
-                logger.exception(
-                    "quant-v6 historical evaluation failed during shutdown"
-                )
-            raise
-        logger.warning(
-            "quant-v6 deadline elapsed during atomic completion; "
-            "accepted the committed result"
-        )
-        return result
-    except asyncio.CancelledError:
-        # Cancelling a to_thread waiter cannot stop quote/SQLite work. Join it
-        # so the provider and all publication sessions close before teardown.
-        deadline.cancel()
-        try:
-            await _join_quant_v6_worker_cancellation_resistant(worker)
-        except QuantV6EvaluationStoppedError:
-            pass
-        except Exception:
-            logger.exception(
-                "quant-v6 historical evaluation failed during shutdown"
-            )
-        raise
-
-
-async def _watchlist_quant_v6_evaluation_cron() -> None:
-    """Run the independent, default-disabled historical evidence publisher."""
-    if not settings.watchlist_quant_v6_evaluation_enabled:
-        return
-    from app.services.durable_job_lease_service import (
-        LeaseBackendError,
-        LeaseLostError,
-    )
-
-    logger.info(
-        "quant-v6 historical evaluation enabled: interval=%dm retry=%dm "
-        "deadline=%ds",
-        settings.watchlist_quant_v6_evaluation_interval_minutes,
-        settings.watchlist_quant_v6_evaluation_retry_interval_minutes,
-        settings.watchlist_quant_v6_evaluation_timeout_seconds,
-    )
-    await asyncio.sleep(_WATCHLIST_QUANT_V6_INITIAL_DELAY_SECONDS)
-    while True:
-        failed = False
-        deferred = False
-        lease_failed = False
-        async with _watchlist_quant_v6_evaluation_lock:
-            try:
-                outcome = await _run_watchlist_quant_v6_evaluation_tick()
-                deferred = (
-                    outcome is _OPENING_RESEARCH_DEFERRED
-                    or outcome is _JOB_LEASE_BUSY_DEFERRED
-                    or outcome is _MARKET_RTH_DEFERRED
-                )
-                _cron_record_success(_CRON_WATCHLIST_QUANT_V6_EVALUATION)
-            except asyncio.CancelledError:
-                raise
-            except (LeaseBackendError, LeaseLostError):
-                failed = True
-                lease_failed = True
-                logger.exception(
-                    "quant-v6 durable lease failed; retrying in %ds",
-                    _JOB_LEASE_RETRY_SECONDS,
-                )
-                _cron_record_failure(
-                    _CRON_WATCHLIST_QUANT_V6_EVALUATION,
-                    sys.exc_info()[1],  # type: ignore[arg-type]
-                )
-            except Exception:
-                failed = True
-                logger.exception(
-                    "quant-v6 historical evaluation failed; retrying in %dm",
-                    settings.watchlist_quant_v6_evaluation_retry_interval_minutes,
-                )
-                _cron_record_failure(
-                    _CRON_WATCHLIST_QUANT_V6_EVALUATION,
-                    sys.exc_info()[1],  # type: ignore[arg-type]
-                )
-        if deferred or lease_failed:
-            delay_seconds = _JOB_LEASE_RETRY_SECONDS
-        else:
-            delay_minutes = (
-                settings.watchlist_quant_v6_evaluation_retry_interval_minutes
-                if failed
-                else settings.watchlist_quant_v6_evaluation_interval_minutes
-            )
-            delay_seconds = delay_minutes * 60
-        await asyncio.sleep(delay_seconds)
 
 
 def _universe_selection_tick_sync() -> object | None:
@@ -2496,12 +2044,10 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         asyncio.create_task(_alert_rules_cron()),
         asyncio.create_task(_llm_storage_maintenance_cron()),
         asyncio.create_task(_strategy_v2_shadow_cron()),
-        asyncio.create_task(_opening_momentum_shadow_cron()),
         asyncio.create_task(_universe_selection_cron()),
         asyncio.create_task(_auto_primary_switch_cron()),
         asyncio.create_task(_interval_recenter_cron()),
         asyncio.create_task(_watchlist_quant_cron()),
-        asyncio.create_task(_watchlist_quant_v6_evaluation_cron()),
         asyncio.create_task(_quote_entitlement_cron()),
     )
     try:
@@ -2528,15 +2074,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 _OPENAPI_TAGS: list[dict[str, str]] = [
     {"name": "strategy", "description": "区间策略配置、状态与历史。"},
     {"name": "strategy-v2-shadow", "description": "Strategy v2 前向影子决策与回放。"},
-    {
-        "name": "opening-momentum-shadow",
-        "description": "横截面开盘动量前向影子观测。",
-    },
     {"name": "universe", "description": "版本化动态候选池与只读观察标的。"},
-    {
-        "name": "watchlist-quant-v6",
-        "description": "Quant-v6 已持久化不可变研究证据（只读）。",
-    },
     {"name": "trade", "description": "订单、账户、事件与交易控制。"},
     {"name": "credentials", "description": "长桥凭据与多渠道通知。"},
     {"name": "llm", "description": "DeepSeek LLM 顾问区间建议。"},
@@ -2582,12 +2120,10 @@ app.include_router(platform_router, prefix="/api/platform")
 app.include_router(portfolio_router, prefix="/api/portfolio")
 app.include_router(strategy_router)
 app.include_router(strategy_shadow_router)
-app.include_router(opening_momentum_shadow_router)
 app.include_router(strategy_experiments_router)
 app.include_router(credentials_router)
 app.include_router(trade_router)
 app.include_router(universe_router)
-app.include_router(watchlist_quant_v6_router)
 app.include_router(watchlist_router)
 app.include_router(llm_advisor_router)
 app.include_router(backtest_router)

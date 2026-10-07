@@ -91,7 +91,6 @@ def _execution_sandbox(runner: AppRunner, monkeypatch: pytest.MonkeyPatch, quote
     monkeypatch.setattr(runner_module, "SessionLocal", sessions)
     monkeypatch.setattr(runner, "broker", broker)
     monkeypatch.setattr(runner, "notifier", notifier)
-    monkeypatch.setattr(runner, "refresh_opening_execution_registry", lambda: None)
     monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
     monkeypatch.setattr(runner._trade_svc, "_record_order", lambda *a, **kw: None)
     monkeypatch.setattr(runner._trade_svc, "_update_order_status", lambda *a, **kw: None)

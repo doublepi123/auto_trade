@@ -538,36 +538,6 @@ class _NullNotifier:
 class TestRunnerContextLaneExclusion:
     """The resolver must read the marker the runner actually passes."""
 
-    @staticmethod
-    def _armed_opening_policy() -> object:
-        from app.runner import _OpeningExecutionPolicy
-
-        return _OpeningExecutionPolicy(
-            execution_id=1,
-            symbol="TSLA.US",
-            status="ARMED",
-            stop_loss_pct=1.0,
-            max_holding_minutes=30,
-            reference_entry_price=379.0,
-            max_price_deviation_bps=50.0,
-        )
-
-    def test_runner_built_opening_context_excludes_the_exception(self) -> None:
-        runner = AppRunner()
-        runner._opening_execution_policies["TSLA.US"] = (
-            self._armed_opening_policy()
-        )
-        decision = _RunnerDecisionStub(action="BUY")
-        quote = Quote("TSLA.US", 379, 378.9, 379.1, "")
-        context = runner._execution_ledger_context(decision, quote, "stub")
-        opening_context = runner._opening_execution_ledger_context(
-            "TSLA.US", context,
-        )
-        assert opening_context["execution_initiator"] == "OPENING_MOMENTUM"
-        svc = _make_service(raw_caps=(1000, 25000.0, 250.0))
-        svc._active_execution_context = dict(opening_context)
-        assert svc._range_entry_limits_for("TSLA.US", "BUY", "US") is None
-
     def test_runner_built_range_context_allows_the_exception(self) -> None:
         runner = AppRunner()
         decision = _RunnerDecisionStub(action="BUY")
@@ -593,53 +563,6 @@ class TestRunnerContextLaneExclusion:
         svc = _make_service(raw_caps=(1000, 25000.0, 250.0))
         svc._active_execution_context = dict(context)
         assert svc._range_entry_limits_for("TSLA.US", "BUY", "US") is None
-
-    def test_sizing_and_pre_submit_both_excluded_under_opening_context(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(
-            trade_svc_module, "is_trading_hours", lambda _m: True,
-        )
-        monkeypatch.setattr(
-            trade_svc_module, "is_closing_window", lambda *_args: False,
-        )
-        monkeypatch.setattr(
-            trade_svc_module, "is_opening_warmup", lambda *_args: False,
-        )
-        runner = AppRunner()
-        runner._opening_execution_policies["TSLA.US"] = (
-            self._armed_opening_policy()
-        )
-        decision = _RunnerDecisionStub(action="BUY")
-        quote = Quote("TSLA.US", 379, 378.9, 379.1, "")
-        context = runner._execution_ledger_context(decision, quote, "stub")
-        opening_context = runner._opening_execution_ledger_context(
-            "TSLA.US", context,
-        )
-
-        svc = _make_service(raw_caps=(1000, 25000.0, 250.0))
-        svc._active_execution_context = dict(opening_context)
-        broker = _FakeMarginBroker2(margin_max="1000")
-        qty = svc._entry_quantity_from_margin_power(
-            broker, "TSLA.US", "BUY", Decimal("379"), "USD",
-        )
-        # Clamped funded caps apply (5000/379 -> 13), and pre-submit also
-        # refuses the oversized quantity.
-        assert qty == 13
-        result = svc.pre_submit_risk_check(
-            _PreSubmitRiskRequest(
-                action="BUY",
-                symbol="TSLA.US",
-                quantity=Decimal("20"),
-                price=Decimal("379"),
-            ),
-            broker,
-        )
-        assert isinstance(result, OrderStatus)
-        assert result.status == "SKIPPED"
-        # No pre-submit capacity estimate on the excluded lane.
-        assert len(broker.margin_calls) == 1
 
 
 class _RunnerDecisionStub:

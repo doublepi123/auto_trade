@@ -54,7 +54,7 @@ from app.domain.strategy_v2.forward_semantics import (
     FORWARD_EXECUTABLE_SEMANTIC_MANIFEST_VERSION,
     forward_executable_semantic_digest,
 )
-from app.domain.strategy_v2.frozen_disproof_queue import (
+from app.domain.strategy_v2.frozen_forward_collection import (
     FROZEN_EVALUATOR_DIGEST,
     FROZEN_QUEUE_ENTRIES,
 )
@@ -1011,10 +1011,6 @@ class StrategyV2ShadowService:
         self._ensure_version_snapshot(row)
         normalized_symbol = row.symbol
         updates = payload.model_dump(exclude_unset=True, exclude_none=True)
-        opening_execution_eligible = updates.pop(
-            "opening_momentum_execution_eligible",
-            None,
-        )
         uses_fence = self._transaction_fence is not None
         try:
             fenced = self._start_fenced_transaction()
@@ -1046,7 +1042,7 @@ class StrategyV2ShadowService:
                     "strategy v2 shadow config cannot change while a "
                     "bracket challenger trade is open"
                 )
-            if not updates and opening_execution_eligible is None:
+            if not updates:
                 if fenced:
                     self.db.commit()
                 response = self._config_response(row)
@@ -1054,10 +1050,7 @@ class StrategyV2ShadowService:
                 return response
 
             ownership_changed = (
-                (
-                    "enabled" in updates
-                    or opening_execution_eligible is not None
-                )
+                "enabled" in updates
                 and not preserve_universe_management
                 and row.universe_managed
             )
@@ -1076,11 +1069,6 @@ class StrategyV2ShadowService:
                     getattr(row, field) != value
                     for field, value in updates.items()
                 )
-                or (
-                    opening_execution_eligible is not None
-                    and row.opening_momentum_execution_eligible
-                    != opening_execution_eligible
-                )
             )
             if not changed:
                 if fenced:
@@ -1096,10 +1084,6 @@ class StrategyV2ShadowService:
             now = datetime.now(timezone.utc)
             for field in _CONFIG_FIELDS:
                 setattr(row, field, getattr(validated, field))
-            if opening_execution_eligible is not None:
-                row.opening_momentum_execution_eligible = (
-                    opening_execution_eligible
-                )
             row.updated_at = now
             self.db.add(row)
             self.db.flush()
@@ -7206,9 +7190,6 @@ class StrategyV2ShadowService:
         round_trip_cost, reward_risk = self._cost_diagnostics(values)
         return StrategyV2ShadowConfigResponse(
             **values,
-            opening_momentum_execution_eligible=(
-                row.opening_momentum_execution_eligible
-            ),
             config_version=self._config_version(row),
             updated_at=row.updated_at,
             estimated_round_trip_cost_pct=round_trip_cost,

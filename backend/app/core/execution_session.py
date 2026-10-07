@@ -173,8 +173,7 @@ def extended_last_executable_close(
     phase exists for that instant.
 
     Lives here — NOT in market_calendar.py — because that module's source is
-    hashed into frozen research digests (strategy_v2 forward semantics,
-    watchlist_quant_v6) which must not drift.
+    hashed into the strategy_v2 forward-semantics digest, which must not drift.
     """
     code = market.upper()
     session = get_session(code)

@@ -23,7 +23,6 @@ from app.core.engine import EngineSnapshot, EngineState, StrategyParams
 from app.core.log_throttle import RepeatedLogThrottle
 from app.runner import (
     AppRunner,
-    _OpeningExecutionPolicy,
     _ReductionIntent,
     get_runner,
 )
@@ -1068,7 +1067,7 @@ class TestAppRunner:
         assert runner.risk.paused is False
         assert runner.risk.entry_reconciliation_count == 0
 
-    def test_quote_retries_persisted_opening_reduction_after_auto_permission(
+    def test_quote_retries_persisted_primary_reduction_after_auto_permission(
         self,
         monkeypatch,
     ) -> None:
@@ -1084,7 +1083,7 @@ class TestAppRunner:
                     return []
                 return [
                     Position(
-                        "ISRG.US",
+                        "NVDA.US",
                         "LONG",
                         Decimal("704"),
                         Decimal("371.49"),
@@ -1123,21 +1122,9 @@ class TestAppRunner:
 
         runner = self._runner_with_primary_quote_runtime()
         runner._running = True
-        runtime = runner._build_symbol_runtime("ISRG.US", "US")
-        runtime.engine.state = EngineState.LONG
-        runner._symbol_runtimes["ISRG.US"] = runtime
-        runner._opening_execution_policies = {
-            "ISRG.US": _OpeningExecutionPolicy(
-                execution_id=7,
-                symbol="ISRG.US",
-                status="EXITING",
-                stop_loss_pct=4.0,
-                max_holding_minutes=60,
-                reference_entry_price=371.49,
-                max_price_deviation_bps=100.0,
-            )
-        }
-        runner._reduction_intents["ISRG.US"] = _ReductionIntent(
+        runner.engine.params.symbol = "NVDA.US"
+        runner.engine.state = EngineState.LONG
+        runner._reduction_intents["NVDA.US"] = _ReductionIntent(
             action="SELL",
             cause="TIME_STOP",
             reason="maximum holding time reached: 60 minutes",
@@ -1145,7 +1132,7 @@ class TestAppRunner:
             started_at=datetime.now(timezone.utc) - timedelta(minutes=30),
         )
         runner._trade_svc.load_tracked_entries({
-            "ISRG.US": (
+            "NVDA.US": (
                 Decimal("704"),
                 Decimal("261528.96"),
                 "LONG",
@@ -1187,7 +1174,7 @@ class TestAppRunner:
 
         monkeypatch.setattr(runner, "_complete_reduction", complete_reduction)
         quote = Quote(
-            "ISRG.US",
+            "NVDA.US",
             368.1,
             368.0,
             368.2,
@@ -1206,7 +1193,7 @@ class TestAppRunner:
 
         assert broker.submitted == [
             (
-                "ISRG.US",
+                "NVDA.US",
                 "SELL",
                 Decimal("704"),
                 Decimal("368.00"),
@@ -1574,7 +1561,7 @@ class TestAppRunner:
         assert "healthy quote loop" in error
         assert runner.risk.protective_exit_permitted is False
 
-    def test_protective_only_verification_allows_managed_opening_reduction(
+    def test_protective_only_verification_allows_primary_reduction(
         self,
         monkeypatch,
     ) -> None:
@@ -1583,7 +1570,7 @@ class TestAppRunner:
             def get_positions() -> list[Position]:
                 return [
                     Position(
-                        "ISRG.US",
+                        "NVDA.US",
                         "LONG",
                         Decimal("704"),
                         Decimal("371.49"),
@@ -1591,22 +1578,8 @@ class TestAppRunner:
                 ]
 
         runner = self._runner_with_primary_quote_runtime()
-        runner._symbol_runtimes["ISRG.US"] = runner._build_symbol_runtime(
-            "ISRG.US",
-            "US",
-        )
-        runner._opening_execution_policies = {
-            "ISRG.US": _OpeningExecutionPolicy(
-                execution_id=7,
-                symbol="ISRG.US",
-                status="EXITING",
-                stop_loss_pct=4.0,
-                max_holding_minutes=60,
-                reference_entry_price=371.49,
-                max_price_deviation_bps=100.0,
-            )
-        }
-        runner._reduction_intents["ISRG.US"] = _ReductionIntent(
+        runner.engine.params.symbol = "NVDA.US"
+        runner._reduction_intents["NVDA.US"] = _ReductionIntent(
             action="SELL",
             cause="TIME_STOP",
             reason="maximum holding time reached: 60 minutes",
@@ -1614,7 +1587,7 @@ class TestAppRunner:
             started_at=datetime.now(timezone.utc) - timedelta(minutes=30),
         )
         runner._trade_svc.load_tracked_entries({
-            "ISRG.US": (
+            "NVDA.US": (
                 Decimal("704"),
                 Decimal("261528.96"),
                 "LONG",
@@ -1640,20 +1613,12 @@ class TestAppRunner:
         monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
         runner._remember_quote(
             Quote(
-                "ISRG.US",
+                "NVDA.US",
                 368.1,
                 368.0,
                 368.2,
                 _fresh_timestamp(),
             )
-        )
-
-        safe, error = runner.verify_operational_resume(
-            require_complete_pnl=False,
-        )
-        assert safe is False
-        assert error == (
-            "broker exposure exists outside the primary strategy: ISRG.US"
         )
 
         safe, error = runner.permit_protective_exits_after_verification()
@@ -1671,7 +1636,7 @@ class TestAppRunner:
             ("UNRELATED", "outside the verified protective-exit scope"),
             ("SIDE_MISMATCH", "does not match its durable tracked entry"),
             ("QUANTITY_MISMATCH", "does not match its durable tracked entry"),
-            ("STALE_QUOTE", "fresh trusted quote is unavailable for ISRG.US"),
+            ("STALE_QUOTE", "fresh trusted quote is unavailable for NVDA.US"),
         ],
     )
     def test_protective_only_verification_rejects_unmanaged_or_incoherent_exposure(
@@ -1680,7 +1645,7 @@ class TestAppRunner:
         case: str,
         expected_error: str,
     ) -> None:
-        broker_symbol = "MSFT.US" if case == "UNRELATED" else "ISRG.US"
+        broker_symbol = "MSFT.US" if case == "UNRELATED" else "NVDA.US"
         broker_side = "SHORT" if case == "SIDE_MISMATCH" else "LONG"
         broker_quantity = (
             Decimal("703") if case == "QUANTITY_MISMATCH" else Decimal("704")
@@ -1699,22 +1664,8 @@ class TestAppRunner:
                 ]
 
         runner = self._runner_with_primary_quote_runtime()
-        runner._symbol_runtimes["ISRG.US"] = runner._build_symbol_runtime(
-            "ISRG.US",
-            "US",
-        )
-        runner._opening_execution_policies = {
-            "ISRG.US": _OpeningExecutionPolicy(
-                execution_id=7,
-                symbol="ISRG.US",
-                status="EXITING",
-                stop_loss_pct=4.0,
-                max_holding_minutes=60,
-                reference_entry_price=371.49,
-                max_price_deviation_bps=100.0,
-            )
-        }
-        runner._reduction_intents["ISRG.US"] = _ReductionIntent(
+        runner.engine.params.symbol = "NVDA.US"
+        runner._reduction_intents["NVDA.US"] = _ReductionIntent(
             action="SELL",
             cause="TIME_STOP",
             reason="maximum holding time reached: 60 minutes",
@@ -1722,7 +1673,7 @@ class TestAppRunner:
             started_at=datetime.now(timezone.utc) - timedelta(minutes=30),
         )
         runner._trade_svc.load_tracked_entries({
-            "ISRG.US": (
+            "NVDA.US": (
                 Decimal("704"),
                 Decimal("261528.96"),
                 "LONG",
@@ -1869,7 +1820,7 @@ class TestAppRunner:
                 self.position_reads += 1
                 return [
                     Position(
-                        "ISRG.US",
+                        "NVDA.US",
                         "LONG",
                         Decimal("704"),
                         Decimal("371.49"),
@@ -1877,22 +1828,8 @@ class TestAppRunner:
                 ]
 
         runner = self._runner_with_primary_quote_runtime()
-        runner._symbol_runtimes["ISRG.US"] = runner._build_symbol_runtime(
-            "ISRG.US",
-            "US",
-        )
-        runner._opening_execution_policies = {
-            "ISRG.US": _OpeningExecutionPolicy(
-                execution_id=7,
-                symbol="ISRG.US",
-                status="EXITING",
-                stop_loss_pct=4.0,
-                max_holding_minutes=60,
-                reference_entry_price=371.49,
-                max_price_deviation_bps=100.0,
-            )
-        }
-        runner._reduction_intents["ISRG.US"] = _ReductionIntent(
+        runner.engine.params.symbol = "NVDA.US"
+        runner._reduction_intents["NVDA.US"] = _ReductionIntent(
             action="SELL",
             cause="TIME_STOP",
             reason="maximum holding time reached: 60 minutes",
@@ -1900,7 +1837,7 @@ class TestAppRunner:
             started_at=datetime.now(timezone.utc) - timedelta(minutes=30),
         )
         runner._trade_svc.load_tracked_entries({
-            "ISRG.US": (
+            "NVDA.US": (
                 Decimal("704"),
                 Decimal("261528.96"),
                 "LONG",
@@ -1929,7 +1866,7 @@ class TestAppRunner:
         monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
         runner._remember_quote(
             Quote(
-                "ISRG.US",
+                "NVDA.US",
                 368.1,
                 368.0,
                 368.2,
@@ -2277,7 +2214,6 @@ class TestAppRunner:
         AppRunner,
         SimpleNamespace,
         _ReductionIntent,
-        _OpeningExecutionPolicy,
         dict[str, bool],
         dict[str, bool],
         dict[str, object],
@@ -2330,17 +2266,7 @@ class TestAppRunner:
             trigger_price=214.0,
             started_at=started_at,
         )
-        policy = _OpeningExecutionPolicy(
-            execution_id=7,
-            symbol="NVDA.US",
-            status="EXITING",
-            stop_loss_pct=4.0,
-            max_holding_minutes=60,
-            reference_entry_price=220.0,
-            max_price_deviation_bps=100.0,
-        )
         runner._reduction_intents["NVDA.US"] = intent
-        runner._opening_execution_policies["NVDA.US"] = policy
         runner.risk.pause("ORDER_EXECUTION_BLOCKED: operator review")
         pause_reason, generation = runner.risk.pause_verification_snapshot()
         assert runner.risk.permit_protective_exits(
@@ -2377,25 +2303,12 @@ class TestAppRunner:
         execution_context: dict[str, object] = {
             "exit_cause": intent.cause,
             "exit_reason": intent.reason,
-            "config_snapshot": json.dumps(
-                {
-                    "reduce_only": True,
-                    "execution_signal": {
-                        "strategy_source": "OPENING_MOMENTUM",
-                        "opening_execution_id": policy.execution_id,
-                        "reference_entry_price": policy.reference_entry_price,
-                        "max_price_deviation_bps": policy.max_price_deviation_bps,
-                        "stop_loss_pct": policy.stop_loss_pct,
-                        "max_holding_minutes": policy.max_holding_minutes,
-                    },
-                }
-            ),
+            "config_snapshot": json.dumps({"reduce_only": True}),
         }
         return (
             runner,
             broker,
             intent,
-            policy,
             health_state,
             quote_state,
             execution_context,
@@ -2409,7 +2322,6 @@ class TestAppRunner:
             runner,
             broker,
             _intent,
-            _policy,
             _health_state,
             _quote_state,
             execution_context,
@@ -2612,7 +2524,7 @@ class TestAppRunner:
             ("SELL", remaining_quantity),
         ]
 
-    def test_opening_registry_successful_resubscribe_invalidates_protective_runtime(
+    def test_symbol_runtime_refresh_successful_resubscribe_invalidates_protective_runtime(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
@@ -2649,13 +2561,8 @@ class TestAppRunner:
 
         monkeypatch.setattr(runner, "_db_session", db_session)
         monkeypatch.setattr(runner, "_sync_symbol_runtimes", add_runtime)
-        monkeypatch.setattr(
-            runner,
-            "_load_opening_execution_registry",
-            lambda _db: None,
-        )
 
-        runner.refresh_opening_execution_registry()
+        runner.refresh_symbol_runtimes()
 
         assert subscriptions == [["NVDA.US", "AAPL.US"]]
         assert runner._quotes_subscribed is True
@@ -2745,7 +2652,6 @@ class TestAppRunner:
             "tracked_quantity",
             "tracked_cost",
             "intent",
-            "policy",
         ],
     )
     def test_final_protective_submission_revokes_on_any_scoped_state_change(
@@ -2757,7 +2663,6 @@ class TestAppRunner:
             runner,
             broker,
             intent,
-            policy,
             health_state,
             quote_state,
             execution_context,
@@ -2808,18 +2713,6 @@ class TestAppRunner:
                 trigger_price=213.0,
                 started_at=datetime.now(timezone.utc),
             )
-        elif change == "policy":
-            runner._opening_execution_policies["NVDA.US"] = (
-                _OpeningExecutionPolicy(
-                    execution_id=policy.execution_id,
-                    symbol=policy.symbol,
-                    status=policy.status,
-                    stop_loss_pct=policy.stop_loss_pct,
-                    max_holding_minutes=policy.max_holding_minutes + 1,
-                    reference_entry_price=policy.reference_entry_price,
-                    max_price_deviation_bps=policy.max_price_deviation_bps,
-                )
-            )
 
         status = runner._trade_svc.execute(
             "SELL",
@@ -2843,7 +2736,6 @@ class TestAppRunner:
         "change",
         [
             "disconnect",
-            "policy",
             "same_reason_aba",
             "resume",
             "different_pause",
@@ -2859,7 +2751,6 @@ class TestAppRunner:
             runner,
             broker,
             intent,
-            policy,
             health_state,
             _quote_state,
             execution_context,
@@ -2869,18 +2760,6 @@ class TestAppRunner:
             if change == "disconnect":
                 runner._on_disconnect("lost during final quote")
                 health_state["healthy"] = False
-            elif change == "policy":
-                runner._opening_execution_policies["NVDA.US"] = (
-                    _OpeningExecutionPolicy(
-                        execution_id=policy.execution_id,
-                        symbol=policy.symbol,
-                        status=policy.status,
-                        stop_loss_pct=policy.stop_loss_pct,
-                        max_holding_minutes=policy.max_holding_minutes + 1,
-                        reference_entry_price=policy.reference_entry_price,
-                        max_price_deviation_bps=policy.max_price_deviation_bps,
-                    )
-                )
             elif change == "same_reason_aba":
                 runner.risk.begin_entry_reconciliation(
                     "post-proof reconciliation",
@@ -2939,7 +2818,6 @@ class TestAppRunner:
             runner,
             broker,
             _intent,
-            _policy,
             _health_state,
             _quote_state,
             execution_context,
@@ -3032,7 +2910,6 @@ class TestAppRunner:
             runner,
             broker,
             _intent,
-            _policy,
             _health_state,
             _quote_state,
             execution_context,
@@ -3142,7 +3019,6 @@ class TestAppRunner:
             runner,
             broker,
             _intent,
-            _policy,
             _health_state,
             _quote_state,
             execution_context,
@@ -8234,36 +8110,20 @@ class TestAppRunner:
         assert runner._reduction_intents == {}
         assert runner.engine.state == EngineState.LONG
 
-    @pytest.mark.parametrize("registered_secondary", [False, True])
     def test_managed_daily_loss_uses_executable_bid_not_last_price(
         self,
-        registered_secondary: bool,
     ) -> None:
         runner = AppRunner()
         runner._running = True
         runner.notifier = _NoopNotifier()
-        symbol = "AAPL.US" if registered_secondary else "NVDA.US"
+        symbol = "NVDA.US"
         runner.engine.params = StrategyParams(
             symbol="NVDA.US",
             market="US",
             buy_low=90,
             sell_high=200,
         )
-        if registered_secondary:
-            runtime = runner._build_symbol_runtime(symbol, "US")
-            runtime.engine.state = EngineState.LONG
-            runner._symbol_runtimes[symbol] = runtime
-            runner._opening_execution_policies[symbol] = _OpeningExecutionPolicy(
-                execution_id=1,
-                symbol=symbol,
-                status="POSITION_OPEN",
-                stop_loss_pct=0,
-                max_holding_minutes=0,
-                reference_entry_price=100,
-                max_price_deviation_bps=0,
-            )
-        else:
-            runner.engine.state = EngineState.LONG
+        runner.engine.state = EngineState.LONG
         runner.risk.config.max_daily_loss = 100
         runner._trade_svc.load_tracked_entries({
             symbol: (Decimal("100"), Decimal("10000"))
@@ -8355,6 +8215,73 @@ class TestAppRunner:
         ]
         assert notifier.events == events
         assert persisted == [True]
+
+    def test_watchlist_non_primary_tracked_position_is_still_an_orphan(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A registered watchlist runtime is not an executable live runtime.
+
+        Base 970a12ae treated a non-primary symbol as executable only when it
+        also had an opening execution policy. After that lane was removed, a
+        plain watchlist member must still reach the orphan daily-loss pause.
+        """
+        from collections import deque
+
+        from app.core.engine import StrategyEngine
+        from app.runner import SymbolRuntime
+
+        runner = AppRunner()
+        runner._running = True
+        runner.engine.params = StrategyParams(
+            symbol="NVDA.US",
+            market="US",
+            buy_low=90,
+            sell_high=200,
+        )
+        runner.risk.config.max_daily_loss = 10
+        runner._trade_svc.load_tracked_entries({
+            "AAPL.US": (Decimal("10"), Decimal("1000"))
+        })
+        watchlist_engine = StrategyEngine(
+            StrategyParams(
+                symbol="AAPL.US",
+                market="US",
+                buy_low=90,
+                sell_high=200,
+            )
+        )
+        runner._symbol_runtimes["AAPL.US"] = SymbolRuntime(
+            symbol="AAPL.US",
+            market="US",
+            engine=watchlist_engine,
+            recent_quotes=deque(maxlen=8),
+        )
+        calls: list[str] = []
+        original = runner._pause_orphan_tracked_position_if_daily_loss_reached
+
+        def _counting_orphan(quote: Quote) -> bool:
+            calls.append(quote.symbol)
+            return original(quote)
+
+        monkeypatch.setattr(
+            runner,
+            "_pause_orphan_tracked_position_if_daily_loss_reached",
+            _counting_orphan,
+        )
+        monkeypatch.setattr(runner, "_broadcast_status", lambda: None)
+
+        runner._on_quote(
+            Quote("AAPL.US", 99.1, 99.0, 99.2, _fresh_timestamp())
+        )
+
+        assert calls == ["AAPL.US"]
+        assert runner.risk.paused is True
+        assert runner.risk.pause_auto_resumable is False
+        assert runner.risk.pause_reason.startswith(
+            "ORPHAN_TRACKED_POSITION_DAILY_LOSS:"
+        )
+        assert "symbol=AAPL.US" in runner.risk.pause_reason
 
     def test_orphan_tracked_short_uses_executable_ask(
         self,
@@ -10892,751 +10819,6 @@ class TestMarkFillProcessed:
         runner.engine.params = StrategyParams(symbol="NVDA.US", market="US")
         runner._mark_fill_processed(symbol="")
         assert "NVDA.US" in runner._last_fill_at
-
-
-class TestOpeningMomentumExecution:
-    @staticmethod
-    def _policy(
-        *,
-        symbol: str = "NVDA.US",
-        status: str = "SUBMITTING",
-    ) -> Any:
-        return runner_module._OpeningExecutionPolicy(
-            execution_id=17,
-            symbol=symbol,
-            status=status,
-            stop_loss_pct=1.0,
-            max_holding_minutes=60,
-            reference_entry_price=100.0,
-            max_price_deviation_bps=200.0,
-        )
-
-    @staticmethod
-    def _enable(
-        runner: AppRunner,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(
-            runner_module.settings,
-            "opening_momentum_execution_enabled",
-            True,
-        )
-        monkeypatch.setattr(
-            runner_module.settings,
-            "opening_momentum_execution_paper_confirmed",
-            True,
-        )
-        monkeypatch.setattr(
-            runner_module.settings,
-            "full_buying_power_usage_enabled",
-            True,
-        )
-        runner._trade_svc.full_buying_power_usage_enabled = True
-        runner._running = True
-
-    def test_entry_uses_bbo_guarded_mode_and_durable_provenance(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        runner = TestAppRunner._runner_with_primary_quote_runtime()
-        self._enable(runner, monkeypatch)
-        monkeypatch.setattr(
-            trade_execution_service_module,
-            "is_trading_hours",
-            lambda _market: True,
-        )
-        runner._opening_execution_policies = {
-            "NVDA.US": self._policy()
-        }
-        monkeypatch.setattr(
-            runner.broker,
-            "get_quotes",
-            lambda _symbols: [Quote(
-                "NVDA.US",
-                100.0,
-                99.99,
-                100.01,
-                _fresh_timestamp(),
-            )],
-        )
-        monkeypatch.setattr(
-            runner,
-            "_validate_opening_momentum_entry_policy",
-            lambda *_args, **_kwargs: None,
-        )
-        captured: dict[str, Any] = {}
-
-        def execute(**kwargs: Any) -> Any:
-            captured.update(kwargs)
-            return SimpleNamespace(
-                status="SUBMITTED",
-                broker_order_id="opening-17",
-                reason="submitted",
-            )
-
-        monkeypatch.setattr(runner._trade_svc, "execute", execute)
-
-        result = runner.execute_opening_momentum_entry(
-            execution_id=17,
-            symbol="NVDA.US",
-            reference_entry_price=100.0,
-            entry_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=1),
-            max_price_deviation_bps=200.0,
-            stop_loss_pct=1.0,
-            max_holding_minutes=60,
-            signal_context={"rank": 1},
-        )
-
-        assert result == {
-            "executed": True,
-            "status": "SUBMITTED",
-            "order_id": "opening-17",
-            "action": "BUY",
-            "reason": "submitted",
-        }
-        assert captured["allow_opening_warmup_entry"] is True
-        assert captured["trading_session_mode"] == "RTH_ONLY"
-        assert captured["expected_exit_price"] is None
-        assert captured["quote"].last_price == 100.01
-        assert captured["entry_policy_check"](
-            "NVDA.US",
-            "BUY",
-            "US",
-        ) is None
-        snapshot = json.loads(
-            captured["execution_context"]["config_snapshot"]
-        )
-        assert snapshot["buying_power_usage_mode"] == "GUARDED"
-        assert snapshot["strategy_source"] == "OPENING_MOMENTUM"
-        assert snapshot["execution_signal"] == {
-            "strategy_source": "OPENING_MOMENTUM",
-            "opening_execution_id": 17,
-            "reference_entry_price": 100.0,
-            "max_price_deviation_bps": 200.0,
-            "stop_loss_pct": 1.0,
-            "max_holding_minutes": 60,
-            "signal_context": {"rank": 1},
-        }
-        assert runner.engine.state == EngineState.LONG
-        assert runner._trigger_in_flight is False
-
-    def test_opening_pre_submit_estimate_failure_does_not_latch_uncertainty(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # Given
-        runner = TestAppRunner._runner_with_primary_quote_runtime()
-        self._enable(runner, monkeypatch)
-        monkeypatch.setattr(
-            trade_execution_service_module,
-            "is_trading_hours",
-            lambda _market: True,
-        )
-        runner._opening_execution_policies = {
-            "NVDA.US": self._policy()
-        }
-        monkeypatch.setattr(
-            runner.broker,
-            "get_quotes",
-            lambda _symbols: [
-                Quote(
-                    "NVDA.US",
-                    100.0,
-                    99.99,
-                    100.01,
-                    _fresh_timestamp(),
-                )
-            ],
-        )
-        monkeypatch.setattr(runner.broker, "get_positions", lambda: [])
-        monkeypatch.setattr(
-            runner.broker,
-            "estimate_margin_max_quantity",
-            lambda *_args: (_ for _ in ()).throw(
-                RuntimeError("margin estimate unavailable")
-            ),
-        )
-        submit_entered = False
-
-        def submit_limit_order(*_args: object) -> OrderResult:
-            nonlocal submit_entered
-            submit_entered = True
-            raise AssertionError("pre-submit failure reached broker mutation")
-
-        monkeypatch.setattr(
-            runner.broker,
-            "submit_limit_order",
-            submit_limit_order,
-        )
-        monkeypatch.setattr(
-            runner,
-            "_validate_opening_momentum_entry_policy",
-            lambda *_args, **_kwargs: None,
-        )
-        observed_failure: RuntimeError | None = None
-        result: dict[str, object] | None = None
-
-        # When
-        try:
-            result = runner.execute_opening_momentum_entry(
-                execution_id=17,
-                symbol="NVDA.US",
-                reference_entry_price=100.0,
-                entry_deadline_at=(
-                    datetime.now(timezone.utc) + timedelta(minutes=1)
-                ),
-                max_price_deviation_bps=200.0,
-                stop_loss_pct=1.0,
-                max_holding_minutes=60,
-                signal_context={},
-            )
-        except RuntimeError as exc:
-            observed_failure = exc
-
-        # Then
-        assert observed_failure is None
-        assert result is not None
-        assert result["status"] == "SKIPPED"
-        assert submit_entered is False
-        assert runner.risk.paused is False
-        assert runner.risk.pause_auto_resumable is False
-
-    def test_opening_broker_submit_failure_still_latches_uncertainty(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        # Given
-        runner = TestAppRunner._runner_with_primary_quote_runtime()
-        self._enable(runner, monkeypatch)
-        monkeypatch.setattr(
-            trade_execution_service_module,
-            "is_trading_hours",
-            lambda _market: True,
-        )
-        runner._opening_execution_policies = {
-            "NVDA.US": self._policy()
-        }
-        monkeypatch.setattr(
-            runner.broker,
-            "get_quotes",
-            lambda _symbols: [
-                Quote(
-                    "NVDA.US",
-                    100.0,
-                    99.99,
-                    100.01,
-                    _fresh_timestamp(),
-                )
-            ],
-        )
-        monkeypatch.setattr(runner.broker, "get_positions", lambda: [])
-        monkeypatch.setattr(
-            runner.broker,
-            "estimate_margin_max_quantity",
-            lambda *_args: Decimal("10"),
-        )
-        submit_entered = False
-
-        def submit_limit_order(*_args: object) -> OrderResult:
-            nonlocal submit_entered
-            submit_entered = True
-            raise RuntimeError("broker acknowledgement missing")
-
-        monkeypatch.setattr(
-            runner.broker,
-            "submit_limit_order",
-            submit_limit_order,
-        )
-        monkeypatch.setattr(
-            runner,
-            "_validate_opening_momentum_entry_policy",
-            lambda *_args, **_kwargs: None,
-        )
-
-        # When / Then
-        with pytest.raises(BrokerSubmissionUncertainError):
-            runner.execute_opening_momentum_entry(
-                execution_id=17,
-                symbol="NVDA.US",
-                reference_entry_price=100.0,
-                entry_deadline_at=(
-                    datetime.now(timezone.utc) + timedelta(minutes=1)
-                ),
-                max_price_deviation_bps=200.0,
-                stop_loss_pct=1.0,
-                max_holding_minutes=60,
-                signal_context={},
-            )
-        assert submit_entered is True
-        assert runner.risk.paused is True
-        assert runner.risk.pause_auto_resumable is False
-
-    def test_entry_rejects_catastrophic_price_deviation_without_transition(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        runner = TestAppRunner._runner_with_primary_quote_runtime()
-        self._enable(runner, monkeypatch)
-        runner._opening_execution_policies = {
-            "NVDA.US": self._policy()
-        }
-        monkeypatch.setattr(
-            runner.broker,
-            "get_quotes",
-            lambda _symbols: [Quote(
-                "NVDA.US",
-                103.0,
-                102.99,
-                103.01,
-                _fresh_timestamp(),
-            )],
-        )
-        submitted: list[object] = []
-        monkeypatch.setattr(
-            runner._trade_svc,
-            "execute",
-            lambda **kwargs: submitted.append(kwargs),
-        )
-
-        result = runner.execute_opening_momentum_entry(
-            execution_id=17,
-            symbol="NVDA.US",
-            reference_entry_price=100.0,
-            entry_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=1),
-            max_price_deviation_bps=200.0,
-            stop_loss_pct=1.0,
-            max_holding_minutes=60,
-            signal_context={},
-        )
-
-        assert result["status"] == "QUOTE_DEVIATION"
-        assert submitted == []
-        assert runner.engine.state == EngineState.FLAT
-        assert runner._trigger_in_flight is False
-
-    def test_opening_position_is_not_closed_by_legacy_grid_target(
-        self,
-    ) -> None:
-        runner = TestAppRunner._runner_with_primary_quote_runtime()
-        runner._running = True
-        runner.engine.state = EngineState.LONG
-        runner._opening_execution_policies = {
-            "NVDA.US": self._policy(status="OPEN")
-        }
-
-        decision = runner._evaluate_quote_trigger(Quote(
-            "NVDA.US",
-            111.0,
-            110.99,
-            111.01,
-            _fresh_timestamp(),
-        ))
-
-        assert decision.early_return is True
-        assert decision.result is None
-        assert runner.engine.state == EngineState.LONG
-
-    def test_armed_secondary_signal_reserves_primary_capital_slot(
-        self,
-    ) -> None:
-        runner = TestAppRunner._runner_with_primary_quote_runtime()
-        runner._running = True
-        runner.engine.params.buy_low = 100.0
-        runner.engine.state = EngineState.FLAT
-        runner._opening_execution_policies = {
-            "AAPL.US": self._policy(
-                symbol="AAPL.US",
-                status="ARMED",
-            )
-        }
-
-        decision = runner._evaluate_quote_trigger(Quote(
-            "NVDA.US",
-            99.0,
-            98.99,
-            99.01,
-            _fresh_timestamp(),
-        ))
-        policy_result = runner._validate_live_entry_policy(
-            "NVDA.US",
-            "BUY",
-            "US",
-        )
-
-        assert decision.early_return is True
-        assert decision.result is None
-        assert runner.engine.state == EngineState.FLAT
-        assert isinstance(policy_result, EntryPolicyCheckResult)
-        assert policy_result.details["policy_reason"] == (
-            "CAPITAL_SLOT_RESERVED"
-        )
-
-    def test_signal_window_reserves_capital_before_signal_is_armed(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        runner = TestAppRunner._runner_with_primary_quote_runtime()
-        runner._running = True
-        runner.engine.params.buy_low = 100.0
-        runner.engine.state = EngineState.FLAT
-        assert runner._opening_execution_policies == {}
-        monkeypatch.setattr(
-            runner_module,
-            "opening_execution_reservation_window",
-            lambda: True,
-        )
-
-        decision = runner._evaluate_quote_trigger(Quote(
-            "NVDA.US",
-            99.0,
-            98.99,
-            99.01,
-            _fresh_timestamp(),
-        ))
-        policy_result = runner._validate_live_entry_policy(
-            "NVDA.US",
-            "BUY",
-            "US",
-        )
-
-        assert decision.early_return is True
-        assert decision.result is None
-        assert runner.engine.state == EngineState.FLAT
-        assert isinstance(policy_result, EntryPolicyCheckResult)
-        assert policy_result.details["policy_reason"] == (
-            "CAPITAL_SLOT_RESERVED"
-        )
-
-    def test_entry_retries_when_an_existing_position_owns_capital_slot(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        runner = TestAppRunner._runner_with_primary_quote_runtime()
-        self._enable(runner, monkeypatch)
-        runner._opening_execution_policies = {
-            "NVDA.US": self._policy()
-        }
-        runner._trade_svc.load_tracked_entries({
-            "AAPL.US": (
-                Decimal("1"),
-                Decimal("100"),
-                "LONG",
-                datetime.now(timezone.utc),
-            )
-        })
-
-        result = runner.execute_opening_momentum_entry(
-            execution_id=17,
-            symbol="NVDA.US",
-            reference_entry_price=100.0,
-            entry_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=1),
-            max_price_deviation_bps=200.0,
-            stop_loss_pct=1.0,
-            max_holding_minutes=60,
-            signal_context={},
-        )
-
-        assert result["status"] == "CAPITAL_SLOT_BUSY"
-        assert runner.engine.state == EngineState.FLAT
-        assert runner._trigger_in_flight is False
-
-    def test_entry_never_submits_after_the_causal_window(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        runner = TestAppRunner._runner_with_primary_quote_runtime()
-        self._enable(runner, monkeypatch)
-        runner._opening_execution_policies = {
-            "NVDA.US": self._policy()
-        }
-
-        result = runner.execute_opening_momentum_entry(
-            execution_id=17,
-            symbol="NVDA.US",
-            reference_entry_price=100.0,
-            entry_deadline_at=datetime.now(timezone.utc) - timedelta(seconds=1),
-            max_price_deviation_bps=200.0,
-            stop_loss_pct=1.0,
-            max_holding_minutes=60,
-            signal_context={},
-        )
-
-        assert result["status"] == "ENTRY_WINDOW_EXPIRED"
-        assert runner.engine.state == EngineState.FLAT
-        assert runner._trigger_in_flight is False
-
-    def test_entry_expiring_during_broker_preflight_is_reported_as_expired(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        runner = TestAppRunner._runner_with_primary_quote_runtime()
-        self._enable(runner, monkeypatch)
-        runner._opening_execution_policies = {
-            "NVDA.US": self._policy()
-        }
-        monkeypatch.setattr(
-            runner.broker,
-            "get_quotes",
-            lambda _symbols: [Quote(
-                "NVDA.US",
-                100.0,
-                99.99,
-                100.01,
-                _fresh_timestamp(),
-            )],
-        )
-        monkeypatch.setattr(
-            runner._trade_svc,
-            "execute",
-            lambda **_kwargs: OrderStatus(
-                "",
-                "SKIPPED",
-                reason="ENTRY_WINDOW_EXPIRED",
-            ),
-        )
-
-        result = runner.execute_opening_momentum_entry(
-            execution_id=17,
-            symbol="NVDA.US",
-            reference_entry_price=100.0,
-            entry_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=1),
-            max_price_deviation_bps=200.0,
-            stop_loss_pct=1.0,
-            max_holding_minutes=60,
-            signal_context={},
-        )
-
-        assert result["status"] == "ENTRY_WINDOW_EXPIRED"
-        assert result["reason"] == "ENTRY_WINDOW_EXPIRED"
-        assert runner.engine.state == EngineState.FLAT
-        assert runner._trigger_in_flight is False
-
-    @pytest.mark.parametrize(
-        ("reason", "expected_status"),
-        [
-            (
-                "submitted limit price deviates from fresh executable BBO "
-                "by 0.58%",
-                "QUOTE_DEVIATION",
-            ),
-            (
-                "fresh quote for the submitted symbol is unavailable",
-                "NO_QUOTE",
-            ),
-            (
-                "fresh executable quote failed the final quality gate",
-                "NO_QUOTE",
-            ),
-            (
-                "fresh executable BBO price is unavailable",
-                "NO_QUOTE",
-            ),
-            (
-                "fresh executable quote could not be verified",
-                "NO_QUOTE",
-            ),
-        ],
-    )
-    def test_retryable_final_quote_skip_preserves_opening_retry_semantics(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        reason: str,
-        expected_status: str,
-    ) -> None:
-        runner = TestAppRunner._runner_with_primary_quote_runtime()
-        self._enable(runner, monkeypatch)
-        runner._opening_execution_policies = {
-            "NVDA.US": self._policy()
-        }
-        monkeypatch.setattr(
-            runner.broker,
-            "get_quotes",
-            lambda _symbols: [Quote(
-                "NVDA.US",
-                100.0,
-                99.99,
-                100.01,
-                _fresh_timestamp(),
-            )],
-        )
-        monkeypatch.setattr(
-            runner._trade_svc,
-            "execute",
-            lambda **_kwargs: OrderStatus(
-                "",
-                "SKIPPED",
-                reason=reason,
-            ),
-        )
-
-        result = runner.execute_opening_momentum_entry(
-            execution_id=17,
-            symbol="NVDA.US",
-            reference_entry_price=100.0,
-            entry_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=1),
-            max_price_deviation_bps=200.0,
-            stop_loss_pct=1.0,
-            max_holding_minutes=60,
-            signal_context={},
-        )
-
-        assert result == {
-            "executed": False,
-            "status": expected_status,
-            "order_id": None,
-            "action": "BUY",
-            "reason": reason,
-        }
-        assert runner.engine.state == EngineState.FLAT
-        assert runner._trigger_in_flight is False
-
-    @pytest.mark.parametrize(
-        (
-            "order_status",
-            "broker_order_id",
-            "reason",
-            "expected_status",
-            "expected_order_id",
-        ),
-        [
-            (
-                "SKIPPED",
-                "",
-                "an unrelated order policy rejected submission",
-                "SKIPPED",
-                None,
-            ),
-            (
-                "SKIPPED",
-                "unexpected-order-id",
-                "submitted limit price deviates from fresh executable BBO "
-                "by 0.58%",
-                "SKIPPED",
-                "unexpected-order-id",
-            ),
-            (
-                "REJECTED",
-                "",
-                "fresh quote for the submitted symbol is unavailable",
-                "REJECTED",
-                None,
-            ),
-        ],
-    )
-    def test_only_unlinked_retryable_skipped_order_is_reclassified(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        order_status: str,
-        broker_order_id: str,
-        reason: str,
-        expected_status: str,
-        expected_order_id: str | None,
-    ) -> None:
-        runner = TestAppRunner._runner_with_primary_quote_runtime()
-        self._enable(runner, monkeypatch)
-        runner._opening_execution_policies = {
-            "NVDA.US": self._policy()
-        }
-        monkeypatch.setattr(
-            runner.broker,
-            "get_quotes",
-            lambda _symbols: [Quote(
-                "NVDA.US",
-                100.0,
-                99.99,
-                100.01,
-                _fresh_timestamp(),
-            )],
-        )
-        monkeypatch.setattr(
-            runner._trade_svc,
-            "execute",
-            lambda **_kwargs: OrderStatus(
-                broker_order_id,
-                order_status,
-                reason=reason,
-            ),
-        )
-
-        result = runner.execute_opening_momentum_entry(
-            execution_id=17,
-            symbol="NVDA.US",
-            reference_entry_price=100.0,
-            entry_deadline_at=datetime.now(timezone.utc) + timedelta(minutes=1),
-            max_price_deviation_bps=200.0,
-            stop_loss_pct=1.0,
-            max_holding_minutes=60,
-            signal_context={},
-        )
-
-        assert result == {
-            "executed": False,
-            "status": expected_status,
-            "order_id": expected_order_id,
-            "action": "BUY",
-            "reason": reason,
-        }
-        assert runner.engine.state == EngineState.FLAT
-        assert runner._trigger_in_flight is False
-
-    def test_opening_policy_recheck_rejects_an_expired_deadline(self) -> None:
-        runner = TestAppRunner._runner_with_primary_quote_runtime()
-        runner._opening_execution_policies = {
-            "NVDA.US": self._policy()
-        }
-
-        result = runner._validate_opening_momentum_entry_policy(
-            17,
-            "NVDA.US",
-            "BUY",
-            "US",
-            entry_deadline_at=datetime.now(timezone.utc) - timedelta(seconds=1),
-        )
-
-        assert isinstance(result, EntryPolicyCheckResult)
-        assert result.issue == "ENTRY_WINDOW_EXPIRED"
-        assert result.skip_category == "SESSION"
-        assert result.details["policy_reason"] == "ENTRY_WINDOW_EXPIRED"
-
-    def test_secondary_opening_position_gets_fixed_stop_exit(self) -> None:
-        runner = TestAppRunner._runner_with_primary_quote_runtime()
-        runner._running = True
-        runtime = runner._build_symbol_runtime(
-            "AAPL.US",
-            "US",
-            primary=False,
-        )
-        runtime.engine.state = EngineState.LONG
-        runner._symbol_runtimes["AAPL.US"] = runtime
-        runner._opening_execution_policies = {
-            "AAPL.US": self._policy(
-                symbol="AAPL.US",
-                status="OPEN",
-            )
-        }
-        runner._trade_svc.load_tracked_entries({
-            "AAPL.US": (
-                Decimal("10"),
-                Decimal("1000"),
-                "LONG",
-                datetime.now(timezone.utc),
-            )
-        })
-
-        decision = runner._evaluate_quote_trigger(Quote(
-            "AAPL.US",
-            98.95,
-            98.94,
-            98.96,
-            _fresh_timestamp(),
-        ))
-
-        assert decision.result is not None
-        assert decision.result.triggered is True
-        assert decision.result.action == "SELL"
-        assert decision.reduce_only is True
-        assert decision.allow_loss_exit is True
-        assert decision.reduction_cause == "PRICE_STOP"
 
 
 def test_set_reconciliation_gate_mirrors_engine_attribute() -> None:

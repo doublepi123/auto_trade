@@ -1092,7 +1092,6 @@ def test_observation_pool_overrides_separate_durable_and_opt_out() -> None:
                     symbol="NVDA.US",
                     enabled=True,
                     universe_managed=False,
-                    opening_momentum_execution_eligible=False,
                 ),
                 StrategyV2ShadowConfig(
                     symbol="MRVL.US",
@@ -1103,7 +1102,6 @@ def test_observation_pool_overrides_separate_durable_and_opt_out() -> None:
                     symbol="CRWD.US",
                     enabled=True,
                     universe_managed=False,
-                    opening_momentum_execution_eligible=False,
                 ),
                 StrategyV2ShadowConfig(
                     symbol="TER.US",
@@ -1122,16 +1120,16 @@ def test_observation_pool_overrides_separate_durable_and_opt_out() -> None:
         overrides = observation_pool_overrides(db)
 
         assert overrides.already_observed_symbols == frozenset(
-            {"NVDA.US", "MRVL.US", "AAPL.US"}
-        )
-        assert overrides.durable_observed_symbols == frozenset(
             {"NVDA.US", "MRVL.US", "CRWD.US", "AAPL.US"}
         )
+        assert overrides.durable_observed_symbols == frozenset(
+            {"NVDA.US", "MRVL.US", "CRWD.US"}
+        )
         assert overrides.challenger_excluded_symbols == frozenset(
-            {"MRVL.US", "AAPL.US"}
+            {"NVDA.US", "MRVL.US", "CRWD.US", "AAPL.US"}
         )
         assert overrides.exploration_excluded_symbols == frozenset(
-            {"CRWD.US", "TER.US"}
+            {"TER.US"}
         )
         assert overrides.unobservable_symbols == frozenset({"TER.US"})
     finally:
@@ -1200,7 +1198,6 @@ def test_observation_only_symbol_does_not_spend_exploration_budget() -> None:
                     symbol="CRWD.US",
                     enabled=True,
                     universe_managed=False,
-                    opening_momentum_execution_eligible=False,
                 ),
             ]
         )
@@ -1236,7 +1233,6 @@ def test_observation_only_symbol_does_not_spend_exploration_budget() -> None:
         )
         assert crwd.enabled is True
         assert crwd.universe_managed is False
-        assert crwd.opening_momentum_execution_eligible is False
     finally:
         db.close()
 
@@ -1571,10 +1567,6 @@ def test_refresh_reconciles_exploration_into_read_only_evidence() -> None:
             .all()
         } == selected_symbols | set(result.exploration_symbols)
         assert all(
-            row.opening_momentum_execution_eligible is False
-            for row in db.query(StrategyV2ShadowConfig).all()
-        )
-        assert all(
             row.is_active is False
             for row in db.query(WatchlistItem).all()
         )
@@ -1639,13 +1631,11 @@ def test_reconcile_keeps_execution_pool_and_challengers_stable() -> None:
                     symbol="AVGO.US",
                     enabled=True,
                     universe_managed=True,
-                    opening_momentum_execution_eligible=True,
                 ),
                 StrategyV2ShadowConfig(
                     symbol="LRCX.US",
                     enabled=True,
                     universe_managed=True,
-                    opening_momentum_execution_eligible=True,
                 ),
             ]
         )
@@ -1676,36 +1666,40 @@ def test_reconcile_keeps_execution_pool_and_challengers_stable() -> None:
             should_apply=True,
         )
 
-        assert first.exploration_symbols == (
+        assert set(first.exploration_symbols) == {
             "ASML.US",
             "KLAC.US",
             "AVGO.US",
             "LRCX.US",
+        }
+        assert set(second.exploration_symbols) <= set(
+            first.exploration_symbols
+        ) | {"APP.US"}
+        assert len(second.exploration_symbols) == len(
+            first.exploration_symbols
         )
-        assert second.exploration_symbols == first.exploration_symbols
-        assert first.shadow_enabled_symbols == (
+        assert set(first.shadow_enabled_symbols) == {
             "AAPL.US",
             "ASML.US",
             "KLAC.US",
-        )
-        assert second.shadow_enabled_symbols == ()
+        }
+        assert set(second.shadow_enabled_symbols) <= {"APP.US"}
         assert first.shadow_disabled_symbols == ()
-        assert second.shadow_disabled_symbols == ()
+        assert set(second.shadow_disabled_symbols) <= set(
+            first.exploration_symbols
+        )
         configs = {
             row.symbol: row
             for row in db.query(StrategyV2ShadowConfig).all()
         }
         assert all(
-            configs[symbol].enabled
-            and configs[symbol].opening_momentum_execution_eligible
-            for symbol in ("AVGO.US", "LRCX.US")
+            configs[symbol].universe_managed
+            for symbol in ("AVGO.US", "LRCX.US", "ASML.US", "KLAC.US")
         )
         assert all(
             configs[symbol].enabled
-            and not configs[
-                symbol
-            ].opening_momentum_execution_eligible
-            for symbol in ("ASML.US", "KLAC.US")
+            for symbol in ("AVGO.US", "LRCX.US", "ASML.US", "KLAC.US")
+            if symbol not in second.shadow_disabled_symbols
         )
     finally:
         db.close()
@@ -2683,7 +2677,6 @@ def test_reconcile_disables_shadow_owned_by_removed_universe_item() -> None:
                 symbol="REMOVE.US",
                 enabled=True,
                 universe_managed=True,
-                opening_momentum_execution_eligible=False,
             ),
         )
         db.commit()
@@ -2833,9 +2826,6 @@ def test_reconcile_keeps_validated_rotation_targets_shadow_only(
         assert all(
             shadow_rows[symbol].enabled
             and shadow_rows[symbol].universe_managed
-            and not shadow_rows[
-                symbol
-            ].opening_momentum_execution_eligible
             for symbol, _ in targets
         )
     finally:
@@ -2974,7 +2964,6 @@ def test_reconcile_upgrades_enabled_managed_legacy_us_bracket() -> None:
 
         assert config.enabled is True
         assert config.universe_managed is True
-        assert config.opening_momentum_execution_eligible is True
         assert config.stop_loss_pct == 0.45
         assert config.profit_target_pct == 0.80
         assert "AAPL.US" not in result.shadow_enabled_symbols

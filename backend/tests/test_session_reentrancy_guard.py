@@ -217,7 +217,7 @@ def test_in_memory_engine_still_works_with_guard_installed(_test_env) -> None:
     """``sqlite://`` uses ``SingletonThreadPool``; installing must not break it.
 
     Many tests build in-memory engines, and
-    ``tests/test_watchlist_quant_v6_reader_import_isolation.py`` boots a whole
+    the reader-import isolation test boots a whole
     fresh interpreter with ``AUTO_TRADE_DATABASE_URL=sqlite://``. That pool
     hands one connection per thread back repeatedly, so nesting emits no second
     checkout and the guard is simply inert there rather than wrong.

@@ -33,7 +33,7 @@ from app.domain.strategy_v2.forward_replay_artifact import (
     encode_forward_replay_artifact,
     forward_replay_artifact_binding_sha256,
 )
-from app.domain.strategy_v2.frozen_disproof_queue import (
+from app.domain.strategy_v2.frozen_forward_collection import (
     FROZEN_EVALUATOR_DIGEST,
     FROZEN_QUEUE_ENTRIES,
 )
@@ -1125,15 +1125,13 @@ class TestStrategyV2ShadowService:
             )
             db.commit()
 
-            eligibility = service.update_config(
-                StrategyV2ShadowConfigUpdate(
-                    opening_momentum_execution_eligible=False,
-                )
+            response = service.update_config(
+                StrategyV2ShadowConfigUpdate(enabled=False)
             )
             db.refresh(state)
-            assert eligibility.opening_momentum_execution_eligible is False
+            assert response.enabled is False
             assert config.universe_managed is False
-            assert eligibility.config_version == version_before
+            assert response.config_version == version_before
             assert state.phase == "LONG"
             assert state.state_json == '{"state":"LONG"}'
 

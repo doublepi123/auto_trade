@@ -333,25 +333,6 @@ class Settings(BaseSettings):
             "AUTO_TRADE_STRATEGY_V2_FORWARD_REPLAY_ARTIFACT_MAINTENANCE_BATCH_SIZE"
         ),
     )
-    # Must be 0 while publication bindings carry append-only manifest
-    # provenance: any non-zero window makes the prune issue a DELETE the
-    # trigger aborts, which fails the whole maintenance tick. Safe to raise
-    # only once artifact metadata and expirable blob bytes live in separate
-    # tables.
-    watchlist_quant_v6_artifact_retention_days: int = Field(
-        default=0,
-        ge=0,
-        le=3650,
-        validation_alias="AUTO_TRADE_WATCHLIST_QUANT_V6_ARTIFACT_RETENTION_DAYS",
-    )
-    watchlist_quant_v6_artifact_maintenance_batch_size: int = Field(
-        default=250,
-        ge=10,
-        le=5000,
-        validation_alias=(
-            "AUTO_TRADE_WATCHLIST_QUANT_V6_ARTIFACT_MAINTENANCE_BATCH_SIZE"
-        ),
-    )
     llm_interval_volatility_threshold_pct: float = Field(
         default=1.0,
         gt=0,
@@ -531,63 +512,6 @@ class Settings(BaseSettings):
         default=False,
         validation_alias="AUTO_TRADE_UNIVERSE_SELECTION_ENABLE_SHADOW",
     )
-    opening_momentum_shadow_enabled: bool = Field(
-        default=False,
-        validation_alias="AUTO_TRADE_OPENING_MOMENTUM_SHADOW_ENABLED",
-        description=(
-            "Collect daily, paired US opening-momentum observations for the "
-            "selected universe and frozen extension cohort. This is "
-            "shadow-only and has no order submission path."
-        ),
-    )
-    opening_momentum_challenger_enabled: bool = Field(
-        default=False,
-        validation_alias=(
-            "AUTO_TRADE_OPENING_MOMENTUM_CHALLENGER_ENABLED"
-        ),
-        description=(
-            "Evaluate a T-1 trend-continuation universe alongside the "
-            "incumbent opening-momentum shadow universe. Both variants "
-            "remain observation-only and cannot submit orders."
-        ),
-    )
-    opening_momentum_execution_enabled: bool = Field(
-        default=False,
-        validation_alias=(
-            "AUTO_TRADE_OPENING_MOMENTUM_EXECUTION_ENABLED"
-        ),
-        description=(
-            "Compatibility field. Opening momentum remains observation-only "
-            "and cannot submit orders."
-        ),
-    )
-    opening_momentum_execution_paper_confirmed: bool = Field(
-        default=False,
-        validation_alias=(
-            "AUTO_TRADE_OPENING_MOMENTUM_EXECUTION_PAPER_CONFIRMED"
-        ),
-        description=(
-            "Explicit operator acknowledgement that the connected broker "
-            "account is a paper account. Required for opening execution."
-        ),
-    )
-    opening_momentum_execution_max_entry_delay_seconds: int = Field(
-        default=30,
-        ge=5,
-        le=120,
-        validation_alias=(
-            "AUTO_TRADE_OPENING_MOMENTUM_EXECUTION_MAX_ENTRY_DELAY_SECONDS"
-        ),
-    )
-    opening_momentum_execution_max_price_deviation_bps: float = Field(
-        default=200.0,
-        ge=0,
-        le=200,
-        allow_inf_nan=False,
-        validation_alias=(
-            "AUTO_TRADE_OPENING_MOMENTUM_EXECUTION_MAX_PRICE_DEVIATION_BPS"
-        ),
-    )
     strategy_v2_portfolio_shadow_enabled: bool = Field(
         default=False,
         validation_alias=(
@@ -651,108 +575,6 @@ class Settings(BaseSettings):
             "Maximum number of due symbols refreshed by one automatic quant "
             "tick. Small batches leave quote API capacity for the live runner "
             "and shadow strategies."
-        ),
-    )
-    watchlist_quant_v6_evaluation_enabled: bool = Field(
-        default=False,
-        validation_alias=(
-            "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_ENABLED"
-        ),
-        description=(
-            "Run the quote-only historical quant-v6 evidence publication "
-            "job. This research path cannot submit orders or change the "
-            "live watchlist/universe."
-        ),
-    )
-    watchlist_quant_v6_evaluation_interval_minutes: int = Field(
-        default=1_440,
-        ge=60,
-        le=10_080,
-        validation_alias=(
-            "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_INTERVAL_MINUTES"
-        ),
-        description=(
-            "Bounded interval for the historical quant-v6 publication job."
-        ),
-    )
-    watchlist_quant_v6_evaluation_retry_interval_minutes: int = Field(
-        default=60,
-        ge=15,
-        le=1_440,
-        validation_alias=(
-            "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_RETRY_INTERVAL_MINUTES"
-        ),
-        description=(
-            "Bounded retry interval after a historical quant-v6 tick fails."
-        ),
-    )
-    watchlist_quant_v6_evaluation_timeout_seconds: int = Field(
-        default=1_800,
-        ge=60,
-        le=7_200,
-        validation_alias=(
-            "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_TIMEOUT_SECONDS"
-        ),
-        description=(
-            "End-to-end cooperative deadline for one historical "
-            "quant-v6 acquisition, evaluation, and publication tick. This "
-            "does not alter domain semantics or artifact payloads; its "
-            "control source is bound by historical evaluator manifest v3."
-        ),
-    )
-    watchlist_quant_v6_provider_page_timeout_seconds: float = Field(
-        default=30.0,
-        ge=5.0,
-        le=120.0,
-        allow_inf_nan=False,
-        validation_alias=(
-            "AUTO_TRADE_WATCHLIST_QUANT_V6_PROVIDER_PAGE_TIMEOUT_SECONDS"
-        ),
-        description=(
-            "Hard wall-clock limit for one quote-only historical SDK page."
-        ),
-    )
-    watchlist_quant_v6_compute_workers: int = Field(
-        default=4,
-        ge=2,
-        le=4,
-        validation_alias=(
-            "AUTO_TRADE_WATCHLIST_QUANT_V6_COMPUTE_WORKERS"
-        ),
-        description=(
-            "Bounded process-worker count for quote-only quant-v6 compute."
-        ),
-    )
-    watchlist_quant_v6_pipeline_memory_limit_mib: int = Field(
-        default=2_048,
-        ge=512,
-        le=8_192,
-        validation_alias=(
-            "AUTO_TRADE_WATCHLIST_QUANT_V6_PIPELINE_MEMORY_LIMIT_MIB"
-        ),
-        description=(
-            "Hard quant-v6 pipeline memory budget in MiB across parent RSS "
-            "growth caused by this job plus total compute-worker RSS."
-        ),
-    )
-    # Published quant-v6 artifacts are append-only by SQLite trigger and the
-    # retention window above must stay 0, so this evidence can never be
-    # pruned. Refusing to create more is therefore the only available control
-    # once the database — shared with the live trading loop — grows too large.
-    # The default sits above the current footprint so enabling the fence never
-    # kills a research pipeline an operator started on purpose.
-    watchlist_quant_v6_db_size_budget_mb: int = Field(
-        default=4_096,
-        ge=512,
-        le=16_384,
-        validation_alias=(
-            "AUTO_TRADE_WATCHLIST_QUANT_V6_DB_SIZE_BUDGET_MB"
-        ),
-        description=(
-            "Hard database-size budget in MB (1 MB = 1024*1024 bytes) above "
-            "which new quote-only quant-v6 evaluation ticks are skipped. "
-            "Existing evidence is never deleted or vacuumed; the fence only "
-            "refuses to publish more."
         ),
     )
     universe_selection_max_symbols: int = Field(
@@ -1011,15 +833,6 @@ class Settings(BaseSettings):
     paper_account_fingerprint: str = Field(
         default="",
         validation_alias="AUTO_TRADE_PAPER_ACCOUNT_FINGERPRINT",
-    )
-    # Isolated SPY passive buy-and-hold lane (phase 1). DEFAULT OFF; even
-    # when ON the lane additionally requires the confirmed-PAPER attestation
-    # above AND an owner-approved persisted mandate row with an unspent
-    # one-time entry authorisation. Turning this flag on is itself an
-    # owner-approval-gated act (2026-09-29); funded use is not authorised.
-    spy_passive_lane_enabled: bool = Field(
-        default=False,
-        validation_alias="AUTO_TRADE_SPY_PASSIVE_ENABLED",
     )
 
     # Funded full-margin sizing exception (P3a; owner decision
@@ -1478,17 +1291,11 @@ class Settings(BaseSettings):
         self.allow_short_entries = False
         self.hard_allow_position_addons = False
         self.llm_shadow_mode = True
-        if self.opening_momentum_execution_enabled:
-            logger.warning(
-                "opening momentum order execution is permanently disabled; "
-                "the configured opt-in is being ignored"
-            )
         if self.full_buying_power_usage_enabled:
             logger.warning(
                 "full buying-power usage is permanently disabled; the configured "
                 "opt-in is being ignored"
             )
-        self.opening_momentum_execution_enabled = False
         self.full_buying_power_usage_enabled = False
         # Each paper relaxation (quantity, notional, per-trade risk) is
         # granted ONLY by the paper attestation AND a separately requested
@@ -1691,45 +1498,6 @@ class Settings(BaseSettings):
                     "ceiling to be below the incumbent trend threshold"
                 )
         if (
-            self.opening_momentum_shadow_enabled
-            and not self.universe_selection_enabled
-        ):
-            raise ValueError(
-                "opening momentum shadow requires universe selection"
-            )
-        if (
-            self.opening_momentum_challenger_enabled
-            and not self.opening_momentum_shadow_enabled
-        ):
-            raise ValueError(
-                "opening momentum challenger requires opening momentum "
-                "shadow"
-            )
-        if (
-            self.opening_momentum_execution_enabled
-            and not self.opening_momentum_challenger_enabled
-        ):
-            raise ValueError(
-                "opening momentum execution requires the paired challenger "
-                "observer"
-            )
-        if (
-            self.opening_momentum_execution_enabled
-            and not self.opening_momentum_execution_paper_confirmed
-        ):
-            raise ValueError(
-                "opening momentum execution requires explicit paper-account "
-                "confirmation"
-            )
-        if (
-            self.opening_momentum_execution_enabled
-            and not self.full_buying_power_usage_enabled
-        ):
-            raise ValueError(
-                "opening momentum execution requires the explicitly selected "
-                "full buying-power paper mode"
-            )
-        if (
             self.strategy_v2_portfolio_shadow_enabled
             and not self.universe_selection_enable_shadow
         ):
@@ -1744,14 +1512,6 @@ class Settings(BaseSettings):
             raise ValueError(
                 "watchlist quant score TTL must not be shorter than its "
                 "refresh interval"
-            )
-        if (
-            self.watchlist_quant_v6_evaluation_retry_interval_minutes
-            > self.watchlist_quant_v6_evaluation_interval_minutes
-        ):
-            raise ValueError(
-                "watchlist quant-v6 evaluation retry interval must not "
-                "exceed its regular interval"
             )
         if self.job_lease_heartbeat_seconds >= self.job_lease_ttl_seconds:
             raise ValueError(

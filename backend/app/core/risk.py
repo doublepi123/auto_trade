@@ -48,26 +48,6 @@ class RiskResult:
     reason: str = ""
 
 
-class ResumeBlockedError(RuntimeError):
-    """``resume()`` refused: an external safety block is still active."""
-
-
-@dataclass(frozen=True, slots=True)
-class ExternalSafetyBlock:
-    """One independent, in-memory external safety block (Phase2a W2).
-
-    Pure controller state — never persisted, never I/O. ``source``
-    identifies the raiser (currently only ``passive_recovery``), ``epoch``
-    is the source-local monotonic version used for CAS publishes, and
-    ``reason`` is the human-facing cause. Deterministic selection under
-    multiple sources is by sorted ``source``.
-    """
-
-    source: str
-    reason: str
-    epoch: int
-
-
 @dataclass(frozen=True)
 class DailyLossSnapshot:
     """Atomic daily-loss inputs captured after exchange-day rollover."""
@@ -141,12 +121,6 @@ class RiskController:
         self._kill_switch_reason: str = ""
         self._safety_generation: int = 0
         self._entry_reconciliation_count: int = 0
-        # Phase2a W2: independent in-memory external safety blocks. Pure
-        # state under this controller's own lock — no DB, no network, no
-        # services, no callbacks. Source epochs make publishes CAS-safe:
-        # an old scan can never clear a newer raise.
-        self._external_blocks: dict[str, ExternalSafetyBlock] = {}
-        self._external_epoch: dict[str, int] = {}
         # Serializes the local protective commit proof with runner lifecycle
         # invalidation.  Keep this separate from ``_lock``: the commit proof
         # reads runner state, while ordinary runner paths can read risk state
@@ -171,11 +145,6 @@ class RiskController:
             if self.kill_switch:
                 return TradingState.HALTED
             if self.paused or self._entry_reconciliation_count > 0:
-                return TradingState.REDUCING
-            if self._external_blocks:
-                # Phase2a W2: an external safety block refuses new
-                # exposure but never blocks proven reductions — at least
-                # REDUCING, never HALTED (the kill switch owns HALTED).
                 return TradingState.REDUCING
             if not self._check_limits().approved:
                 return TradingState.REDUCING
@@ -449,74 +418,8 @@ class RiskController:
                 self._safety_generation += 1
             return self._entry_reconciliation_count
 
-    # -- Phase2a W2 external safety blocks (pure, in-memory) ---------------
-
-    def raise_external_block(self, source: str, reason: str) -> int:
-        """Raise (or re-raise) an external safety block; returns the epoch.
-
-        Under the controller lock: increments the source's epoch and the
-        safety generation, then installs/replaces the block. No I/O.
-        """
-        with self._lock:
-            epoch = self._external_epoch.get(source, 0) + 1
-            self._external_epoch[source] = epoch
-            self._safety_generation += 1
-            self._external_blocks[source] = ExternalSafetyBlock(
-                source=source,
-                reason=str(reason or "external safety block"),
-                epoch=epoch,
-            )
-            return epoch
-
-    def publish_external_block(
-        self,
-        source: str,
-        reason: str | None,
-        *,
-        based_on_epoch: int,
-    ) -> bool:
-        """CAS publish of a scan result against the CAPTURED epoch.
-
-        ``based_on_epoch`` must be the epoch the scanning snapshot
-        captured (never a freshly read self field). A mismatch means a
-        newer raise landed mid-scan: return False and mutate NOTHING —
-        an old scan can never clear or replace a newer raise. On success
-        the block is removed (``reason is None``) or its reason replaced,
-        and the safety generation advances. No I/O.
-        """
-        with self._lock:
-            if self._external_epoch.get(source, 0) != based_on_epoch:
-                return False
-            if reason is None:
-                if source in self._external_blocks:
-                    del self._external_blocks[source]
-                    self._safety_generation += 1
-                return True
-            epoch = self._external_epoch[source]
-            self._external_blocks[source] = ExternalSafetyBlock(
-                source=source,
-                reason=str(reason),
-                epoch=epoch,
-            )
-            self._safety_generation += 1
-            return True
-
-    def external_block(self) -> ExternalSafetyBlock | None:
-        """The active external block, or None (deterministic: sorted source)."""
-        with self._lock:
-            if not self._external_blocks:
-                return None
-            source = min(self._external_blocks)
-            return self._external_blocks[source]
-
     def resume(self) -> None:
         with self._lock:
-            if self._external_blocks:
-                block = self._external_blocks[min(self._external_blocks)]
-                raise ResumeBlockedError(
-                    f"resume refused: external safety block active "
-                    f"({block.source}: {block.reason})",
-                )
             self._safety_generation += 1
             self._protective_exit_pause_reason = ""
             self.paused = False
@@ -528,15 +431,6 @@ class RiskController:
         """Check persistent risk limits without clearing the pause latch."""
         with self._lock:
             self._maybe_rollover_day()
-            if self._external_blocks:
-                block = self._external_blocks[min(self._external_blocks)]
-                return RiskResult(
-                    approved=False,
-                    reason=(
-                        f"external safety block active ({block.source}: "
-                        f"{block.reason}); resolve it before resuming"
-                    ),
-                )
             if self.kill_switch:
                 return RiskResult(
                     approved=False,
@@ -564,14 +458,6 @@ class RiskController:
         indivisible in-process state transition.
         """
         with self._lock:
-            if self._external_blocks:
-                # Phase2a W2: an active external block refuses the resume
-                # while PRESERVING the original pause; the generation
-                # advance below mirrors the pre-existing refusal path so
-                # ordering semantics are unchanged.
-                self._protective_exit_pause_reason = ""
-                self._safety_generation += 1
-                return False
             if self._safety_generation != expected_generation:
                 self._protective_exit_pause_reason = ""
                 self._safety_generation += 1

@@ -25,7 +25,6 @@ declaration order. The major domains, top to bottom:
 | Review | `ReviewOrder`, `ReviewEvent`, `ReviewLLMInteraction` |
 | Universe selection | `UniverseSelectionItem`, `UniverseSelectionRunResponse`, `UniversePromotionReadiness*` |
 | Experiments | `ExperimentSummary`, `PerformanceVariant`, `StrategyExperiment*`, `LLMEvaluation*` |
-| Opening momentum shadow | `OpeningMomentumShadowConfig/Run/Metrics/Status`, `OpeningMomentumExecution*` |
 | Strategy v2 shadow | `StrategyShadowConfig/Latest/Metrics/Status/Decision/Version`, challenger & portfolio-routing variants (`…ExitChallenger…`, `…BracketChallenger…`, `…AdxChallenger…`, `…Warmup…`, `…ForwardValidation…`, `LiveExitChallenger…`) |
 | Reconciliation | `ReconciliationStatus`, `ReconciliationEvidence`, `ReconciliationBrokerSnapshot`, `ReconciliationEvidenceSurface` |
 | Primary candidacy | `PrimaryCandidacyGateParameters/PoolGate/Power/Candidate/Response`, verdict unions (`PrimaryCandidacyVerdict`, `…PoolGateStatus = 'PASS' | 'BLOCKED' | 'UNASSESSABLE'`) |

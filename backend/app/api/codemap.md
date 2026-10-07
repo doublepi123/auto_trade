@@ -68,11 +68,9 @@ The research platform routes (`/api/platform/*`, 202 routes; `/api/portfolio/*`)
 | `credentials.py` | `/api` | 4 | Encrypted credential GET/PUT, broker + notification-channel test |
 | `calendar.py` | `/api` | 5 | `/api/calendar/{today,session,closures,lookup,coverage}` |
 | `watchlist.py` | `/api/watchlist` | 11 | CRUD, quotes, quant rank/score/snapshots, **`/{item_id}/set-trading`** (changes the live symbol via `StrategyService`) |
-| `watchlist_quant_v6.py` | `/api/watchlist/quant-v6` | 5 | Publications, members, bindings, artifact bytes by digest |
 | `universe.py` | `/api/universe` | 12 | Catalog, latest/runs, range/interval-width fitness, primary candidacy, entry-window overlap, promotion readiness, rotation scorecard, observation health, `POST /refresh` |
 | `universe_explainer.py` | `/api/universe-explainer` | 2 | Explain one run / one symbol |
-| `strategy_shadow.py` | `/api/strategy-shadow` | 19 | v2 shadow config/status/versions/evaluation/decisions/trades/replay, ADX/exit/bracket/live-exit challengers, portfolio routing, forward validation, frozen-disproof assessment, `signal-edge` |
-| `opening_momentum_shadow.py` | `/api/opening-momentum-shadow` | 4 | Shadow status/runs + gated execution status/runs |
+| `strategy_shadow.py` | `/api/strategy-shadow` | 18 | v2 shadow config/status/versions/evaluation/decisions/trades/replay, ADX/exit/bracket/live-exit challengers, portfolio routing, forward validation, `signal-edge` |
 | `strategy_presets.py` | `/api/strategy-presets` | 5 | Preset CRUD + `/{id}/apply` (audited write to the strategy config) |
 | `strategy_experiments.py` / `experiments.py` | `/api/strategy-experiments` / `/api/experiments` | 8 / 6 | Strategy experiments (run/export); LLM prompt-version A/B |
 | `backtest.py` | `/api/backtest` | 10 | Run, list runs, export |

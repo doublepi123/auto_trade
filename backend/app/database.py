@@ -10,8 +10,6 @@ from contextvars import ContextVar
 from typing import Any
 
 from sqlalchemy import (
-    CheckConstraint,
-    UniqueConstraint,
     create_engine,
     event,
     inspect,
@@ -70,7 +68,7 @@ def queue_pool_kwargs(database_url: str) -> dict[str, object]:
     in-memory spellings must be recognised: ``sqlite:///:memory:`` and the
     bare ``sqlite://``, which carries no ``:memory:`` substring yet is equally
     in-memory and is what
-    ``tests/test_watchlist_quant_v6_reader_import_isolation.py`` boots a fresh
+    the reader-import isolation test boots a fresh
     interpreter with.
     """
     if not database_url.startswith("sqlite"):
@@ -524,8 +522,8 @@ if settings.database_url.startswith("sqlite"):
         - synchronous=NORMAL: WAL mode default; durable enough for our workload
           (we are not a financial exchange; one fsync per checkpoint is fine)
         - busy_timeout=60000: wait out research-layer write bursts instead of
-          raising "database is locked". quant-v6 artifact publication holds
-          the single SQLite writer lock for tens of seconds; at 5s the
+          raising "database is locked". A long research publication used to
+          hold the single SQLite writer lock for tens of seconds; at 5s the
           runtime_state persist, storage maintenance and lease heartbeats all
           failed, and the same failure class previously lapsed order
           persistence into ORDER_RECONCILIATION_UNCERTAIN pauses. Live-path
@@ -553,159 +551,12 @@ WATCHLIST_QUANT_V6_TABLE_NAMES = (
     "watchlist_quant_v6_publications",
     "watchlist_quant_v6_publication_artifacts",
 )
+"""Historical table names. The writer is retired; docker-entrypoint.sh uses
+this tuple only to recognise an already-migrated database. Startup does not
+create these tables, and nothing drops them.
+"""
 
 
-_WATCHLIST_QUANT_V6_DUPLICATE_PREDICATES = {
-    "watchlist_quant_v6_registrations": (
-        "(NEW.id IS NOT NULL AND EXISTS ("
-        "SELECT 1 FROM watchlist_quant_v6_registrations "
-        "WHERE id = NEW.id)) "
-        "OR EXISTS (SELECT 1 FROM watchlist_quant_v6_registrations "
-        "WHERE identity_sha256 = NEW.identity_sha256) "
-        "OR (NEW.id IS NOT NULL AND EXISTS ("
-        "SELECT 1 FROM watchlist_quant_v6_registrations "
-        "WHERE id = NEW.id "
-        "AND identity_sha256 = NEW.identity_sha256))"
-    ),
-    "watchlist_quant_v6_artifacts": (
-        "EXISTS (SELECT 1 FROM watchlist_quant_v6_artifacts "
-        "WHERE digest_sha256 = NEW.digest_sha256) "
-        "OR EXISTS (SELECT 1 FROM watchlist_quant_v6_artifacts "
-        "WHERE digest_sha256 = NEW.digest_sha256 "
-        "AND kind = NEW.kind)"
-    ),
-    "watchlist_quant_v6_publications": (
-        "(NEW.id IS NOT NULL AND EXISTS ("
-        "SELECT 1 FROM watchlist_quant_v6_publications "
-        "WHERE id = NEW.id)) "
-        "OR EXISTS (SELECT 1 FROM watchlist_quant_v6_publications "
-        "WHERE registration_id = NEW.registration_id) "
-        "OR EXISTS (SELECT 1 FROM watchlist_quant_v6_publications "
-        "WHERE identity_sha256 = NEW.identity_sha256)"
-    ),
-    "watchlist_quant_v6_publication_artifacts": (
-        "EXISTS (SELECT 1 "
-        "FROM watchlist_quant_v6_publication_artifacts "
-        "WHERE publication_id = NEW.publication_id "
-        "AND member_ordinal = NEW.member_ordinal "
-        "AND role = NEW.role "
-        "AND artifact_ordinal = NEW.artifact_ordinal) "
-        "OR EXISTS (SELECT 1 "
-        "FROM watchlist_quant_v6_publication_artifacts "
-        "WHERE binding_sha256 = NEW.binding_sha256)"
-    ),
-}
-
-
-_WATCHLIST_QUANT_V6_REFERENCE_PREDICATES = {
-    "watchlist_quant_v6_publications": (
-        "NOT EXISTS (SELECT 1 FROM watchlist_quant_v6_registrations "
-        "WHERE id = NEW.registration_id "
-        "AND identity_sha256 = NEW.registration_identity_sha256 "
-        "AND cohort_member_count = NEW.registered_member_count "
-        "AND json_type(registration_json, '$.cohort.member_count') = 'integer' "
-        "AND json_extract(registration_json, '$.cohort.member_count') "
-        "= NEW.registered_member_count "
-        "AND json_type(registration_json, '$.cohort.members') = 'array' "
-        "AND json_array_length(registration_json, '$.cohort.members') "
-        "= NEW.registered_member_count)"
-    ),
-    "watchlist_quant_v6_publication_artifacts": (
-        "NOT EXISTS (SELECT 1 "
-        "FROM watchlist_quant_v6_publications AS publication "
-        "JOIN watchlist_quant_v6_registrations AS registration "
-        "ON registration.id = publication.registration_id "
-        "AND registration.identity_sha256 "
-        "= publication.registration_identity_sha256 "
-        "AND registration.cohort_member_count "
-        "= publication.registered_member_count "
-        "WHERE publication.id = NEW.publication_id "
-        "AND NEW.member_ordinal >= 0 "
-        "AND NEW.member_ordinal < publication.registered_member_count "
-        "AND json_type(registration.registration_json, "
-        "'$.cohort.members[' || NEW.member_ordinal || ']') = 'object' "
-        "AND json_type(registration.registration_json, "
-        "'$.cohort.members[' || NEW.member_ordinal || '].ordinal') = 'integer' "
-        "AND json_extract(registration.registration_json, "
-        "'$.cohort.members[' || NEW.member_ordinal || '].ordinal') "
-        "= NEW.member_ordinal "
-        "AND json_type(registration.registration_json, "
-        "'$.cohort.members[' || NEW.member_ordinal || '].symbol') = 'text' "
-        "AND json_extract(registration.registration_json, "
-        "'$.cohort.members[' || NEW.member_ordinal || '].symbol') = NEW.symbol "
-        "AND json_type(registration.registration_json, "
-        "'$.cohort.members[' || NEW.member_ordinal || '].market') = 'text' "
-        "AND json_extract(registration.registration_json, "
-        "'$.cohort.members[' || NEW.member_ordinal || '].market') = NEW.market) "
-        "OR NOT EXISTS (SELECT 1 FROM watchlist_quant_v6_artifacts "
-        "WHERE digest_sha256 = NEW.artifact_sha256 "
-        "AND kind = NEW.artifact_kind)"
-    ),
-}
-
-
-def _normalize_sqlite_ddl(value: str) -> str:
-    return " ".join(value.strip().removesuffix(";").split())
-
-
-def _sqlite_type_signature(column_type: object, db_engine: Engine) -> str:
-    compile_type = getattr(column_type, "compile", None)
-    if not callable(compile_type):
-        return str(column_type).upper()
-    return " ".join(
-        str(compile_type(dialect=db_engine.dialect)).upper().split()
-    )
-
-
-def _sqlite_default_signature(value: object | None) -> str | None:
-    if value is None:
-        return None
-    return _normalize_sqlite_ddl(str(value)).upper()
-
-
-def _watchlist_quant_v6_trigger_definitions() -> dict[str, tuple[str, str]]:
-    definitions: dict[str, tuple[str, str]] = {}
-    for table_name in WATCHLIST_QUANT_V6_TABLE_NAMES:
-        for operation in ("UPDATE", "DELETE"):
-            trigger_name = f"trg_{table_name}_no_{operation.lower()}"
-            definitions[trigger_name] = (
-                table_name,
-                f"CREATE TRIGGER {trigger_name} "
-                f"BEFORE {operation} ON {table_name} "
-                "BEGIN "
-                f"SELECT RAISE(ABORT, '{table_name} is append-only'); "
-                "END",
-            )
-        duplicate_trigger = f"trg_{table_name}_no_duplicate_key"
-        definitions[duplicate_trigger] = (
-            table_name,
-            f"CREATE TRIGGER {duplicate_trigger} "
-            f"BEFORE INSERT ON {table_name} "
-            f"WHEN {_WATCHLIST_QUANT_V6_DUPLICATE_PREDICATES[table_name]} "
-            "BEGIN "
-            f"SELECT RAISE(ABORT, '{table_name} duplicate key'); "
-            "END",
-        )
-        reference_predicate = _WATCHLIST_QUANT_V6_REFERENCE_PREDICATES.get(
-            table_name
-        )
-        if reference_predicate is not None:
-            reference_trigger = f"trg_{table_name}_validate_reference"
-            definitions[reference_trigger] = (
-                table_name,
-                f"CREATE TRIGGER {reference_trigger} "
-                f"BEFORE INSERT ON {table_name} "
-                f"WHEN {reference_predicate} "
-                "BEGIN "
-                f"SELECT RAISE(ABORT, '{table_name} invalid reference'); "
-                "END",
-            )
-    return definitions
-
-
-WATCHLIST_QUANT_V6_TRIGGER_NAMES = tuple(
-    _watchlist_quant_v6_trigger_definitions()
-)
 
 
 def init_db() -> None:
@@ -741,7 +592,6 @@ def init_db() -> None:
     _ensure_universe_selection_tables(engine)
     _normalize_universe_selection_run_timestamps(engine)
     _ensure_watchlist_scores_table(engine)
-    _ensure_watchlist_quant_v6_tables(engine)
     _ensure_prompt_versions_table(engine)
     _ensure_experiment_results_table(engine)
     _ensure_strategy_experiments_table(engine)
@@ -1852,120 +1702,21 @@ _PROTOCOL_V2_COLUMNS: tuple[tuple[str, str], ...] = (
 
 
 def _migrate_legacy_passive_mandate_rows(connection: Connection) -> int:
-    """Conservatively map legacy protocol-v1 rows onto the v2 state machine.
+    """Leave historical passive_mandates rows untouched.
 
-    Never reauthorises a consumed row: only clearly unspent rows (no token,
-    no consumed_at, no broker id, available=True, no v2 snapshot columns,
-    valid ACTIVE policy) may remain AUTHORIZED. Everything else — including
-    every legacy SUBMITTING/SUBMITTED/FAILED state, NULL/unknown states and
-    contradictory combinations — becomes UNCERTAIN with all facts retained.
-    Idempotent: v2 rows (protocol_version='passive-submit-v2') are skipped.
+    The SPY passive lane is retired. Existing rows are preserved and are no
+    longer rewritten onto a submit-state machine that nothing reads.
     """
-    from datetime import datetime, timezone
-
-    from app.domain.passive_allocation.model import POLICY_VERSION
-    from app.domain.passive_allocation import protocol as passive_protocol
-    from app.domain.passive_allocation.model import PASSIVE_ALLOTMENT_USD
-
-    rows = connection.exec_driver_sql(
-        "SELECT id, submit_state, entry_authorisation_available, claim_token, "
-        "entry_authorisation_consumed_at, bound_broker_order_id, "
-        "execution_token, intent_json, final_snapshot_json, "
-        "uncertainty_reason, status, policy_version, allotment_usd, "
-        "protocol_version FROM passive_mandates"
-    ).fetchall()
-    migrated = 0
-    for row in rows:
-        (
-            row_id,
-            submit_state,
-            available,
-            claim_token,
-            consumed_at,
-            bound_id,
-            execution_token,
-            intent_json,
-            final_json,
-            uncertainty_reason,
-            status,
-            policy_version,
-            allotment_usd,
-            protocol_version,
-        ) = row
-        if protocol_version == passive_protocol.PASSIVE_PROTOCOL_VERSION:
-            # v2-stamped rows are never reset by the idempotent pass, but a
-            # contradictory USED marker on an AUTHORIZED row is still not
-            # reservable — the reservation itself re-validates (R1-7).
-            continue
-        available_flag = _parse_legacy_boolean(available)
-        issue = passive_protocol.legacy_row_may_remain_authorized(
-            submit_state=submit_state,
-            entry_authorisation_available=available_flag,
-            claim_token=claim_token,
-            entry_authorisation_consumed_at=consumed_at,
-            bound_broker_order_id=bound_id,
-            execution_token=execution_token,
-            intent_json=intent_json,
-            final_snapshot_json=final_json,
-            uncertainty_reason=uncertainty_reason,
-            status=status,
-            policy_version=policy_version,
-            allotment_usd=allotment_usd,
-        )
-        if issue is None:
-            # Clearly unspent: adopt the protocol stamp only.
-            connection.exec_driver_sql(
-                "UPDATE passive_mandates SET protocol_version = ? WHERE id = ?",
-                (passive_protocol.PASSIVE_PROTOCOL_VERSION, row_id),
-            )
-            migrated += 1
-            continue
-        connection.exec_driver_sql(
-            "UPDATE passive_mandates SET submit_state = ?, "
-            "uncertainty_reason = ?, protocol_version = ? WHERE id = ?",
-            (
-                passive_protocol.SUBMIT_STATE_UNCERTAIN,
-                (
-                    f"legacy migration 2026-09: {issue}"
-                    if not uncertainty_reason
-                    else f"legacy migration 2026-09 ({issue}); prior: {uncertainty_reason}"
-                ),
-                passive_protocol.PASSIVE_PROTOCOL_VERSION,
-                row_id,
-            ),
-        )
-        migrated += 1
-    return migrated
-
-
-def _parse_legacy_boolean(raw: object) -> bool | None:
-    """SQLite legacy booleans: 1/0 integers and '1'/'0'/''/None only.
-
-    Never ``bool(any truthy)`` — a legacy 'true'/'yes' string must parse as
-    unknown (None), which fails closed, not as True.
-    """
-    if raw is None:
-        return None
-    if isinstance(raw, bool):
-        return raw
-    if isinstance(raw, int):
-        return raw == 1
-    if isinstance(raw, str):
-        stripped = raw.strip()
-        if stripped in {"1", "0"}:
-            return stripped == "1"
-        return None
-    return None
+    return 0
 
 
 def _ensure_passive_mandates_table(db_engine: Engine) -> None:
     """Defensive explicit create for passive_mandates (SPY passive lane).
 
-    Created explicitly (rather than only via ``metadata.create_all``) for
-    parity with the other ``_ensure_*`` tables. Idempotent, and upgrades an
-    earlier phase-1 schema in place by adding missing columns, then maps
-    legacy protocol-v1 rows onto the v2 submit state machine
-    conservatively (see ``_migrate_legacy_passive_mandate_rows``).
+    Created explicitly because the passive ORM model is retired. Idempotent,
+    and upgrades an earlier phase-1 schema in place by adding missing
+    columns. Historical rows are not rewritten
+    (see ``_migrate_legacy_passive_mandate_rows``).
     """
     inspector = inspect(db_engine)
     table_exists = "passive_mandates" in inspector.get_table_names()
@@ -2033,7 +1784,8 @@ def _ensure_passive_mandates_table(db_engine: Engine) -> None:
                     "ALTER TABLE passive_mandates ADD COLUMN "
                     f"{name} {column_type}"
                 )
-        _migrate_legacy_passive_mandate_rows(connection)
+        # Historical rows are preserved as-is. The retired lane no longer
+        # rewrites them onto a submit-state machine.
 
 
 def _ensure_paper_orders_table(db_engine: Engine) -> None:
@@ -2433,301 +2185,6 @@ def _ensure_watchlist_scores_table(db_engine: Engine) -> None:
         )
 
 
-def _watchlist_quant_v6_schema_issues(
-    db_engine: Engine,
-    *,
-    require_triggers: bool = True,
-) -> tuple[str, ...]:
-    """Return fail-closed differences from the frozen B1 SQLite signature."""
-    from app.models import Base
-
-    if db_engine.dialect.name != "sqlite":
-        return ("watchlist quant-v6 storage requires SQLite",)
-
-    inspector = inspect(db_engine)
-    actual_table_names = set(inspector.get_table_names())
-    issues: list[str] = []
-    for table_name in WATCHLIST_QUANT_V6_TABLE_NAMES:
-        if table_name not in actual_table_names:
-            issues.append(f"missing table {table_name}")
-            continue
-
-        expected_table = Base.metadata.tables[table_name]
-        expected_columns = tuple(expected_table.columns.keys())
-        actual_column_rows = inspector.get_columns(table_name)
-        actual_columns = tuple(
-            str(column["name"]) for column in actual_column_rows
-        )
-        if actual_columns != expected_columns:
-            issues.append(
-                f"{table_name} columns differ: "
-                f"expected {expected_columns}, found {actual_columns}"
-            )
-        actual_columns_by_name = {
-            str(column["name"]): column for column in actual_column_rows
-        }
-        for expected_column in expected_table.columns:
-            actual_column = actual_columns_by_name.get(expected_column.name)
-            if actual_column is None:
-                continue
-            expected_type = _sqlite_type_signature(
-                expected_column.type,
-                db_engine,
-            )
-            actual_type = _sqlite_type_signature(
-                actual_column["type"],
-                db_engine,
-            )
-            if actual_type != expected_type:
-                issues.append(
-                    f"{table_name} column {expected_column.name} type "
-                    f"differs: expected {expected_type}, found {actual_type}"
-                )
-            expected_nullable = bool(expected_column.nullable)
-            actual_nullable = bool(actual_column.get("nullable"))
-            if actual_nullable != expected_nullable:
-                issues.append(
-                    f"{table_name} column {expected_column.name} "
-                    "nullability differs: "
-                    f"expected {expected_nullable}, found {actual_nullable}"
-                )
-            expected_server_default = (
-                getattr(expected_column.server_default, "arg", None)
-                if expected_column.server_default is not None
-                else None
-            )
-            expected_default = _sqlite_default_signature(
-                expected_server_default
-            )
-            actual_default = _sqlite_default_signature(
-                actual_column.get("default")
-            )
-            if actual_default != expected_default:
-                issues.append(
-                    f"{table_name} column {expected_column.name} "
-                    "server default differs: "
-                    f"expected {expected_default}, found {actual_default}"
-                )
-
-        expected_primary_key = tuple(
-            column.name for column in expected_table.primary_key.columns
-        )
-        actual_primary_key = tuple(
-            inspector.get_pk_constraint(table_name).get(
-                "constrained_columns"
-            )
-            or ()
-        )
-        if actual_primary_key != expected_primary_key:
-            issues.append(
-                f"{table_name} primary key differs: "
-                f"expected {expected_primary_key}, found {actual_primary_key}"
-            )
-
-        expected_checks = {
-            str(constraint.name): " ".join(
-                str(constraint.sqltext).upper().split()
-            )
-            for constraint in expected_table.constraints
-            if isinstance(constraint, CheckConstraint)
-            and constraint.name is not None
-        }
-        actual_checks = {
-            str(constraint["name"]): " ".join(
-                str(constraint.get("sqltext") or "").upper().split()
-            )
-            for constraint in inspector.get_check_constraints(table_name)
-            if constraint.get("name") is not None
-        }
-        for constraint_name, expected_check_sql in expected_checks.items():
-            if actual_checks.get(constraint_name) != expected_check_sql:
-                issues.append(
-                    f"{table_name} check constraint {constraint_name} "
-                    "does not match the frozen predicate"
-                )
-        unexpected_checks = set(actual_checks) - set(expected_checks)
-        if unexpected_checks:
-            issues.append(
-                f"{table_name} has unexpected checks "
-                f"{sorted(unexpected_checks)}"
-            )
-
-        expected_uniques = {
-            str(constraint.name): tuple(
-                column.name for column in constraint.columns
-            )
-            for constraint in expected_table.constraints
-            if isinstance(constraint, UniqueConstraint)
-            and constraint.name is not None
-        }
-        actual_uniques = {
-            str(constraint["name"]): tuple(
-                constraint.get("column_names") or ()
-            )
-            for constraint in inspector.get_unique_constraints(table_name)
-            if constraint.get("name") is not None
-        }
-        for constraint_name, expected_unique_columns in expected_uniques.items():
-            if actual_uniques.get(constraint_name) != expected_unique_columns:
-                issues.append(
-                    f"{table_name} unique constraint {constraint_name} "
-                    f"does not cover {expected_unique_columns}"
-                )
-        unexpected_uniques = set(actual_uniques) - set(expected_uniques)
-        if unexpected_uniques:
-            issues.append(
-                f"{table_name} has unexpected unique constraints "
-                f"{sorted(unexpected_uniques)}"
-            )
-
-        expected_indexes = {
-            str(index.name): tuple(column.name for column in index.columns)
-            for index in expected_table.indexes
-            if index.name is not None
-        }
-        actual_indexes = {
-            str(index["name"]): tuple(index.get("column_names") or ())
-            for index in inspector.get_indexes(table_name)
-            if index.get("name") is not None
-        }
-        for index_name, expected_index_columns in expected_indexes.items():
-            if actual_indexes.get(index_name) != expected_index_columns:
-                issues.append(
-                    f"{table_name} index {index_name} "
-                    f"does not cover {expected_index_columns}"
-                )
-        unexpected_indexes = set(actual_indexes) - set(expected_indexes)
-        if unexpected_indexes:
-            issues.append(
-                f"{table_name} has unexpected indexes "
-                f"{sorted(unexpected_indexes)}"
-            )
-
-        expected_foreign_keys = set()
-        for constraint in expected_table.foreign_key_constraints:
-            elements = tuple(constraint.elements)
-            expected_foreign_keys.add((
-                tuple(constraint.column_keys),
-                elements[0].column.table.name,
-                tuple(element.column.name for element in elements),
-                str(constraint.ondelete or "").upper(),
-            ))
-        actual_foreign_keys = {
-            (
-                tuple(constraint.get("constrained_columns") or ()),
-                str(constraint.get("referred_table") or ""),
-                tuple(constraint.get("referred_columns") or ()),
-                str(
-                    (constraint.get("options") or {}).get("ondelete")
-                    or ""
-                ).upper(),
-            )
-            for constraint in inspector.get_foreign_keys(table_name)
-        }
-        missing_foreign_keys = expected_foreign_keys - actual_foreign_keys
-        if missing_foreign_keys:
-            issues.append(
-                f"{table_name} missing foreign keys "
-                f"{sorted(missing_foreign_keys)}"
-            )
-        unexpected_foreign_keys = (
-            actual_foreign_keys - expected_foreign_keys
-        )
-        if unexpected_foreign_keys:
-            issues.append(
-                f"{table_name} has unexpected foreign keys "
-                f"{sorted(unexpected_foreign_keys)}"
-            )
-
-    if require_triggers:
-        expected_triggers = _watchlist_quant_v6_trigger_definitions()
-        with db_engine.connect() as connection:
-            actual_triggers = {
-                str(row[0]): (str(row[1]), str(row[2] or ""))
-                for row in connection.exec_driver_sql(
-                    "SELECT name, tbl_name, sql FROM sqlite_master "
-                    "WHERE type = 'trigger' AND name LIKE "
-                    "'trg_watchlist_quant_v6_%'"
-                )
-            }
-        missing_triggers = set(expected_triggers) - set(actual_triggers)
-        if missing_triggers:
-            issues.append(
-                "missing immutable-table triggers "
-                f"{sorted(missing_triggers)}"
-            )
-        unexpected_triggers = set(actual_triggers) - set(expected_triggers)
-        if unexpected_triggers:
-            issues.append(
-                "unexpected immutable-table triggers "
-                f"{sorted(unexpected_triggers)}"
-            )
-        for trigger_name, (
-            expected_table_name,
-            expected_ddl,
-        ) in expected_triggers.items():
-            actual_trigger = actual_triggers.get(trigger_name)
-            if actual_trigger is None:
-                continue
-            actual_table_name, actual_ddl = actual_trigger
-            if (
-                actual_table_name != expected_table_name
-                or _normalize_sqlite_ddl(actual_ddl)
-                != _normalize_sqlite_ddl(expected_ddl)
-            ):
-                issues.append(
-                    f"trigger {trigger_name} does not match canonical DDL"
-                )
-
-    return tuple(issues)
-
-
-def _ensure_watchlist_quant_v6_tables(db_engine: Engine) -> None:
-    """Create and verify the immutable B1 tables used outside Alembic.
-
-    Production deploys run Alembic first, while tests and legacy ``init_db``
-    callers also rely on ``Base.metadata.create_all``.  This parity hook
-    installs the fourteen SQLite triggers that metadata alone cannot express and
-    rejects a same-name table whose frozen constraints are incomplete.
-    """
-    from app.models import Base
-
-    if db_engine.dialect.name != "sqlite":
-        raise RuntimeError("watchlist quant-v6 storage requires SQLite")
-
-    for table_name in WATCHLIST_QUANT_V6_TABLE_NAMES:
-        Base.metadata.tables[table_name].create(db_engine, checkfirst=True)
-
-    schema_issues = _watchlist_quant_v6_schema_issues(
-        db_engine,
-        require_triggers=False,
-    )
-    if schema_issues:
-        raise RuntimeError(
-            "incomplete watchlist quant-v6 schema: "
-            + "; ".join(schema_issues)
-        )
-
-    with db_engine.begin() as connection:
-        for _, trigger_ddl in (
-            _watchlist_quant_v6_trigger_definitions().values()
-        ):
-            connection.exec_driver_sql(
-                trigger_ddl.replace(
-                    "CREATE TRIGGER ",
-                    "CREATE TRIGGER IF NOT EXISTS ",
-                    1,
-                )
-            )
-
-    complete_issues = _watchlist_quant_v6_schema_issues(db_engine)
-    if complete_issues:
-        raise RuntimeError(
-            "incomplete watchlist quant-v6 schema: "
-            + "; ".join(complete_issues)
-        )
-
-
 def _ensure_prompt_versions_table(db_engine: Engine) -> None:
     inspector = inspect(db_engine)
     if "prompt_versions" in inspector.get_table_names():
@@ -2994,12 +2451,6 @@ def _ensure_strategy_v2_shadow_tables(db_engine: Engine) -> None:
                 "ALTER TABLE strategy_v2_shadow_config "
                 "ADD COLUMN universe_managed BOOLEAN NOT NULL DEFAULT 0"
             )
-        if "opening_momentum_execution_eligible" not in config_columns:
-            connection.exec_driver_sql(
-                "ALTER TABLE strategy_v2_shadow_config "
-                "ADD COLUMN opening_momentum_execution_eligible "
-                "BOOLEAN NOT NULL DEFAULT 1"
-            )
         if "holding_deadline" not in trade_columns:
             connection.exec_driver_sql(
                 "ALTER TABLE strategy_v2_shadow_trades ADD COLUMN holding_deadline DATETIME"
@@ -3098,21 +2549,41 @@ def _ensure_strategy_v2_forward_registration_uniqueness(
 
 
 def _ensure_opening_momentum_shadow_table(db_engine: Engine) -> None:
-    """Create the prospective cross-sectional shadow table in place."""
-    from app.models import Base
+    """Create the retired opening-momentum shadow table in place.
 
-    Base.metadata.tables["opening_momentum_shadow_runs"].create(
-        db_engine,
-        checkfirst=True,
-    )
-    inspector = inspect(db_engine)
-    columns = {
-        column["name"]
-        for column in inspector.get_columns(
-            "opening_momentum_shadow_runs"
-        )
-    }
-    evidence_columns = {
+    Historical rows stay readable. This no longer uses an ORM model: the
+    feature is retired, and existing databases must not lose the table.
+    A legacy table that predates ``status`` is altered before the status
+    index is created.
+    """
+    base_columns = {
+        "session_date": "DATE",
+        "algorithm_version": "VARCHAR(100)",
+        "config_version": "VARCHAR(64)",
+        "status": "VARCHAR(16)",
+        "reason": "TEXT",
+        "signal_at": "DATETIME",
+        "observed_at": "DATETIME",
+        "selection_run_id": "INTEGER",
+        "universe_source": "VARCHAR(32)",
+        "universe_size": "INTEGER",
+        "universe_json": "TEXT",
+        "excluded_symbols_json": "TEXT",
+        "ranking_json": "TEXT",
+        "candidate_symbol": "VARCHAR(50)",
+        "market_return_bps": "FLOAT",
+        "candidate_return_bps": "FLOAT",
+        "excess_return_bps": "FLOAT",
+        "entry_at": "DATETIME",
+        "entry_price": "FLOAT",
+        "exit_due_at": "DATETIME",
+        "exit_at": "DATETIME",
+        "exit_price": "FLOAT",
+        "gross_return_bps": "FLOAT",
+        "estimated_cost_bps": "FLOAT",
+        "net_return_bps": "FLOAT",
+        "created_at": "DATETIME",
+        "updated_at": "DATETIME",
         "candidate_first_five_return_bps": "FLOAT",
         "candidate_last_five_return_bps": "FLOAT",
         "candidate_path_efficiency": "FLOAT",
@@ -3132,34 +2603,130 @@ def _ensure_opening_momentum_shadow_table(db_engine: Engine) -> None:
         "maximum_favorable_excursion_bps": "FLOAT",
     }
     with db_engine.begin() as connection:
-        for name, column_type in evidence_columns.items():
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS opening_momentum_shadow_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT
+            )
+            """
+        )
+    inspector = inspect(db_engine)
+    columns = {
+        column["name"]
+        for column in inspector.get_columns("opening_momentum_shadow_runs")
+    }
+    with db_engine.begin() as connection:
+        for name, column_type in base_columns.items():
             if name not in columns:
                 connection.exec_driver_sql(
                     "ALTER TABLE opening_momentum_shadow_runs "
                     f"ADD COLUMN {name} {column_type}"
                 )
+        connection.exec_driver_sql(
+            """
+            CREATE INDEX IF NOT EXISTS
+                ix_opening_momentum_shadow_status_session
+            ON opening_momentum_shadow_runs (status, session_date)
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                uq_opening_momentum_shadow_session_version
+            ON opening_momentum_shadow_runs (session_date, config_version)
+            """
+        )
 
 
 def _ensure_opening_activity_observation_table(
     db_engine: Engine,
 ) -> None:
-    """Create the causal opening-activity history table in place."""
-    from app.models import Base
-
-    Base.metadata.tables["opening_activity_observations"].create(
-        db_engine,
-        checkfirst=True,
-    )
+    """Create the retired opening-activity history table in place."""
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS opening_activity_observations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_date DATE NOT NULL,
+                symbol VARCHAR(50) NOT NULL,
+                window_minutes INTEGER NOT NULL,
+                volume FLOAT NOT NULL,
+                turnover FLOAT,
+                source VARCHAR(48) NOT NULL,
+                observed_at DATETIME NOT NULL,
+                created_at DATETIME NOT NULL
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                uq_opening_activity_session_symbol_window
+            ON opening_activity_observations (
+                session_date, symbol, window_minutes
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            CREATE INDEX IF NOT EXISTS ix_opening_activity_symbol_session
+            ON opening_activity_observations (symbol, session_date)
+            """
+        )
 
 
 def _ensure_opening_momentum_execution_table(db_engine: Engine) -> None:
-    """Create the idempotent opening-execution journal in place."""
-    from app.models import Base
-
-    Base.metadata.tables["opening_momentum_executions"].create(
-        db_engine,
-        checkfirst=True,
-    )
+    """Create the retired opening-execution journal in place."""
+    with db_engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS opening_momentum_executions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_date DATE NOT NULL,
+                algorithm_version VARCHAR(160) NOT NULL,
+                config_version VARCHAR(64) NOT NULL,
+                universe_source VARCHAR(48) NOT NULL,
+                selection_run_id INTEGER,
+                status VARCHAR(20) NOT NULL,
+                reason TEXT NOT NULL DEFAULT '',
+                symbol VARCHAR(50),
+                signal_at DATETIME NOT NULL,
+                armed_at DATETIME NOT NULL,
+                entry_due_at DATETIME NOT NULL,
+                entry_deadline_at DATETIME NOT NULL,
+                requested_at DATETIME,
+                universe_size INTEGER NOT NULL DEFAULT 0,
+                market_return_bps FLOAT,
+                candidate_return_bps FLOAT,
+                excess_return_bps FLOAT,
+                reference_entry_price FLOAT,
+                max_price_deviation_bps FLOAT NOT NULL,
+                stop_loss_pct FLOAT NOT NULL,
+                max_holding_minutes INTEGER NOT NULL,
+                signal_context_json TEXT NOT NULL DEFAULT '{}',
+                submit_attempts INTEGER NOT NULL DEFAULT 0,
+                entry_order_id VARCHAR(100) NOT NULL DEFAULT '',
+                exit_order_id VARCHAR(100) NOT NULL DEFAULT '',
+                entry_filled_at DATETIME,
+                entry_price FLOAT,
+                quantity FLOAT,
+                exit_filled_at DATETIME,
+                exit_price FLOAT,
+                net_pnl FLOAT,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL,
+                CONSTRAINT uq_opening_momentum_execution_session
+                    UNIQUE (session_date)
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            CREATE INDEX IF NOT EXISTS
+                ix_opening_momentum_execution_status_session
+            ON opening_momentum_executions (status, session_date)
+            """
+        )
 
 
 def _ensure_llm_interaction_variant_column(db_engine: Engine) -> None:

@@ -15,6 +15,7 @@ from app.models import (
     LLMInteraction,
     OrderRecord,
     StrategyConfig,
+    StrategyV2ShadowConfig,
     UniverseSelectionCandidate,
     UniverseSelectionRun,
 )
@@ -462,8 +463,8 @@ def test_opening_activity_observation_table_migration_is_idempotent(
         )
     }
     assert "uq_opening_activity_session_symbol_window" in {
-        constraint["name"]
-        for constraint in inspector.get_unique_constraints(
+        index["name"]
+        for index in inspector.get_indexes(
             "opening_activity_observations"
         )
     }
@@ -544,6 +545,71 @@ def test_llm_interaction_token_migration_adds_nullable_columns(tmp_path) -> None
     assert tuple(values) == (None, None, None)
 
 
+def test_legacy_shadow_config_not_null_column_still_accepts_orm_insert(
+    tmp_path,
+) -> None:
+    """Production rows predate the column's removal from business logic.
+
+    The live table has ``opening_momentum_execution_eligible`` NOT NULL and
+    no database default. Dropping the ORM mapping makes a new shadow-config
+    INSERT omit the column and fail that constraint. The compatibility
+    mapping must supply a value so both old and new schemas accept the insert.
+    """
+    db_path = tmp_path / "production_shaped_shadow.db"
+    engine = create_engine(f"sqlite:///{db_path}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE strategy_v2_shadow_config (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol VARCHAR(50) NOT NULL UNIQUE,
+                enabled BOOLEAN NOT NULL DEFAULT 0,
+                universe_managed BOOLEAN NOT NULL DEFAULT 0,
+                opening_momentum_execution_eligible BOOLEAN NOT NULL,
+                zscore_window_1m_bars INTEGER NOT NULL DEFAULT 30,
+                zscore_window_5m_bars INTEGER NOT NULL DEFAULT 12,
+                breach_zscore FLOAT NOT NULL DEFAULT -2.0,
+                reclaim_zscore FLOAT NOT NULL DEFAULT -1.0,
+                five_minute_zscore_max FLOAT NOT NULL DEFAULT -0.5,
+                adx_period INTEGER NOT NULL DEFAULT 14,
+                max_adx FLOAT NOT NULL DEFAULT 20.0,
+                realized_vol_window_bars INTEGER NOT NULL DEFAULT 30,
+                min_realized_vol FLOAT NOT NULL DEFAULT 0.10,
+                max_realized_vol FLOAT NOT NULL DEFAULT 0.80,
+                stop_loss_pct FLOAT NOT NULL DEFAULT 0.75,
+                profit_target_pct FLOAT NOT NULL DEFAULT 0.50,
+                max_holding_minutes INTEGER NOT NULL DEFAULT 60,
+                entry_cutoff_minutes_before_close INTEGER NOT NULL DEFAULT 45,
+                flatten_minutes_before_close INTEGER NOT NULL DEFAULT 15,
+                arm_ttl_bars INTEGER NOT NULL DEFAULT 10,
+                max_entries_per_day INTEGER NOT NULL DEFAULT 2,
+                entry_cooldown_minutes INTEGER NOT NULL DEFAULT 15,
+                slippage_bps FLOAT NOT NULL DEFAULT 2.0,
+                estimated_fee_rate_us FLOAT NOT NULL DEFAULT 0.0005,
+                estimated_fee_rate_hk FLOAT NOT NULL DEFAULT 0.003,
+                updated_at DATETIME
+            )
+            """
+        )
+
+    database._ensure_strategy_v2_shadow_tables(engine)
+    Session = sessionmaker(bind=engine)
+    with Session() as db:
+        db.add(StrategyV2ShadowConfig(symbol="AAPL.US", enabled=True))
+        db.commit()
+        stored = db.query(StrategyV2ShadowConfig).filter_by(
+            symbol="AAPL.US"
+        ).one()
+        assert stored.enabled is True
+    with engine.connect() as connection:
+        eligible = connection.exec_driver_sql(
+            "SELECT opening_momentum_execution_eligible "
+            "FROM strategy_v2_shadow_config WHERE symbol = 'AAPL.US'"
+        ).scalar_one()
+    assert eligible in (0, False)
+    engine.dispose()
+
+
 def test_strategy_v2_shadow_table_migration_is_complete_and_idempotent(tmp_path) -> None:
     db_path = tmp_path / "strategy_v2_shadow.db"
     engine = create_engine(f"sqlite:///{db_path}")
@@ -573,7 +639,6 @@ def test_strategy_v2_shadow_table_migration_is_complete_and_idempotent(tmp_path)
         "symbol",
         "enabled",
         "universe_managed",
-        "opening_momentum_execution_eligible",
         "breach_zscore",
         "reclaim_zscore",
         "estimated_fee_rate_us",
@@ -723,37 +788,6 @@ def test_strategy_v2_shadow_table_migration_is_complete_and_idempotent(tmp_path)
     }
 
     Base.metadata.drop_all(bind=engine)
-    engine.dispose()
-
-
-def test_opening_execution_eligibility_migration_preserves_existing_rows(
-    tmp_path,
-) -> None:
-    db_path = tmp_path / "legacy_strategy_v2_shadow.db"
-    engine = create_engine(f"sqlite:///{db_path}")
-    with engine.begin() as connection:
-        connection.exec_driver_sql(
-            "CREATE TABLE strategy_v2_shadow_config ("
-            "id INTEGER PRIMARY KEY, "
-            "symbol VARCHAR(50) NOT NULL, "
-            "enabled BOOLEAN NOT NULL DEFAULT 0"
-            ")"
-        )
-        connection.exec_driver_sql(
-            "INSERT INTO strategy_v2_shadow_config "
-            "(id, symbol, enabled) VALUES (1, 'NVDA.US', 1)"
-        )
-
-    database._ensure_strategy_v2_shadow_tables(engine)
-    database._ensure_strategy_v2_shadow_tables(engine)
-
-    with engine.begin() as connection:
-        value = connection.exec_driver_sql(
-            "SELECT opening_momentum_execution_eligible "
-            "FROM strategy_v2_shadow_config WHERE id = 1"
-        ).scalar_one()
-
-    assert value == 1
     engine.dispose()
 
 
@@ -1893,7 +1927,7 @@ def test_engine_still_builds_for_every_in_memory_sqlite_url(
 
     Both spellings are load-bearing. ``sqlite://`` carries no ``:memory:``
     substring yet is equally in-memory, and
-    ``tests/test_watchlist_quant_v6_reader_import_isolation.py`` boots a fresh
+    the reader-import isolation test boots a fresh
     interpreter with exactly that URL -- a substring check on ``:memory:``
     alone lets it through and breaks the import of ``app.database`` itself.
     """

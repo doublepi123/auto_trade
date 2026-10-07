@@ -33,8 +33,7 @@ Strategy v2: the shadow-research engine plus the statistical machinery that deci
 |---|---|---|
 | `forward_replay_artifact.py` | 258 | Canonical-JSON + SHA-256 codec for forward replay artifacts: size-validated, duplicate-key/float/`NaN`-rejecting parser, `forward_replay_artifact_binding_sha256` |
 | `forward_semantics.py` | 288 | `forward_executable_semantic_manifest()` / `_digest()`: AST-normalized (docstrings stripped) behavioral probe digest proving which executable produced a result |
-| `frozen_disproof_queue.py` | 1449 | `FrozenQueueSpec` / `FrozenQueueEntry` / `FrozenEvidenceContext` parsing, `canonical_frozen_queue_manifest()`, daily disposition evaluation against frozen metrics |
-| `trusted_frozen_assessment.py` | 1749 | `build_trusted_assessment_report()` over `TrustedDailyLeaf` + `validate_replay_trade_track()`: producer cutoffs, per-leaf digest binding, aggregation into the v5 negative-control report |
+| `frozen_forward_collection.py` | identity constants | `FROZEN_EVALUATOR_DIGEST` / `FROZEN_QUEUE_ENTRIES` consumed by the shadow writer so matured frozen-cohort registrations keep writing forward evidence. The disproof assessment route and its evaluator were retired; these constants are not a scoring pipeline |
 | `PREREGISTRATION.md` | — | Governance contract. v5 runs unchanged as a negative control: if the pipeline ever certifies v5 as having edge, the pipeline is wrong |
 
 `__init__.py` (107 lines) re-exports the public surface; services import from the package, rarely from submodules.
@@ -50,7 +49,7 @@ Strategy v2: the shadow-research engine plus the statistical machinery that deci
    - ≥60 distinct days and ~180 resolved brackets;
    - deflated Sharpe `distinguishable_from_luck` (`Φ(z) ≥ 0.95`).
    Any parameter change resets the evidence clock.
-5. Evidence freezes through the artifact codec + semantic digest; `trusted_frozen_assessment` / `frozen_disproof_queue` grade it against the frozen baseline.
+5. Evidence freezes through the artifact codec + semantic digest. Matured registrations whose identity is in `frozen_forward_collection` keep collecting forward evidence; the retired disproof-assessment route no longer grades that evidence.
 
 ## Integration
 

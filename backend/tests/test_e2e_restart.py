@@ -35,7 +35,6 @@ from app.main import app
 from app.models import (
     AuditLog,
     Base,
-    OpeningMomentumExecution,
     OrderRecord,
     RuntimeState,
     StrategyConfig,
@@ -514,8 +513,8 @@ class TestE2EStartupRestoresTrackedEntries:
         assert runner.risk.protective_exit_permitted is False
 
 
-class TestE2EProtectiveOpeningReductionRecovery:
-    def test_restart_can_arm_only_the_persisted_secondary_opening_reduction(
+class TestE2EProtectivePrimaryReductionRecovery:
+    def test_restart_can_arm_only_the_persisted_primary_reduction(
         self,
         fresh_runner,
         monkeypatch,
@@ -558,28 +557,6 @@ class TestE2EProtectiveOpeningReductionRecovery:
                     opened_at=now - timedelta(hours=24),
                 )
             )
-            db.add(
-                OpeningMomentumExecution(
-                    session_date=now.date(),
-                    algorithm_version="test-opening-v1",
-                    config_version="test-config-v1",
-                    universe_source="TEST",
-                    status="EXITING",
-                    reason="maximum holding time reached: 60 minutes",
-                    symbol="ISRG.US",
-                    signal_at=now - timedelta(hours=24, minutes=1),
-                    armed_at=now - timedelta(hours=24, minutes=1),
-                    entry_due_at=now - timedelta(hours=24),
-                    entry_deadline_at=now - timedelta(hours=23, minutes=59),
-                    reference_entry_price=371.49,
-                    max_price_deviation_bps=100.0,
-                    stop_loss_pct=4.0,
-                    max_holding_minutes=60,
-                    entry_filled_at=now - timedelta(hours=24),
-                    entry_price=371.49,
-                    quantity=704.0,
-                )
-            )
             db.commit()
         finally:
             db.close()
@@ -613,17 +590,8 @@ class TestE2EProtectiveOpeningReductionRecovery:
             )
         )
 
-        assert "ISRG.US" in runner._opening_execution_policies
         assert "ISRG.US" in runner._reduction_intents
         assert runner.risk.paused is True
-
-        safe, error = runner.verify_operational_resume(
-            require_complete_pnl=False,
-        )
-        assert safe is False
-        assert error == (
-            "broker exposure exists outside the primary strategy: ISRG.US"
-        )
 
         safe, error = runner.permit_protective_exits_after_verification()
         assert safe is False

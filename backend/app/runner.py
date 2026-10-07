@@ -47,14 +47,9 @@ from app.core.notifiers.serverchan import ServerChanNotifier
 from app.core.position_probe_diagnostics import PositionProbeDiagnostics
 from app.core.risk import DailyLossSnapshot, RiskConfig, RiskController, TradingState
 from app.database import SessionLocal
-from app.domain.passive_allocation import protocol as passive_protocol
-from app.domain.passive_allocation.model import PASSIVE_LANE, PASSIVE_SYMBOL
-from app.models import OrderRecord, ReconciliationEvidence, TrackedEntry, TradeEvent, PassiveMandate
+from app.models import OrderRecord, ReconciliationEvidence, TrackedEntry, TradeEvent
 from app.services.daily_pnl_service import DailyPnlService
 from app.services.notification_log_service import get_notification_sink
-from app.services.opening_momentum_execution_service import (
-    opening_execution_reservation_window,
-)
 from app.services.order_terminal_callback_service import (
     OrderTerminalCallbackService,
 )
@@ -140,15 +135,6 @@ DISCONNECT_RETRY_EXHAUSTED_THRESHOLD = 3
 _QUOTE_SPREAD_THRESHOLD_PCT = 0.05  # Reject quotes with >5% bid-ask spread
 _QUOTE_LAST_BBO_DEVIATION_THRESHOLD_PCT = 0.005
 _QUOTE_SOURCE_MAX_AGE_SECONDS = 30.0
-_OPENING_FINAL_QUOTE_DEVIATION_REASON_PREFIX = (
-    "submitted limit price deviates from fresh executable BBO by "
-)
-_OPENING_FINAL_QUOTE_UNAVAILABLE_REASONS = frozenset({
-    "fresh quote for the submitted symbol is unavailable",
-    "fresh executable quote failed the final quality gate",
-    "fresh executable BBO price is unavailable",
-    "fresh executable quote could not be verified",
-})
 _POST_FILL_SETTLEMENT_GRACE_SECONDS = 60.0
 _UNKNOWN_SUBMISSION_RESUME_GRACE_SECONDS = 60.0
 _UNKNOWN_SUBMISSION_SECOND_PROOF_SECONDS = 5.0
@@ -264,17 +250,6 @@ _REDUCTION_CAUSE_PRIORITY: dict[str, int] = {
 
 
 @dataclass(frozen=True)
-class _OpeningExecutionPolicy:
-    execution_id: int
-    symbol: str
-    status: str
-    stop_loss_pct: float
-    max_holding_minutes: int
-    reference_entry_price: float
-    max_price_deviation_bps: float
-
-
-@dataclass(frozen=True)
 class _PostFillExpectation:
     side: str
     quantity: Decimal
@@ -387,17 +362,6 @@ class AppRunner:
         self._account_exposure: dict[str, Any] = {}
         self._account_exposure_not_before: float = 0.0
         self._board_lot_residual_symbols: set[str] = set()
-        # Phase2a W3 passive recovery state. The quarantine/ref view is
-        # immutable-between-publishes: each scan builds a NEW snapshot and
-        # publishes it atomically (epoch CAS) under _state_lock; readers
-        # (quarantine callback, entry policy, reduction skip) only ever see
-        # a complete view. All callbacks are PURE MEMORY — no I/O inside.
-        self._passive_quarantined_symbols: frozenset[str] = frozenset()
-        self._passive_pending_refs: dict[str, str] = {}
-        self._passive_recovery_hard_reasons: tuple[str, ...] = ()
-        self._passive_recovery_complete: bool = False
-        self._passive_recovery_inventoried: bool = False
-        self._passive_recovery_service: Any = None
         self._broker_position_symbols: set[str] = set()
         self._board_lot_log_throttle = RepeatedLogThrottle(window_seconds=300)
         self._fee_enrichment_log_throttle = RepeatedLogThrottle(window_seconds=3600)
@@ -431,8 +395,6 @@ class AppRunner:
             entry_cutoff_minutes_before_close=settings.hard_entry_cutoff_minutes_before_close,
             final_order_quote_check=self._validate_final_order_quote,
             entry_policy_check=self._validate_live_entry_policy,
-            passive_reduction_quarantine=self._passive_quarantine_issue,
-            passive_uncertainty_sink=self._passive_uncertainty_sink,
             funded_margin_fingerprint_provider=(
                 self._current_credential_fingerprint
             ),
@@ -550,9 +512,6 @@ class AppRunner:
         # was quoted against a different band (e.g. a recenter moved the band
         # onto prices the stream quoted before the band existed).
         self._band_effective_at: dict[str, datetime] = {}
-        self._opening_execution_policies: dict[
-            str, _OpeningExecutionPolicy
-        ] = {}
         # Per-symbol last fill timestamp. Previously a single float, which
         # caused a fill on symbol B to skip a position sync on symbol A
         # even though they are unrelated.
@@ -798,19 +757,6 @@ class AppRunner:
                             if runtime is not None and runtime.engine is not self.engine:
                                 self._state_svc.persist_symbol(db, runtime.engine, fill_symbol)
                         reconciliation_complete = True
-                    if fill_symbol:
-                        from app.services.opening_momentum_execution_service import (
-                            OpeningMomentumExecutionService,
-                        )
-
-                        OpeningMomentumExecutionService.reconcile_fill(
-                            db,
-                            symbol=fill_symbol,
-                            action=action,
-                        )
-                        db.commit()
-                if fill_symbol:
-                    self.refresh_opening_execution_registry()
             except Exception:
                 logger.exception("post-fill persist failed for %s", fill_symbol)
             finally:
@@ -1010,643 +956,6 @@ class AppRunner:
         except Exception:
             logger.critical("failed to persist operational risk pause", exc_info=True)
 
-    # ------------------------------------------------------------------
-    # Phase2a W3: passive OFF-recovery (view/guards, pure memory)
-    # ------------------------------------------------------------------
-
-    def _passive_quarantine_issue(self, symbol: str) -> str | None:
-        """W2 reduction-quarantine callback: PURE MEMORY, NO LOCK.
-
-        Returns the quarantine reason when the symbol is quarantined by
-        the latest published recovery view; None otherwise. The view is
-        an immutable frozenset replaced atomically by publish, so an
-        unlocked membership read is safe (CPython reference semantics)
-        and — critically — a caller already inside any runner critical
-        section, or racing a thread that holds the state lock (e.g. the
-        protective-commit invalidation guard), can never deadlock here.
-        """
-        if symbol in self._passive_quarantined_symbols:
-            return (
-                f"SPY_PASSIVE recovery quarantine on {symbol}: "
-                "ownership/resolution unproven; reductions are held "
-                "for manual reconciliation"
-            )
-        return None
-
-    def _passive_uncertainty_sink(
-        self, reason: str, broker_order_id: str | None,
-    ) -> None:
-        """W2 uncertainty sink: tighten SPY quarantine + raise the guard.
-
-        Same short critical section as publish (state RLock); pure
-        memory — the epoch raise is the core controller's own locked
-        operation, no I/O here. An existing manual pause reason is NEVER
-        overwritten by this sink.
-        """
-        # Review1 M2: state->risk order inside the SAME critical section
-        # ``_publish_passive_recovery`` uses, so publish (risk CAS -> view)
-        # and sink (view tighten -> risk raise) serialize against each
-        # other; a sink can no longer slip between a publish's CAS and its
-        # view replacement.
-        with self._state_lock:
-            if PASSIVE_SYMBOL not in self._passive_quarantined_symbols:
-                self._passive_quarantined_symbols = frozenset(
-                    set(self._passive_quarantined_symbols) | {PASSIVE_SYMBOL},
-                )
-            self.risk.raise_external_block("passive_recovery", reason)
-
-    def _passive_recovery_snapshot_view(self) -> dict[str, Any]:
-        """Read-only copy of the published view (state RLock, no I/O)."""
-        with self._state_lock:
-            return {
-                "quarantined": set(self._passive_quarantined_symbols),
-                "pending_refs": dict(self._passive_pending_refs),
-                "hard_reasons": list(self._passive_recovery_hard_reasons),
-                "complete": self._passive_recovery_complete,
-                "inventoried": self._passive_recovery_inventoried,
-            }
-
-    def _get_passive_recovery_service(self) -> Any:
-        """Lazily build the recovery service on the runner session factory."""
-        if self._passive_recovery_service is None:
-            from app.services.passive_recovery_service import (
-                PassiveRecoveryService,
-            )
-
-            self._passive_recovery_service = PassiveRecoveryService(
-                SessionLocal,
-                clock=lambda: datetime.now(timezone.utc),
-            )
-        return self._passive_recovery_service
-
-    def _latch_passive_hard_pause(self, reason: str) -> None:
-        """Non-auto operational pause for a FRESH hard uncertainty only.
-
-        An existing pause (owner manual or earlier fault) is never
-        overwritten — its reason survives all scans/errors.
-        """
-        full_reason = (
-            f"PASSIVE_RECOVERY_UNCERTAIN: {reason} - manual reconciliation "
-            "required before trading resumes"
-        )
-        if not self.risk.paused:
-            self.risk.pause(full_reason, auto_resumable=False)
-        try:
-            from app.services.reconciliation_incident_service import (
-                ReconciliationFailure,
-            )
-
-            with self._db_session() as db:
-                self._reconciliation_incident_svc.record_failure(
-                    db,
-                    ReconciliationFailure(
-                        source="passive_recovery",
-                        category="PASSIVE_RECOVERY",
-                        symbols=(PASSIVE_SYMBOL,),
-                        message=full_reason[:1000],
-                        error_type="PassiveRecoveryHard",
-                    ),
-                )
-                db.commit()
-        except Exception:
-            logger.exception(
-                "failed to record the passive recovery incident",
-            )
-
-    def _publish_passive_recovery(
-        self, snapshot: Any, *, based_on_epoch: int,
-    ) -> None:
-        """Publish one scan's view atomically under the captured epoch.
-
-        The epoch is the SCAN'S captured local variable (never a newer
-        self field). On CAS failure the ENTIRE snapshot is discarded: no
-        quarantine/pending-ref clearing can race a newer uncertainty
-        raise. Memory-only critical section; no I/O here.
-        """
-        # Review1 M2: the risk epoch CAS AND the entire view replacement
-        # happen inside ONE ``_state_lock`` critical section. The sink
-        # takes the SAME lock before its state->risk update, so a sink
-        # can never interleave between the CAS and the view write (which
-        # previously let an old snapshot overwrite a newly-raised
-        # quarantine with an empty view). On a stale epoch the ENTIRE
-        # snapshot is discarded — no quarantine, no refs, no reasons, no
-        # completion flag change.
-        with self._state_lock:
-            cleared = self.risk.publish_external_block(
-                "passive_recovery",
-                (
-                    "; ".join(snapshot.hard_reasons[:3])
-                    if snapshot.hard_reasons
-                    else (
-                        "PASSIVE_RECOVERY: known passive order still live"
-                        if getattr(snapshot, "order_live", False)
-                        else None
-                    )
-                ),
-                based_on_epoch=based_on_epoch,
-            )
-            if not cleared:
-                logger.warning(
-                    "stale passive recovery scan discarded (epoch %d)",
-                    based_on_epoch,
-                )
-                return
-            self._passive_quarantined_symbols = frozenset(
-                snapshot.quarantined_symbols,
-            )
-            self._passive_pending_refs = dict(snapshot.pending_refs)
-            self._passive_recovery_hard_reasons = tuple(
-                snapshot.hard_reasons,
-            )
-            self._passive_recovery_complete = bool(snapshot.complete)
-            self._passive_recovery_inventoried = True
-
-    def _wire_passive_observation_hooks(self) -> None:
-        """Review1 M1: wire the DENY-entry observation bundle to the SAME
-        runner-lifetime ``TradeExecutionService``.
-
-        The bundle exposes only the observation surface
-        (``record_outcome`` / ``record_unresolved_reference`` /
-        ``owner_intent_for``); every entry-granting hook (begin / resolve
-        / claim) rejects and the fresh-entry gate always reports
-        disabled — so late broker receipts on reloaded pending orders can
-        update mandate facts WITHOUT granting any new entry authority.
-        No second execution service, no PassiveAllocationService, no
-        auto-allow hooks.
-        """
-        service = self._get_passive_recovery_service()
-        builder = getattr(service, "observation_hooks", None)
-        if not callable(builder):
-            raise RuntimeError(
-                "passive recovery observation hooks are unavailable; "
-                "passive outcome observation cannot be wired",
-            )
-        # The DENY-entry observation bundle satisfies the frozen
-        # ``PassiveSubmitHooks`` protocol structurally (begin/resolve/
-        # claim reject; record/observe permitted); the executor's own
-        # ``passive_hooks_complete`` check still validates the wiring.
-        self._trade_svc.passive_submit_hooks = cast(
-            "Any",
-            builder(),
-        )
-
-    def _startup_passive_recovery(self) -> None:
-        """DB-only inventory IMMEDIATELY after risk load, before resumes.
-
-        Missing table / DB failure is HARD: the external block is raised,
-        its epoch captured in a LOCAL variable, and the hard preliminary
-        view published under that epoch. A successful zero-row query
-        clears under the same epoch with zero added broker reads.
-        """
-        service = self._get_passive_recovery_service()
-        self._wire_passive_observation_hooks()
-        inv = service.load_inventory()
-        epoch = self.risk.raise_external_block(
-            "passive_recovery",
-            "startup passive inventory verification pending",
-        )
-        if inv.read_error is not None:
-            snapshot = service.preliminary(inv)
-            self._publish_passive_recovery(snapshot, based_on_epoch=epoch)
-            self._latch_passive_hard_pause(
-                f"inventory unreadable: {inv.read_error}",
-            )
-            return
-        if not inv.rows:
-            self.risk.publish_external_block(
-                "passive_recovery", None, based_on_epoch=epoch,
-            )
-            with self._state_lock:
-                self._passive_recovery_inventoried = True
-                self._passive_recovery_complete = True
-            return
-        snapshot = service.preliminary(inv)
-        self._publish_passive_recovery(snapshot, based_on_epoch=epoch)
-        if snapshot.hard_reasons:
-            self._latch_passive_hard_pause(
-                "; ".join(snapshot.hard_reasons[:3]),
-            )
-
-    def _startup_passive_reconcile(
-        self,
-        *,
-        position_snapshot: list[Position] | None,
-        position_snapshot_error: Exception | None,
-    ) -> None:
-        """Full reconcile AFTER tracked reconciliation, BEFORE engine sync.
-
-        Reuses the startup position snapshot (no repeated position
-        query). Known-ID broker queries run OUTSIDE ``_state_lock``. The
-        scan captures its epoch FIRST and publishes only on a
-        same-generation CAS success; a stale scan discards everything.
-        """
-        service = self._get_passive_recovery_service()
-        inv = service.load_inventory()
-        if inv.read_error is not None:
-            epoch = self.risk.raise_external_block(
-                "passive_recovery", "reconcile inventory read error",
-            )
-            snapshot = service.preliminary(inv)
-            self._publish_passive_recovery(snapshot, based_on_epoch=epoch)
-            return
-        if not inv.rows:
-            return
-        epoch = self.risk.raise_external_block(
-            "passive_recovery",
-            "passive recovery reconciliation in progress",
-        )
-
-        def order_status(broker_order_id: str) -> Any:
-            from app.domain.passive_allocation.recovery import (
-                BrokerOrderFact,
-            )
-
-            try:
-                result = self.broker.get_order_status(broker_order_id)
-            except Exception as exc:
-                return BrokerOrderFact(
-                    broker_order_id=broker_order_id,
-                    status=None,
-                    executed_quantity=None,
-                    executed_price=None,
-                    error=f"{type(exc).__name__}: {exc}"[:200],
-                )
-            raw_qty = getattr(result, "executed_quantity", None)
-            raw_price = getattr(result, "executed_price", None)
-            return BrokerOrderFact(
-                broker_order_id=broker_order_id,
-                status=str(getattr(result, "status", "") or "") or None,
-                executed_quantity=(
-                    Decimal(str(raw_qty)) if raw_qty is not None else None
-                ),
-                executed_price=(
-                    Decimal(str(raw_price)) if raw_price is not None else None
-                ),
-                error=None,
-            )
-
-        def local_order(broker_order_id: str) -> Any:
-            from app.domain.passive_allocation.recovery import (
-                LocalOrderFact,
-            )
-
-            try:
-                with self._db_session() as db:
-                    row = (
-                        db.query(OrderRecord)
-                        .filter(
-                            OrderRecord.broker_order_id == broker_order_id,
-                        )
-                        .one_or_none()
-                    )
-            except Exception:
-                return LocalOrderFact(
-                    broker_order_id=broker_order_id,
-                    exists=False,
-                    symbol="",
-                    side="",
-                    quantity=None,
-                    lane_marker_ok=False,
-                    provenance_ref=None,
-                )
-            if row is None:
-                return LocalOrderFact(
-                    broker_order_id=broker_order_id,
-                    exists=False,
-                    symbol="",
-                    side="",
-                    quantity=None,
-                    lane_marker_ok=False,
-                    provenance_ref=None,
-                )
-            return LocalOrderFact(
-                broker_order_id=broker_order_id,
-                exists=True,
-                symbol=str(row.symbol or ""),
-                side=str(row.side or ""),
-                quantity=(
-                    Decimal(str(row.quantity))
-                    if row.quantity is not None
-                    else None
-                ),
-                lane_marker_ok=self._passive_config_lane_ok(row),
-                provenance_ref=self._passive_provenance_ref_for(row),
-            )
-
-        # HoldingFacts: tracked cost is the TOTAL confirmed cost (never
-        # the derived unit avg); unknown positions stay None (not []).
-        tracked_qty: Decimal | None = None
-        tracked_cost: Decimal | None = None
-        if self._trade_svc is not None:
-            snap = self._trade_svc.tracked_position(PASSIVE_SYMBOL)
-            if snap is not None:
-                tracked_qty = snap.quantity
-                tracked_cost = snap.cost
-        broker_spy_qty: Decimal | None = None
-        other_nonzero: tuple[str, ...] = ()
-        if position_snapshot_error is None and position_snapshot is not None:
-            # Review1 P1: a SUCCESSFUL positions list with no SPY entry is
-            # an EXPLICIT broker_spy_qty=0 — not None (unavailable). Only
-            # a snapshot FAILURE leaves the holding None. A SHORT SPY row
-            # never satisfies a LONG BUY holding proof: its quantity is
-            # recorded under the SHORT side and the LONG expectation stays
-            # unmet (classifier HARD).
-            others: list[str] = []
-            for pos in position_snapshot:
-                sym = str(pos.symbol or "")
-                side = str(getattr(pos, "side", "") or "").upper()
-                try:
-                    qty = Decimal(str(getattr(pos, "quantity", 0) or 0))
-                except Exception:
-                    qty = Decimal("0")
-                if sym == PASSIVE_SYMBOL:
-                    if side == "LONG" and qty > 0:
-                        broker_spy_qty = qty
-                    elif side == "SHORT" and qty != 0:
-                        # Incompatible side evidence: record the mismatch
-                        # as a nonzero other-holding so the classifier
-                        # cannot confirm a LONG from a SHORT row.
-                        others.append(sym)
-                    elif broker_spy_qty is None:
-                        broker_spy_qty = Decimal("0")
-                elif qty > 0 and sym:
-                    others.append(sym)
-            if broker_spy_qty is None:
-                broker_spy_qty = Decimal("0")
-            other_nonzero = tuple(sorted(set(others)))
-        holding = None
-        if (
-            broker_spy_qty is not None
-            or tracked_qty is not None
-            or position_snapshot_error is not None
-        ):
-            from app.domain.passive_allocation.recovery import HoldingFacts
-
-            holding = HoldingFacts(
-                broker_spy_qty=broker_spy_qty,
-                other_nonzero_symbols=other_nonzero,
-                tracked_spy_qty=tracked_qty,
-                tracked_spy_cost=tracked_cost,
-            )
-        snapshot = service.reconcile(
-            inv,
-            order_status=order_status,
-            local_order=local_order,
-            holding=holding,
-        )
-        self._publish_passive_recovery(snapshot, based_on_epoch=epoch)
-        if snapshot.hard_reasons and not self.risk.paused:
-            self._latch_passive_hard_pause(
-                "; ".join(snapshot.hard_reasons[:3]),
-            )
-
-    def _passive_provenance_ref_for(self, row: Any) -> str | None:
-        """Derive the owner ref from the ORDER SUBMISSION EVENT evidence.
-
-        Review1 M3: the provenance must come from the actual
-        ``ORDER_SUBMITTED`` TradeEvent for THIS exact broker order id —
-        its ``payload.passive_owner_ref`` — never from the mandate's own
-        tokens (that comparison was a tautology). Missing or ambiguous
-        event evidence yields None (the caller must treat that as HARD,
-        never latest-wins). The mandate's tokens are only consulted to
-        CONFIRM the event ref matches the live mandate identity.
-        """
-        order_id = str(getattr(row, "broker_order_id", "") or "").strip()
-        if not order_id:
-            return None
-        try:
-            with self._db_session() as db:
-                events = (
-                    db.query(TradeEvent)
-                    .filter(
-                        TradeEvent.event_type == "ORDER_SUBMITTED",
-                        TradeEvent.broker_order_id == order_id,
-                    )
-                    .all()
-                )
-                if not events:
-                    return None
-                refs: set[str] = set()
-                for event in events:
-                    try:
-                        payload = json.loads(
-                            str(event.payload_json or "{}"),
-                        )
-                    except (TypeError, ValueError):
-                        continue
-                    if not isinstance(payload, dict):
-                        continue
-                    ref = str(payload.get("passive_owner_ref", "") or "")
-                    if ref:
-                        refs.add(ref)
-                if len(refs) != 1:
-                    # Missing, duplicate or inconsistent event evidence:
-                    # never pick an arbitrary/latest ref.
-                    return None
-                event_ref = next(iter(refs))
-                mandate = (
-                    db.query(PassiveMandate)
-                    .filter(PassiveMandate.lane == PASSIVE_LANE)
-                    .one_or_none()
-                )
-                if mandate is None:
-                    return None
-                if not (mandate.claim_token and mandate.execution_token):
-                    return None
-                mandate_ref = (
-                    f"{mandate.id}:{mandate.claim_token}:"
-                    f"{mandate.execution_token}"
-                )
-                if event_ref != mandate_ref:
-                    return None
-                return event_ref
-        except Exception:
-            return None
-
-    def _passive_config_lane_ok(self, row: Any) -> bool:
-        """Strict passive-lane proof from the ACTUAL serialized config.
-
-        Review1 M3: the SEC98 accounting marker is shared with ordinary
-        RANGE orders and is NOT a lane marker. The production serializer
-        (``_passive_config_snapshot_json``) writes ``passive_lane`` and
-        ``passive_protocol_version`` into the OrderRecord's
-        config_snapshot — require BOTH, with no fee-model substitution.
-        An older snapshot lacking the markers fails closed.
-        """
-        raw = getattr(row, "config_snapshot", None)
-        if not raw:
-            return False
-        try:
-            snapshot = json.loads(str(raw))
-        except (TypeError, ValueError):
-            return False
-        if not isinstance(snapshot, dict):
-            return False
-        if snapshot.get("passive_lane") != PASSIVE_LANE:
-            return False
-        protocol_version = snapshot.get("passive_protocol_version")
-        if protocol_version != passive_protocol.PASSIVE_PROTOCOL_VERSION:
-            return False
-        return True
-
-    def _passive_intent_from_ref(self, ref: str) -> Any:
-        try:
-            mandate_id_s, _claim, _exec = ref.split(":", 2)
-            with self._db_session() as db:
-                mandate = db.get(PassiveMandate, int(mandate_id_s))
-                if mandate is None or not mandate.intent_json:
-                    return None
-                return passive_protocol.intent_from_json(
-                    mandate.intent_json,
-                )
-        except Exception:
-            return None
-
-    def _startup_passive_restore_pending_refs(
-        self, db: Session,
-    ) -> list[str]:
-        """Install VALIDATED pending refs onto restored pending orders.
-
-        A preliminary ``pending_refs[broker_id] = mandate:claim:exec`` is
-        installed only after authenticating the LOCAL order: same broker
-        id, SPY/BUY, quantity equal to the immutable intent, lane marker
-        present. Missing/ambiguous/conflicting refs become
-        representation issues (never latest-wins); no execution token is
-        invented and no cost facts are written.
-        """
-        view = self._passive_recovery_snapshot_view()
-        refs: dict[str, str] = view["pending_refs"]
-        if not refs:
-            return []
-        issues: list[str] = []
-        try:
-            rows = (
-                db.query(OrderRecord)
-                .filter(
-                    OrderRecord.broker_order_id.in_(sorted(refs)),
-                )
-                .all()
-            )
-        except Exception:
-            return ["pending passive ref validation query failed"]
-        by_id = {str(r.broker_order_id): r for r in rows}
-        svc = self._trade_svc
-        for broker_id, ref in sorted(refs.items()):
-            row = by_id.get(broker_id)
-            # Preliminary inventory may include terminal IDs. They still
-            # require the full ownership proof below, but have no pending
-            # executor object to attach; absence is not an attach failure.
-            if row is not None and row.status in _TERMINAL_ORDER_STATUSES:
-                continue
-            if row is None:
-                issues.append(
-                    f"passive pending ref {broker_id}: no matching local "
-                    "live order; refusing to install"
-                )
-                continue
-            intent = self._passive_intent_from_ref(ref)
-            if intent is None:
-                issues.append(
-                    f"passive pending ref {broker_id}: mandate intent "
-                    "unavailable; refusing to install"
-                )
-                continue
-            try:
-                qty = Decimal(str(row.quantity))
-            except Exception:
-                qty = None
-            symbol_ok = (
-                str(row.symbol or "").upper() == intent.symbol.upper()
-            )
-            side_ok = str(row.side or "").upper() == "BUY"
-            qty_ok = qty is not None and qty == intent.quantity
-            # M3: strict passive-lane proof from the serialized config
-            # (SEC98 alone is a RANGE marker and must never restore).
-            lane_ok = self._passive_config_lane_ok(row)
-            provenance = self._passive_provenance_ref_for(row)
-            provenance_ok = provenance == ref
-            if not (
-                symbol_ok and side_ok and qty_ok and lane_ok and provenance_ok
-            ):
-                issues.append(
-                    f"passive pending ref {broker_id}: local order does "
-                    "not authenticate (lane={lane_ok}, "
-                    f"provenance={provenance_ok}); refusing to install"
-                )
-                continue
-            attached = False
-            try:
-                attached = bool(svc.attach_passive_owner_ref(broker_id, ref))
-            except Exception:
-                attached = False
-            if not attached:
-                issues.append(
-                    f"passive pending ref {broker_id}: attach failed "
-                    "(missing pending or conflicting existing ref); "
-                    "refusing to continue silently"
-                )
-        if issues:
-            # Review1 M1: a restore failure is a REPRESENTATION issue and
-            # must raise the external block — never a logger-only skip.
-            epoch = self.risk.raise_external_block(
-                "passive_recovery",
-                "pending passive ref restoration failed: "
-                + "; ".join(issues[:3]),
-            )
-            with self._state_lock:
-                self._passive_quarantined_symbols = frozenset(
-                    set(self._passive_quarantined_symbols) | {PASSIVE_SYMBOL},
-                )
-            logger.error(
-                "passive pending-ref restoration issues raised the "
-                "external block (epoch %d): %s",
-                epoch,
-                "; ".join(issues[:5]),
-            )
-        return issues
-
-    def _refresh_passive_before_resume_eligibility(self) -> None:
-        """Passive-specific refresh BEFORE the eligibility short-circuit.
-
-        ``resume_after_verification`` checks ``resume_eligibility`` before
-        ``verify_operational_resume``; without this refresh a transient
-        startup read failure would deadlock manual re-verification behind
-        a guard that only a NEW scan can resolve. The refresh re-runs the
-        DB-only inventory: a transient read failure may resolve; a
-        persisted UNCERTAIN NEVER auto-clears (the service classification
-        stays hard until an explicit reconciliation decision).
-        """
-        view = self._passive_recovery_snapshot_view()
-        if not view["inventoried"]:
-            return
-        block = self.risk.external_block()
-        if block is None or block.source != "passive_recovery":
-            return
-        # Review1 P1: the manual refresh reuses the FULL startup
-        # reconcile machinery — FRESH broker positions and known-ID order
-        # reads — never a preliminary-only scan that would keep every
-        # ORDER_KNOWN row blocked forever. ``_startup_passive_reconcile``
-        # performs the complete classification under a captured epoch;
-        # sticky persisted UNCERTAIN stays HARD (the service semantics),
-        # a transient read failure can clear once verified, and a
-        # confirmed known holding removes only the transient external
-        # block while the symbol stays quarantined/entry-inhibited.
-        try:
-            fresh_positions: list[Position] | None = None
-            fresh_error: Exception | None = None
-            try:
-                fresh_positions = self.broker.get_positions()
-            except Exception as exc:
-                fresh_error = exc
-            self._startup_passive_reconcile(
-                position_snapshot=fresh_positions,
-                position_snapshot_error=fresh_error,
-            )
-        except Exception:
-            logger.exception(
-                "passive manual-refresh reconcile failed; guard remains",
-            )
-
     def _initialize_runner(self) -> None:
         # Same serialization boundary as reload. start() holds _start_lock
         # and does not hold _state_lock here, so reload guard → state lock
@@ -1672,22 +981,11 @@ class AppRunner:
                 # Legacy test session doubles do not expose the incident query API.
                 logger.warning("board lot residual restore unavailable for session", exc_info=True)
             self._sync_symbol_runtimes(db)
-            self._load_opening_execution_registry(db)
             self._restore_reduction(db)
             self._apply_credentials(
                 self._load_credentials(db=db),
                 resubscribe=False,
             )
-        # Phase2a W3: DB-only passive inventory IMMEDIATELY after the risk
-        # load above and BEFORE every early direct resume path below (the
-        # pending-timeout resume in particular). Hard failures raise the
-        # external guard under a captured epoch; verified zero rows clear
-        # with zero added broker reads.
-        try:
-            self._startup_passive_recovery()
-        except Exception:
-            logger.exception("passive startup inventory failed; guard stays raised")
-
         # In-memory only and never raises; the background writer does the I/O.
         self._bind_decision_funnel()
         self._register_broker_disconnect_hook()
@@ -1717,19 +1015,6 @@ class AppRunner:
             with self._db_session() as db:
                 self._load_pending_orders(db)
                 self._resume_pending_timeout_pause_if_filled(db)
-                try:
-                    ref_issues = (
-                        self._startup_passive_restore_pending_refs(db)
-                    )
-                    if ref_issues:
-                        logger.warning(
-                            "passive pending-ref validation issues: %s",
-                            "; ".join(ref_issues[:5]),
-                        )
-                except Exception:
-                    logger.exception(
-                        "passive pending-ref restoration failed",
-                    )
             self._sync_risk_from_order_ledger()
             position_snapshot: list[Position] | None = None
             position_snapshot_error: Exception | None = None
@@ -1746,17 +1031,6 @@ class AppRunner:
                     position_snapshot=position_snapshot,
                     position_snapshot_error=position_snapshot_error,
                 )
-            # Phase2a W3 step C: passive reconcile AFTER tracked
-            # reconciliation, BEFORE the engine sync below — reusing this
-            # position snapshot (no extra broker position query) and
-            # querying known order IDs outside the state lock.
-            try:
-                self._startup_passive_reconcile(
-                    position_snapshot=position_snapshot,
-                    position_snapshot_error=position_snapshot_error,
-                )
-            except Exception:
-                logger.exception("passive startup reconcile failed")
             if self.risk.paused and self.risk.pause_reason:
                 reconciliation_failed = True
             # Force an engine-vs-broker position sync BEFORE the quote
@@ -1834,76 +1108,17 @@ class AppRunner:
                 # Observer-only: failed subscription stays unsubscribed.
                 self._observe_quote_subscription(False)
 
-    def _load_opening_execution_registry(self, db: Session) -> None:
-        from app.services.opening_momentum_execution_service import (
-            OpeningMomentumExecutionService,
-        )
-
-        try:
-            rows = OpeningMomentumExecutionService.active_policies(db)
-        except Exception:
-            if settings.opening_momentum_execution_enabled:
-                raise
-            logger.warning(
-                "opening-execution registry unavailable while execution is disabled",
-                exc_info=True,
-            )
-            rows = []
-        policies: dict[str, _OpeningExecutionPolicy] = {}
-        for row in rows:
-            if not all(
-                hasattr(row, field)
-                for field in (
-                    "id",
-                    "symbol",
-                    "status",
-                    "stop_loss_pct",
-                    "max_holding_minutes",
-                    "reference_entry_price",
-                    "max_price_deviation_bps",
-                )
-            ):
-                logger.warning(
-                    "ignoring malformed opening-execution registry row"
-                )
-                continue
-            symbol = str(row.symbol or "").strip().upper()
-            if not symbol:
-                continue
-            policies[symbol] = _OpeningExecutionPolicy(
-                execution_id=int(row.id),
-                symbol=symbol,
-                status=str(row.status or ""),
-                stop_loss_pct=float(row.stop_loss_pct or 0),
-                max_holding_minutes=int(row.max_holding_minutes or 0),
-                reference_entry_price=float(
-                    row.reference_entry_price or 0
-                ),
-                max_price_deviation_bps=float(
-                    row.max_price_deviation_bps or 0
-                ),
-            )
-        with self._state_lock:
-            self._opening_execution_policies = policies
-
-    def refresh_opening_execution_registry(self, db: Session | None = None) -> None:
-        """Refresh symbol runtimes and opening-execution quote policies.
+    def refresh_symbol_runtimes(self, db: Session | None = None) -> None:
+        """Refresh watchlist symbol runtimes and quote subscriptions.
 
         Given ``db``, the database work borrows it instead of opening a second
-        session: the opening-momentum cron holds its session across
-        ``OpeningMomentumExecutionService.tick``, and this refresh opening its
-        own inside the tick was the 2026-09-04 live re-entrancy violation.
-        Safe to borrow: every statement on the refresh path is a read, and
-        ``load_symbol_runtime`` is transaction-neutral, so the borrow neither
-        reads uncommitted data nor finalizes the caller's transaction.
-
-        ``db`` stays optional: the post-fill and reduction refreshes call
-        here AFTER their sessions have ended and must keep owning one.
+        session. Callers that invoke this after their own sessions have ended
+        keep owning one.
         """
         with self._trade_svc.submission_guard():
-            self._refresh_opening_execution_registry_under_submission_guard(db)
+            self._refresh_symbol_runtimes_under_submission_guard(db)
 
-    def _refresh_opening_execution_registry_under_submission_guard(
+    def _refresh_symbol_runtimes_under_submission_guard(
         self,
         db: Session | None = None,
     ) -> None:
@@ -1911,7 +1126,6 @@ class AppRunner:
             previous_symbols = set(self._desired_quote_symbols_locked())
         with self._db_session_or(db) as session:
             self._sync_symbol_runtimes(session)
-            self._load_opening_execution_registry(session)
         with self._state_lock:
             desired_symbols = self._desired_quote_symbols_locked()
             should_resubscribe = (
@@ -1936,10 +1150,7 @@ class AppRunner:
                 # Observer-only: a symbol-set refresh starts a fresh window.
                 self._observe_quote_subscription(True)
             except Exception as exc:
-                reason = (
-                    "opening-execution quote subscription refresh failed: "
-                    f"{exc}"
-                )
+                reason = f"quote subscription refresh failed: {exc}"
                 logger.exception(reason)
                 with self._protective_runtime_state_guard():
                     self._quotes_subscribed = False
@@ -1947,14 +1158,6 @@ class AppRunner:
                 # Observer-only: the refresh failed; stream stays unsubscribed.
                 self._observe_quote_subscription(False)
                 self.risk.pause(reason, auto_resumable=False)
-
-    def _managed_opening_symbols(self) -> set[str]:
-        with self._state_lock:
-            return {
-                symbol
-                for symbol, policy in self._opening_execution_policies.items()
-                if policy.status != "ARMED"
-            }
 
     def _resume_stale_post_fill_pause_after_startup(self) -> bool:
         with self._state_lock:
@@ -2379,14 +1582,6 @@ class AppRunner:
     ) -> tuple[bool, str]:
         with self._trade_svc.submission_guard():
             self.risk.revoke_protective_exits()
-            # Phase2a W3: the passive guard would otherwise short-circuit
-            # the eligibility check below before any re-verification could
-            # run. Refresh the passive view FIRST (a transient read failure
-            # may resolve; persisted UNCERTAIN never auto-clears).
-            try:
-                self._refresh_passive_before_resume_eligibility()
-            except Exception:
-                logger.exception("passive resume refresh failed")
             eligibility = self.risk.resume_eligibility()
             if not eligibility.approved:
                 self._broadcast_status()
@@ -2466,7 +1661,6 @@ class AppRunner:
         pause_reason, safety_generation = self.risk.pause_verification_snapshot()
         with self._state_lock:
             intents = dict(self._reduction_intents)
-            policies = dict(self._opening_execution_policies)
             primary_symbol = self.engine.params.symbol
             broker_identity_fingerprint = self._broker_identity_fingerprint
             broker_instance_id = id(self.broker)
@@ -2485,19 +1679,7 @@ class AppRunner:
             )
             for symbol, intent in sorted(intents.items())
         )
-        policy_snapshot = tuple(
-            (
-                symbol,
-                policy.execution_id,
-                policy.symbol,
-                policy.status,
-                policy.stop_loss_pct,
-                policy.max_holding_minutes,
-                policy.reference_entry_price,
-                policy.max_price_deviation_bps,
-            )
-            for symbol, policy in sorted(policies.items())
-        )
+        policy_snapshot: tuple[object, ...] = ()
         tracked_snapshot: list[tuple[object, ...]] = []
         for symbol in sorted(self._trade_svc.snapshot_tracked_entries()):
             tracked = self._trade_svc.tracked_position(symbol)
@@ -2729,7 +1911,6 @@ class AppRunner:
             authorization_scope = self._protective_exit_authorization_scope
             current_broker = self.broker
             intent = self._reduction_intents.get(normalized_symbol)
-            policy = self._opening_execution_policies.get(normalized_symbol)
         if authorization_scope is None:
             return fail("authorization scope is unavailable")
         if (
@@ -2779,22 +1960,7 @@ class AppRunner:
             "reduce_only"
         ) is not True:
             return fail("target reduction policy is not reduce-only")
-        execution_signal = config_snapshot.get("execution_signal")
-        if policy is not None:
-            expected_policy = {
-                "strategy_source": "OPENING_MOMENTUM",
-                "opening_execution_id": policy.execution_id,
-                "reference_entry_price": policy.reference_entry_price,
-                "max_price_deviation_bps": policy.max_price_deviation_bps,
-                "stop_loss_pct": policy.stop_loss_pct,
-                "max_holding_minutes": policy.max_holding_minutes,
-            }
-            if not isinstance(execution_signal, dict) or any(
-                execution_signal.get(key) != value
-                for key, value in expected_policy.items()
-            ):
-                return fail("target opening-execution policy scope changed")
-        elif execution_signal is not None:
+        if config_snapshot.get("execution_signal") is not None:
             return fail("unexpected opening-execution policy scope")
 
         final_pause_reason, final_generation = (
@@ -3981,7 +3147,6 @@ class AppRunner:
                     self.quote_stream_health.record_quote(quote.timestamp)
                     # Funnel stage 1: a usable, fresh quote for the primary.
                     self.decision_funnel.record_fresh_primary_quote()
-            opening_policy = self._opening_execution_policies.get(quote.symbol)
             if runtime is None and not is_primary_symbol:
                 decision.early_return = True
                 logger.debug(
@@ -3989,7 +3154,7 @@ class AppRunner:
                     quote.symbol,
                 )
                 return decision
-            if not is_primary_symbol and opening_policy is None:
+            if not is_primary_symbol:
                 decision.early_return = True
                 return decision
             if is_primary_symbol:
@@ -4114,13 +3279,6 @@ class AppRunner:
                             transition_status,
                         )
                 elif decision.quote_degraded:
-                    decision.early_return = True
-                elif self._opening_execution_capital_slot_reserved():
-                    # The opening strategy owns the single capital slot from
-                    # its signal window through settlement. Its selected
-                    # position uses the fixed stop/time policy; other symbols
-                    # remain observation only until the slot is released.
-                    active_engine.record_price(quote.last_price)
                     decision.early_return = True
                 elif (
                     active_engine.state == EngineState.FLAT
@@ -4441,10 +3599,6 @@ class AppRunner:
                 quote,
                 result.description,
             )
-            ledger_context = self._opening_execution_ledger_context(
-                decision.trigger_symbol or quote.symbol,
-                ledger_context,
-            )
             entry_reference_quantity = None
             if (
                 not decision.allow_loss_exit
@@ -4684,470 +3838,6 @@ class AppRunner:
             ),
             "exit_reason": reason if is_exit else "",
         }
-
-    def _opening_execution_ledger_context(
-        self,
-        symbol: str,
-        context: dict[str, object],
-        *,
-        signal_context: dict[str, object] | None = None,
-    ) -> dict[str, object]:
-        with self._state_lock:
-            policy = self._opening_execution_policies.get(symbol)
-        if policy is None:
-            return context
-        try:
-            snapshot = json.loads(str(context.get("config_snapshot") or "{}"))
-        except (TypeError, ValueError, json.JSONDecodeError):
-            snapshot = {}
-        if not isinstance(snapshot, dict):
-            snapshot = {}
-        snapshot["strategy_source"] = "OPENING_MOMENTUM"
-        execution_signal: dict[str, object] = {
-            "strategy_source": "OPENING_MOMENTUM",
-            "opening_execution_id": policy.execution_id,
-            "reference_entry_price": policy.reference_entry_price,
-            "max_price_deviation_bps": policy.max_price_deviation_bps,
-            "stop_loss_pct": policy.stop_loss_pct,
-            "max_holding_minutes": policy.max_holding_minutes,
-        }
-        if signal_context:
-            execution_signal["signal_context"] = signal_context
-        snapshot["execution_signal"] = execution_signal
-        snapshot_json = json.dumps(
-            snapshot,
-            ensure_ascii=True,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        return {
-            **context,
-            "config_version": hashlib.sha256(
-                snapshot_json.encode("utf-8")
-            ).hexdigest(),
-            "config_snapshot": snapshot_json,
-            # The opening lane overrides the initiator so the
-            # funded-margin resolver excludes this order (round-2
-            # finding 4): the marker is top-level AND inside the
-            # snapshot.
-            "execution_initiator": "OPENING_MOMENTUM",
-        }
-
-    @staticmethod
-    def _quote_age_ms(value: object, now: datetime | None = None) -> float | None:
-        raw = str(value or "").strip()
-        if not raw:
-            return None
-        try:
-            if raw.replace(".", "", 1).isdigit():
-                numeric = float(raw)
-                if numeric > 10_000_000_000:
-                    numeric /= 1000
-                source_time = datetime.fromtimestamp(numeric, tz=timezone.utc)
-            else:
-                source_time = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-                source_time = (
-                    source_time.replace(tzinfo=timezone.utc)
-                    if source_time.tzinfo is None
-                    else source_time.astimezone(timezone.utc)
-                )
-        except (ValueError, OverflowError, OSError):
-            return None
-        return max(
-            0.0,
-            ((now or datetime.now(timezone.utc)) - source_time).total_seconds() * 1000,
-        )
-
-    def _on_quote(self, quote: Quote, *, is_push: bool = True) -> None:
-        processing_started = False
-        try:
-            quote_quality = self._evaluate_quote_quality(
-                {
-                    "last_price": quote.last_price,
-                    "bid": quote.bid,
-                    "ask": quote.ask,
-                    "timestamp": quote.timestamp,
-                }
-            )
-            if quote_quality["source_timestamp_fresh"]:
-                with self._state_lock:
-                    has_executable_runtime = (
-                        quote.symbol == self.engine.params.symbol
-                        or (
-                            quote.symbol in self._symbol_runtimes
-                            and quote.symbol in self._opening_execution_policies
-                        )
-                    )
-                if not has_executable_runtime:
-                    self._pause_orphan_tracked_position_if_daily_loss_reached(
-                        quote
-                    )
-            decision = self._evaluate_quote_trigger(quote, is_push=is_push)
-            processing_started = decision.processing_started
-
-            if decision.reduction_should_clear:
-                if not self._clear_reduction(quote.symbol, reason="position is flat"):
-                    return
-            if decision.reduction_newly_latched and decision.reduction_intent is not None:
-                if not self._persist_reduction(decision.reduction_intent, quote.symbol):
-                    if decision.engine_snapshot is not None and decision.trigger_engine is not None:
-                        decision.trigger_engine.restore(decision.engine_snapshot)
-                    reason = (
-                        f"{_POSITION_RECONCILIATION_UNCERTAIN_PREFIX} "
-                        f"failed to persist reduction intent for {quote.symbol}"
-                    )
-                    self.risk.pause(reason, auto_resumable=False)
-                    self._set_last_action_message(reason)
-                    self._broadcast_status()
-                    return
-
-            if (
-                decision.reduction_intent is not None
-                and not decision.exit_hold_reason
-                and decision.result is None
-                and decision.engine_snapshot is not None
-                and self._maybe_permit_persisted_reduction()
-            ):
-                # The first evaluation intentionally restored the engine when
-                # the operational pause rejected the reduction. Re-evaluate
-                # the same trusted quote once after reduce-only authorization
-                # so a durable protective exit does not need a third quote.
-                decision = self._evaluate_quote_trigger(quote, is_push=False)
-                processing_started = decision.processing_started
-
-            if decision.exit_hold_reason:
-                reason = f"{quote.symbol} protective exit held: {decision.exit_hold_reason}"
-                self._set_last_action_message(reason)
-                if self._degraded_exit_log_throttle.should_log(quote.symbol):
-                    logger.warning(
-                        "protective exit held: symbol=%s reason=%s suppressed=%s",
-                        quote.symbol,
-                        decision.exit_hold_reason,
-                        self._degraded_exit_log_throttle.take_suppressed_count(),
-                    )
-                    self._record_risk_event(reason, event_type="DEGRADED_EXIT_HELD")
-                    self.notifier.notify_risk_event("DEGRADED_EXIT_HELD", reason)
-            if decision.early_return:
-                return
-
-            if self._trade_svc.has_pending_order and processing_started and decision.result is None:
-                # Each _PendingOrder already carries its own
-                # ``restore_engine_snapshot_fn`` bound to the per-symbol
-                # engine at track time. We only need a fallback for any
-                # pending that lacked that binding — that restores the
-                # primary engine. The single call to ``reconcile()``
-                # iterates ALL pending orders internally; wrapping it in
-                # a runner-level loop would be a double-iteration and
-                # would also misattribute the restore callback across
-                # symbols (the prior _drive_reconcile_per_pending helper
-                # had this exact bug — see review 2026-06-14).
-                def _fallback_restore(snapshot):
-                    self.engine.restore(snapshot)
-
-                self._trade_svc.reconcile(
-                    self.risk,
-                    self.notifier,
-                    _fallback_restore,
-                    self.notifier.notify_risk_event,
-                )
-                self._broadcast_status()
-                return
-
-            self._broadcast_status()
-            self._execute_triggered_order(decision, quote)
-        except Exception:
-            logger.exception("error processing quote")
-        finally:
-            if processing_started:
-                close_broker = False
-                with self._state_lock:
-                    self._trigger_in_flight = False
-                    if not self._running and self._defer_broker_close:
-                        self._defer_broker_close = False
-                        close_broker = True
-                if close_broker:
-                    self.broker.close()
-
-    def _runtime_for_symbol(self, symbol: str | None) -> tuple[str, str, StrategyEngine] | None:
-        requested_symbol = str(symbol or "").upper()
-        if not requested_symbol or requested_symbol == self.engine.params.symbol:
-            return self.engine.params.symbol, self.engine.params.market, self.engine
-        runtime = self._symbol_runtimes.get(requested_symbol)
-        if runtime is None:
-            return None
-        return runtime.symbol, runtime.market, runtime.engine
-
-    def execute_opening_momentum_entry(
-        self,
-        *,
-        execution_id: int,
-        symbol: str,
-        reference_entry_price: float,
-        entry_deadline_at: datetime,
-        max_price_deviation_bps: float,
-        stop_loss_pct: float,
-        max_holding_minutes: int,
-        signal_context: dict[str, object],
-    ) -> dict[str, object]:
-        action = "BUY"
-
-        def result(
-            status: str,
-            *,
-            executed: bool = False,
-            order_id: str | None = None,
-            reason: str = "",
-        ) -> dict[str, object]:
-            return {
-                "executed": executed,
-                "status": status,
-                "order_id": order_id,
-                "action": action,
-                "reason": reason or status,
-            }
-
-        if not settings.opening_momentum_execution_enabled:
-            return result("EXECUTION_DISABLED")
-        if not settings.opening_momentum_execution_paper_confirmed:
-            return result("PAPER_ACCOUNT_NOT_CONFIRMED")
-        if not (
-            settings.full_buying_power_usage_enabled
-            and self._trade_svc.full_buying_power_usage_enabled
-        ):
-            return result("FULL_BUYING_POWER_DISABLED")
-        if not self._running:
-            return result("RUNNER_STOPPED")
-        deadline = self._as_utc(entry_deadline_at)
-        if datetime.now(timezone.utc) > deadline:
-            return result("ENTRY_WINDOW_EXPIRED")
-
-        target_symbol = str(symbol or "").strip().upper()
-        if not target_symbol:
-            return result("NO_SYMBOL")
-        if (
-            not math.isfinite(reference_entry_price)
-            or reference_entry_price <= 0
-        ):
-            return result("INVALID_REFERENCE_PRICE")
-        if (
-            not math.isfinite(max_price_deviation_bps)
-            or max_price_deviation_bps < 0
-        ):
-            return result("INVALID_PRICE_DEVIATION_LIMIT")
-        if (
-            not math.isfinite(stop_loss_pct)
-            or stop_loss_pct <= 0
-            or stop_loss_pct > settings.hard_stop_loss_pct
-        ):
-            return result("INVALID_STOP_LOSS")
-        if (
-            max_holding_minutes <= 0
-            or max_holding_minutes > settings.hard_max_holding_minutes
-        ):
-            return result("INVALID_HOLDING_LIMIT")
-
-        with self._state_lock:
-            policy = self._opening_execution_policies.get(target_symbol)
-            if policy is None or policy.execution_id != execution_id:
-                return result("EXECUTION_NOT_ACTIVE")
-            if policy.status != "SUBMITTING":
-                return result("EXECUTION_NOT_SUBMITTING")
-            if self._trigger_in_flight:
-                return result("BUSY")
-            runtime = self._runtime_for_symbol(target_symbol)
-            if runtime is None:
-                return result("UNKNOWN_SYMBOL")
-            self._trigger_in_flight = True
-
-        target_symbol, target_market, target_engine = runtime
-        engine_snapshot: EngineSnapshot | None = None
-        try:
-            tracked_entries = self._trade_svc.snapshot_tracked_entries()
-            if any(
-                quantity > 0
-                for quantity, _cost in tracked_entries.values()
-            ):
-                return result(
-                    "CAPITAL_SLOT_BUSY",
-                    reason="another tracked position already owns the capital slot",
-                )
-            if self._trade_svc.has_pending_order:
-                return result(
-                    "BUSY",
-                    reason="another order is still pending",
-                )
-            quote = self._trusted_quote_for_llm_policy(target_symbol)
-            if quote is None:
-                return result("NO_QUOTE")
-            quote_quality = self._evaluate_quote_quality({
-                "last_price": quote.last_price,
-                "bid": quote.bid,
-                "ask": quote.ask,
-                "timestamp": quote.timestamp,
-            })
-            if not all(
-                bool(quote_quality[name])
-                for name in (
-                    "price_positive",
-                    "spread_reasonable",
-                    "last_bbo_consistent",
-                    "source_timestamp_fresh",
-                )
-            ):
-                return result("NO_QUOTE", reason="live quote failed quality gate")
-            executable_price = float(quote.ask)
-            deviation_bps = abs(
-                executable_price / reference_entry_price - 1
-            ) * 10_000
-            if deviation_bps > max_price_deviation_bps:
-                return result(
-                    "QUOTE_DEVIATION",
-                    reason=(
-                        f"entry ask deviation {deviation_bps:.2f}bps exceeds "
-                        f"{max_price_deviation_bps:.2f}bps"
-                    ),
-                )
-            risk_result = self.risk.check()
-            if not risk_result.approved:
-                return result("RISK_REJECTED", reason=risk_result.reason)
-
-            engine_snapshot = target_engine.snapshot()
-            transition_status = target_engine.transition_for_action(action)
-            if transition_status != "OK":
-                return result(transition_status)
-            execution_params = dataclass_replace(target_engine.params)
-            execution_params.stop_loss_pct = stop_loss_pct
-            execution_params.max_holding_minutes = max_holding_minutes
-            execution_params.min_profit_amount = 0
-            execution_params.allow_position_addons = False
-            execution_quote = Quote(
-                symbol=quote.symbol,
-                last_price=executable_price,
-                bid=quote.bid,
-                ask=quote.ask,
-                timestamp=quote.timestamp,
-            )
-            decision = _QuoteTriggerDecision(
-                result=TriggerResult(
-                    triggered=True,
-                    action=action,
-                    description="opening momentum entry",
-                ),
-                trigger_symbol=target_symbol,
-                trigger_engine=target_engine,
-                trigger_params=execution_params,
-                trigger_market=target_market,
-            )
-            ledger_context = self._opening_execution_ledger_context(
-                target_symbol,
-                self._execution_ledger_context(
-                    decision,
-                    execution_quote,
-                    "opening momentum entry",
-                ),
-                signal_context=signal_context,
-            )
-            if datetime.now(timezone.utc) > deadline:
-                target_engine.restore(engine_snapshot)
-                return result("ENTRY_WINDOW_EXPIRED")
-            order_status = self._trade_svc.execute(
-                action=action,
-                symbol=target_symbol,
-                quote=execution_quote,
-                broker=self.broker,
-                risk=self.risk,
-                notifier=self.notifier,
-                cash_currency=self._cash_currency_for_market(target_market),
-                market=target_market,
-                trading_session_mode="RTH_ONLY",
-                min_profit_amount=0,
-                allow_loss_exit=False,
-                fee_rate=self._fee_rate_for_params(
-                    execution_params,
-                    target_market,
-                ),
-                expected_exit_price=None,
-                engine_snapshot=engine_snapshot,
-                restore_engine_snapshot=lambda snapshot: target_engine.restore(
-                    snapshot
-                ),
-                notify_risk_event=self.notifier.notify_risk_event,
-                execution_context=ledger_context,
-                entry_policy_check=(
-                    lambda checked_symbol, checked_action, checked_market: (
-                        self._validate_opening_momentum_entry_policy(
-                            execution_id,
-                            checked_symbol,
-                            checked_action,
-                            checked_market,
-                            entry_deadline_at=deadline,
-                        )
-                    )
-                ),
-                allow_opening_warmup_entry=True,
-            )
-            if order_status is None:
-                target_engine.restore(engine_snapshot)
-                return result("NO_ORDER")
-            status = str(order_status.status or "UNKNOWN").upper()
-            reason = str(order_status.reason or status)
-            order_id = str(order_status.broker_order_id or "") or None
-            if (
-                status == "SKIPPED"
-                and reason == "ENTRY_WINDOW_EXPIRED"
-            ):
-                status = "ENTRY_WINDOW_EXPIRED"
-            elif status == "SKIPPED" and order_id is None:
-                if reason.startswith(
-                    _OPENING_FINAL_QUOTE_DEVIATION_REASON_PREFIX
-                ):
-                    status = "QUOTE_DEVIATION"
-                elif reason in _OPENING_FINAL_QUOTE_UNAVAILABLE_REASONS:
-                    status = "NO_QUOTE"
-            executed = status in {
-                "FILLED",
-                "SUBMITTED",
-                "PARTIAL_FILLED",
-            }
-            if not executed:
-                target_engine.restore(engine_snapshot)
-            return result(
-                status,
-                executed=executed,
-                order_id=order_id,
-                reason=reason,
-            )
-        except BrokerSubmissionUncertainError:
-            if engine_snapshot is not None:
-                target_engine.restore(engine_snapshot)
-            reason = (
-                f"{_ORDER_SUBMISSION_UNCERTAIN_PREFIX} opening momentum "
-                f"entry outcome is unknown for {target_symbol}"
-            )
-            self.risk.pause(reason, auto_resumable=False)
-            self._set_last_action_message(reason)
-            self._persist_risk_pause_best_effort()
-            logger.exception(reason)
-            raise
-        except Exception as exc:
-            if engine_snapshot is not None:
-                target_engine.restore(engine_snapshot)
-            reason = (
-                f"PRE_SUBMIT_EXECUTION_FAILED: opening momentum entry check "
-                f"failed for {target_symbol}: {exc}"
-            )
-            self._set_last_action_message(f"{action} skipped: {reason}")
-            try:
-                self._record_risk_event(reason)
-            except Exception:
-                logger.exception(
-                    "failed to record rejected opening pre-submit check"
-                )
-            logger.exception("opening momentum pre-submit check failed closed")
-            return result("SKIPPED", reason=reason)
-        finally:
-            with self._state_lock:
-                self._trigger_in_flight = False
 
     def execute_llm_order_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
         result = self._execute_llm_order_decision(decision)
@@ -5629,44 +4319,6 @@ class AppRunner:
                     "symbols": residual_symbols,
                 },
             )
-        # Immutable-frozenset read; no lock (see _passive_quarantine_issue).
-        passive_quarantined = sorted(self._passive_quarantined_symbols)
-        if passive_quarantined:
-            return EntryPolicyCheckResult(
-                issue=(
-                    "SPY_PASSIVE recovery quarantine active on "
-                    f"{', '.join(passive_quarantined)}; new entries "
-                    "inhibited until reconciliation completes"
-                ),
-                skip_category="POSITION",
-                details={
-                    "entry_policy": "SPY_PASSIVE_RECOVERY_QUARANTINE",
-                    "policy_reason": "OWNERSHIP_UNPROVEN",
-                    "symbols": passive_quarantined,
-                },
-            )
-        external_block = self.risk.external_block()
-        if external_block is not None:
-            return EntryPolicyCheckResult(
-                issue=(
-                    f"external safety block ({external_block.source}: "
-                    f"{external_block.reason}); new entries inhibited"
-                ),
-                skip_category="RISK",
-                details={
-                    "entry_policy": "EXTERNAL_SAFETY_BLOCK",
-                    "policy_reason": external_block.source,
-                },
-            )
-        if self._opening_execution_capital_slot_reserved():
-            return EntryPolicyCheckResult(
-                issue="opening momentum execution owns the capital slot",
-                skip_category="PENDING",
-                details={
-                    "entry_policy": "OPENING_MOMENTUM_CAPITAL_SLOT",
-                    "policy_reason": "CAPITAL_SLOT_RESERVED",
-                },
-            )
         crossing_result = self._validate_live_entry_crossing(
             symbol,
             normalized_action,
@@ -5684,81 +4336,6 @@ class AppRunner:
                     settings.live_max_entries_per_symbol_per_day
                 ),
             ).evaluate(symbol, normalized_action, market)
-
-    def _opening_execution_capital_slot_reserved(self) -> bool:
-        with self._state_lock:
-            has_active_execution = bool(self._opening_execution_policies)
-        return (
-            has_active_execution
-            or opening_execution_reservation_window()
-        )
-
-    def _validate_opening_momentum_entry_policy(
-        self,
-        execution_id: int,
-        symbol: str,
-        action: str,
-        market: str,
-        *,
-        entry_deadline_at: datetime | None = None,
-    ) -> EntryPolicyCheckResult | str | None:
-        normalized_symbol = str(symbol or "").strip().upper()
-        normalized_action = str(action or "").upper()
-        if normalized_action != "BUY" or market != "US":
-            return EntryPolicyCheckResult(
-                issue=(
-                    "opening momentum execution only permits US long entries"
-                ),
-                skip_category="RISK",
-                details={
-                    "entry_policy": "OPENING_MOMENTUM_EXECUTION",
-                    "policy_reason": "ACTION_OR_MARKET_NOT_ALLOWED",
-                },
-            )
-        with self._state_lock:
-            policy = self._opening_execution_policies.get(normalized_symbol)
-        if (
-            policy is None
-            or policy.execution_id != execution_id
-            or policy.status != "SUBMITTING"
-        ):
-            return EntryPolicyCheckResult(
-                issue="opening momentum execution is no longer active",
-                skip_category="RISK",
-                details={
-                    "entry_policy": "OPENING_MOMENTUM_EXECUTION",
-                    "policy_reason": "EXECUTION_NOT_ACTIVE",
-                    "opening_execution_id": execution_id,
-                },
-            )
-        if (
-            entry_deadline_at is not None
-            and datetime.now(timezone.utc) > self._as_utc(entry_deadline_at)
-        ):
-            return EntryPolicyCheckResult(
-                issue="ENTRY_WINDOW_EXPIRED",
-                skip_category="SESSION",
-                details={
-                    "entry_policy": "OPENING_MOMENTUM_EXECUTION",
-                    "policy_reason": "ENTRY_WINDOW_EXPIRED",
-                    "opening_execution_id": execution_id,
-                },
-            )
-        from app.services.live_entry_policy_service import (
-            LiveEntryPolicyService,
-        )
-
-        with self._db_session() as db:
-            return LiveEntryPolicyService(
-                db,
-                regime_gate_enabled=False,
-                max_data_age_seconds=(
-                    settings.live_regime_max_data_age_seconds
-                ),
-                max_entries_per_symbol_per_day=(
-                    settings.live_max_entries_per_symbol_per_day
-                ),
-            ).evaluate(normalized_symbol, normalized_action, market)
 
     def _validate_live_entry_crossing(
         self,
@@ -6175,6 +4752,152 @@ class AppRunner:
             "bid": bid,
             "ask": ask,
         }
+
+    @staticmethod
+    def _quote_age_ms(value: object, now: datetime | None = None) -> float | None:
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            if raw.replace(".", "", 1).isdigit():
+                numeric = float(raw)
+                if numeric > 10_000_000_000:
+                    numeric /= 1000
+                source_time = datetime.fromtimestamp(numeric, tz=timezone.utc)
+            else:
+                source_time = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                source_time = (
+                    source_time.replace(tzinfo=timezone.utc)
+                    if source_time.tzinfo is None
+                    else source_time.astimezone(timezone.utc)
+                )
+        except (ValueError, OverflowError, OSError):
+            return None
+        return max(
+            0.0,
+            ((now or datetime.now(timezone.utc)) - source_time).total_seconds() * 1000,
+        )
+
+    def _on_quote(self, quote: Quote, *, is_push: bool = True) -> None:
+        processing_started = False
+        try:
+            quote_quality = self._evaluate_quote_quality(
+                {
+                    "last_price": quote.last_price,
+                    "bid": quote.bid,
+                    "ask": quote.ask,
+                    "timestamp": quote.timestamp,
+                }
+            )
+            if quote_quality["source_timestamp_fresh"]:
+                with self._state_lock:
+                    # Only the primary has an executable live runtime.
+                    # A watchlist member in ``_symbol_runtimes`` is not one:
+                    # quote evaluation ignores every non-primary, so a tracked
+                    # position there must still reach the orphan daily-loss
+                    # pause. Opening execution used to be the only non-primary
+                    # exception; that lane is retired.
+                    has_executable_runtime = (
+                        quote.symbol == self.engine.params.symbol
+                    )
+                if not has_executable_runtime:
+                    self._pause_orphan_tracked_position_if_daily_loss_reached(
+                        quote
+                    )
+            decision = self._evaluate_quote_trigger(quote, is_push=is_push)
+            processing_started = decision.processing_started
+
+            if decision.reduction_should_clear:
+                if not self._clear_reduction(quote.symbol, reason="position is flat"):
+                    return
+            if decision.reduction_newly_latched and decision.reduction_intent is not None:
+                if not self._persist_reduction(decision.reduction_intent, quote.symbol):
+                    if decision.engine_snapshot is not None and decision.trigger_engine is not None:
+                        decision.trigger_engine.restore(decision.engine_snapshot)
+                    reason = (
+                        f"{_POSITION_RECONCILIATION_UNCERTAIN_PREFIX} "
+                        f"failed to persist reduction intent for {quote.symbol}"
+                    )
+                    self.risk.pause(reason, auto_resumable=False)
+                    self._set_last_action_message(reason)
+                    self._broadcast_status()
+                    return
+
+            if (
+                decision.reduction_intent is not None
+                and not decision.exit_hold_reason
+                and decision.result is None
+                and decision.engine_snapshot is not None
+                and self._maybe_permit_persisted_reduction()
+            ):
+                # The first evaluation intentionally restored the engine when
+                # the operational pause rejected the reduction. Re-evaluate
+                # the same trusted quote once after reduce-only authorization
+                # so a durable protective exit does not need a third quote.
+                decision = self._evaluate_quote_trigger(quote, is_push=False)
+                processing_started = decision.processing_started
+
+            if decision.exit_hold_reason:
+                reason = f"{quote.symbol} protective exit held: {decision.exit_hold_reason}"
+                self._set_last_action_message(reason)
+                if self._degraded_exit_log_throttle.should_log(quote.symbol):
+                    logger.warning(
+                        "protective exit held: symbol=%s reason=%s suppressed=%s",
+                        quote.symbol,
+                        decision.exit_hold_reason,
+                        self._degraded_exit_log_throttle.take_suppressed_count(),
+                    )
+                    self._record_risk_event(reason, event_type="DEGRADED_EXIT_HELD")
+                    self.notifier.notify_risk_event("DEGRADED_EXIT_HELD", reason)
+            if decision.early_return:
+                return
+
+            if self._trade_svc.has_pending_order and processing_started and decision.result is None:
+                # Each _PendingOrder already carries its own
+                # ``restore_engine_snapshot_fn`` bound to the per-symbol
+                # engine at track time. We only need a fallback for any
+                # pending that lacked that binding — that restores the
+                # primary engine. The single call to ``reconcile()``
+                # iterates ALL pending orders internally; wrapping it in
+                # a runner-level loop would be a double-iteration and
+                # would also misattribute the restore callback across
+                # symbols (the prior _drive_reconcile_per_pending helper
+                # had this exact bug — see review 2026-06-14).
+                def _fallback_restore(snapshot):
+                    self.engine.restore(snapshot)
+
+                self._trade_svc.reconcile(
+                    self.risk,
+                    self.notifier,
+                    _fallback_restore,
+                    self.notifier.notify_risk_event,
+                )
+                self._broadcast_status()
+                return
+
+            self._broadcast_status()
+            self._execute_triggered_order(decision, quote)
+        except Exception:
+            logger.exception("error processing quote")
+        finally:
+            if processing_started:
+                close_broker = False
+                with self._state_lock:
+                    self._trigger_in_flight = False
+                    if not self._running and self._defer_broker_close:
+                        self._defer_broker_close = False
+                        close_broker = True
+                if close_broker:
+                    self.broker.close()
+
+    def _runtime_for_symbol(self, symbol: str | None) -> tuple[str, str, StrategyEngine] | None:
+        requested_symbol = str(symbol or "").upper()
+        if not requested_symbol or requested_symbol == self.engine.params.symbol:
+            return self.engine.params.symbol, self.engine.params.market, self.engine
+        runtime = self._symbol_runtimes.get(requested_symbol)
+        if runtime is None:
+            return None
+        return runtime.symbol, runtime.market, runtime.engine
 
     @staticmethod
     def _quote_source_timestamp_is_fresh(value: object) -> bool:
@@ -6886,7 +5609,6 @@ class AppRunner:
         """
         with self._state_lock:
             primary_symbol = (self.engine.params.symbol or "").strip().upper()
-            opening_policies = dict(self._opening_execution_policies)
             reduction_intents = dict(self._reduction_intents)
             unsettled_positions = sorted(
                 self._unsettled_position_symbols
@@ -6899,13 +5621,7 @@ class AppRunner:
                 + ", ".join(unsettled_positions),
             )
 
-        managed_opening_symbols = {
-            symbol
-            for symbol, policy in opening_policies.items()
-            if policy.status != "ARMED"
-        }
-        allowed_symbols = set(managed_opening_symbols)
-        allowed_symbols.update(reduction_intents)
+        allowed_symbols = set(reduction_intents)
         if primary_symbol:
             allowed_symbols.add(primary_symbol)
 
@@ -7000,16 +5716,6 @@ class AppRunner:
                         f"persisted reduction action for {symbol} does not match "
                         "the broker position side",
                     )
-            elif (
-                symbol != primary_symbol
-                and symbol in managed_opening_symbols
-                and broker_side != "LONG"
-            ):
-                return (
-                    False,
-                    f"managed opening exposure for {symbol} must be LONG",
-                )
-
             if self.fresh_market_price(
                 symbol,
                 max_age_seconds=max_quote_age,
@@ -8478,13 +7184,6 @@ class AppRunner:
         quote_quality: Mapping[str, Any] | None = None,
     ) -> tuple[_ReductionIntent | None, bool, bool]:
         existing = self._reduction_intents.get(quote.symbol)
-        # Immutable-frozenset read; no lock (see _passive_quarantine_issue).
-        if quote.symbol in self._passive_quarantined_symbols:
-            # Phase2a W3 (contract F): a quarantined SPY quote produces NO
-            # new automatic reduction intent and NEVER clears the existing
-            # intent or engine state — reductions are held for manual
-            # reconciliation; the W2 FINAL guard stays authoritative.
-            return existing, False, False
         tracked = self._trade_svc.tracked_position(quote.symbol)
         if tracked is None:
             self._position_peak_executable.pop(quote.symbol, None)
@@ -8528,41 +7227,19 @@ class AppRunner:
                 if side == "LONG"
                 else (avg_price - executable_price) * quantity
             )
-        opening_policy = self._opening_execution_policies.get(quote.symbol)
-        # The profit lock applies to range-strategy positions only; opening
-        # momentum executions carry their own stop/target semantics.
         peak_executable_price: float | None = None
-        if tracked is not None and opening_policy is None and price_evidence_trusted:
+        if tracked is not None and price_evidence_trusted:
             peak_executable_price = self._track_position_peak(
                 quote.symbol,
                 side,
                 executable_price,
             )
-        stop_loss_pct = (
-            opening_policy.stop_loss_pct
-            if opening_policy is not None and opening_policy.stop_loss_pct > 0
-            else engine.params.stop_loss_pct
-        )
-        max_holding_minutes = (
-            opening_policy.max_holding_minutes
-            if opening_policy is not None
-            and opening_policy.max_holding_minutes > 0
-            else engine.params.max_holding_minutes
-        )
         decision = evaluate_exit_policy(
             config=ExitPolicyConfig(
-                stop_loss_pct=stop_loss_pct,
-                max_holding_minutes=max_holding_minutes,
-                profit_lock_activation_pct=(
-                    settings.profit_lock_activation_pct
-                    if opening_policy is None
-                    else 0.0
-                ),
-                profit_lock_lock_pct=(
-                    settings.profit_lock_lock_pct
-                    if opening_policy is None
-                    else 0.0
-                ),
+                stop_loss_pct=engine.params.stop_loss_pct,
+                max_holding_minutes=engine.params.max_holding_minutes,
+                profit_lock_activation_pct=settings.profit_lock_activation_pct,
+                profit_lock_lock_pct=settings.profit_lock_lock_pct,
             ),
             position=PositionExitContext(
                 symbol=quote.symbol,
@@ -8676,7 +7353,6 @@ class AppRunner:
 
     def _restore_reduction(self, db: Session) -> None:
         symbols = set(self._trade_svc.snapshot_tracked_entries())
-        symbols.update(self._opening_execution_policies)
         if self.engine.params.symbol:
             symbols.add(self.engine.params.symbol)
         for symbol in sorted(symbols):
@@ -8761,25 +7437,9 @@ class AppRunner:
                         "trigger_price": intent.trigger_price,
                     },
                 )
-                from app.services.opening_momentum_execution_service import (
-                    OpeningMomentumExecutionService,
-                )
-
-                OpeningMomentumExecutionService.mark_exiting(
-                    db,
-                    symbol=symbol,
-                    reason=intent.reason,
-                )
                 db.commit()
         except Exception:
             logger.exception("failed to record reduction event for %s", symbol)
-        try:
-            self.refresh_opening_execution_registry()
-        except Exception:
-            logger.exception(
-                "failed to refresh opening execution after reduction for %s",
-                symbol,
-            )
         return True
 
     def _clear_reduction(self, symbol: str, *, reason: str) -> bool:
@@ -8849,8 +7509,9 @@ class AppRunner:
     ) -> bool:
         """Fail closed for tracked positions without an executable runtime.
 
-        Managed primary/opening runtimes must never call this fallback: their
-        durable deterministic reduction uses the same quote's executable BBO.
+        The primary runtime must never call this fallback: its durable
+        deterministic reduction uses the same quote's executable BBO. A
+        watchlist runtime is not executable and must use this fallback.
         An orphan cannot safely submit an order because there is no engine to
         snapshot/restore, so a confirmed daily-loss breach latches a manual
         pause and emits an explicit diagnostic event for operator recovery.
@@ -10300,7 +8961,7 @@ class AppRunner:
         if primary_symbol:
             managed_symbols.add(primary_symbol)
 
-        allowed_exposure_symbols = self._managed_opening_symbols()
+        allowed_exposure_symbols: set[str] = set()
         if primary_symbol:
             allowed_exposure_symbols.add(primary_symbol)
         unexpected_exposure = sorted(
@@ -10328,9 +8989,7 @@ class AppRunner:
                 payload={
                     "source": source,
                     "symbols": unexpected_exposure,
-                    "managed_opening_symbols": sorted(
-                        self._managed_opening_symbols()
-                    ),
+                    "managed_symbols": sorted(allowed_exposure_symbols),
                 },
             )
 
@@ -11026,24 +9685,6 @@ class AppRunner:
             if not symbol:
                 continue
             symbol_markets[symbol] = getattr(item, "market", "US") or "US"
-        try:
-            from app.services.opening_momentum_execution_service import (
-                OpeningMomentumExecutionService,
-            )
-
-            for execution in OpeningMomentumExecutionService.active_policies(
-                db
-            ):
-                execution_symbol = str(
-                    execution.symbol or ""
-                ).strip().upper()
-                if execution_symbol:
-                    symbol_markets[execution_symbol] = "US"
-        except Exception:
-            logger.warning(
-                "failed to load opening-execution symbol runtimes",
-                exc_info=True,
-            )
 
         with self._state_lock:
             for symbol, market in symbol_markets.items():

@@ -1,12 +1,12 @@
 """Bounded retention for reproducible research artifact payloads.
 
-quant-v6 publication bindings/payloads and Strategy v2 forward replay bytes
-are immutable, content-addressed, and recomputable offline from provider data
-plus the frozen code manifest. They are therefore legitimate to expire on a
-window. The provenance rows that prove what was computed —
-``watchlist_quant_v6_publications`` / ``watchlist_quant_v6_registrations`` and
-``strategy_v2_forward_evidence`` / ``strategy_v2_forward_registrations`` with
-their SHA-256 commitments — are never touched by these prunes.
+Strategy v2 forward replay bytes are immutable, content-addressed, and
+recomputable offline from provider data plus the frozen code manifest. They
+are therefore legitimate to expire on a window. The provenance rows that
+prove what was computed — ``strategy_v2_forward_evidence`` /
+``strategy_v2_forward_registrations`` with their SHA-256 commitments — are
+never touched by these prunes. Historical quant-v6 tables are no longer
+written or pruned; their rows, if present, stay in place.
 
 Follows the established maintenance idiom: batched short transactions with an
 optional durable-lease ``transaction_fence`` and ``operation_checkpoint``, and
@@ -25,17 +25,7 @@ from app.models import (
     StrategyV2ForwardEvidence,
     StrategyV2ForwardEvidenceArtifact,
     StrategyV2ForwardReplayArtifact,
-    WatchlistQuantV6Artifact,
-    WatchlistQuantV6Publication,
-    WatchlistQuantV6PublicationArtifact,
 )
-
-
-@dataclass(frozen=True)
-class QuantV6ArtifactPruneResult:
-    bindings_deleted: int = 0
-    artifacts_deleted: int = 0
-    batches: int = 0
 
 
 @dataclass(frozen=True)
@@ -72,143 +62,6 @@ class ResearchArtifactRetentionService:
         if batch_size <= 0:
             raise ValueError("batch_size must be positive")
         return retention_days > 0
-
-    def prune_expired_quant_v6_publication_payloads(
-        self,
-        *,
-        retention_days: int,
-        batch_size: int,
-        max_batches: int | None = 8,
-        now: datetime | None = None,
-    ) -> QuantV6ArtifactPruneResult:
-        """Expire old quant-v6 publication bindings and their orphan payloads.
-
-        Publications are atomic cohorts: every binding of an expired
-        publication is deleted together. An artifact payload is deleted only
-        once no surviving binding references it, so payloads shared with a
-        newer publication survive. Publication and registration rows (the
-        SHA-256 provenance proof) are always retained.
-        """
-        self._checkpoint_operation()
-        if not self._validate_window(retention_days, batch_size):
-            self._checkpoint_operation()
-            return QuantV6ArtifactPruneResult()
-        if max_batches is not None and max_batches <= 0:
-            self._checkpoint_operation()
-            return QuantV6ArtifactPruneResult()
-
-        cutoff = (now or datetime.now(timezone.utc)) - timedelta(
-            days=retention_days
-        )
-        bindings_deleted = 0
-        artifacts_deleted = 0
-        batches = 0
-
-        while max_batches is None or batches < max_batches:
-            self._checkpoint_operation()
-            publication_ids = [
-                int(row[0])
-                for row in (
-                    self._db.query(WatchlistQuantV6Publication.id)
-                    .filter(
-                        WatchlistQuantV6Publication.published_at < cutoff,
-                        self._db.query(WatchlistQuantV6PublicationArtifact)
-                        .filter(
-                            WatchlistQuantV6PublicationArtifact.publication_id
-                            == WatchlistQuantV6Publication.id
-                        )
-                        .exists(),
-                    )
-                    .order_by(
-                        WatchlistQuantV6Publication.published_at.asc(),
-                        WatchlistQuantV6Publication.id.asc(),
-                    )
-                    .limit(batch_size)
-                    .all()
-                )
-            ]
-            if not publication_ids:
-                break
-            try:
-                self._fence_in_transaction()
-                bindings_deleted += int(
-                    self._db.query(WatchlistQuantV6PublicationArtifact)
-                    .filter(
-                        WatchlistQuantV6PublicationArtifact.publication_id.in_(
-                            publication_ids
-                        )
-                    )
-                    .delete(synchronize_session=False)
-                )
-                artifacts_deleted += self._delete_orphaned_quant_v6_artifacts(
-                    cutoff=cutoff,
-                    batch_size=batch_size,
-                )
-                self._db.commit()
-            except Exception:
-                self._db.rollback()
-                raise
-            batches += 1
-
-        while max_batches is None or batches < max_batches:
-            self._checkpoint_operation()
-            try:
-                self._fence_in_transaction()
-                orphans = self._delete_orphaned_quant_v6_artifacts(
-                    cutoff=cutoff,
-                    batch_size=batch_size,
-                )
-                self._db.commit()
-            except Exception:
-                self._db.rollback()
-                raise
-            if orphans == 0:
-                break
-            artifacts_deleted += orphans
-            batches += 1
-        self._checkpoint_operation()
-        return QuantV6ArtifactPruneResult(
-            bindings_deleted=bindings_deleted,
-            artifacts_deleted=artifacts_deleted,
-            batches=batches,
-        )
-
-    def _delete_orphaned_quant_v6_artifacts(
-        self,
-        *,
-        cutoff: datetime,
-        batch_size: int,
-    ) -> int:
-        referenced = self._db.query(
-            WatchlistQuantV6PublicationArtifact.artifact_sha256
-        )
-        digests = [
-            str(row[0])
-            for row in (
-                self._db.query(WatchlistQuantV6Artifact.digest_sha256)
-                .filter(
-                    WatchlistQuantV6Artifact.created_at < cutoff,
-                    WatchlistQuantV6Artifact.digest_sha256.not_in(referenced),
-                )
-                .order_by(
-                    WatchlistQuantV6Artifact.created_at.asc(),
-                    WatchlistQuantV6Artifact.digest_sha256.asc(),
-                )
-                .limit(batch_size)
-                .all()
-            )
-        ]
-        if not digests:
-            return 0
-        return int(
-            self._db.query(WatchlistQuantV6Artifact)
-            .filter(
-                WatchlistQuantV6Artifact.digest_sha256.in_(digests),
-                WatchlistQuantV6Artifact.created_at < cutoff,
-                WatchlistQuantV6Artifact.digest_sha256.not_in(referenced),
-            )
-            .delete(synchronize_session=False)
-        )
 
     def prune_expired_forward_replay_artifacts(
         self,

@@ -34,7 +34,7 @@ Revision chain, oldest → head (`down_revision` → `revision`):
 | `20260726_opening_stop` | `20260724_opening_momentum` | Stop/MFE/MAE columns on opening-momentum runs |
 | `20260727_opening_context` | `20260726_opening_stop` | Causal opening-context telemetry columns (gap, benchmarks) |
 | `20260727_opening_execution` | `20260727_opening_context` | `opening_momentum_executions` crash-safe journal |
-| `20260801_watchlist_quant_v6` | `20260727_opening_execution` | Immutable quant-v6 publication storage |
+| `20260801_watchlist_quant_v6` | `20260727_opening_execution` | Historical quant-v6 publication storage (revision kept; writer retired, no DROP) |
 | `20260801_durable_job_leases` | `20260801_watchlist_quant_v6` | `durable_job_leases` with no-delete trigger + check constraints |
 | `20260802_opening_breakout_depth` | `20260801_durable_job_leases` | `candidate_breakout_depth_bps` on shadow runs |
 | `20260921_fill_settlements` | `20260802_opening_breakout_depth` | `fill_settlements` durable accounting receipts (+ no-delete trigger) |

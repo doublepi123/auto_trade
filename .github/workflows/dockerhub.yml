@@ -94,16 +94,26 @@ jobs:
 
       # These spawn their own compute processes and assert elapsed bounds, so
       # they need the whole runner rather than one of four xdist workers.
+      # WALL_CLOCK_MODULES may be empty. pytest then collects nothing and
+      # exits 5; that is success for this lane only. Any other exit still fails.
       - name: Run pytest
         env:
           COVERAGE_FILE: .coverage.shard-realtime
           AUTO_TRADE_TEST_REALTIME_ONLY: '1'
-        run: >-
-          pytest tests/
-          -o addopts=
-          -p no:cacheprovider
-          -p no:xdist
-          --cov=app --cov-config=.coveragerc --cov-report=
+        run: |
+          set +e
+          pytest tests/ \
+            -o addopts= \
+            -p no:cacheprovider \
+            -p no:xdist \
+            --cov=app --cov-config=.coveragerc --cov-report=
+          status=$?
+          set -e
+          if [ "$status" -eq 5 ]; then
+            echo "realtime lane collected no tests; treating exit 5 as success"
+            exit 0
+          fi
+          exit "$status"
 
       - name: Upload realtime coverage
         uses: actions/upload-artifact@v4
@@ -111,7 +121,7 @@ jobs:
           name: coverage-shard-realtime
           path: backend/.coverage.shard-realtime
           include-hidden-files: true
-          if-no-files-found: error
+          if-no-files-found: ignore
           retention-days: 1
 
   backend-coverage:
@@ -143,10 +153,19 @@ jobs:
           path: backend
 
       # Each shard runs part of the suite, so only the combined data can be
-      # measured against the threshold the whole suite used to meet.
+      # measured against the threshold the whole suite used to meet. The
+      # realtime file is optional: an empty WALL_CLOCK_MODULES lane uploads
+      # nothing. Numbered shard files are still required, and 80% is enforced
+      # on whatever was combined.
       - name: Combine and enforce threshold
         run: |
-          coverage combine .coverage.shard-*
+          shopt -s nullglob
+          files=(.coverage.shard-*)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no shard coverage files to combine" >&2
+            exit 1
+          fi
+          coverage combine "${files[@]}"
           coverage report --rcfile=.coveragerc --show-missing --fail-under=80
 
   backend-typecheck:

@@ -2,11 +2,49 @@
 from __future__ import annotations
 
 import math
+from decimal import Decimal
+from types import MappingProxyType
 from statistics import NormalDist
 
 import pytest
 
-from app.domain.watchlist_quant_v6.semantics import SESSION_CLUSTER_T90_BY_DF
+from app.domain.strategy_v2.clustered_returns import DAY_CLUSTER_T95_BY_DF
+
+
+# One-sided p=0.90 values formerly frozen inside the retired quant-v6
+# semantics module. They stay here only as an independent cross-check of the
+# generator; runtime signal-edge code does not import them.
+_SESSION_CLUSTER_T90_BY_DF = MappingProxyType({
+    1: Decimal("3.077683537"),
+    2: Decimal("1.885618083"),
+    3: Decimal("1.637744354"),
+    4: Decimal("1.533206274"),
+    5: Decimal("1.475884049"),
+    6: Decimal("1.439755747"),
+    7: Decimal("1.414923928"),
+    8: Decimal("1.396815310"),
+    9: Decimal("1.383028739"),
+    10: Decimal("1.372183641"),
+    11: Decimal("1.363430319"),
+    12: Decimal("1.356217334"),
+    13: Decimal("1.350171289"),
+    14: Decimal("1.345030374"),
+    15: Decimal("1.340605608"),
+    16: Decimal("1.336757167"),
+    17: Decimal("1.333379389"),
+    18: Decimal("1.330390943"),
+    19: Decimal("1.327728209"),
+    20: Decimal("1.325340707"),
+    21: Decimal("1.323187874"),
+    22: Decimal("1.321236742"),
+    23: Decimal("1.319460239"),
+    24: Decimal("1.317835934"),
+    25: Decimal("1.316345073"),
+    26: Decimal("1.314971864"),
+    27: Decimal("1.313702909"),
+    28: Decimal("1.312526782"),
+    29: Decimal("1.311433647"),
+})
 
 
 def _nonzero(value: float) -> float:
@@ -60,16 +98,14 @@ def student_t_quantile(df: int, probability: float) -> float:
     return (low + high) / 2.0
 
 
-def test_generator_matches_all_29_quant_v6_preregistered_values() -> None:
-    # Given: an independent, already frozen one-sided p=.90 table.
-    assert len(SESSION_CLUSTER_T90_BY_DF) == 29
-    # When / Then: regenerate every entry, not just a selected anchor.
+def test_generator_matches_the_retired_one_sided_cross_check() -> None:
+    # Given: the former quant-v6 one-sided p=.90 table, kept as an oracle.
+    assert len(_SESSION_CLUSTER_T90_BY_DF) == 29
     errors = [
         abs(student_t_quantile(df, 0.90) - float(expected))
-        for df, expected in SESSION_CLUSTER_T90_BY_DF.items()
+        for df, expected in _SESSION_CLUSTER_T90_BY_DF.items()
     ]
     assert max(errors) < 5e-8
-    print(f"quant-v6 cross-validation: 29/29; max absolute error={max(errors):.12g}")
 
 
 def test_generator_matches_normal_limit_and_cauchy_closed_form() -> None:
@@ -80,12 +116,9 @@ def test_generator_matches_normal_limit_and_cauchy_closed_form() -> None:
     assert round(normal_limit, 4) == 1.9600
     assert abs(normal_limit - NormalDist().inv_cdf(0.975)) < 3e-6
     assert cauchy == pytest.approx(math.tan(math.pi * (0.975 - 0.5)), abs=5e-12)
-    print(f"normal limit df=1000000: {normal_limit:.10f}")
 
 
 def test_strategy_v2_table_matches_exact_generator_to_nine_decimal_places() -> None:
-    from app.domain.strategy_v2.clustered_returns import DAY_CLUSTER_T95_BY_DF
-
     assert set(DAY_CLUSTER_T95_BY_DF) == set(range(1, 121))
     for df, expected in DAY_CLUSTER_T95_BY_DF.items():
         assert abs(student_t_quantile(df, 0.975) - float(expected)) < 5e-10

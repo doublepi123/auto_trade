@@ -26,7 +26,7 @@ auto_trade/
 │   ├── config.py               # Settings (AUTO_TRADE_* / LONGPORT_*)
 │   ├── runner.py               # AppRunner (threaded live loop + shadow jobs)
 │   ├── api/                    # routers (strategy, trade, watchlist, universe,
-│   │                           # strategy_shadow, opening_momentum_shadow, review, …)
+│   │                           # strategy_shadow, review, …)
 │   ├── core/                   # broker, engine, risk, fees, backtest, audit, calendar
 │   ├── domain/                 # pure: prompt, strategy_v2, universe_selection, opening_momentum
 │   ├── services/               # execution, LLM, universe, quant, shadows, review, PnL

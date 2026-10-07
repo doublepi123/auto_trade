@@ -14,10 +14,6 @@ from sqlalchemy.orm import Session
 from app.models import (
     Base,
     StrategyV2ShadowDecision,
-    WatchlistQuantV6Artifact,
-    WatchlistQuantV6Publication,
-    WatchlistQuantV6PublicationArtifact,
-    WatchlistQuantV6Registration,
 )
 
 
@@ -59,92 +55,6 @@ def _engine(db_path: Path) -> Engine:
     return engine
 
 
-def _old_quant_v6_rows(db: Session) -> None:
-    old = _NOW - timedelta(days=60)
-    registration = WatchlistQuantV6Registration(
-        identity_sha256="1" * 64,
-        schema_version=1,
-        contract_version="watchlist-quant-v6-registration-v1",
-        selection_rule_version="rotation-research-catalog-pit-v1",
-        algorithm_version="watchlist-quant-v6-v1",
-        semantic_digest_sha256="2" * 64,
-        evaluator_digest_sha256="3" * 64,
-        acquisition_spec_sha256="4" * 64,
-        cohort_source="ROTATION_RESEARCH_CATALOG_PIT",
-        market="US",
-        source_snapshot_sha256="5" * 64,
-        cohort_manifest_sha256="6" * 64,
-        cohort_member_count=1,
-        schedule_sha256="7" * 64,
-        training_session_count=10,
-        target_session_count=30,
-        first_training_session_date=(old - timedelta(days=45)).date(),
-        first_target_session_date=(old - timedelta(days=30)).date(),
-        last_target_session_date=old.date(),
-        data_cutoff_at=old,
-        bar_period="MIN_5",
-        adjustment_mode="NO_ADJUST",
-        registration_json="{}",
-        server_generated=True,
-        short_entry_allowed=False,
-        position_add_on_allowed=False,
-        order_submission_allowed=False,
-        automatic_promotion_allowed=False,
-        cohort_observed_at=old,
-        registered_at=old,
-    )
-    db.add(registration)
-    db.flush()
-    publication = WatchlistQuantV6Publication(
-        registration_id=registration.id,
-        registration_identity_sha256=registration.identity_sha256,
-        identity_sha256="8" * 64,
-        schema_version=1,
-        contract_version="watchlist-quant-v6-publication-v1",
-        status="PUBLISHED",
-        manifest_sha256="9" * 64,
-        publication_json="{}",
-        registered_member_count=1,
-        assessment_artifact_count=1,
-        session_input_artifact_count=0,
-        event_artifact_count=0,
-        binding_count=1,
-        promotion_eligible=False,
-        automatic_promotion_allowed=False,
-        order_submission_allowed=False,
-        short_entry_allowed=False,
-        position_add_on_allowed=False,
-        published_at=old,
-    )
-    db.add(publication)
-    db.flush()
-    db.add(WatchlistQuantV6Artifact(
-        digest_sha256="a" * 64,
-        schema_version=1,
-        kind="WATCHLIST_QUANT_V6_ASSESSMENT",
-        codec="zlib",
-        compression_level=9,
-        raw_size=1,
-        compressed_size=1,
-        payload=b"x",
-        created_at=old,
-    ))
-    db.add(WatchlistQuantV6PublicationArtifact(
-        publication_id=publication.id,
-        member_ordinal=0,
-        symbol="AAPL.US",
-        market="US",
-        role="ASSESSMENT",
-        artifact_ordinal=0,
-        session_date=None,
-        artifact_sha256="a" * 64,
-        artifact_kind="WATCHLIST_QUANT_V6_ASSESSMENT",
-        binding_sha256="b" * 64,
-        created_at=old,
-    ))
-    db.commit()
-
-
 def _old_decision(db: Session) -> None:
     old = _NOW - timedelta(days=120)
     db.add(StrategyV2ShadowDecision(
@@ -175,7 +85,6 @@ def _old_decision(db: Session) -> None:
 def _seed_db(db_path: Path) -> None:
     engine = _engine(db_path)
     with Session(bind=engine) as session:
-        _old_quant_v6_rows(session)
         _old_decision(session)
     engine.dispose()
 
@@ -196,10 +105,6 @@ def _counts(db_path: Path) -> dict[str, int]:
     engine = create_engine(f"sqlite:///{db_path}")
     with Session(bind=engine) as session:
         counts = {
-            "bindings": session.query(WatchlistQuantV6PublicationArtifact).count(),
-            "artifacts": session.query(WatchlistQuantV6Artifact).count(),
-            "publications": session.query(WatchlistQuantV6Publication).count(),
-            "registrations": session.query(WatchlistQuantV6Registration).count(),
             "decisions": session.query(StrategyV2ShadowDecision).count(),
         }
     engine.dispose()
@@ -229,22 +134,17 @@ def test_preview_reports_plan_without_mutating(
     dest = tmp_path / "offsite"
     _seed_db(db_path)
     _backups(backups, ["auto_trade-2026-08-05.db", "auto_trade-2026-08-22.db"])
-    monkeypatch.setattr(
-        maintenance.settings, "watchlist_quant_v6_artifact_retention_days", 30
-    )
-
     exit_code = maintenance.main(_argv(db_path, backups, dest))
     payload = json.loads(capsys.readouterr().out)
 
     assert exit_code == 0
     assert payload["mode"] == "PREVIEW"
-    assert payload["retention"]["watchlist_quant_v6"]["bindings"] == 1
-    assert payload["retention"]["watchlist_quant_v6"]["artifacts"] == 1
+    assert "watchlist_quant_v6" not in payload["retention"]
     assert payload["retention"]["strategy_v2_diagnostic_wait"]["decisions"] == 1
     assert payload["applied"] is None
     assert payload["page_usage_available"] is True
     assert any(
-        entry["name"] == "watchlist_quant_v6_artifacts"
+        entry["name"] == "strategy_v2_shadow_decisions"
         for entry in payload["page_usage"]
     )
     assert payload["projection"]["current_bytes"] > 0
@@ -255,13 +155,7 @@ def test_preview_reports_plan_without_mutating(
     assert relocation["applied"] is False
     assert len(relocation["move"]) == 2
     # Then: preview mutated nothing — rows and backup files are untouched.
-    assert _counts(db_path) == {
-        "bindings": 1,
-        "artifacts": 1,
-        "publications": 1,
-        "registrations": 1,
-        "decisions": 1,
-    }
+    assert _counts(db_path) == {"decisions": 1}
     assert sorted(path.name for path in backups.iterdir()) == [
         "auto_trade-2026-08-05.db",
         "auto_trade-2026-08-22.db",
@@ -279,29 +173,14 @@ def test_apply_prunes_expired_rows_and_keeps_provenance(
     backups = tmp_path / "data" / "backups"
     dest = tmp_path / "offsite"
     _seed_db(db_path)
-    # The shipped default is 0 because the bindings are append-only in a
-    # trigger-equipped database; enable a window explicitly so this still
-    # exercises the prune path rather than the disabled short-circuit.
-    monkeypatch.setattr(
-        maintenance.settings, "watchlist_quant_v6_artifact_retention_days", 30
-    )
-
     exit_code = maintenance.main(_argv(db_path, backups, dest, "--apply"))
     payload = json.loads(capsys.readouterr().out)
 
     assert exit_code == 0
     assert payload["mode"] == "APPLY"
-    assert payload["applied"]["watchlist_quant_v6"]["bindings_deleted"] == 1
-    assert payload["applied"]["watchlist_quant_v6"]["artifacts_deleted"] == 1
+    assert "watchlist_quant_v6" not in payload["applied"]
     assert payload["applied"]["strategy_v2_diagnostic_wait"]["deleted"] == 1
-    # Then: bulk payload rows are gone but provenance rows survive.
-    assert _counts(db_path) == {
-        "bindings": 0,
-        "artifacts": 0,
-        "publications": 1,
-        "registrations": 1,
-        "decisions": 0,
-    }
+    assert _counts(db_path) == {"decisions": 0}
 
 
 def test_vacuum_refused_during_market_hours(
@@ -326,7 +205,7 @@ def test_vacuum_refused_during_market_hours(
     assert exit_code == 2
     assert "market" in captured.err.lower()
     # Then: the refusal is all-or-nothing — no retention was applied either.
-    assert _counts(db_path)["bindings"] == 1
+    assert _counts(db_path)["decisions"] == 1
 
 
 def test_vacuum_runs_outside_market_hours(

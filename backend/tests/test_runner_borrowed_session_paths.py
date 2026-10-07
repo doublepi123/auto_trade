@@ -15,9 +15,8 @@ out all 15 pooled connections and deadlocked the process for ~65 minutes on
   holds a session, and it called ``_persist_risk_pause_best_effort`` and
   ``_record_risk_event`` without passing it -- both are borrow-capable and
   the call sites simply omitted ``db=``.
-* ``_sync_symbol_runtimes`` -> ``OpeningMomentumExecutionService.active_policies``
-  (a pure read) is already given the caller's ``db``; the runtime is pinned so
-  a future refactor cannot reintroduce an owned session there.
+* ``_sync_symbol_runtimes`` is already given the caller's ``db``; the runtime
+  is pinned so a future refactor cannot reintroduce an owned session there.
 * ``_load_tracked_entries`` from the today-order sync, called one line after
   ``db.commit()`` -- the commit ends the transaction, so nothing uncommitted
   crosses that read.
@@ -25,14 +24,6 @@ out all 15 pooled connections and deadlocked the process for ~65 minutes on
   across the whole block.
 * ``reload_strategy`` from ``PUT /api/strategy``, whose request session has
   already committed its save.
-* ``OpeningMomentumExecutionService.tick`` from the opening-momentum cron:
-  the cron holds its ``SessionLocal`` across the tick, and the tick's
-  ``_refresh_runner_registry`` reached
-  ``AppRunner.refresh_opening_execution_registry``, which opened its own
-  session for ``_sync_symbol_runtimes`` / ``_load_opening_execution_registry``
-  -- the 2026-09-04 live violation. The service now lends its session and
-  the runner borrows it, and ``load_symbol_runtime`` is transaction-neutral
-  so the borrow cannot finalize the cron's work.
 
 Each is asserted by counting the sessions the runner opens for itself while a
 caller's session is held. The caller's own session comes straight from
@@ -98,7 +89,6 @@ class _SessionCounter:
 
 def _clean_rows() -> None:
     from app.models import (
-        OpeningMomentumExecution,
         OrderRecord,
         RiskEvent,
         RuntimeState,
@@ -126,9 +116,6 @@ def _clean_rows() -> None:
         ).delete(synchronize_session=False)
         db.query(RuntimeState).filter(
             RuntimeState.symbol.like("BORROWSESSION%")
-        ).delete(synchronize_session=False)
-        db.query(OpeningMomentumExecution).filter(
-            OpeningMomentumExecution.symbol.like("BORROWSESSION%")
         ).delete(synchronize_session=False)
         db.query(WatchlistItem).filter(
             WatchlistItem.symbol.like("BORROWSESSION%")
@@ -624,17 +611,12 @@ def test_a_type_error_from_inside_the_reload_still_propagates(
             strategy_api._reload_strategy_after_save(db=db)
 
 
-def test_sync_symbol_runtimes_reads_opening_policies_on_the_given_session(
+def test_sync_symbol_runtimes_uses_the_given_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#12: ``active_policies`` is a pure read and already borrows.
+    """#12: symbol-runtime sync already borrows the caller's session.
 
-    The sweep attributed one event to
-    ``OpeningMomentumExecutionService.active_policies``, but the stack shows the
-    second connection was checked out by ``reload_strategy`` further up --
-    ``active_policies`` was simply the frame that first touched the database
-    after it. It takes the caller's ``db`` and opens nothing, and
-    ``_sync_symbol_runtimes`` passes the session it was given.
+    ``_sync_symbol_runtimes`` takes the caller's ``db`` and opens nothing.
 
     This pins that, so a refactor that gave either an owned session would fail
     here rather than resurface as a pool warning.
@@ -691,63 +673,22 @@ def test_today_order_sync_reloads_tracked_entries_on_its_own_session(
     )
 
 
-def test_opening_momentum_cron_tick_holds_one_connection_through_registry_refresh(
+def test_symbol_runtime_refresh_holds_one_connection_on_a_borrowed_session(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The 2026-09-04 live violation: the cron's session plus the runner's own.
+    """A caller-held session must be the only connection a runtime refresh uses.
 
-    ``_opening_momentum_shadow_tick_sync`` opens one ``SessionLocal`` and
-    holds it across ``OpeningMomentumExecutionService.tick``. With execution
-    disabled (the P0 clamp forces it off) the tick takes the registry-refresh
-    branch, which reached ``AppRunner.refresh_opening_execution_registry`` --
-    and that opened a SECOND session for ``_sync_symbol_runtimes`` /
-    ``_load_opening_execution_registry`` while the cron still held the first.
-
-    Runs the REAL cron entry point on a worker thread, exactly as production
-    does via ``asyncio.to_thread``. The service must lend the cron its
-    session, the runner must borrow it, and the borrow must be provably
-    inert: one connection held, zero runner-owned sessions, no guard
-    violation, and the registry genuinely refreshed on the borrowed session.
+    ``refresh_symbol_runtimes(db)`` used to be reached while another session
+    was still open. It must borrow that session for ``_sync_symbol_runtimes``
+    instead of opening a second one.
     """
-    from app import main as main_module
-    from app.models import OpeningMomentumExecution, RuntimeState, WatchlistItem
+    from app.models import RuntimeState, WatchlistItem
 
     runner = _runner()
-    monkeypatch.setattr(main_module, "get_runner", lambda: runner)
-    monkeypatch.setattr(settings, "opening_momentum_shadow_enabled", False)
-    monkeypatch.setattr(settings, "opening_momentum_challenger_enabled", False)
-
     secondary_symbol = "BORROWSESSION2.US"
     with database.SessionLocal() as db:
-        # A watchlist symbol with NO persisted runtime row: the borrowed
-        # refresh reaches load_symbol_runtime for it, which must not create
-        # a row or finalize the cron's transaction.
         db.add(WatchlistItem(symbol=secondary_symbol, market="US"))
-        # Anchored on the CURRENT session, not a literal date. Pinned to
-        # 2026-09-04 this passed on the day it was written and failed every
-        # day after: the tick expires an ARMED row once its entry deadline is
-        # in the past, so the registry came back empty and `policy is None`.
-        # What is under test is that the refresh borrows the cron's session,
-        # which must not depend on what day it is run.
-        armed_at = datetime.now(timezone.utc) + timedelta(minutes=30)
-        db.add(
-            OpeningMomentumExecution(
-                session_date=armed_at.date(),
-                algorithm_version="borrow-session-test",
-                config_version="borrow-session-test",
-                universe_source="BORROWSESSION",
-                status="ARMED",
-                symbol=SYMBOL,
-                signal_at=armed_at,
-                armed_at=armed_at,
-                entry_due_at=armed_at + timedelta(minutes=2),
-                entry_deadline_at=armed_at + timedelta(minutes=4),
-                max_price_deviation_bps=200.0,
-                stop_loss_pct=1.0,
-                max_holding_minutes=60,
-            )
-        )
         db.commit()
 
     tracker = _CheckoutDepthTracker()
@@ -757,18 +698,19 @@ def test_opening_momentum_cron_tick_holds_one_connection_through_registry_refres
     failures: list[BaseException] = []
     tick_thread_ids: list[int] = []
 
-    def run_tick() -> None:
+    def run_refresh() -> None:
         tick_thread_ids.append(threading.get_ident())
         try:
-            main_module._opening_momentum_shadow_tick_sync()
+            with database.SessionLocal() as db:
+                runner.refresh_symbol_runtimes(db)
         except BaseException as exc:  # reported, never swallowed
             failures.append(exc)
 
     try:
         with caplog.at_level(logging.WARNING):
             tick_thread = threading.Thread(
-                target=run_tick,
-                name="opening-momentum-cron-test",
+                target=run_refresh,
+                name="symbol-runtime-refresh-test",
             )
             tick_thread.start()
             tick_thread.join(timeout=30)
@@ -777,29 +719,20 @@ def test_opening_momentum_cron_tick_holds_one_connection_through_registry_refres
         for thread_id in tick_thread_ids:
             _drop_guard_depth_for(thread_id)
 
-    assert tick_thread.is_alive() is False, "the opening-momentum tick hung"
+    assert tick_thread.is_alive() is False, "the symbol-runtime refresh hung"
     assert failures == []
     assert counter.opened == 0, (
-        f"the registry refresh opened {counter.opened} session(s) of its own "
-        "while the opening-momentum cron still held its session"
+        f"the runtime refresh opened {counter.opened} session(s) of its own "
+        "while the caller still held its session"
     )
     assert tracker.max_depth == 1, (
-        f"the tick held {tracker.max_depth} pooled connections at once; the "
-        "cron's session must be the only one"
+        f"the refresh held {tracker.max_depth} pooled connections at once; "
+        "the caller's session must be the only one"
     )
     assert guard.violation_count == violations_before, (
-        "the opening-momentum tick checked out a second pooled connection: "
-        "the 2026-09-04 live violation shape"
+        "the symbol-runtime refresh checked out a second pooled connection"
     )
     assert "re-entrant database session" not in caplog.text
-    assert "opening momentum execution tick failed" not in caplog.text
-    # The registry was genuinely refreshed on the borrowed session, not
-    # silently emptied by a swallowed failure.
-    policy = runner._opening_execution_policies.get(SYMBOL)
-    assert policy is not None
-    assert policy.status == "ARMED"
-    # And the borrowed path left no runtime row behind for the symbol that
-    # has none: a get-or-create there would commit the cron's transaction.
     with database.SessionLocal() as db:
         assert (
             db.query(RuntimeState)
@@ -814,16 +747,14 @@ def test_registry_refresh_without_a_caller_session_still_owns_one(
 ) -> None:
     """Characterization: legacy no-db callers keep owning exactly one session.
 
-    The post-fill refresh (called after its session has ended) and the
-    reduction refresh (same shape) both call
-    ``refresh_opening_execution_registry()`` with no argument, as does
-    ``tests/test_runner.py``. Making ``db`` optional must not change that
-    shape: one session opened, one connection returned to the pool.
+    Callers that invoke ``refresh_symbol_runtimes()`` with no argument keep
+    owning exactly one session: one session opened, one connection returned
+    to the pool.
     """
     runner = _runner()
     counter = _SessionCounter(monkeypatch)
 
-    runner.refresh_opening_execution_registry()
+    runner.refresh_symbol_runtimes()
 
     assert counter.opened == 1, (
         "a registry refresh with no caller session must own the one session "

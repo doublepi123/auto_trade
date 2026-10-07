@@ -16,7 +16,7 @@ Pure computation layer: all quantitative and decision logic that can be expresse
 
 ### Recurring patterns
 
-- **Frozen evidence**: `strategy_v2` and `watchlist_quant_v6` each pair computation with a canonical-JSON + SHA-256 artifact codec so results are bit-reproducible and tamper-evident. Decimals are serialized as plain strings; floats, `NaN`, and duplicate JSON keys are rejected on decode.
+- **Frozen evidence**: `strategy_v2` pairs computation with a canonical-JSON + SHA-256 artifact codec so results are bit-reproducible and tamper-evident. Decimals are serialized as plain strings; floats, `NaN`, and duplicate JSON keys are rejected on decode.
 - **Preregistration governance**: parameter sets are pinned by SHA-256 hash tests (`test_strategy_v2_preregistration.py`); changing them is a governance decision, never a silent edit.
 - **Injected clocks**: replay/research code takes `now` or timestamps as parameters, never reads the wall clock, so replay stays deterministic.
 - **Defensive parsing**: anything crossing a persistence boundary is re-parsed through `_required_*` / `_validated_*` helpers that fail closed.
@@ -28,7 +28,6 @@ Pure computation layer: all quantitative and decision logic that can be expresse
 |---|---|---|---|
 | `strategy_v2/` | 16 files, ~7.7k lines | Shadow engine, bracket/profit-lock/time exits, signal-edge & promotion statistics, frozen v5 negative control | [strategy_v2/codemap.md](strategy_v2/codemap.md) |
 | `universe_selection/` | 7 files, ~5.1k lines | Index candidate catalog, member selection, rotation walk-forward & cohort evaluation | [universe_selection/codemap.md](universe_selection/codemap.md) |
-| `watchlist_quant_v6/` | 5 files, ~3.4k lines | Quote-only historical evaluation semantics, session leaves, assessment artifacts | [watchlist_quant_v6/codemap.md](watchlist_quant_v6/codemap.md) |
 | `prompt/` | 10 files, ~570 lines | LLM prompt plugin architecture (`PromptModule` + `PromptBuilder` + `FeatureSelector`) | [prompt/codemap.md](prompt/codemap.md) |
 | `analysis/` | 2 files, ~620 lines | `TechnicalIndicators` (RSI/MACD/ADX/OBV/VWAP…) and `MarketStateDetector` | [analysis/codemap.md](analysis/codemap.md) |
 | `sentiment/` | 1 file, 58 lines | `MarketSentimentAnalyzer`: price-change → sentiment score | [sentiment/codemap.md](sentiment/codemap.md) |
@@ -76,8 +75,7 @@ Worked example (shadow evaluation): `strategy_v2_shadow_service` collects ticks/
 - **Primary consumers**:
   - strategy_v2: `strategy_v2_shadow_service`, `signal_edge_service`, `live_exit_challenger_service`, `strategy_v2_bracket_challenger_service`, `primary_candidacy_service`, `universe_promotion_service`, `research_observation_health_service`
   - universe_selection: `universe_selection_service`, `rotation_forward_scorecard_service`, `watchlist_quant_service`, `universe_explainer_service`
-  - watchlist_quant_v6: `watchlist_quant_v6_evaluation_service`, `..._publication_service`, `..._reader_service`, `..._spawn_supervisor`, `research_artifact_retention_service`
   - prompt / experiment / performance: `llm_advisor_service`, `api/experiments.py`, `api/performance.py`
-  - root modules: `opening_momentum_shadow_service`, `cli/opening_extension_research.py`, `trade_execution_service`, `data_aggregator`, `main.py` (quiet window)
+  - root modules: `opening_momentum_shadow_service` (historical replay dependency, not a live path), `trade_execution_service`, `data_aggregator`, `main.py` (quiet window)
 - Root AGENTS.md layer graph: `domain → core(26) only; zero services imports`.
 - Domain tests need no DB and no fixtures — if a new domain test needs a session, the code is in the wrong layer.

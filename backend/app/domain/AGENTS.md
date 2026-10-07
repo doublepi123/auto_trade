@@ -6,12 +6,12 @@
 ## STRUCTURE
 ```
 domain/
-├── strategy_v2/            14 files, 7129 lines — shadow engine, bracket, profit_lock,
+├── strategy_v2/            shadow engine, bracket, profit_lock,
 │                           portfolio_routing, signal_edge, clustered_returns,
-│                           trusted_frozen_assessment (1749), PREREGISTRATION.md
-├── universe_selection/      7 files, 4986 — catalog, selector, rotation walk-forward,
+│                           frozen_forward_collection (identity constants the
+│                           shadow writer still matches), PREREGISTRATION.md
+├── universe_selection/      catalog, selector, rotation walk-forward,
 │                           data/ index-membership snapshots + THIRD_PARTY_NOTICES.md
-├── watchlist_quant_v6/      5 files, 3350 — quote-only historical evaluation
 ├── prompt/                 10 files,  566 — see prompt/AGENTS.md
 ├── analysis/ sentiment/ performance/ experiment/   small helper packages
 ```
@@ -29,7 +29,6 @@ domain/
 | Prove/refute a signal has edge | `strategy_v2/signal_edge.py` + `clustered_returns.py` |
 | Touch frozen v5 parameters | **read `strategy_v2/PREREGISTRATION.md` first** |
 | Candidate pool ranking / rotation | `universe_selection/` |
-| Quote-only historical evidence | `watchlist_quant_v6/` |
 | LLM prompt assembly | `prompt/` (has its own AGENTS.md) |
 
 ## ANTI-PATTERNS (THIS DIR)

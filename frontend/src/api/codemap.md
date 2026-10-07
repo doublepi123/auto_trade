@@ -11,7 +11,7 @@ Typed axios client layer: one file per backend domain, each exporting `async fun
 - **Response types come from `../types`** (`types/index.ts`, the 3.1k-line shared interface file); response-shape interfaces specific to one domain (e.g. `WatchlistScore`) are declared locally in the client file.
 - **Query params stay snake_case** (`lookback_days`, `page_size`) matching the backend Pydantic aliases — no camelCase conversion anywhere.
 - **CSV export** uses `responseType: 'blob'`: `backtest.ts`, `notifications.ts` (export), `trades.ts` (export).
-- **Naming**: camelCase filenames except four that mirror backend module names — `llm_advisor.ts`, `strategy_shadow.ts`, `opening_momentum_shadow.ts`, `strategy_experiments.ts`.
+- **Naming**: camelCase filenames except three that mirror backend module names — `llm_advisor.ts`, `strategy_shadow.ts`, `strategy_experiments.ts`.
 - **Barrel**: `index.ts` re-exports every module, so both `from '../api'` and `from '../api/edgeQuality'` resolve.
 - **Path ≠ filename for a few multi-domain clients** (table below): `trade.ts` actually serves `/api/orders` + `/api/control/*` + `/api/account`; `api/strategy.ts` (live strategy CRUD + status/diagnostics) is unrelated to `views/Strategy.vue`'s analytics cousins.
 
@@ -40,7 +40,6 @@ Typed axios client layer: one file per backend domain, each exporting `async fun
 | `cronHealth.ts`, `databaseHealth.ts`, `quoteHealth.ts` | `/api/cron-health`, `/api/database-health`, `/api/quote-health` | ops health panels |
 | `watchlist.ts`, `universe.ts`, `universeExplainer.ts`, `primaryCandidacy.ts` | `/api/watchlist*`, `/api/universe/*`, `/api/universe-explainer/run`, `/api/universe/primary-candidacy` | watchlist CRUD/scores/snapshots; universe catalog/refresh/scorecard |
 | `strategy_shadow.ts` | `/api/strategy-shadow/*` (14 endpoints) | v2 shadow config/status/decisions/challengers/validation |
-| `opening_momentum_shadow.ts` | `/api/opening-momentum-shadow/*` | shadow runs + execution status |
 | `strategy_experiments.ts`, `lab.ts` | `/api/strategy-experiments*`, `/api/experiments*` + `/api/indicators`, `/api/performance/*`, `/api/llm-usage/summary` | Experiments page + Lab workbench |
 | `llm_advisor.ts`, `llmInteractions.ts` | `/api/strategy/llm-interval/*`, `/api/llm-interactions/*` | interval advisor enable/disable/preview/analyze |
 | `backtest.ts`, `review.ts`, `reports.ts` | `/api/backtest*`, `/api/review*`, `/api/reports/*` (daily/weekly/monthly/range/schedule) | blob exports |

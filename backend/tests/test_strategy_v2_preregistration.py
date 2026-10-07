@@ -25,9 +25,9 @@ Hash scope (explicitly enumerated; do NOT extend implicitly):
 * Cost model: ``slippage_bps``, ``estimated_fee_rate_us/hk``,
   ``DEFAULT_EDGE_SAFETY_BUFFER_BPS``, ``_MIN_NET_REWARD_RISK_RATIO``.
 
-Deliberately out of scope: ``enabled`` / ``universe_managed`` /
-``opening_momentum_execution_eligible`` (operational toggles that do not
-change signal semantics), ``symbol`` (identity), ``updated_at`` (volatile),
+Deliberately out of scope: ``enabled`` / ``universe_managed``
+(operational toggles that do not change signal semantics), ``symbol``
+(identity), ``updated_at`` (volatile),
 challenger constants and review-threshold constants (separate hypotheses and
 evaluation policy, not the frozen v5 signal).
 """

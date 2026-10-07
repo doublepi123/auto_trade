@@ -42,12 +42,13 @@ mapped in [`app/codemap.md`](app/codemap.md).
 ### Test config (`pytest.ini`, `.coveragerc`)
 
 - `asyncio_mode = auto`, `testpaths = tests`, `pythonpath = .`.
-- Hardwired `-n 4 --dist loadgroup` — **not** `-n auto`: quant-v6 tests spawn
-  compute processes and assert wall-clock deadlines, so extra workers
-  oversubscribe the CPU. `loadgroup` schedules by the groups `conftest.py`
-  assigns (one per module by default; shared groups for shared-DB modules;
-  no group for audited modules so they spread). Do not regroup or shard on
-  top of this (see root `AGENTS.md`).
+- Hardwired `-n 4 --dist loadgroup` — **not** `-n auto`: tests that spawn
+  compute processes and assert wall-clock deadlines oversubscribe the CPU
+  under extra workers. Those modules, when they exist, belong in
+  `WALL_CLOCK_MODULES` (currently empty). `loadgroup` schedules by the groups
+  `conftest.py` assigns (one per module by default; shared groups for
+  shared-DB modules; no group for audited modules so they spread). Do not
+  regroup or shard on top of this (see root `AGENTS.md`).
 - Coverage gate: `--cov=app --cov-fail-under=80 --no-cov-on-fail`.
   `.coveragerc` omits `app/main.py`, `app/runner.py`, `app/database.py`,
   `app/config.py`, `app/api/ws.py`, and `app/__init__.py`.

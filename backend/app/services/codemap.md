@@ -4,9 +4,9 @@
 
 ## Responsibility
 
-Classic **Service Layer** between the API routers (`app/api/`) and the domain/core layers: it owns use-case orchestration — trade execution, order/fill persistence and reconciliation, PnL accounting, LLM advisory, universe/watchlist research pipelines, and ~50 read-only analytics — while pure computation stays in `app/domain/` and broker/risk/engine primitives stay in `app/core/`. Services are transaction-script style classes over a SQLAlchemy `Session`; they translate `ValueError`/`RuntimeError` (and subclasses such as `OrderPersistenceError`, `BrokerSubmissionUncertainError`, `FillSettlementConflict`, `QuantV6PublicationError`) into results that the API layer maps to `HTTPException`. No service raises `HTTPException` itself.
+Classic **Service Layer** between the API routers (`app/api/`) and the domain/core layers: it owns use-case orchestration — trade execution, order/fill persistence and reconciliation, PnL accounting, LLM advisory, universe/watchlist research pipelines, and ~50 read-only analytics — while pure computation stays in `app/domain/` and broker/risk/engine primitives stay in `app/core/`. Services are transaction-script style classes over a SQLAlchemy `Session`; they translate `ValueError`/`RuntimeError` (and subclasses such as `OrderPersistenceError`, `BrokerSubmissionUncertainError`, `FillSettlementConflict`) into results that the API layer maps to `HTTPException`. No service raises `HTTPException` itself.
 
-The load-bearing safety distinction (P0): **`trade_execution_service.py` is the only file in this layer that submits broker orders**, one config-gated exception (`opening_momentum_execution_service.py`) routes through the runner, and everything else is record-only.
+The load-bearing safety distinction (P0): **`trade_execution_service.py` is the only file in this layer that submits broker orders**, and everything else is record-only.
 
 ## Design
 
@@ -16,7 +16,7 @@ The load-bearing safety distinction (P0): **`trade_execution_service.py` is the 
 - **Callable-injected exception**: `TradeExecutionService` (4706 lines) takes **callables only** (no db, no broker), is constructed exactly once in `AppRunner.__init__` (runner.py:319), and owns an `RLock` `_submission_lock` exposed as `submission_guard()`. Every mutation path (`execute`, `reconcile`, `cancel_*`, `_submit_limit_order`) runs under that guard.
 - **Infra singletons** (module-level, own their `SessionLocal`): `OrderTerminalCallbackService` (+ module `_CLAIM_LOCK`), `get_notification_sink()` / `NotificationLogSink`, `DurableJobLeaseService(session_factory=SessionLocal)`; `AuditLogger` lives in `api/deps.py`.
 - **Pure-function modules** (no class) for analytics: `compute_trade_stats()` (`trade_stats_service.py`), `compute_equity_curve()` (`equity_curve_service.py`), `list_timeline_events()` (`event_list_service.py`) — frozen dataclass results over `ClosedRoundTrip` inputs.
-- **Protocols over mocks**: `OpeningExecutionRunner`, `CandleProvider`, `QuoteProvider`, `WatchlistMarketDataProvider`, `HistoricalPreviewReader`, `HistoricalHttpTransport` — collaborators are injected as Protocols.
+- **Protocols over mocks**: `CandleProvider`, `QuoteProvider`, `WatchlistMarketDataProvider`, `HistoricalPreviewReader`, `HistoricalHttpTransport` — collaborators are injected as Protocols.
 
 ### File groups
 
@@ -25,7 +25,6 @@ The load-bearing safety distinction (P0): **`trade_execution_service.py` is the 
 | File | Role |
 |---|---|
 | `trade_execution_service.py` | Whole live order path; `pre_submit_risk_check()` boundary returns frozen `ApprovedOrder`; `_submit_limit_order` is the layer's **sole** `broker.submit_limit_order` call site, wrapped in `risk.protective_submission_guard()` |
-| `opening_momentum_execution_service.py` | Config-gated (`opening_momentum_execution_enabled`) opening entry; submits indirectly via injected `OpeningExecutionRunner` → `runner.execute_opening_momentum_entry`. Named like a shadow — **it is not one** |
 | `auto_primary_switch_service.py` | The only path that changes the **live symbol**; must pass `runner.assert_primary_switch_safe`; ADX/reach-rate/signal-edge gates |
 
 **Entry gating (read-only decisions, fail-closed)**
@@ -63,13 +62,13 @@ The load-bearing safety distinction (P0): **`trade_execution_service.py` is the 
 
 `llm_advisor_service.py` (provider calls, `analyze`/`preview`), `llm_interaction_service.py` (interaction log, pruning, context compaction), `llm_order_policy.py`, `llm_recommendation_evaluator.py`, `llm_symbol_state_service.py`, `llm_usage_service.py`, plus `interval_application_service.py`. Prompt assembly itself lives in `domain/prompt/`.
 
-**Universe & watchlist & quant-v6 (14)**
+**Universe & watchlist**
 
-`universe_selection_service.py` (3132 lines, `refresh()` with run claims), `universe_promotion_service.py`, `universe_run_history_service.py`, `universe_explainer_service.py`, `watchlist_service.py`, `watchlist_score_service.py`, `watchlist_quant_service.py` (walk-forward scoring), `watchlist_quant_v6_{evaluation,publication,reader,historical_provider,spawn_supervisor,deadline}.py` (quote-only historical evaluation pipeline with subprocess workers, memory/db fences, publication receipts), `momentum_ranking_service.py`, `primary_candidacy_service.py` (read-only candidacy report; shares the switch's gates via `classify_candidate_row`, never calls the runner).
+`universe_selection_service.py` (3132 lines, `refresh()` with run claims), `universe_promotion_service.py`, `universe_run_history_service.py`, `universe_explainer_service.py`, `watchlist_service.py`, `watchlist_score_service.py`, `watchlist_quant_service.py` (walk-forward scoring; the non-v6 auto-score path), `momentum_ranking_service.py`, `primary_candidacy_service.py` (read-only candidacy report; shares the switch's gates via `classify_candidate_row`, never calls the runner).
 
 **Shadows & challengers (record-only, never order)**
 
-`strategy_v2_shadow_service.py` (7390 lines; `tick()` / `replay()`), `strategy_v2_bracket_challenger_service.py`, `strategy_v2_exit_challenger_service.py`, `strategy_v2_portfolio_service.py`, `live_exit_challenger_service.py` ("without submitting orders" — keep that docstring line), `opening_momentum_shadow_service.py` (5403 lines), `trusted_frozen_assessment_service.py`, `signal_edge_service.py`, `backtest_run_service.py`, `intervention_evidence_service.py`.
+`strategy_v2_shadow_service.py` (7390 lines; `tick()` / `replay()`), `strategy_v2_bracket_challenger_service.py`, `strategy_v2_exit_challenger_service.py`, `strategy_v2_portfolio_service.py`, `live_exit_challenger_service.py` ("without submitting orders" — keep that docstring line), `opening_momentum_shadow_service.py` (5403 lines), `signal_edge_service.py`, `backtest_run_service.py`, `intervention_evidence_service.py`.
 
 **Review & reports & strategy config**
 
@@ -97,7 +96,7 @@ One service per `/api/<metric>` page: `asymmetry`, `autocorrelation`, `benchmark
 
 **LLM interval.** Cron → `LLMAdvisorService.analyze()` (prompt plugins from `domain/prompt/`) → `evaluate_llm_order_policy()` (SHADOW-pinned) → human/config-gated `IntervalApplicationService.apply_suggestion()`; outcome recorded by `LLMInteractionService`.
 
-**Research (record-only).** Crons / API → `StrategyV2ShadowService.tick()` / `replay()`, `OpeningMomentumShadowService`, challengers, `UniverseSelectionService.refresh()`, quant-v6 spawn→evaluate→publish pipeline — none can reach a broker mutation or auto-promote.
+**Research (record-only).** Crons / API → `StrategyV2ShadowService.tick()` / `replay()`, `OpeningMomentumShadowService`, challengers, `UniverseSelectionService.refresh()` — none can reach a broker mutation or auto-promote.
 
 ## Integration
 
@@ -110,7 +109,7 @@ One service per `/api/<metric>` page: `asymmetry`, `autocorrelation`, `benchmark
 **Dependencies (AST-verified layer graph)**
 
 - `services → domain(56) core(40) platform(2) api(3 back-import)`; downward only otherwise.
-- `domain` imports stay pure (strategy_v2, fill_settlement, prompt, universe_selection, watchlist_quant_v6); `core` provides `BrokerGateway`, `RiskController`, `StrategyEngine`, market calendar, fees.
+- `domain` imports stay pure (strategy_v2, fill_settlement, prompt, universe_selection); `core` provides `BrokerGateway`, `RiskController`, `StrategyEngine`, market calendar, fees.
 - Only two `platform` imports: `opening_momentum_shadow_service.py` ← `app.platform.multiple_testing`, `strategy_v2_shadow_service.py` ← `app.platform.strategy_quality`.
 
 **Back-import — do NOT extend.** Four services import the private `_active_fee_rates` from `app.api.trades`: `analytics_trade_sample_service.py`, `decision_replay_service.py`, `drawdown_analysis_service.py`, `strategy_health_service.py` (shared business logic living in the wrong layer; do not add another). Separately, `auto_primary_switch_service.py` does a function-local `from app.api.deps import init_audit_logger` (runner.py:598 region) — same rule applies.

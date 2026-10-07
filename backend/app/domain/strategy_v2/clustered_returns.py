@@ -10,7 +10,7 @@ from types import MappingProxyType
 DEFAULT_T_CRITICAL = 2.0
 
 # Two-sided 95% (p=.975), df=D-1; PREREGISTRATION.md section 3.2.
-# Fixed like quant-v6: no SciPy/runtime-version dependency or runtime solver.
+# Fixed: no SciPy/runtime-version dependency or runtime solver.
 # Generated and cross-validated by tests/test_student_t_table.py.
 DAY_CLUSTER_T95_BY_DF: Mapping[int, Decimal] = MappingProxyType({
     1: Decimal("12.706204736175"),

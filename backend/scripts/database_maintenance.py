@@ -12,7 +12,8 @@ in free disk space), and checkpoints the WAL first.
 This command has no broker access, no order path, and never touches the live
 evidence tables (orders, transactions, trade_events, audit_logs, risk_events,
 tracked_entries, strategy_v2_shadow_trades) or the provenance rows
-(quant-v6 publications/registrations, forward evidence/registrations).
+(forward evidence/registrations). Historical quant-v6 tables, if present,
+are neither counted nor pruned.
 """
 from __future__ import annotations
 
@@ -37,9 +38,6 @@ from app.models import (
     StrategyV2ForwardEvidenceArtifact,
     StrategyV2ForwardReplayArtifact,
     StrategyV2ShadowDecision,
-    WatchlistQuantV6Artifact,
-    WatchlistQuantV6Publication,
-    WatchlistQuantV6PublicationArtifact,
 )
 from app.services.research_artifact_retention_service import (
     ResearchArtifactRetentionService,
@@ -60,8 +58,6 @@ class DiagnosticWaitPlan(TypedDict):
 
 
 _SIZE_TABLES = (
-    "watchlist_quant_v6_artifacts",
-    "watchlist_quant_v6_publication_artifacts",
     "strategy_v2_forward_replay_artifacts",
     "strategy_v2_forward_evidence_artifacts",
     "strategy_v2_shadow_decisions",
@@ -124,60 +120,6 @@ def _retention_window_enabled(retention_days: int) -> bool:
     if retention_days < 0:
         raise ValueError("retention_days must be non-negative")
     return retention_days > 0
-
-
-def _quant_v6_plan(
-    session: Session,
-    *,
-    retention_days: int,
-    now: datetime,
-) -> dict[str, int]:
-    if not _retention_window_enabled(retention_days):
-        return {
-            "retention_days": retention_days,
-            "expired_publications": 0,
-            "bindings": 0,
-            "artifacts": 0,
-        }
-    cutoff = now - timedelta(days=retention_days)
-    expired_publications = (
-        session.query(WatchlistQuantV6Publication)
-        .filter(WatchlistQuantV6Publication.published_at < cutoff)
-        .count()
-    )
-    bindings = (
-        session.query(WatchlistQuantV6PublicationArtifact)
-        .join(
-            WatchlistQuantV6Publication,
-            WatchlistQuantV6Publication.id
-            == WatchlistQuantV6PublicationArtifact.publication_id,
-        )
-        .filter(WatchlistQuantV6Publication.published_at < cutoff)
-        .count()
-    )
-    surviving = (
-        session.query(WatchlistQuantV6PublicationArtifact.artifact_sha256)
-        .join(
-            WatchlistQuantV6Publication,
-            WatchlistQuantV6Publication.id
-            == WatchlistQuantV6PublicationArtifact.publication_id,
-        )
-        .filter(WatchlistQuantV6Publication.published_at >= cutoff)
-    )
-    artifacts = (
-        session.query(WatchlistQuantV6Artifact)
-        .filter(
-            WatchlistQuantV6Artifact.created_at < cutoff,
-            WatchlistQuantV6Artifact.digest_sha256.not_in(surviving),
-        )
-        .count()
-    )
-    return {
-        "retention_days": retention_days,
-        "expired_publications": int(expired_publications),
-        "bindings": int(bindings),
-        "artifacts": int(artifacts),
-    }
 
 
 def _forward_replay_plan(
@@ -570,11 +512,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         page_usage, page_usage_available = _page_usage(engine)
         row_counts = _row_counts(engine, _SIZE_TABLES)
         with Session(bind=engine) as session:
-            quant_v6_plan = _quant_v6_plan(
-                session,
-                retention_days=settings.watchlist_quant_v6_artifact_retention_days,
-                now=now,
-            )
             replay_plan = _forward_replay_plan(
                 session,
                 retention_days=(
@@ -592,17 +529,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         usage_bytes = {
             str(entry["name"]): int(entry["bytes"]) for entry in page_usage
         }
-        quant_v6_freed = _estimate_freed(
-            int(quant_v6_plan["artifacts"]),
-            table="watchlist_quant_v6_artifacts",
-            usage_bytes=usage_bytes,
-            row_counts=row_counts,
-        ) + _estimate_freed(
-            int(quant_v6_plan["bindings"]),
-            table="watchlist_quant_v6_publication_artifacts",
-            usage_bytes=usage_bytes,
-            row_counts=row_counts,
-        )
         replay_freed = _estimate_freed(
             int(replay_plan["artifacts"]),
             table="strategy_v2_forward_replay_artifacts",
@@ -620,7 +546,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             usage_bytes=usage_bytes,
             row_counts=row_counts,
         )
-        quant_v6_plan["est_freed_bytes"] = quant_v6_freed
         replay_plan["est_freed_bytes"] = replay_freed
         diagnostic_plan["est_freed_bytes"] = diagnostic_freed
 
@@ -629,24 +554,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             if db_path is not None and db_path.is_file()
             else sum(usage_bytes.values())
         )
-        est_freed = quant_v6_freed + replay_freed + diagnostic_freed
+        est_freed = replay_freed + diagnostic_freed
 
         applied: dict[str, object] | None = None
         if args.apply:
             with Session(bind=engine) as session:
                 artifact_retention = ResearchArtifactRetentionService(session)
-                quant_v6_result = (
-                    artifact_retention.prune_expired_quant_v6_publication_payloads(
-                        retention_days=(
-                            settings.watchlist_quant_v6_artifact_retention_days
-                        ),
-                        batch_size=(
-                            settings.watchlist_quant_v6_artifact_maintenance_batch_size
-                        ),
-                        max_batches=None,
-                        now=now,
-                    )
-                )
                 replay_result = (
                     artifact_retention.prune_expired_forward_replay_artifacts(
                         retention_days=(
@@ -682,11 +595,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             relocation["applied"] = True
             applied = {
-                "watchlist_quant_v6": {
-                    "bindings_deleted": quant_v6_result.bindings_deleted,
-                    "artifacts_deleted": quant_v6_result.artifacts_deleted,
-                    "batches": quant_v6_result.batches,
-                },
                 "strategy_v2_forward_replay": {
                     "bindings_deleted": replay_result.bindings_deleted,
                     "artifacts_deleted": replay_result.artifacts_deleted,
@@ -718,7 +626,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         "page_usage": page_usage,
         "row_counts": row_counts,
         "retention": {
-            "watchlist_quant_v6": quant_v6_plan,
             "strategy_v2_forward_replay": replay_plan,
             "strategy_v2_diagnostic_wait": diagnostic_plan,
         },

@@ -18,14 +18,13 @@ _RELIABILITY_MODULES_UNDER_TEST = frozenset(
     }
 )
 
-_CI_FAILED_WALL_CLOCK_MODULES = frozenset(
-    {
-        "tests/test_watchlist_quant_v6_cron.py",
-        "tests/test_watchlist_quant_v6_publication_service.py",
-        "tests/test_watchlist_quant_v6_spawn_supervisor.py",
-    }
-)
-"""The modules that actually lost tests to missed deadlines on CI."""
+_CI_FAILED_WALL_CLOCK_MODULES: frozenset[str] = frozenset()
+"""Retired with the quant-v6 wall-clock modules.
+
+Those three files were the only ones that missed deadlines under ``-n 4``.
+The lane mechanism stays; the set is empty until another module is shown to
+need it.
+"""
 
 
 class TestRealtimeLaneIsSeparated:
@@ -41,12 +40,23 @@ class TestRealtimeLaneIsSeparated:
     def test_declared_wall_clock_modules_match_the_known_offenders(self) -> None:
         assert WALL_CLOCK_MODULES == _CI_FAILED_WALL_CLOCK_MODULES
 
-    @pytest.mark.parametrize("module", sorted(_CI_FAILED_WALL_CLOCK_MODULES))
-    def test_wall_clock_module_is_excluded_from_numbered_shards(
-        self, module: str
+    def test_retired_quant_v6_modules_are_not_still_excluded(self) -> None:
+        retired = {
+            "tests/test_watchlist_quant_v6_cron.py",
+            "tests/test_watchlist_quant_v6_publication_service.py",
+            "tests/test_watchlist_quant_v6_spawn_supervisor.py",
+        }
+        assert not (WALL_CLOCK_MODULES & retired)
+
+    def test_empty_wall_clock_set_excludes_nothing_from_numbered_shards(
+        self,
     ) -> None:
-        shardable = {name: 1.0 for name in _shardable(_CI_FAILED_WALL_CLOCK_MODULES)}
-        assert module not in assign_modules_to_shards(shardable, shard_count=4)
+        modules = {"tests/test_engine.py", "tests/test_fees.py"}
+        assignment = assign_modules_to_shards(
+            {name: 1.0 for name in _shardable(frozenset(modules))},
+            shard_count=4,
+        )
+        assert set(assignment) == modules
 
     def test_wall_clock_modules_are_never_freed_to_test_level(self) -> None:
         assert not (TEST_LEVEL_SAFE_MODULES & WALL_CLOCK_MODULES)

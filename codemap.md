@@ -4,7 +4,7 @@
 
 Full-stack **automated range-trading system** for Longbridge (Longport) HK/US equities,
 plus a large **read-only research layer** (universe selection, quant scoring,
-Strategy v2 / opening-momentum / portfolio-routing shadows, ~250 platform analytics).
+Strategy v2 / portfolio-routing shadows, ~250 platform analytics).
 
 - **Backend**: Python 3.11+ FastAPI, SQLAlchemy 2.0, SQLite (WAL), ~200k lines under `backend/app/`.
 - **Frontend**: Vue 3 + Vite + Element Plus + strict TypeScript SPA (hash routes, pure-SVG charts), ~47k lines under `frontend/src/`.
@@ -61,7 +61,6 @@ core imports nothing upward.  Known leaks (do not extend): services→api (_acti
 | `backend/app/domain/strategy_v2/` | v2 shadow engine, bracket/profit-lock, portfolio routing, signal-edge gate + futility, frozen v5 negative control (`PREREGISTRATION.md`) | [View Map](backend/app/domain/strategy_v2/codemap.md) |
 | `backend/app/domain/prompt/` | LLM prompt plugin architecture: `PromptModule` + `PromptBuilder` + `FeatureSelector` | [View Map](backend/app/domain/prompt/codemap.md) |
 | `backend/app/domain/universe_selection/` | Candidate catalog, point-in-time selection, rotation walk-forward | [View Map](backend/app/domain/universe_selection/codemap.md) |
-| `backend/app/domain/watchlist_quant_v6/` | Quote-only historical evaluation with tamper-evident published artifacts | [View Map](backend/app/domain/watchlist_quant_v6/codemap.md) |
 | `backend/app/domain/analysis/` | Technical indicators + market-state detector | [View Map](backend/app/domain/analysis/codemap.md) |
 | `backend/app/domain/sentiment/` | Price-derived sentiment score for the LLM advisor | [View Map](backend/app/domain/sentiment/codemap.md) |
 | `backend/app/domain/experiment/` | LLM prompt A/B testing (documented ORM purity exception) | [View Map](backend/app/domain/experiment/codemap.md) |

@@ -3,7 +3,7 @@
     <div class="page-header">
       <div>
         <h3>信号共识矩阵</h3>
-        <p>横向比对范围引擎、Strategy v2、开盘动量、量化评分与 LLM 顾问的多源信号共识</p>
+        <p>横向比对范围引擎、Strategy v2、量化评分与 LLM 顾问的多源信号共识</p>
       </div>
       <div class="page-actions">
         <el-input
@@ -71,13 +71,6 @@
         <template #default="{ row }">
           <el-tag :type="signalTagType(row.strategy_v2.signal)" size="small">
             {{ signalLabel(row.strategy_v2.signal) }}
-          </el-tag>
-        </template>
-      </el-table-column>
-      <el-table-column label="开盘动量" min-width="130">
-        <template #default="{ row }">
-          <el-tag :type="signalTagType(row.opening_momentum.signal)" size="small">
-            {{ signalLabel(row.opening_momentum.signal) }}
           </el-tag>
         </template>
       </el-table-column>

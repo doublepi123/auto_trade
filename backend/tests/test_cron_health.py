@@ -555,12 +555,10 @@ class TestMainRegistersCronJobs:
             main_module._CRON_ALERT_RULES,
             main_module._CRON_LLM_STORAGE_MAINTENANCE,
             main_module._CRON_STRATEGY_V2_SHADOW,
-            main_module._CRON_OPENING_MOMENTUM_SHADOW,
             main_module._CRON_UNIVERSE_SELECTION,
             main_module._CRON_AUTO_PRIMARY_SWITCH,
             main_module._CRON_INTERVAL_RECENTER,
             main_module._CRON_WATCHLIST_QUANT,
-            main_module._CRON_WATCHLIST_QUANT_V6_EVALUATION,
             main_module._CRON_WS_CLEANUP,
             main_module._CRON_QUOTE_ENTITLEMENT,
         }
@@ -613,38 +611,13 @@ class TestMainRegistersCronJobs:
 
         monkeypatch.setattr(main_module.settings, "universe_selection_enabled", False)
         monkeypatch.setattr(main_module.settings, "watchlist_quant_auto_score_enabled", False)
-        monkeypatch.setattr(
-            main_module.settings, "watchlist_quant_v6_evaluation_enabled", False
-        )
         main_module._register_cron_health_jobs()
         rows = {row.name: row for row in isolated.snapshot()}
         assert rows[main_module._CRON_UNIVERSE_SELECTION].enabled is False
         assert rows[main_module._CRON_WATCHLIST_QUANT].enabled is False
-        assert rows[main_module._CRON_WATCHLIST_QUANT_V6_EVALUATION].enabled is False
         # Disabled jobs are not stale and do not pretend enabled work ran.
-        assert rows[main_module._CRON_WATCHLIST_QUANT_V6_EVALUATION].stale is False
-        assert rows[main_module._CRON_WATCHLIST_QUANT_V6_EVALUATION].status == "disabled"
-        set_cron_health_service(None)
-
-    def test_quant_v6_enabled_reports_true_and_expected_interval(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        isolated = CronHealthService()
-        set_cron_health_service(isolated)
-        monkeypatch.setattr(cron_health_api, "get_cron_health_service", lambda: isolated)
-        from app import main as main_module
-
-        monkeypatch.setattr(
-            main_module.settings, "watchlist_quant_v6_evaluation_enabled", True
-        )
-        monkeypatch.setattr(
-            main_module.settings, "watchlist_quant_v6_evaluation_interval_minutes", 180
-        )
-        main_module._register_cron_health_jobs()
-        rows = {row.name: row for row in isolated.snapshot()}
-        v6 = rows[main_module._CRON_WATCHLIST_QUANT_V6_EVALUATION]
-        assert v6.enabled is True
-        assert v6.expected_interval_seconds == 180 * 60
+        assert rows[main_module._CRON_WATCHLIST_QUANT].stale is False
+        assert rows[main_module._CRON_WATCHLIST_QUANT].status == "disabled"
         set_cron_health_service(None)
 
 

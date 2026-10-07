@@ -92,9 +92,6 @@ def test_deploy_files_expose_storage_retention_controls() -> None:
         "AUTO_TRADE_STRATEGY_V2_DIAGNOSTIC_WAIT_MAINTENANCE_BATCH_SIZE",
         "AUTO_TRADE_STRATEGY_V2_FORWARD_REPLAY_ARTIFACT_RETENTION_DAYS",
         "AUTO_TRADE_STRATEGY_V2_FORWARD_REPLAY_ARTIFACT_MAINTENANCE_BATCH_SIZE",
-        "AUTO_TRADE_WATCHLIST_QUANT_V6_ARTIFACT_RETENTION_DAYS",
-        "AUTO_TRADE_WATCHLIST_QUANT_V6_ARTIFACT_MAINTENANCE_BATCH_SIZE",
-        "AUTO_TRADE_WATCHLIST_QUANT_V6_DB_SIZE_BUDGET_MB",
     }
     for filename in ("docker-compose.yaml", "docker-compose.dockerhub.yaml"):
         compose = (ROOT / filename).read_text(encoding="utf-8")
@@ -158,36 +155,6 @@ def test_deploy_files_expose_p0_hard_safety_controls() -> None:
     assert "AUTO_TRADE_ALLOW_SHORT_ENTRIES=" not in env_example
 
 
-def test_deploy_files_expose_spy_passive_lane_control() -> None:
-    """The SPY passive lane flag must ship default-off in every deploy file.
-
-    A Settings field absent from compose is silently ignored at runtime: the
-    container keeps the field default regardless of what the operator sets
-    in .env (recorded auto-primary-switch incident). The ``:-`` fallback must
-    equal the Settings default so an unset variable ships fail-closed.
-    """
-    from app.config import Settings
-
-    compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
-    dockerhub = (
-        ROOT / "docker-compose.dockerhub.yaml"
-    ).read_text(encoding="utf-8")
-    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
-
-    expected_default = (
-        "AUTO_TRADE_SPY_PASSIVE_ENABLED="
-        "${AUTO_TRADE_SPY_PASSIVE_ENABLED:-"
-        f"{str(Settings().spy_passive_lane_enabled).lower()}"
-        "}"
-    )
-    assert "AUTO_TRADE_SPY_PASSIVE_ENABLED=" in compose
-    assert "AUTO_TRADE_SPY_PASSIVE_ENABLED=" in dockerhub
-    assert "AUTO_TRADE_SPY_PASSIVE_ENABLED=" in env_example
-    assert expected_default in compose
-    assert expected_default in dockerhub
-    assert Settings().spy_passive_lane_enabled is False
-
-
 def test_deploy_files_expose_degraded_exit_pricing_controls() -> None:
     compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
     dockerhub = (ROOT / "docker-compose.dockerhub.yaml").read_text(encoding="utf-8")
@@ -225,8 +192,6 @@ def test_deploy_files_expose_universe_and_live_regime_controls() -> None:
         "AUTO_TRADE_UNIVERSE_SELECTION_ENABLED",
         "AUTO_TRADE_UNIVERSE_SELECTION_APPLY_TO_WATCHLIST",
         "AUTO_TRADE_UNIVERSE_SELECTION_ENABLE_SHADOW",
-        "AUTO_TRADE_OPENING_MOMENTUM_SHADOW_ENABLED",
-        "AUTO_TRADE_OPENING_MOMENTUM_CHALLENGER_ENABLED",
         "AUTO_TRADE_STRATEGY_V2_PORTFOLIO_SHADOW_ENABLED",
         "AUTO_TRADE_LIVE_EXIT_CHALLENGER_ENABLED",
         "AUTO_TRADE_UNIVERSE_SELECTION_INTERVAL_MINUTES",
@@ -441,33 +406,34 @@ def test_auto_primary_switch_defaults_to_disabled_in_compose() -> None:
     ) in compose
 
 
-def test_compose_defaults_do_not_shadow_quant_v6_retention_kill_switch() -> None:
-    """Compose's ``:-`` fallback overrides the Settings default entirely.
+def test_retired_quant_v6_controls_are_absent_from_deploy_files() -> None:
+    """A retired Settings field must not linger in compose or .env.example.
 
-    The quant-v6 window must ship closed because the prune targets append-only
-    bindings; a compose fallback of 30 silently re-arms it in every deployment
-    regardless of what ``config.py`` says.
+    Compose only forwards variables it declares. Leaving the quant-v6 knobs
+    documented would look operator-supported after the writer, cron, and
+    reader are gone.
     """
-    import re
-
-    from app.config import Settings
-
-    expected = Settings.model_fields[
-        "watchlist_quant_v6_artifact_retention_days"
-    ].default
-    assert expected == 0
-
-    for name in ("docker-compose.yaml", "docker-compose.dockerhub.yaml"):
-        text = (ROOT / name).read_text(encoding="utf-8")
-        match = re.search(
-            r"AUTO_TRADE_WATCHLIST_QUANT_V6_ARTIFACT_RETENTION_DAYS="
-            r"\$\{AUTO_TRADE_WATCHLIST_QUANT_V6_ARTIFACT_RETENTION_DAYS:-(\d+)\}",
-            text,
-        )
-        assert match is not None, f"{name} must forward the retention variable"
-        assert int(match.group(1)) == expected, (
-            f"{name} fallback {match.group(1)} shadows the Settings default {expected}"
-        )
+    retired = (
+        "AUTO_TRADE_WATCHLIST_QUANT_V6_ARTIFACT_RETENTION_DAYS",
+        "AUTO_TRADE_WATCHLIST_QUANT_V6_ARTIFACT_MAINTENANCE_BATCH_SIZE",
+        "AUTO_TRADE_WATCHLIST_QUANT_V6_DB_SIZE_BUDGET_MB",
+        "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_ENABLED",
+        "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_INTERVAL_MINUTES",
+        "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_RETRY_INTERVAL_MINUTES",
+        "AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_TIMEOUT_SECONDS",
+        "AUTO_TRADE_WATCHLIST_QUANT_V6_PROVIDER_PAGE_TIMEOUT_SECONDS",
+        "AUTO_TRADE_WATCHLIST_QUANT_V6_COMPUTE_WORKERS",
+        "AUTO_TRADE_WATCHLIST_QUANT_V6_PIPELINE_MEMORY_LIMIT_MIB",
+    )
+    files = (
+        ROOT / "docker-compose.yaml",
+        ROOT / "docker-compose.dockerhub.yaml",
+        ROOT / ".env.example",
+    )
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        for key in retired:
+            assert key not in text, f"{path.name} still documents {key}"
 
 
 def test_deploy_files_expose_extended_hours_protective_exit_control() -> None:

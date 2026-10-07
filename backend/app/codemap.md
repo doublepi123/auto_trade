@@ -21,7 +21,7 @@ package lives in subpackages (`api/`, `services/`, `core/`, `domain/`,
 | `config.py` | 1,393 | Single `Settings(BaseSettings)` with all env aliases and defaults, plus `merge_longbridge_credentials()`. |
 | `database.py` | 3,074 | Engine + `SessionLocal`, WAL setup, session-scope middleware/guard, `init_db()` with 59 `_ensure_*` runtime migrations. |
 | `models.py` | 2,745 | 63 ORM classes (`Mapped` + `mapped_column`, sync ORM), one per `__tablename__`. |
-| `schemas.py` | 5,945 | 309 Pydantic v2 `BaseModel` request/response schemas (strategy, shadow, opening momentum, challengers, trusted-frozen reports, …). |
+| `schemas.py` | Pydantic v2 request/response schemas (strategy, shadow, opening momentum, challengers, …). |
 
 ### AppRunner threading model
 
@@ -107,11 +107,13 @@ package lives in subpackages (`api/`, `services/`, `core/`, `domain/`,
   replay_artifacts,evidence_artifacts}`, exit/bracket challenger
   registrations+trades, `live_exit_challenger_*`,
   `strategy_v2_portfolio_{registrations,observations}`.
-- **Opening momentum**: `opening_momentum_shadow_runs`,
-  `opening_activity_observations`, `opening_momentum_executions`.
+- **Opening momentum history (retained, no live writer)**:
+  `opening_momentum_shadow_runs`, `opening_activity_observations`,
+  `opening_momentum_executions`.
 - **Universe / quant**: `universe_selection_{runs,candidates}`,
-  `watchlist_items`, `watchlist_scores`, `watchlist_quant_v6_{registrations,
-  artifacts,publications,publication_artifacts}`.
+  `watchlist_items`, `watchlist_scores`. Historical
+  `watchlist_quant_v6_*` tables may still exist in an already-migrated
+  database; the application no longer creates or reads them.
 - **Research ops**: `strategy_experiments`, `strategy_experiment_runs`,
   `experiment_results`, `backtest_runs`, `platform_backtest_runs`,
   `factor_snapshots`, `factor_ic_series`, `prompt_versions`,
@@ -132,15 +134,15 @@ package lives in subpackages (`api/`, `services/`, `core/`, `domain/`,
    effort, never blocks startup).
 5. `LivenessWatchdog` start (if enabled; failure stops the runner and
    re-raises).
-6. 13 `asyncio.create_task` background crons: liveness heartbeat, WS cleanup,
+6. 12 `asyncio.create_task` background crons: liveness heartbeat, WS cleanup,
    LLM analysis, report schedule, alert rules, LLM storage maintenance,
    strategy-v2 shadow, opening-momentum shadow, universe selection, auto
-   primary switch, interval recenter, watchlist quant, watchlist-quant-v6
-   evaluation. Each cron owns an `asyncio.Lock`, wraps its blocking tick in
+   primary switch, interval recenter, watchlist quant. Each cron owns an
+   `asyncio.Lock`, wraps its blocking tick in
    `asyncio.to_thread` (lease-guarded via `DurableJobLeaseService`), and
    yields around the open via `_opening_research_quiet_window()`. On shutdown:
    cancel all tasks, stop watchdog, `runner.stop()` via `to_thread`.
-7. Routers: 93 `include_router` calls (`/api/platform`, `/api/portfolio`, then
+7. Routers: `include_router` calls (`/api/platform`, `/api/portfolio`, then
    the per-domain routers under their own prefixes).
 
 ### Quote hot path
@@ -165,7 +167,7 @@ housekeeping at the end of each pass.
 | `api/` | FastAPI routers (90+); sync route handlers; one router per domain (`strategy`, `trade`, `platform`, …). | `api/codemap.md` |
 | `services/` | Business logic: trade execution, LLM advisor, universe, quant, shadows, review, PnL (129 services). | `services/codemap.md` |
 | `core/` | Broker gateway, range engine, risk controller, fees, backtest, audit, market calendar, notifiers (25 modules). | `core/codemap.md` |
-| `domain/` | Pure computation, no I/O: prompt plugins, strategy_v2, universe_selection, watchlist_quant_v6, opening momentum (9 subpackages). | `domain/codemap.md` |
+| `domain/` | Pure computation, no I/O: prompt plugins, strategy_v2, universe_selection, opening momentum. | `domain/codemap.md` |
 | `platform/` | Research/plugin SDK, paper broker, portfolio, 250+ analytics modules, 202-route `api.py`. | `platform/codemap.md` |
 | `strategies/` | Platform strategy plugins (12 platform imports). | `strategies/codemap.md` |
 | `cli/` | Operational command-line helpers (`python -m app.cli.<module>`). | `cli/codemap.md` |

@@ -420,39 +420,20 @@ def observation_pool_overrides(
         configs = db.query(StrategyV2ShadowConfig).all()
         unmanaged = [row for row in configs if not row.universe_managed]
 
-    # Opening-approved symbols are operator-controlled and must not be
-    # retired by an automatic research-allocation refresh.
+    # Operator-owned observers must not be retired by an automatic
+    # research-allocation refresh.
     durable_observed = {
         row.symbol.strip().upper()
         for row in configs
-        if (
-            row.enabled
-            and (
-                not row.universe_managed
-                or row.opening_momentum_execution_eligible
-            )
-            and row.symbol.strip()
-        )
+        if row.enabled and not row.universe_managed and row.symbol.strip()
     }
     already_observed = {
         row.symbol.strip().upper()
         for row in configs
-        if (
-            row.enabled
-            and row.opening_momentum_execution_eligible
-            and row.symbol.strip()
-        )
+        if row.enabled and row.symbol.strip()
     }
     exploration_excluded = durable_observed - already_observed
-    challenger_excluded = {
-        row.symbol.strip().upper()
-        for row in configs
-        if (
-            row.enabled
-            and row.opening_momentum_execution_eligible
-            and row.symbol.strip()
-        )
-    }
+    challenger_excluded = set(already_observed)
     unobservable = {
         row.symbol.strip().upper()
         for row in unmanaged
@@ -2947,10 +2928,6 @@ class UniverseSelectionService:
                         self.db.commit()
                     continue
                 row.universe_managed = True
-                if not was_enabled:
-                    # New and returning universe observers need forward
-                    # evidence before they can join live opening execution.
-                    row.opening_momentum_execution_eligible = False
                 self.db.add(row)
                 if lease_guard is not None:
                     # Ownership is its own fenced transaction. The enable

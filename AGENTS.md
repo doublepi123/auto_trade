@@ -2,7 +2,7 @@
 
 > **Last refreshed:** 2026-09-02 / commit `c1e4760` / branch `main`. Product docs live in `README.md`; this file is for coding agents.
 
-Full-stack automated range-trading system for Longbridge (HK/US equities), plus a large **read-only research layer** (universe selection, quant scoring, Strategy v2 / opening-momentum / portfolio-routing shadows, `/api/platform/*` analytics). Backend: Python 3.11+ FastAPI + SQLAlchemy 2.0 + SQLite. Frontend: Vue 3 + Vite + Element Plus + TypeScript (strict). Optional LLM interval advisor (DeepSeek / MiniMax). Docker Compose deployment (nginx SPA → uvicorn).
+Full-stack automated range-trading system for Longbridge (HK/US equities), plus a large **read-only research layer** (universe selection, quant scoring, Strategy v2 / portfolio-routing shadows, `/api/platform/*` analytics). Backend: Python 3.11+ FastAPI + SQLAlchemy 2.0 + SQLite. Frontend: Vue 3 + Vite + Element Plus + TypeScript (strict). Optional LLM interval advisor (DeepSeek / MiniMax). Docker Compose deployment (nginx SPA → uvicorn).
 
 **P0 live safety (hard defaults):** no short entries, no position add-ons, LLM never places live orders, shadow / challenger paths never submit orders or auto-promote.
 
@@ -25,7 +25,7 @@ Full-stack automated range-trading system for Longbridge (HK/US equities), plus 
 FastAPI (async lifespan) ─── mount 90+ routers
    │
    ├── api/                   [strategy, trade, credentials, watchlist, universe,
-   │                           strategy_shadow, opening_momentum_shadow, review,
+   │                           strategy_shadow, review,
    │                           reports, alerts, notifications, backtest, platform, …]
    │
    ├── services/              [trade execution, LLM, universe, watchlist quant,
@@ -36,8 +36,6 @@ FastAPI (async lifespan) ─── mount 90+ routers
    │   ├── strategy_v2/       [shadow engine, bracket, profit_lock, portfolio_routing,
    │   │                       signal_edge (edge gate ahead of parameter tuning)]
    │   ├── universe_selection/[catalog, selector, rotation walk-forward]
-   │   ├── watchlist_quant_v6/[quote-only historical evaluation + evidence publication]
-   │   ├── opening_momentum*  [opening path / extension pure logic]
    │   └── analysis|sentiment|performance|experiment
    │
    ├── core/                  [broker, engine, risk, fees, backtest, audit, calendar, notifiers]
@@ -54,7 +52,7 @@ Hash routes (`createWebHashHistory`), ~65 total: 13 core operating pages (Dashbo
 ### Key Architecture Decisions
 
 - **Synchronous trading loop**: `AppRunner` uses `threading.Lock` + `threading.Event`. Bridge async contexts via `asyncio.to_thread()`.
-- **P0 live vs research split**: Live path is range engine + risk + execution. Universe / quant / strategy_v2 / opening-momentum / platform APIs are observation or offline research unless a flag explicitly wires a *read* gate (e.g. live regime gate) — still no auto-promotion.
+- **P0 live vs research split**: Live path is range engine + risk + execution. Universe / quant / strategy_v2 / platform APIs are observation or offline research unless a flag explicitly wires a *read* gate (e.g. live regime gate) — still no auto-promotion.
 - **One pre-submit boundary**: every entry passes `TradeExecutionService.pre_submit_risk_check()`, which returns a frozen `ApprovedOrder` (side derived from action; approved price = `max(request price, fresh executable price)` and *that* price is submitted) or a rejection. Exactly one broker mutation sits behind it — `test_pre_submit_risk_boundary_topology.py` spies every path.
 - **Prompt plugins**: `PromptModule` ABC + `FeatureSelector` for dynamic indicator gating.
 - **Hybrid credential encryption**: AES-GCM + RSA; plaintext only via `CredentialsService.get_plain_credentials()`.
@@ -79,7 +77,7 @@ Three god modules dominate: [`runner.py`](file:///home/lcy/code/auto_trade/backe
 
 ## CODE MAP
 
-`main.py` lifespan: `init_db()` → `init_audit_logger()` → `runner.start()` via `asyncio.to_thread` (failure aborts startup) → optional `PlatformRunner` → 12 cron-health registrations → `LivenessWatchdog` → **13 background asyncio tasks** → **93 `include_router`** calls. Each cron holds its own `asyncio.Lock`; `_opening_research_quiet_window()` makes research crons yield around the open.
+`main.py` lifespan: `init_db()` → `init_audit_logger()` → `runner.start()` via `asyncio.to_thread` (failure aborts startup) → optional `PlatformRunner` → cron-health registrations → `LivenessWatchdog` → **12 background asyncio tasks** → `include_router` calls. Each cron holds its own `asyncio.Lock`; `_opening_research_quiet_window()` makes research crons yield around the open.
 
 `AppRunner`: one daemon `_run_loop` thread on a 5s cycle (resubscribe → pending reconcile → today-order sync → auto-resume → position reconcile → engine/position sync → stale-quote refresh → silent-feed resubscribe → state persist → funnel housekeeping), plus a `post-fill-persist` daemon thread. Locks: `_start_lock`, `_state_lock` (RLock), `_order_persistence_lock`, and `TradeExecutionService.submission_guard()`. Quote hot path: broker WS push → `_on_quote` → `_evaluate_quote_trigger` (under `_state_lock`, snapshots engine, calls `StrategyEngine.update_price() -> TriggerResult`) → `_broadcast_status()` → `_execute_triggered_order` → `TradeExecutionService`.
 
@@ -106,7 +104,7 @@ Three god modules dominate: [`runner.py`](file:///home/lcy/code/auto_trade/backe
 |---|---|
 | `backend/app/core/` | Broker, engine, risk, fees, backtest, audit, calendar, notifiers, crypto |
 | `backend/app/services/` | Business logic (execution, LLM, universe, quant, shadows, review, PnL) |
-| `backend/app/domain/` | Pure computation (prompt, strategy_v2, universe_selection, watchlist_quant_v6, opening momentum) |
+| `backend/app/domain/` | Pure computation (prompt, strategy_v2, universe_selection) |
 | `backend/app/platform/` | Research/plugin layer + `/api/platform/*` |
 | `backend/app/api/` | FastAPI routers |
 | `frontend/src/views/` | Page components (13 core + ~50 analytics routes) |
@@ -315,7 +313,7 @@ If gate 4 fails, roll back immediately — `git revert` the commit, rebuild, con
 - **Signal edge gate** (`domain/strategy_v2/signal_edge.py`): Prove edge BEFORE tuning parameters. First-passage — driftless `P(target first) = stop/(stop+target)`; a signal at or below that baseline carries no directional information, so no exit re-parameterisation can rescue it, and counting is restricted to one barrier-version cohort (changing barriers changes the baseline). Cluster-robust significance — trades cluster by day across correlated symbols, so per-trade t-statistics overstate by ~`sqrt(trades/days)`; the estimator is trade-weighted by day. Verdicts: `PASS | FAIL | FEE_BLOCKED | INSUFFICIENT_DATA` — `FEE_BLOCKED` separates "fees ate a real edge" from "signal is wrong", and thin evidence is never `FAIL`. Judge on the **net** CI lower bound > 0; gross is reported only as contrast. Edge is assessed across ALL symbols because the entry rule is shared and per-symbol samples never reach the day count.
 - **Futility**: `signal-edge.futility` separately reports whether a cost-clearing gross edge remains `ALIVE`, is `FUTILE`, or is still `INSUFFICIENT_DATA`, using preregistered 10 bps cost / 20 bps daily sigma constants, a fixed `mean + 2.0·SE` upper bound, and the verdict evidence floors. It is read-only; abandonment still requires the written human decision in `PREREGISTRATION.md` §9.5.4.
 - **Frozen v5 negative control** (`domain/strategy_v2/PREREGISTRATION.md`): v5 keeps running unchanged as a negative control — if the pipeline ever certifies it as having edge, the pipeline is wrong. Promotion needs four ANDs: net CI lower > 0; version-specific first-passage beating its own driftless baseline; ≥60 distinct days and ~180 resolved brackets; deflated Sharpe `distinguishable_from_luck`. Any parameter change resets the evidence clock.
-- **Research artifact retention**: Artifact *bytes* expire (30d replay/quant-v6, 90d diagnostic WAIT, 14d ordinary WAIT); provenance/checksum rows and every live evidence table (`orders`, `transactions`, `trade_events`, `audit_logs`, `risk_events`, `tracked_entries`, `strategy_v2_shadow_trades`) are never pruned. `0` disables a window.
+- **Research artifact retention**: Artifact *bytes* expire (30d replay, 90d diagnostic WAIT, 14d ordinary WAIT); provenance/checksum rows and every live evidence table (`orders`, `transactions`, `trade_events`, `audit_logs`, `risk_events`, `tracked_entries`, `strategy_v2_shadow_trades`) are never pruned. `0` disables a window. Historical quant-v6 tables, if present, are neither written nor pruned.
 - **Prompt modules**: Composable modules assembled by `PromptBuilder`
 
 ---

@@ -421,14 +421,6 @@ def test_storage_maintenance_uses_one_lease_for_all_writers_and_closes_first(
             assert session is db
             self.kwargs = kwargs
 
-        def prune_expired_quant_v6_publication_payloads(
-            self, **_kwargs: object
-        ) -> object:
-            _exercise_callbacks("quant-v6-prune", self.kwargs)
-            return SimpleNamespace(
-                bindings_deleted=1, artifacts_deleted=1, batches=1
-            )
-
         def prune_expired_forward_replay_artifacts(
             self, **_kwargs: object
         ) -> object:
@@ -501,9 +493,6 @@ def test_storage_maintenance_uses_one_lease_for_all_writers_and_closes_first(
             "lease-checkpoint",
             "lease-fence",
             "diagnostic-wait-prune",
-            "lease-checkpoint",
-            "lease-fence",
-            "quant-v6-prune",
             "lease-checkpoint",
             "lease-fence",
             "replay-prune",
@@ -1185,82 +1174,6 @@ class TestPriceDriftPct:
         assert main_module._price_drift_pct(100.0, 100.0) == 0.0
 
 
-@pytest.mark.parametrize(
-    ("now", "enabled", "expected"),
-    [
-        (
-            datetime(2026, 7, 27, 13, 27, 59, tzinfo=timezone.utc),
-            True,
-            False,
-        ),
-        (datetime(2026, 7, 27, 13, 28, tzinfo=timezone.utc), True, True),
-        (datetime(2026, 7, 27, 13, 30, tzinfo=timezone.utc), True, True),
-        (
-            datetime(2026, 7, 27, 13, 34, 59, tzinfo=timezone.utc),
-            True,
-            True,
-        ),
-        (datetime(2026, 7, 27, 13, 35, tzinfo=timezone.utc), True, False),
-        (datetime(2026, 7, 25, 13, 32, tzinfo=timezone.utc), True, False),
-        (datetime(2026, 7, 27, 13, 32, tzinfo=timezone.utc), False, False),
-    ],
-)
-def test_opening_execution_priority_window(
-    monkeypatch: pytest.MonkeyPatch,
-    now: datetime,
-    enabled: bool,
-    expected: bool,
-) -> None:
-    monkeypatch.setattr(
-        main_module.settings,
-        "opening_momentum_execution_enabled",
-        enabled,
-    )
-
-    assert main_module._opening_execution_priority_window(now) is expected
-
-
-def test_opening_momentum_polling_accelerates_only_in_priority_window(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        main_module,
-        "_opening_execution_priority_window",
-        lambda _now=None: True,
-    )
-    assert main_module._opening_momentum_poll_seconds() == 5
-
-    monkeypatch.setattr(
-        main_module,
-        "_opening_execution_priority_window",
-        lambda _now=None: False,
-    )
-    assert main_module._opening_momentum_poll_seconds() == 15
-
-
-@pytest.mark.asyncio
-async def test_opening_momentum_cron_uses_dynamic_poll_interval(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    observed: list[float] = []
-
-    async def stop_after_sleep(seconds: float) -> None:
-        observed.append(seconds)
-        raise asyncio.CancelledError
-
-    monkeypatch.setattr(
-        main_module,
-        "_opening_momentum_poll_seconds",
-        lambda: 5,
-    )
-    monkeypatch.setattr(main_module.asyncio, "sleep", stop_after_sleep)
-
-    with pytest.raises(asyncio.CancelledError):
-        await main_module._opening_momentum_shadow_cron()
-
-    assert observed == [5]
-
-
 def test_opening_research_quiet_window_defers_heavy_research_ticks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1284,11 +1197,6 @@ def test_opening_research_quiet_window_defers_heavy_research_ticks(
         "universe_selection_enabled",
         True,
     )
-    monkeypatch.setattr(
-        main_module.settings,
-        "watchlist_quant_v6_evaluation_enabled",
-        True,
-    )
 
     assert (
         main_module._llm_storage_maintenance_tick_sync()
@@ -1296,10 +1204,6 @@ def test_opening_research_quiet_window_defers_heavy_research_ticks(
     )
     main_module._strategy_v2_shadow_tick_sync()
     main_module._watchlist_quant_tick_sync()
-    assert (
-        main_module._watchlist_quant_v6_evaluation_tick_sync()
-        is main_module._OPENING_RESEARCH_DEFERRED
-    )
     assert (
         main_module._universe_selection_tick_sync()
         is main_module._OPENING_RESEARCH_DEFERRED
@@ -1326,19 +1230,10 @@ async def test_opening_research_quiet_window_defers_async_research(
     monkeypatch.setattr(main_module, "SessionLocal", session_factory)
     monkeypatch.setattr("app.database.SessionLocal", session_factory)
     monkeypatch.setattr(main_module.asyncio, "to_thread", to_thread)
-    monkeypatch.setattr(
-        main_module.settings,
-        "watchlist_quant_v6_evaluation_enabled",
-        True,
-    )
 
     await main_module._llm_analysis_tick()
     assert (
         await main_module._run_llm_storage_maintenance_tick()
-        is main_module._OPENING_RESEARCH_DEFERRED
-    )
-    assert (
-        await main_module._run_watchlist_quant_v6_evaluation_tick()
         is main_module._OPENING_RESEARCH_DEFERRED
     )
 
@@ -1606,58 +1501,6 @@ async def test_universe_worker_propagates_research_defer(
         is main_module._OPENING_RESEARCH_DEFERRED
     )
     session_factory.assert_not_called()
-
-
-def test_opening_research_quiet_window_does_not_gate_opening_job(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from app.services import opening_momentum_execution_service
-    from app.services import opening_momentum_shadow_service
-
-    calls: list[str] = []
-    db = SimpleNamespace(
-        close=MagicMock(),
-        rollback=MagicMock(),
-    )
-    runner = SimpleNamespace(broker=object())
-
-    class FakeExecutionService:
-        def __init__(self, *_args: object) -> None:
-            pass
-
-        def tick(self) -> None:
-            calls.append("execution")
-
-    class FakeShadowService:
-        def __init__(self, *_args: object) -> None:
-            pass
-
-        def tick(self) -> None:
-            calls.append("shadow")
-
-    monkeypatch.setattr(
-        main_module,
-        "_opening_research_quiet_window",
-        lambda: True,
-    )
-    monkeypatch.setattr(main_module, "SessionLocal", lambda: db)
-    monkeypatch.setattr(main_module, "get_runner", lambda: runner)
-    monkeypatch.setattr(
-        opening_momentum_execution_service,
-        "OpeningMomentumExecutionService",
-        FakeExecutionService,
-    )
-    monkeypatch.setattr(
-        opening_momentum_shadow_service,
-        "OpeningMomentumShadowService",
-        FakeShadowService,
-    )
-
-    main_module._opening_momentum_shadow_tick_sync()
-
-    assert calls == ["execution", "shadow"]
-    db.rollback.assert_not_called()
-    db.close.assert_called_once_with()
 
 
 class TestShouldRunLLMAnalysis:
@@ -3042,15 +2885,11 @@ def test_storage_maintenance_runs_later_stages_when_one_stage_raises(
 
         def prune_expired_diagnostic_wait_decisions(self, **_kwargs: object) -> object:
             events.append("diagnostic-wait-prune")
-            return SimpleNamespace(deleted=0, batches=0)
+            raise RuntimeError("diagnostic wait table rejected the prune")
 
     class FakeArtifactRetentionService:
         def __init__(self, session: object, **_kwargs: object) -> None:
             pass
-
-        def prune_expired_quant_v6_publication_payloads(self, **_kwargs: object) -> object:
-            events.append("quant-v6-prune")
-            raise RuntimeError("quant_v6 table is append-only")
 
         def prune_expired_forward_replay_artifacts(self, **_kwargs: object) -> object:
             events.append("replay-prune")
@@ -3082,7 +2921,6 @@ def test_storage_maintenance_runs_later_stages_when_one_stage_raises(
     with pytest.raises(Exception):
         main_module._llm_storage_maintenance_tick_sync()
 
-    assert "quant-v6-prune" in events
     assert "replay-prune" in events, "a failing stage must not skip later stages"
     assert "snapshot-prune" in events, (
         "runtime_state_snapshot pruning must still run; it is 71% of production DB pages"

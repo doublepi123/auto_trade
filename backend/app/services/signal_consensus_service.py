@@ -1,9 +1,9 @@
 """Signal consensus matrix — cross-source aggregation of bullish/bearish votes.
 
 The matrix is a *read-only* observation layer. It never places orders and
-never mutates any persisted state; it simply joins five existing signal
-sources (range engine, Strategy v2 shadow, opening momentum shadow, watchlist
-quant scores, LLM advisor) and rolls them up into a per-symbol consensus.
+never mutates any persisted state; it simply joins four existing signal
+sources (range engine, Strategy v2 shadow, watchlist quant scores, LLM
+advisor) and rolls them up into a per-symbol consensus.
 
 This deliberately mirrors the project's P0 live-safety rule: shadow / research
 paths are observation-only. The matrix is one more observer on top of them.
@@ -19,7 +19,6 @@ from sqlalchemy.orm import Session
 
 from app.models import (
     LLMInteraction,
-    OpeningMomentumShadowRun,
     StrategyConfig,
     StrategyV2ShadowTrade,
     TradeEvent,
@@ -59,12 +58,11 @@ def _parse_json(raw: str | None) -> dict[str, Any]:
 
 
 class SignalConsensusService:
-    """Aggregate per-symbol signal votes across five read-only sources."""
+    """Aggregate per-symbol signal votes across four read-only sources."""
 
     SOURCE_NAMES: tuple[str, ...] = (
         "range_engine",
         "strategy_v2_shadow",
-        "opening_momentum",
         "quant_score",
         "llm_advisor",
     )
@@ -79,7 +77,7 @@ class SignalConsensusService:
         """Return one consensus row per symbol.
 
         ``symbols`` is normalized (uppercased, deduplicated, empties dropped).
-        When ``None`` the union of symbols observed across all five sources is
+        When ``None`` the union of symbols observed across all four sources is
         used. An empty/blank symbol set therefore yields ``[]`` rather than a
         synthetic "no symbol" row.
         """
@@ -156,8 +154,6 @@ class SignalConsensusService:
             self._add_symbol(discovered, symbol[0])
         for symbol in self._db.query(StrategyV2ShadowTrade.symbol).all():
             self._add_symbol(discovered, symbol[0])
-        for symbol in self._db.query(OpeningMomentumShadowRun.candidate_symbol).all():
-            self._add_symbol(discovered, symbol[0])
         for symbol in self._db.query(WatchlistScore.symbol).all():
             self._add_symbol(discovered, symbol[0])
         for symbol in self._db.query(LLMInteraction.symbol).all():
@@ -179,7 +175,6 @@ class SignalConsensusService:
         return {
             "range_engine": self._range_engine_signal(symbol),
             "strategy_v2_shadow": self._strategy_v2_shadow_signal(symbol),
-            "opening_momentum": self._opening_momentum_signal(symbol),
             "quant_score": self._quant_score_signal(symbol),
             "llm_advisor": self._llm_advisor_signal(symbol),
         }
@@ -280,46 +275,6 @@ class SignalConsensusService:
                 "updated_at": _to_iso(trade.updated_at or trade.exit_at),
             }
         return self._no_data(f"unknown shadow trade status '{trade.status}'")
-
-    def _opening_momentum_signal(self, symbol: str) -> dict[str, Any]:
-        run = (
-            self._db.query(OpeningMomentumShadowRun)
-            .filter(OpeningMomentumShadowRun.candidate_symbol == symbol)
-            .order_by(
-                OpeningMomentumShadowRun.signal_at.desc(),
-                OpeningMomentumShadowRun.id.desc(),
-            )
-            .first()
-        )
-        if run is None:
-            return self._no_data("no opening momentum observation")
-        status = (run.status or "").upper()
-        # ENTRY/ARMED/OPEN -> bullish (the candidate was selected). SKIP/REJECT
-        # or a realized negative net return is bearish. Otherwise neutral.
-        if status in {"ENTRY", "ARMED", "OPEN", "ENTERED"}:
-            signal: SignalLabel = "BULLISH"
-            confidence = 0.6
-        elif status in {"SKIP", "REJECT", "REJECTED", "EXCLUDED"}:
-            signal = "BEARISH"
-            confidence = 0.5
-        elif run.net_return_bps is not None and run.net_return_bps > 0:
-            signal = "BULLISH"
-            confidence = 0.5
-        elif run.net_return_bps is not None and run.net_return_bps < 0:
-            signal = "BEARISH"
-            confidence = 0.5
-        else:
-            signal = "NEUTRAL"
-            confidence = 0.3
-        return {
-            "signal": signal,
-            "confidence": round(confidence, 4),
-            "detail": (
-                f"opening momentum run status={run.status} "
-                f"excess_return_bps={run.excess_return_bps}"
-            ),
-            "updated_at": _to_iso(run.updated_at or run.signal_at),
-        }
 
     def _quant_score_signal(self, symbol: str) -> dict[str, Any]:
         score = (

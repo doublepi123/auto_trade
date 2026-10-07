@@ -124,12 +124,11 @@ flowchart LR
 - P0 永久禁用 LLM 实盘下单，不能通过策略字段、API 或环境变量开启
 - `CANCEL_REPLACE`、订单价格偏离和发单冷却参数仅保留兼容性；P0 不会进入对应的券商下单路径
 
-### Strategy v2 / 开盘动量 / 组合路由影子（只读）
+### Strategy v2 / 组合路由影子（只读）
 
 - **Strategy v2**：RTH 内已结算 1 分钟 bar → session VWAP、因果 residual z-score、5 分钟确认；ADX / 实现波动率门禁；long-only、禁止加仓；不利滑点 + 冻结费率估算净收益；stop / target / 最大持仓 / 收盘前强平、MAE / MFE
 - 硬安全线：最长持仓 60 分钟、收盘前 45 分钟停入场、前 15 分钟强制虚拟平仓；**无订单执行依赖**
 - Lab「策略 v2 影子」：特征、gate、状态、虚拟绩效、决策导出；离线 replay 永不写库
-- **开盘动量影子**（`/api/opening-momentum-shadow`）：盘前冻结池上的开盘路径效率 / 强弱延续对照，仅记录；弱广度路径挑战者固定为 3 分钟信号、市场中位收益 `[-50, 0] bps`、候选路径效率至少 `0.70`、持仓 60 分钟及 1% 止损，并从 2026-07-27 起只累计未见前向证据；同信号的 4% 灾难止损挑战者与其做配对退出对照，同样只从 2026-07-27 起计证据（截至 2026-07-24 的历史分钟线仅视为设计样本）；个股隔夜跳空、昨收到信号收益及同期 QQQ / DIA 收益仅作为因果遥测，不参与门禁或下单
 - **组合路由影子**：单资金槽跨标的路由对照；**live exit challenger** 对真实成交做 forward-only 锁盈对照——均不下单、不自动晋级
 - 可选 **live regime gate**：开仓前要求主标的最新 v2 shadow 门禁通过（默认关）
 
@@ -338,19 +337,6 @@ python3 scripts/import_historical_order_ledger.py \
 无法返回已退市或已收购证券，因此 PIT 缺失阻断必须保留；当前成分结果和不完整 PIT 均不能
 作为自动晋级或下单依据。
 
-quote-only quant-v6 发布会把服务端评估器接收的行情时间戳投影为共享交易日网格的紧凑
-覆盖位图，并据此重放每个目标日的 `COVERED` / `MISSING` 与精确阻断原因；完整时间戳序列
-另以 SHA-256 承诺绑定，避免把约 38 万个时间戳塞进发布根。这里的信任边界仍是
-server-owned evaluator：当前证据可以发现不改取数投影却删除 session/event 的降级攻击，
-但尚不是原始 provider OHLCV 的完整来源证明，也不能证明同一时间戳在所有重叠 artifact
-中的 OHLCV 一致。后续 typed acquisition artifact 会补齐该 provenance；在此之前这些结果
-只能用于只读研究和人工审计，不能自动晋级或下单。
-
-quant-v6 作业默认关闭。启用后，计算进程数默认限制为 4，整条 pipeline（本作业导致的
-父进程 RSS 增量 + 所有 worker 的 RSS 总和）的内存预算默认限制为 2048 MiB；这些配置
-只影响 quote-only 研究计算的资源边界，不改变
-P0：禁止做空、禁止持仓加仓，LLM/shadow/challenger 不下单且不自动晋级。
-
 ---
 
 ## 项目结构
@@ -365,14 +351,14 @@ auto_trade/
 │   │   ├── models.py / schemas.py
 │   │   ├── runner.py            # AppRunner：行情、区间策略、影子任务、WS 广播
 │   │   ├── api/                 # 路由：strategy / trade / watchlist / universe /
-│   │   │                        # strategy_shadow / opening_momentum_shadow /
+│   │   │                        # strategy_shadow /
 │   │   │                        # review / reports / alerts / platform ...
 │   │   ├── core/                # broker、engine、risk、fees、backtest、audit、calendar、notifiers
 │   │   ├── domain/              # 纯计算：prompt、strategy_v2、universe_selection、opening_momentum
 │   │   ├── services/            # 业务：执行、LLM、候选池、量化评分、影子/challenger、复盘
 │   │   ├── platform/            # 研究/组合/Paper 插件层 + /api/platform/* 只读计算
 │   │   ├── strategies/          # 平台策略插件示例（mean_reversion / momentum / trend）
-│   │   └── cli/                 # 研究 CLI（如 opening_extension_research）
+│   │   └── cli/                 # 研究 CLI（如 spy_monthly_sma10_replay）
 │   ├── tests/                   # pytest（含 platform/ 子目录）
 │   ├── scripts/                 # walk-forward 复算、指数成分快照、setup_venv
 │   ├── alembic/                 # 历史迁移（运行时以 database._ensure_* 为主）
@@ -629,12 +615,6 @@ auto_trade/
 | `GET` | `/api/universe/range-fitness` | 按标的汇总 Strategy v2 影子证据中的 `ADX_REGIME_BLOCKED` 占比，判断该标的当前是否仍适合区间策略（`RANGE_SUITABLE` / `MIXED` / `TREND_UNSUITABLE` / `INSUFFICIENT_DATA`）；`?lookback_days=&min_samples=&trend_unsuitable_pct=&range_suitable_pct=`。只读聚合，不切换主标的、不改区间、不下单 |
 | `GET` | `/api/universe/primary-candidacy` | 只读回答「该选哪个主标的，以及数据是否足以回答」。把三个必须分开的问题分列：`edge_pick`（证据是否**支持**选它；不支持时为 null）、`gates_only_pick`（若没有池级闸门与功效要求，cron **本会**选谁——是事实陈述，带 `not_an_edge_claim` 与被扣留的理由）、`tradeability_pick`（哪个**最便宜交易**，只看点差/成交额/价格，不需要任何显著性）。另含 `power` 块：按实测每笔离散度给出「每标的需要 N 笔 / 实际最多持有 M 笔」，让「排名是不是噪声」成为可读数字而非判断。`?delta_bps=&alpha=&power=&include_entry_windows=`。只读，不切换主标的、不改区间、不下单 |
 
-### 开盘动量影子
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/opening-momentum-shadow/*` | 开盘动量影子配置 / 状态 / 决策等只读接口（详见 OpenAPI / Lab UI） |
-
 ### WebSocket
 
 | Protocol | Path | Description |
@@ -813,14 +793,6 @@ auto_trade/
 | `AUTO_TRADE_WATCHLIST_QUANT_INTERVAL_MINUTES` | 同一标的两次量化 v5 评分的最小间隔（分钟） | `30` |
 | `AUTO_TRADE_WATCHLIST_QUANT_SCORE_TTL_MINUTES` | 量化 v5 证据有效期（分钟），与盘中刷新频率分离 | `1440` |
 | `AUTO_TRADE_WATCHLIST_QUANT_BATCH_SIZE` | 每次自动量化刷新最多处理的到期标的数，分批为实时行情与影子策略保留 API 配额 | `3` |
-| `AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_ENABLED` | 启用独立的 quote-only quant-v6 历史评估与不可变证据发布；默认关闭，不读取当前 watchlist/universe，不提交订单、不自动晋级 | `false` |
-| `AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_INTERVAL_MINUTES` | quant-v6 历史评估成功后的常规周期（分钟，`60-10080`） | `1440` |
-| `AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_RETRY_INTERVAL_MINUTES` | quant-v6 provider/发布失败后的重试周期（分钟，`15-1440`，不得大于常规周期） | `60` |
-| `AUTO_TRADE_WATCHLIST_QUANT_V6_EVALUATION_TIMEOUT_SECONDS` | 单次 quant-v6 acquisition/evaluation/publication 的端到端协作式 deadline（秒，`60-7200`）；在 SDK、member、leaf/event replay 与 pre-commit 边界检查，不改变 domain 语义或 artifact payload，控制源由 historical evaluator manifest v3 绑定 | `1800` |
-| `AUTO_TRADE_WATCHLIST_QUANT_V6_PROVIDER_PAGE_TIMEOUT_SECONDS` | 单页 quote-only 历史 SDK 调用的硬超时（秒，`5-120`）；取消部署时会协作终止剩余 cohort | `30` |
-| `AUTO_TRADE_WATCHLIST_QUANT_V6_COMPUTE_WORKERS` | quote-only quant-v6 计算进程数（`2-4`）；只改变研究计算并行度，不改变 P0 交易语义 | `4` |
-| `AUTO_TRADE_WATCHLIST_QUANT_V6_PIPELINE_MEMORY_LIMIT_MIB` | quant-v6 作业导致的父进程 RSS 增量与所有计算 worker RSS 总和的 pipeline 内存预算（MiB，`512-8192`）；超限由研究作业失败关闭，不放宽 P0 | `2048` |
-| `AUTO_TRADE_WATCHLIST_QUANT_V6_DB_SIZE_BUDGET_MB` | quant-v6 研究证据的数据库容量预算（MB，`512-16384`）。已发布 artifact 由 SQLite 触发器保证 append-only、retention 必须为 `0`，因此无法清理；唯一可用的控制手段就是**不再产生新证据**。实测库大小超过该预算时跳过本次 quote-only 评估并记录 warning，**不删除任何已有证据、不执行 VACUUM**；无法测量库大小时同样 fail-closed 跳过。默认值高于当前占用，便于部署后仍有可用余量，可随时按需调小。仅影响研究作业，不改变 P0 与实盘交易 | `4096` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_MAX_SYMBOLS` | 每次最多入选标的数 | `12` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_EXPLORATION_MAX_SYMBOLS` | 先补足已入选风险组的残差基准同伴（可使用仅成交额处于实盘门槛 75%-100% 的 peer-only 标的），再保留冻结轮动与最高分新挑战者，剩余容量用于细行业和长期观察；自动新增或重新启用的标的仅观察、不会获得开仓资格，已启用的开仓池独立保留且不占探索配额，`0` 表示关闭 | `24` |
 | `AUTO_TRADE_UNIVERSE_SELECTION_EXPLORATION_TOP_SCORE_CHALLENGERS` | 同伴与轮动覆盖完成后、长期观察标的占用容量前，优先保留的最高分硬门槛通过者数量；只收集前向证据，不会正式入选、切换主标的或下单 | `2` |

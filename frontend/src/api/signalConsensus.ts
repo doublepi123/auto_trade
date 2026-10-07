@@ -11,7 +11,6 @@ export interface ConsensusRow {
   symbol: string
   range_engine: SignalVote
   strategy_v2: SignalVote
-  opening_momentum: SignalVote
   quant_score: SignalVote
   llm_advisor: SignalVote
   consensus: 'AGREE_BULLISH' | 'AGREE_BEARISH' | 'MIXED' | 'INSUFFICIENT_DATA'

@@ -30,7 +30,6 @@ Two safety idioms recur:
 | `evaluate_rotation_walk_forward.py` | Walk-forward evaluation of universe-rotation selection (`--history-bars`, e.g. 1000) | Read-only research |
 | `build_index_membership_snapshot.py` | Fetch/derive index membership history; snapshot for universe selection (`app/domain/universe_selection/data/`) | Read-only research; writes snapshot artifact |
 | `evaluate_range_exit_horizons.py` | Range-strategy holding-horizon study on local OHLC CSV (`--input`, `--symbol`, `--market`, `--buy-low`, …); deterministic discovery/holdout day split | Read-only research |
-| `evaluate_frozen_disproof_queue.py` | Score a precommitted, research-only Strategy v2 forward disproof queue from explicitly supplied JSON (`--input`; never reads broker or DB) | Read-only research |
 | `screen_strategy_plugin_inventory.py` | Offline screen of platform strategy plugins on minute bars (`--data minute-bars.json --symbol NVDA.US`) | Read-only research |
 | `backfill_strategy_v2_forward_replay_artifacts.py` | Regenerate replay artifacts for forward shadow trades via `StrategyV2ShadowService` (`--limit`, default 250) | Write (DB artifacts only) |
 | `database_maintenance.py` | Retention prune + backup relocation + VACUUM. Default **PREVIEW** (dbstat usage, would-delete counts, projected size); `--apply` to mutate; `--vacuum` additionally requires `--apply`, refuses during any market's RTH, checkpoints WAL first, needs ~DB-size free disk | Preview / `--apply` |
