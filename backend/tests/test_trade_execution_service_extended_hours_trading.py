@@ -119,6 +119,10 @@ def _pin_clock(monkeypatch: pytest.MonkeyPatch, instant: datetime) -> None:
     monkeypatch.setattr(
         execution, "is_extended_closing_window", is_extended_closing_window,
     )
+    monkeypatch.setattr(
+        "app.core.execution_session.datetime",
+        type("Frozen", (datetime,), {"now": staticmethod(lambda tz=None: instant)}),
+    )
 
 
 def _service(**kwargs: object) -> execution.TradeExecutionService:

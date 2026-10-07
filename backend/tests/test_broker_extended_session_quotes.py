@@ -195,7 +195,14 @@ def test_overnight_quote_is_selected_when_freshest(
 ) -> None:
     from app.config import settings as live_settings
 
-    object.__setattr__(live_settings, "overnight_trading_effective", lambda: True)
+    # monkeypatch (not object.__setattr__) so the global settings object is
+    # restored after this test; a permanent override leaked "overnight
+    # effective" into every later test in the same process.
+    monkeypatch.setattr(live_settings, "extended_hours_trading_enabled", True)
+    monkeypatch.setattr(live_settings, "paper_account_confirmed", False)
+    monkeypatch.setattr(live_settings, "overnight_trading_enabled", True)
+    monkeypatch.setenv("LONGPORT_ENABLE_OVERNIGHT", "true")
+    assert live_settings.overnight_trading_effective() is True
     main_ts = datetime(2026, 10, 5, 16, 0, 0)
     gateway, _context = _gateway([
         _QuoteItem(

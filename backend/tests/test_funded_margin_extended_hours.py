@@ -127,6 +127,10 @@ def _pin(monkeypatch: pytest.MonkeyPatch, instant: datetime) -> None:
         "is_opening_warmup",
         lambda *_args, **_kwargs: False,
     )
+    monkeypatch.setattr(
+        "app.core.execution_session.datetime",
+        type("Frozen", (datetime,), {"now": staticmethod(lambda tz=None: instant)}),
+    )
 
 
 def _service(

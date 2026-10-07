@@ -159,7 +159,7 @@ def test_rth_long_same_symbol_is_blocked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "app.services.interval_recenter_service.is_trading_hours",
+        "app.core.market_calendar.is_trading_hours",
         lambda *_args, **_kwargs: True,
     )
     _seed(db, mode="ANY")
@@ -180,7 +180,7 @@ def test_race_to_long_between_check_and_reload_rolls_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        "app.services.interval_recenter_service.is_trading_hours",
+        "app.core.market_calendar.is_trading_hours",
         lambda *_args, **_kwargs: True,
     )
     _seed(db, mode="ANY")

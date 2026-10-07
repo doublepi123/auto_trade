@@ -109,7 +109,7 @@ class _Runner:
 @pytest.fixture(autouse=True)
 def _enable(monkeypatch):
     monkeypatch.setattr(
-        "app.services.interval_recenter_service.is_trading_hours",
+        "app.core.market_calendar.is_trading_hours",
         lambda *_args, **_kwargs: True,
     )
     monkeypatch.setattr(settings, "interval_recenter_enabled", True, raising=False)

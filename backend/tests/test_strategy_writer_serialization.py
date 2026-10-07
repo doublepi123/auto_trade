@@ -87,7 +87,7 @@ def test_api_identity_map_does_not_reinstall_rolled_back_band(
     monkeypatch.setattr(settings, "interval_recenter_max_per_day", 4, raising=False)
     monkeypatch.setattr(settings, "llm_interval_volatility_threshold_pct", 1.0, raising=False)
     monkeypatch.setattr(
-        "app.services.interval_recenter_service.is_trading_hours",
+        "app.core.market_calendar.is_trading_hours",
         lambda *_a, **_k: True,
     )
     seed = factory()
@@ -251,7 +251,7 @@ def test_start_does_not_install_a_rolled_back_band(
     monkeypatch.setattr(settings, "interval_recenter_max_per_day", 4, raising=False)
     monkeypatch.setattr(settings, "llm_interval_volatility_threshold_pct", 1.0, raising=False)
     monkeypatch.setattr(
-        "app.services.interval_recenter_service.is_trading_hours",
+        "app.core.market_calendar.is_trading_hours",
         lambda *_a, **_k: True,
     )
     seed = factory()

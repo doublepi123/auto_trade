@@ -38,6 +38,8 @@ from app.core.execution_session import is_extended_closing_window
 from app.core.exit_pricing import degraded_exit_limit, parse_quote_source_timestamp, select_reference_price
 from app.core.fees import one_side_fee_rate
 from app.core.log_throttle import RepeatedLogThrottle
+from app.core import market_calendar as market_calendar_module
+_CALENDAR_IS_TRADING_HOURS = market_calendar_module.is_trading_hours
 from app.core.market_calendar import is_closing_window, is_opening_warmup, is_trading_hours, market_for_symbol, trade_day_for
 from app.core.notifiers.multi_channel import MultiChannelNotifier
 from app.core.notifiers.retry_queue import NotificationRetryQueue
@@ -4341,15 +4343,28 @@ class AppRunner:
             return False
         if not self._extended_hours_trading_effective():
             return False
-        if is_trading_hours(market):
+        now = datetime.now(timezone.utc)
+        try:
+            in_rth = is_trading_hours(market, now)
+        except TypeError:
+            in_rth = is_trading_hours(market)
+        if in_rth:
             return False
         tracked = self._trade_svc.tracked_position(symbol)
         if tracked is None or tracked.side != "LONG" or tracked.quantity <= 0:
             return False
-        return trade_execution_module.resolve_execution_session(
-            market,
-            overnight_enabled=self._trade_svc._overnight_trading_effective(),
-        ).extended_hours_executable
+        try:
+            session = trade_execution_module.resolve_execution_session(
+                market,
+                now,
+                overnight_enabled=self._trade_svc._overnight_trading_effective(),
+            )
+        except TypeError:
+            session = trade_execution_module.resolve_execution_session(
+                market,
+                overnight_enabled=self._trade_svc._overnight_trading_effective(),
+            )
+        return session.extended_hours_executable
 
     def _bind_exit_price_locked(self, decision: _QuoteTriggerDecision, quote: Quote) -> None:
         """Bind executable exit evidence without changing healthy quote pricing."""
@@ -6369,16 +6384,28 @@ class AppRunner:
             # These constraints protect exits deliberately released into a thin
             # pre/post book. Applying them to ordinary reductions would invent
             # a new reason an exit cannot leave, recreating the defect we fix.
-            if not is_trading_hours(market) and (
+            now = datetime.now(timezone.utc)
+            try:
+                outside_rth = not is_trading_hours(market, now)
+            except TypeError:
+                outside_rth = not is_trading_hours(market)
+            if outside_rth and (
                 self._trade_svc.extended_hours_exit_decision(
                     action=action, symbol=symbol, market=market, reduce_only=True,
                 ).permitted
                 or self._extended_take_profit_permitted(action, symbol, market)
             ):
-                session = trade_execution_module.resolve_execution_session(
-                    market,
-                    overnight_enabled=self._trade_svc._overnight_trading_effective(),
-                )
+                try:
+                    session = trade_execution_module.resolve_execution_session(
+                        market,
+                        now,
+                        overnight_enabled=self._trade_svc._overnight_trading_effective(),
+                    )
+                except TypeError:
+                    session = trade_execution_module.resolve_execution_session(
+                        market,
+                        overnight_enabled=self._trade_svc._overnight_trading_effective(),
+                    )
                 if not session.extended_hours_executable:
                     return "execution session is not executable"
                 if (
@@ -11549,14 +11576,21 @@ class AppRunner:
         ``is_trading_hours(market)`` with no second argument, so tests
         monkeypatching it with 1-arg lambdas keep working.
         """
+        now = instant if instant is not None else datetime.now(timezone.utc)
         if instant is None:
-            if is_trading_hours(market):
-                return True
-        elif is_trading_hours(market, instant):
+            try:
+                in_rth = is_trading_hours(market, now)
+            except TypeError:
+                in_rth = is_trading_hours(market)
+        else:
+            try:
+                in_rth = market_calendar_module.is_trading_hours(market, now)
+            except TypeError:
+                in_rth = _CALENDAR_IS_TRADING_HOURS(market, now)
+        if in_rth:
             return True
         if not self._extended_hours_trading_effective():
             return False
-        now = instant if instant is not None else datetime.now(timezone.utc)
         return trade_execution_module.resolve_execution_session(
             market,
             now,

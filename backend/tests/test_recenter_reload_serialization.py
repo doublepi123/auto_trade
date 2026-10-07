@@ -88,7 +88,7 @@ def test_plain_reload_and_refused_recenter_leave_one_band(
     monkeypatch.setattr(settings, "interval_recenter_max_per_day", 4, raising=False)
     monkeypatch.setattr(settings, "llm_interval_volatility_threshold_pct", 1.0, raising=False)
     monkeypatch.setattr(
-        "app.services.interval_recenter_service.is_trading_hours",
+        "app.core.market_calendar.is_trading_hours",
         lambda market, instant=None: True,
     )
     _seed(sessions)

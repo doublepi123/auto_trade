@@ -111,6 +111,7 @@ def _pin(monkeypatch: pytest.MonkeyPatch, instant: datetime) -> type[_Clock]:
     _Clock.instant = instant.astimezone(timezone.utc)
     monkeypatch.setattr(execution, "datetime", _Clock)
     monkeypatch.setattr(runner_module, "datetime", _Clock)
+    monkeypatch.setattr("app.core.execution_session.datetime", _Clock)
 
     def is_trading_hours(market: str, at: datetime | None = None) -> bool:
         return _real_is_trading_hours(market, at or _Clock.instant)

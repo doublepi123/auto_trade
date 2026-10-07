@@ -55,6 +55,8 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.execution_session import resolve_execution_session
+from app.core import market_calendar as market_calendar_module
+_CALENDAR_IS_TRADING_HOURS = market_calendar_module.is_trading_hours
 from app.core.market_calendar import is_trading_hours, trade_day_for
 from app.models import StrategyConfig, TradeEvent
 from app.services.trade_event_service import (
@@ -383,7 +385,11 @@ class IntervalRecenterService:
         instant: datetime,
     ) -> bool:
         """RTH, or executable US PRE/POST when ANY and extended is effective."""
-        if is_trading_hours(market, instant):
+        try:
+            in_rth = market_calendar_module.is_trading_hours(market, instant)
+        except TypeError:
+            in_rth = _CALENDAR_IS_TRADING_HOURS(market, instant)
+        if in_rth:
             return True
         mode = str(getattr(config, "trading_session_mode", "") or "ANY").upper()
         if mode != "ANY":

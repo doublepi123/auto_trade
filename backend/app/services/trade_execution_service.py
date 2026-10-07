@@ -766,7 +766,12 @@ class TradeExecutionService:
         has no such authorization, so a clock that crosses 16:00 skips
         instead of submitting a plain RTH order into POST.
         """
-        if is_trading_hours(market):
+        now = datetime.now(timezone.utc)
+        try:
+            in_rth = is_trading_hours(market, now)
+        except TypeError:
+            in_rth = is_trading_hours(market)
+        if in_rth:
             return True
         if trading_session_mode != "ANY":
             return False
@@ -777,15 +782,22 @@ class TradeExecutionService:
             return False
         if str(context[0]).upper() != symbol.upper():
             return False
-        return resolve_execution_session(
-            market, overnight_enabled=self._overnight_trading_effective(),
-        ).extended_hours_executable
+        try:
+            session = resolve_execution_session(
+                market, now, overnight_enabled=self._overnight_trading_effective(),
+            )
+        except TypeError:
+            session = resolve_execution_session(
+                market, overnight_enabled=self._overnight_trading_effective(),
+            )
+        return session.extended_hours_executable
 
     def _entry_cutoff_active(
         self,
         market: str,
         *,
         trading_session_mode: str | None = None,
+        instant: datetime | None = None,
     ) -> bool:
         """Entry-cutoff predicate.
 
@@ -803,8 +815,12 @@ class TradeExecutionService:
         )
         if mode != "ANY" or not self._extended_hours_trading_effective():
             return is_closing_window(market, minutes)
+        now = instant if instant is not None else datetime.now(timezone.utc)
         return is_extended_closing_window(
-            market, minutes, overnight_enabled=self._overnight_trading_effective(),
+            market,
+            minutes,
+            now,
+            overnight_enabled=self._overnight_trading_effective(),
         )
 
     def _approval_phase(self, symbol: str) -> str:
@@ -2113,6 +2129,11 @@ class TradeExecutionService:
         is_funnel_primary: bool = False,
         sized_quantity: Decimal | None = None,
     ) -> OrderStatus | None:
+        decided_at = datetime.now(timezone.utc)
+        try:
+            outside_rth_now = not is_trading_hours(market, decided_at)
+        except TypeError:
+            outside_rth_now = not is_trading_hours(market)
         if reduce_only and action not in _POSITION_REDUCING_ACTIONS:
             return self._skip_order(
                 symbol,
@@ -2130,7 +2151,7 @@ class TradeExecutionService:
         if (
             action == "BUY"
             and trading_session_mode == "ANY"
-            and not is_trading_hours(market)
+            and outside_rth_now
         ):
             # Extended-hours trading opt-in (owner 2026-10-03): a long BUY in
             # an executable US PRE/POST phase may pass when the flag is
@@ -2157,14 +2178,14 @@ class TradeExecutionService:
             self._extended_hours_context = (
                 symbol,
                 extended_entry_decision.phase,
-                datetime.now(timezone.utc),
+                decided_at,
                 "ENTRY",
             )
         if (
             trading_session_mode == "ANY"
             and self._extended_hours_trading_effective()
             and action in _POSITION_REDUCING_ACTIONS
-            and not is_trading_hours(market)
+            and outside_rth_now
             and (
                 reduce_only
                 or (
@@ -2197,13 +2218,12 @@ class TradeExecutionService:
             self._extended_hours_context = (
                 symbol,
                 exit_decision.phase,
-                datetime.now(timezone.utc),
+                decided_at,
                 "EXIT",
             )
         if trading_session_mode == "RTH_ONLY":
-            if not is_trading_hours(market):
+            if outside_rth_now:
                 # SESSION skip records ORDER_SKIPPED only; TRADING_SESSION_BLOCKED is layer A.
-                decided_at = datetime.now(timezone.utc)
                 decision = self.extended_hours_exit_decision(
                     action=action, symbol=symbol, market=market,
                     reduce_only=reduce_only, instant=decided_at,
@@ -5756,8 +5776,12 @@ class TradeExecutionService:
         outside_rth: str | None = None
         if self._extended_hours_context is not None:
             execution_market = market_for_symbol(symbol)
-            if not is_trading_hours(execution_market):
-                now = datetime.now(timezone.utc)
+            now = datetime.now(timezone.utc)
+            try:
+                outside_rth_now = not is_trading_hours(execution_market, now)
+            except TypeError:
+                outside_rth_now = not is_trading_hours(execution_market)
+            if outside_rth_now:
                 if action in _ENTRY_ACTIONS:
                     # Extended-hours ENTRY final binding (flag-gated): re-check
                     # the executable phase at submit time — an approval made
