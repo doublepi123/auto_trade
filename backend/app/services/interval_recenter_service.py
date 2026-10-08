@@ -441,9 +441,12 @@ class IntervalRecenterService:
     ) -> int:
         """Count today's successful recenters for this symbol.
 
-        Counted on the EXCHANGE-local trading day, matching how PnL and risk
-        reset, so the cap tracks a session rather than a UTC midnight that
-        falls mid-session for US markets.
+        Counted on the EXCHANGE-local trading day (``trade_day_for``), which
+        tracks a calendar session rather than a UTC midnight that falls
+        mid-session for US markets. This is NOT the live risk day: the daily
+        PnL/risk bucket runs 20:00 ET to 20:00 ET (see
+        ``app.core.live_risk_day``), while this per-day cap deliberately
+        stays on the calendar session day.
         """
         day = trade_day_for(market, anchor)
         rows = self._db.scalars(

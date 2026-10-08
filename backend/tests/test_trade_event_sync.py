@@ -6,6 +6,7 @@ from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 import pytest
+from freezegun import freeze_time
 
 from app.core.broker import BrokerOrder
 from app.core.engine import StrategyParams
@@ -535,117 +536,127 @@ class TestTradeEventSync:
             db.close()
 
     def test_sync_today_orders_recomputes_realized_daily_pnl(self) -> None:
-        _clean()
-        trade_day = trade_day_for("US")
-        buy_fill = datetime.combine(trade_day, time(14, 0), tzinfo=timezone.utc)
-        sell_fill = datetime.combine(trade_day, time(14, 5), tzinfo=timezone.utc)
+        # Freeze to a 14:00 UTC instant (10:00 ET) so the fills' risk day
+        # equals the calendar day regardless of when the suite runs: the
+        # live risk day starts at 20:00 ET, so a wall-clock run inside
+        # 00:00-04:00 UTC would otherwise move the replay window off the
+        # seeded calendar-day fills.
+        with freeze_time("2026-06-04 14:00:00", tz_offset=0):
+            _clean()
+            trade_day = trade_day_for("US")
+            buy_fill = datetime.combine(trade_day, time(14, 0), tzinfo=timezone.utc)
+            sell_fill = datetime.combine(trade_day, time(14, 5), tzinfo=timezone.utc)
 
-        class Broker:
-            def get_today_orders(self) -> list[BrokerOrder]:
-                return [
-                    BrokerOrder(
-                        broker_order_id="pnl-buy",
-                        symbol="NVDA.US",
-                        side="BUY",
-                        quantity=Decimal("2"),
-                        price=Decimal("100"),
-                        executed_quantity=Decimal("2"),
-                        executed_price=Decimal("100"),
-                        status="FILLED",
-                        created_at=buy_fill,
-                        filled_at=buy_fill,
-                    ),
-                    BrokerOrder(
-                        broker_order_id="pnl-sell",
-                        symbol="NVDA.US",
-                        side="SELL",
-                        quantity=Decimal("2"),
-                        price=Decimal("103"),
-                        executed_quantity=Decimal("2"),
-                        executed_price=Decimal("103"),
-                        status="FILLED",
-                        created_at=sell_fill,
-                        filled_at=sell_fill,
-                    ),
-                ]
+            class Broker:
+                def get_today_orders(self) -> list[BrokerOrder]:
+                    return [
+                        BrokerOrder(
+                            broker_order_id="pnl-buy",
+                            symbol="NVDA.US",
+                            side="BUY",
+                            quantity=Decimal("2"),
+                            price=Decimal("100"),
+                            executed_quantity=Decimal("2"),
+                            executed_price=Decimal("100"),
+                            status="FILLED",
+                            created_at=buy_fill,
+                            filled_at=buy_fill,
+                        ),
+                        BrokerOrder(
+                            broker_order_id="pnl-sell",
+                            symbol="NVDA.US",
+                            side="SELL",
+                            quantity=Decimal("2"),
+                            price=Decimal("103"),
+                            executed_quantity=Decimal("2"),
+                            executed_price=Decimal("103"),
+                            status="FILLED",
+                            created_at=sell_fill,
+                            filled_at=sell_fill,
+                        ),
+                    ]
 
-        runner = AppRunner()
-        runner.broker = Broker()
-        runner.risk.daily_pnl = 999.0
-        runner.risk.consecutive_losses = 3
+            runner = AppRunner()
+            runner.broker = Broker()
+            runner.risk.daily_pnl = 999.0
+            runner.risk.consecutive_losses = 3
 
-        assert runner.sync_today_orders_from_broker(force=True) == 2
+            assert runner.sync_today_orders_from_broker(force=True) == 2
 
-        assert runner.risk.daily_pnl == pytest.approx(5.797)
-        assert runner.risk.consecutive_losses == 3
+            assert runner.risk.daily_pnl == pytest.approx(5.797)
+            assert runner.risk.consecutive_losses == 3
 
     def test_sync_today_orders_keeps_less_optimistic_live_pnl(self) -> None:
-        _clean()
-        trade_day = trade_day_for("US")
-        historical_fill = datetime.combine(
-            trade_day - timedelta(days=1),
-            time(14, 0),
-            tzinfo=timezone.utc,
-        )
-        buy_fill = datetime.combine(trade_day, time(14, 0), tzinfo=timezone.utc)
-        sell_fill = datetime.combine(trade_day, time(14, 5), tzinfo=timezone.utc)
+        # Same risk-day freeze rationale as
+        # test_sync_today_orders_recomputes_realized_daily_pnl: keep the
+        # seeded calendar-day fills inside the replay window.
+        with freeze_time("2026-06-04 14:00:00", tz_offset=0):
+            _clean()
+            trade_day = trade_day_for("US")
+            historical_fill = datetime.combine(
+                trade_day - timedelta(days=1),
+                time(14, 0),
+                tzinfo=timezone.utc,
+            )
+            buy_fill = datetime.combine(trade_day, time(14, 0), tzinfo=timezone.utc)
+            sell_fill = datetime.combine(trade_day, time(14, 5), tzinfo=timezone.utc)
 
-        db = SessionLocal()
-        try:
-            db.add(OrderRecord(
-                broker_order_id="phantom-historical-buy",
-                symbol="NVDA.US",
-                side="BUY",
-                quantity=1,
-                price=50,
-                executed_quantity=1,
-                executed_price=50,
-                status="FILLED",
-                created_at=historical_fill,
-                filled_at=historical_fill,
-            ))
-            db.commit()
-        finally:
-            db.close()
+            db = SessionLocal()
+            try:
+                db.add(OrderRecord(
+                    broker_order_id="phantom-historical-buy",
+                    symbol="NVDA.US",
+                    side="BUY",
+                    quantity=1,
+                    price=50,
+                    executed_quantity=1,
+                    executed_price=50,
+                    status="FILLED",
+                    created_at=historical_fill,
+                    filled_at=historical_fill,
+                ))
+                db.commit()
+            finally:
+                db.close()
 
-        class Broker:
-            def get_today_orders(self) -> list[BrokerOrder]:
-                return [
-                    BrokerOrder(
-                        broker_order_id="live-pnl-buy",
-                        symbol="NVDA.US",
-                        side="BUY",
-                        quantity=Decimal("2"),
-                        price=Decimal("100"),
-                        executed_quantity=Decimal("2"),
-                        executed_price=Decimal("100"),
-                        status="FILLED",
-                        created_at=buy_fill,
-                        filled_at=buy_fill,
-                    ),
-                    BrokerOrder(
-                        broker_order_id="live-pnl-sell",
-                        symbol="NVDA.US",
-                        side="SELL",
-                        quantity=Decimal("2"),
-                        price=Decimal("103"),
-                        executed_quantity=Decimal("2"),
-                        executed_price=Decimal("103"),
-                        status="FILLED",
-                        created_at=sell_fill,
-                        filled_at=sell_fill,
-                    ),
-                ]
+            class Broker:
+                def get_today_orders(self) -> list[BrokerOrder]:
+                    return [
+                        BrokerOrder(
+                            broker_order_id="live-pnl-buy",
+                            symbol="NVDA.US",
+                            side="BUY",
+                            quantity=Decimal("2"),
+                            price=Decimal("100"),
+                            executed_quantity=Decimal("2"),
+                            executed_price=Decimal("100"),
+                            status="FILLED",
+                            created_at=buy_fill,
+                            filled_at=buy_fill,
+                        ),
+                        BrokerOrder(
+                            broker_order_id="live-pnl-sell",
+                            symbol="NVDA.US",
+                            side="SELL",
+                            quantity=Decimal("2"),
+                            price=Decimal("103"),
+                            executed_quantity=Decimal("2"),
+                            executed_price=Decimal("103"),
+                            status="FILLED",
+                            created_at=sell_fill,
+                            filled_at=sell_fill,
+                        ),
+                    ]
 
-        runner = AppRunner()
-        runner.broker = Broker()
-        runner.risk.replace_daily_pnl(6.0, 0, trade_day)
+            runner = AppRunner()
+            runner.broker = Broker()
+            runner.risk.replace_daily_pnl(6.0, 0, trade_day)
 
-        assert runner.sync_today_orders_from_broker(force=True) == 2
+            assert runner.sync_today_orders_from_broker(force=True) == 2
 
-        assert runner.risk.daily_pnl == 6.0
-        assert runner.risk.consecutive_losses == 0
-        assert runner._sync_risk_from_order_ledger() is False
+            assert runner.risk.daily_pnl == 6.0
+            assert runner.risk.consecutive_losses == 0
+            assert runner._sync_risk_from_order_ledger() is False
 
     def test_sync_today_orders_does_not_clear_losses_when_ledger_has_unmatched_exit(self) -> None:
         _clean()

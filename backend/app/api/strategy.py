@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session
 from app.api.auth import require_api_key
 from app.api.deps import extract_actor, get_audit_logger
 from app.core.audit import AuditLogger
-from app.core.market_calendar import is_trading_hours, trade_day_for
+from app.core.live_risk_day import risk_day_for
+from app.core.market_calendar import is_trading_hours
 from app.database import get_db
 from app.models import OrderRecord, StrategyConfig
 from app.runner import (
@@ -384,8 +385,8 @@ def get_status(db: Session = Depends(get_db)) -> StatusResponse:
     config = svc.get_config()
     state = svc.get_primary_runtime_state()
     pnl_result = DailyPnlService(db).calculate(
-        trade_day=trade_day_for(config.market),
-        to_trade_day=lambda instant=None: trade_day_for(config.market, instant),
+        trade_day=risk_day_for(config.market),
+        to_trade_day=lambda instant=None: risk_day_for(config.market, instant),
     )
     runner = get_runner()
     risk = getattr(runner, "risk", None)

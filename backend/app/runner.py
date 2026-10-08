@@ -41,6 +41,7 @@ from app.core.log_throttle import RepeatedLogThrottle
 from app.core import market_calendar as market_calendar_module
 _CALENDAR_IS_TRADING_HOURS = market_calendar_module.is_trading_hours
 from app.core.market_calendar import is_closing_window, is_opening_warmup, is_trading_hours, market_for_symbol, trade_day_for
+from app.core.live_risk_day import risk_day_for
 from app.core.notifiers.multi_channel import MultiChannelNotifier
 from app.core.notifiers.retry_queue import NotificationRetryQueue
 from app.core.notifiers.serverchan import ServerChanNotifier
@@ -324,7 +325,7 @@ class AppRunner:
         self.broker = self._build_broker(self._audit)
         self.engine = StrategyEngine()
         self._symbol_runtimes: dict[str, SymbolRuntime] = {}
-        self.risk = RiskController(trade_day_provider=self._market_trade_day)
+        self.risk = RiskController(trade_day_provider=self._risk_trade_day)
         # Observer-only decision-funnel stage counters (see
         # DecisionFunnelTracker docstring for the interpretation contract).
         self.decision_funnel: DecisionFunnelTracker = DecisionFunnelTracker(
@@ -724,13 +725,13 @@ class AppRunner:
             reconciliation_complete = False
             reconciliation_trade_day: object = datetime.now(timezone.utc).date()
             try:
-                reconciliation_trade_day = self._market_trade_day()
+                reconciliation_trade_day = self._risk_trade_day()
                 with self._db_session() as db:
                     pnl_service = DailyPnlService(db)
                     pnl_service.refresh_execution_outcomes(symbol=fill_symbol or None)
                     ledger_result = pnl_service.calculate(
-                        trade_day=self._market_trade_day(),
-                        to_trade_day=self._market_trade_day_for,
+                        trade_day=self._risk_trade_day(),
+                        to_trade_day=self._risk_trade_day_for,
                         fee_rate_us=self.engine.params.fee_rate_us,
                         fee_rate_hk=self.engine.params.fee_rate_hk,
                     )
@@ -778,9 +779,9 @@ class AppRunner:
             logger.exception("post-fill persistence worker could not be started")
             fallback_trade_day: object = datetime.now(timezone.utc).date()
             try:
-                fallback_trade_day = self._market_trade_day()
+                fallback_trade_day = self._risk_trade_day()
             except Exception:
-                logger.exception("market trade day unavailable after worker start failure")
+                logger.exception("risk trade day unavailable after worker start failure")
             self._finish_post_fill_pnl_reconciliation(
                 is_complete=False,
                 trade_day=fallback_trade_day,
@@ -5661,11 +5662,11 @@ class AppRunner:
 
         if require_complete_pnl:
             try:
-                trade_day = self._market_trade_day()
+                trade_day = self._risk_trade_day()
                 with self._db_session() as db:
                     pnl_result = DailyPnlService(db).calculate(
                         trade_day=trade_day,
-                        to_trade_day=self._market_trade_day_for,
+                        to_trade_day=self._risk_trade_day_for,
                         fee_rate_us=self.engine.params.fee_rate_us,
                         fee_rate_hk=self.engine.params.fee_rate_hk,
                     )
@@ -5866,6 +5867,18 @@ class AppRunner:
     def _market_trade_day_for(self, instant) -> Any:
         return trade_day_for(self.engine.params.market, instant)
 
+    def _risk_trade_day(self):
+        """Live risk day (daily_pnl / consecutive_losses / loss limit).
+
+        The US risk day starts at the overnight open (20:00 ET), not at ET
+        midnight; every other market equals the exchange-local trade day.
+        See app.core.live_risk_day.
+        """
+        return risk_day_for(self.engine.params.market)
+
+    def _risk_trade_day_for(self, instant) -> Any:
+        return risk_day_for(self.engine.params.market, instant)
+
     def _sync_risk_from_order_ledger(self) -> bool:
         # A live partial fill can still be finalized by TradeExecutionService.
         # Replaying it from the DB first would count the same realized loss
@@ -5874,12 +5887,12 @@ class AppRunner:
         with self._state_lock:
             if self._trigger_in_flight or self._trade_svc.has_pending_order:
                 return False
-        trade_day = self._market_trade_day()
+        trade_day = self._risk_trade_day()
         try:
             with self._db_session() as db:
                 result = DailyPnlService(db).calculate(
                     trade_day=trade_day,
-                    to_trade_day=self._market_trade_day_for,
+                    to_trade_day=self._risk_trade_day_for,
                     fee_rate_us=self.engine.params.fee_rate_us,
                     fee_rate_hk=self.engine.params.fee_rate_hk,
                 )
