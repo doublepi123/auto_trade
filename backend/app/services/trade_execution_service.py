@@ -1569,16 +1569,25 @@ class TradeExecutionService:
                 self._extended_hours_context = (
                     symbol, decision.phase, decided_at, "EXIT",
                 )
-            if action in _ENTRY_ACTIONS and is_opening_warmup(
+        if (
+            action in _ENTRY_ACTIONS
+            and is_opening_warmup(
                 market,
                 settings.trading_open_warmup_minutes,
-            ) and not allow_opening_warmup_entry:
-                return self._skip_order(
-                    symbol,
-                    action,
-                    f"opening warmup for {market}",
-                    skip_category="SESSION",
-                )
+            )
+            and not allow_opening_warmup_entry
+        ):
+            # Owner decision 2026-10-09: the regular-session opening warmup
+            # blocks new entries in ANY mode too, matching RTH_ONLY.
+            # is_opening_warmup is RTH-scoped, so supported PRE/POST/OVERNIGHT
+            # extended-hours entries (non-RTH instants) are never blocked
+            # here, and reductions/protective exits never reach this check.
+            return self._skip_order(
+                symbol,
+                action,
+                f"opening warmup for {market}",
+                skip_category="SESSION",
+            )
         if action in _ENTRY_ACTIONS and self._entry_cutoff_active(
             market, trading_session_mode=trading_session_mode,
         ):

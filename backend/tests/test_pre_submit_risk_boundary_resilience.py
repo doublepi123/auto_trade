@@ -91,6 +91,10 @@ class _FaultBroker(BrokerGateway):
 @pytest.fixture(autouse=True)
 def _market_is_open(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(trade_svc_module, "is_trading_hours", lambda _market: True)
+    # ANY-mode entries also consult the opening-warmup gate (owner decision
+    # 2026-10-09); pin it off so these tests cannot flake when the wall
+    # clock crosses the first trading minutes of a session.
+    monkeypatch.setattr(trade_svc_module, "is_opening_warmup", lambda _market, _minutes: False)
 
 
 def _ignore_risk_event(_reason: str) -> None:

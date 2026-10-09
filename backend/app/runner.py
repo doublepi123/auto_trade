@@ -9986,14 +9986,23 @@ class AppRunner:
         symbol: str | None = None,
         market: str | None = None,
     ) -> dict[str, Any] | None:
-        """Layer-A gate: block before cancel_pending when RTH_ONLY and outside RTH."""
+        """Layer-A gate: block before cancel_pending.
+
+        RTH_ONLY and outside RTH: block every action (the pre-existing
+        behaviour). In ANY mode the non-RTH check does not apply — supported
+        extended-hours trading is decided downstream — but the
+        regular-session opening warmup blocks new ENTRIES in ANY mode too
+        (owner decision 2026-10-09). ``is_opening_warmup`` is RTH-scoped, so
+        non-RTH instants never trip it.
+        """
         if action == "CANCEL_PENDING":
-            return None
-        if self._get_trading_session_mode() != "RTH_ONLY":
             return None
         target_market = market or self.engine.params.market
         target_symbol = symbol or self.engine.params.symbol
-        if not is_trading_hours(target_market):
+        if (
+            self._get_trading_session_mode() == "RTH_ONLY"
+            and not is_trading_hours(target_market)
+        ):
             reason = f"non-RTH for {target_market}"
         elif action in _ENTRY_ACTIONS and is_opening_warmup(target_market, settings.trading_open_warmup_minutes):
             reason = f"opening warmup for {target_market}"

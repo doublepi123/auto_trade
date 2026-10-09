@@ -23,6 +23,7 @@ from app.core.broker import (
 from app.core.engine import EngineState, StrategyParams
 from app.core.market_calendar import (
     is_closing_window as _real_is_closing_window,
+    is_opening_warmup as _real_is_opening_warmup,
     is_trading_hours as _real_is_trading_hours,
 )
 from app.core.notify import ServerChanNotifier
@@ -123,8 +124,25 @@ def _pin(monkeypatch: pytest.MonkeyPatch, instant: datetime) -> type[_Clock]:
 
     monkeypatch.setattr(execution, "is_trading_hours", is_trading_hours)
     monkeypatch.setattr(execution, "is_closing_window", is_closing_window)
+    # ANY-mode entries also consult the opening-warmup gate (owner decision
+    # 2026-10-09); pin it off the pinned instant so these tests cannot flake
+    # when the wall clock crosses the first trading minutes of a session.
+    monkeypatch.setattr(
+        execution,
+        "is_opening_warmup",
+        lambda market, minutes: _real_is_opening_warmup(
+            market, minutes, _Clock.instant,
+        ),
+    )
     monkeypatch.setattr(runner_module, "is_trading_hours", is_trading_hours)
     monkeypatch.setattr(runner_module, "is_closing_window", is_closing_window)
+    monkeypatch.setattr(
+        runner_module,
+        "is_opening_warmup",
+        lambda market, minutes: _real_is_opening_warmup(
+            market, minutes, _Clock.instant,
+        ),
+    )
     return _Clock
 
 

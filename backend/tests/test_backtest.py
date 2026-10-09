@@ -92,10 +92,13 @@ class TestBacktestEngine:
         assert omitted_result == explicit_result
         assert [trade.action for trade in omitted_result.trades] == ["BUY", "SELL"]
 
-    def test_opening_warmup_blocks_until_end_boundary(self) -> None:
+    @pytest.mark.parametrize("trading_session_mode", ["ANY", "RTH_ONLY"])
+    def test_opening_warmup_blocks_until_end_boundary(
+        self, trading_session_mode: str,
+    ) -> None:
         engine = BacktestEngine(BacktestEngineParams(
             market="US",
-            trading_session_mode="RTH_ONLY",
+            trading_session_mode=trading_session_mode,
             opening_warmup_minutes=30,
             buy_low=100,
             sell_high=200,
@@ -118,6 +121,9 @@ class TestBacktestEngine:
             ),
         ], include_fee_sensitivity=False)
 
+        # 2026-05-22 Friday: US RTH opens 13:30 UTC, 30-minute warmup covers
+        # [13:30, 14:00). The 13:59:59 entry is blocked in BOTH modes (owner
+        # decision 2026-10-09); 14:00 is the exclusive end and enters.
         assert [trade.action for trade in result.trades] == ["BUY"]
         assert result.trades[0].timestamp == datetime(
             2026, 5, 22, 14, 0, tzinfo=timezone.utc

@@ -629,14 +629,15 @@ class BacktestEngine:
             and not is_trading_hours(self.params.market, bar.timestamp)
         ):
             return f"non-RTH for {self.params.market}"
-        if (
-            self.params.trading_session_mode == "RTH_ONLY"
-            and is_opening_warmup(
-                self.params.market,
-                self.params.opening_warmup_minutes,
-                bar.timestamp,
-            )
+        if is_opening_warmup(
+            self.params.market,
+            self.params.opening_warmup_minutes,
+            bar.timestamp,
         ):
+            # Mirrors the live service (owner decision 2026-10-09): the
+            # regular-session opening warmup blocks entries in ANY mode too.
+            # is_opening_warmup is RTH-scoped, so ANY-mode bars outside RTH
+            # (legacy extended-hours entry behaviour) are never blocked here.
             return f"opening warmup for {self.params.market}"
         if is_closing_window(
             self.params.market,

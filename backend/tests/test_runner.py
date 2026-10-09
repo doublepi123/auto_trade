@@ -9394,6 +9394,10 @@ class TestTradingSessionGuard:
     def test_returns_none_when_mode_is_any(self, monkeypatch) -> None:
         runner = self._make_runner(mode="ANY")
         monkeypatch.setattr(runner_module, "is_trading_hours", lambda market: False)
+        # ANY mode no longer returns None unconditionally: entries inside the
+        # regular-session opening warmup are blocked in ANY mode too (owner
+        # decision 2026-10-09). Outside that window the gate stays open.
+        monkeypatch.setattr(runner_module, "is_opening_warmup", lambda market, minutes: False, raising=False)
         assert runner._check_trading_session("BUY") is None
 
     def test_returns_none_when_rth_only_and_in_hours(self, monkeypatch) -> None:
@@ -9402,17 +9406,54 @@ class TestTradingSessionGuard:
         monkeypatch.setattr(runner_module, "is_opening_warmup", lambda market, minutes: False, raising=False)
         assert runner._check_trading_session("BUY") is None
 
-    def test_blocks_entry_during_opening_warmup(self, monkeypatch) -> None:
-        runner = self._make_runner(mode="RTH_ONLY")
-        monkeypatch.setattr(runner_module, "is_trading_hours", lambda market: True)
-        monkeypatch.setattr(runner_module, "is_opening_warmup", lambda market, minutes: True, raising=False)
+    @pytest.mark.parametrize(
+        ("et_instant", "inside_warmup"),
+        [
+            # 2026-10-06 Tuesday; US warmup window [13:30, 13:35) UTC.
+            (datetime(2026, 10, 6, 13, 30, 0, tzinfo=timezone.utc), True),
+            (datetime(2026, 10, 6, 13, 34, 59, tzinfo=timezone.utc), True),
+            (datetime(2026, 10, 6, 13, 35, 0, tzinfo=timezone.utc), False),
+        ],
+    )
+    @pytest.mark.parametrize("mode", ["ANY", "RTH_ONLY"])
+    def test_blocks_entry_during_opening_warmup(
+        self, monkeypatch, mode: str, et_instant: datetime, inside_warmup: bool,
+    ) -> None:
+        from app.core.market_calendar import (
+            is_opening_warmup as _real_is_opening_warmup,
+            is_trading_hours as _real_is_trading_hours,
+        )
+
+        runner = self._make_runner(mode=mode)
+        monkeypatch.setattr(
+            runner_module,
+            "is_trading_hours",
+            lambda market: _real_is_trading_hours(market, et_instant),
+        )
+        monkeypatch.setattr(
+            runner_module,
+            "is_opening_warmup",
+            lambda market, minutes: _real_is_opening_warmup(market, minutes, et_instant),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            runner_module.settings,
+            "trading_open_warmup_minutes",
+            5,
+            raising=False,
+        )
 
         result = runner._check_trading_session("BUY")
 
-        assert isinstance(result, dict)
-        assert result.get("status") == "SKIPPED"
-        assert result.get("skip_category") == "SESSION"
-        assert "opening warmup" in result.get("reason", "")
+        if inside_warmup:
+            # Owner decision 2026-10-09: warmup blocks entries in ANY mode
+            # too, with the same skip/audit payload as RTH_ONLY.
+            assert isinstance(result, dict)
+            assert result.get("status") == "SKIPPED"
+            assert result.get("skip_category") == "SESSION"
+            assert "opening warmup" in result.get("reason", "")
+        else:
+            assert result is None
 
     def test_cancel_pending_action_bypasses_gate_outside_hours(self, monkeypatch) -> None:
         runner = self._make_runner(mode="RTH_ONLY")

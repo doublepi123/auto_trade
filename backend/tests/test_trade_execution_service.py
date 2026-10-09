@@ -225,6 +225,14 @@ class TestTradeExecutionServiceBasics:
             "is_trading_hours",
             lambda _market: True,
         )
+        # ANY-mode entries also consult the opening-warmup gate (owner
+        # decision 2026-10-09); pin it off so these tests cannot flake when
+        # the wall clock crosses the first trading minutes of a session.
+        monkeypatch.setattr(
+            trade_svc_module,
+            "is_opening_warmup",
+            lambda _market, _minutes: False,
+        )
 
     @pytest.fixture
     def svc(self) -> TradeExecutionService:
@@ -6005,39 +6013,161 @@ class TestTradeExecutionServiceBasics:
         assert status.status == "SKIPPED"
         assert broker.submitted is False
 
-    def test_opening_warmup_blocks_new_entry_orders(self, monkeypatch) -> None:
+    @pytest.mark.parametrize(
+        ("et_instant", "inside_warmup"),
+        [
+            # 2026-10-06 is a Tuesday; US RTH opens 09:30 ET == 13:30 UTC
+            # (EDT). Default 5-minute warmup window [13:30, 13:35) UTC:
+            # start inclusive, end exclusive. Wrappers delegate to the REAL
+            # calendar so the boundary semantics are production logic.
+            (datetime(2026, 10, 6, 13, 30, 0, tzinfo=timezone.utc), True),
+            (datetime(2026, 10, 6, 13, 34, 59, tzinfo=timezone.utc), True),
+            (datetime(2026, 10, 6, 13, 35, 0, tzinfo=timezone.utc), False),
+        ],
+    )
+    @pytest.mark.parametrize("trading_session_mode", ["ANY", "RTH_ONLY"])
+    def test_opening_warmup_blocks_new_entry_orders(
+        self,
+        monkeypatch,
+        trading_session_mode: str,
+        et_instant: datetime,
+        inside_warmup: bool,
+    ) -> None:
+        from app.core.market_calendar import (
+            is_opening_warmup as _real_is_opening_warmup,
+            is_trading_hours as _real_is_trading_hours,
+        )
+
         skipped: list[tuple[str, str, str, dict[str, object]]] = []
         svc = TradeExecutionService(
             record_order=lambda *args: None,
             update_order_status=lambda *args: None,
             record_risk_event=lambda *args: None,
             record_order_skipped=lambda symbol, action, reason, payload: skipped.append((symbol, action, reason, payload)),
+            # Generous explicit caps so that, without the warmup gate, the
+            # entry would reach FILLED — RED then proves the warmup reason
+            # itself, not a risk/fixture rejection.
+            max_position_quantity=1_000_000,
+            max_position_notional=1_000_000_000.0,
+            max_risk_per_trade=10_000_000.0,
+            stop_loss_pct=1.0,
+            final_order_quote_check=lambda _broker, _symbol, _action, price: (
+                FinalOrderQuoteCheckResult(executable_price=price)
+            ),
         )
-        monkeypatch.setattr(trade_svc_module, "is_trading_hours", lambda market: True)
-        monkeypatch.setattr(trade_svc_module, "is_opening_warmup", lambda market, minutes: True, raising=False)
+        monkeypatch.setattr(
+            trade_svc_module,
+            "is_trading_hours",
+            lambda market: _real_is_trading_hours(market, et_instant),
+        )
+        monkeypatch.setattr(
+            trade_svc_module,
+            "is_opening_warmup",
+            lambda market, minutes: _real_is_opening_warmup(market, minutes, et_instant),
+            raising=False,
+        )
+        monkeypatch.setattr(
+            trade_svc_module.settings,
+            "trading_open_warmup_minutes",
+            5,
+        )
 
         class Broker:
+            submitted = False
+
+            def get_positions(self):
+                return []
+
             def estimate_margin_max_quantity(self, symbol: str, side: str, price: Decimal, currency=None) -> Decimal:
                 return Decimal("10")
 
             def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal):
+                self.submitted = True
                 return OrderResult("order-entry", symbol, side, quantity, price, "FILLED")
+
+        broker = Broker()
 
         status = svc.execute(
             "BUY",
             "NVDA.US",
             Quote("NVDA.US", 197, 196.9, 197.1, ""),
-            Broker(),
+            broker,
             RiskController(),
             ServerChanNotifier(""),
             "USD",
-            trading_session_mode="RTH_ONLY",
+            market="US",
+            trading_session_mode=trading_session_mode,
         )
 
         assert status is not None
-        assert status.status == "SKIPPED"
-        assert skipped[0][3]["skip_category"] == "SESSION"
-        assert "opening warmup" in skipped[0][2]
+        if inside_warmup:
+            # Owner decision 2026-10-09: the regular-session opening warmup
+            # blocks new entries in ANY mode too, not only RTH_ONLY. The skip
+            # must happen before any broker mutation.
+            assert status.status == "SKIPPED"
+            assert skipped[0][3]["skip_category"] == "SESSION"
+            assert "opening warmup" in skipped[0][2]
+            assert broker.submitted is False
+        else:
+            # 09:35:00 ET is the exclusive end of the window: entry proceeds.
+            assert status.status == "FILLED"
+            assert broker.submitted is True
+
+    @pytest.mark.parametrize(
+        ("reduce_only", "allow_loss_exit", "price", "bid", "ask"),
+        [
+            # Ordinary profitable exit (take-profit path).
+            (False, False, 225, 224.9, 225.1),
+            # Protective reduce-only exit below cost (stop path).
+            (True, True, 215, 214.9, 215.1),
+        ],
+    )
+    def test_opening_warmup_never_blocks_long_reduction_in_any_mode(
+        self,
+        svc: TradeExecutionService,
+        monkeypatch,
+        reduce_only: bool,
+        allow_loss_exit: bool,
+        price: int,
+        bid: float,
+        ask: float,
+    ) -> None:
+        from app.core.broker import OrderResult, Position, Quote
+
+        # Owner decision 2026-10-09: the opening warmup gates new ENTRIES in
+        # ANY mode; exits and protective reductions must still submit.
+        monkeypatch.setattr(
+            trade_svc_module,
+            "is_opening_warmup",
+            lambda _market, _minutes: True,
+        )
+        broker = MagicMock()
+        broker.get_positions.return_value = [
+            Position("NVDA.US", "LONG", Decimal("7"), Decimal("220")),
+        ]
+        broker.submit_limit_order.return_value = OrderResult(
+            "warmup-exit", "NVDA.US", "SELL", Decimal("7"), Decimal(price), "FILLED",
+        )
+
+        status = svc.execute(
+            "SELL",
+            "NVDA.US",
+            Quote("NVDA.US", price, bid, ask, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+            market="US",
+            trading_session_mode="ANY",
+            allow_loss_exit=allow_loss_exit,
+            reduce_only=reduce_only,
+        )
+
+        assert status is not None
+        assert status.status == "FILLED"
+        broker.submit_limit_order.assert_called_once_with(
+            "NVDA.US", "SELL", Decimal("7"), Decimal(price),
+        )
 
     def test_buy_add_on_is_skipped_when_existing_long_is_losing(self) -> None:
         skipped: list[tuple[str, str, str, dict[str, object]]] = []
