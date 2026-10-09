@@ -1537,8 +1537,6 @@ class AppRunner:
         if not unsafe:
             return False
 
-        self.risk.revoke_protective_exits()
-
         inventory_text = "; ".join(
             f"{symbol}=[{', '.join(order_ids)}]"
             for symbol, order_ids in inventory.items()
@@ -1549,8 +1547,17 @@ class AppRunner:
             "unresolved live orders require manual reconciliation; "
             f"live_orders={inventory_text}; representation_issues={issue_text}"
         )
-        if self.risk.paused and self.risk.pause_reason == reason:
-            return True
+        # An exact reason matches only the reconciliation inventory/issues.
+        # Check the current pause and permission together under the risk lock:
+        # an empty revoke would reset the external-ack proof generation on
+        # every identical periodic sync, but an actual permission must revoke.
+        with self.risk.protective_permission_guard() as permitted:
+            if self.risk.paused and self.risk.pause_reason == reason:
+                if permitted:
+                    self.risk.revoke_protective_exits()
+                return True
+
+        self.risk.revoke_protective_exits()
 
         logger.critical(reason)
         self.risk.pause(reason, auto_resumable=False)
