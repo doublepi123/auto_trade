@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Protocol, cast
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit
 from zoneinfo import ZoneInfo
 
 
@@ -111,6 +111,15 @@ class HistoricalCompletenessProof:
     orders_response_digest: str
     executions_response_digest: str
     preview_digest: str
+    completeness_scope: str = "historical_complete_pages"
+    today_orders_has_more: bool | None = None
+    today_executions_has_more: bool | None = None
+    target_order_ids: tuple[str, ...] = ()
+    route_response_digests: tuple[tuple[str, str], ...] = ()
+    target_execution_completeness: str | None = None
+    scope: tuple[str, ...] = ()
+    target_query_matches_symbol_query: bool | None = None
+    raw_route_evidence: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -158,6 +167,7 @@ class LongportHistoricalCompletenessReader:
         end_at: datetime,
         observed_at: datetime | None = None,
         completed_round_trip: bool = False,
+        target_order_ids: tuple[str, str] | None = None,
     ) -> HistoricalOrderPreview:
         normalized_symbol = _normalize_symbol(symbol)
         start_utc, end_utc = _validate_window(
@@ -167,6 +177,13 @@ class LongportHistoricalCompletenessReader:
             observed_at=observed_at,
             completed_round_trip=completed_round_trip,
         )
+        if target_order_ids is not None:
+            if not completed_round_trip or len(set(target_order_ids)) != 2 or not all(target_order_ids):
+                raise ValueError("target quantity proof requires two explicit completed-round-trip order ids")
+            return self._preview_target_round_trip(
+                symbol=normalized_symbol, start_at=start_utc, end_at=end_utc,
+                target_order_ids=target_order_ids,
+            )
         query = urlencode({
             "symbol": normalized_symbol,
             "start_at": int(start_utc.timestamp()),
@@ -248,6 +265,124 @@ class LongportHistoricalCompletenessReader:
             proof=proof,
             filled_orders=filled_orders,
         )
+
+    def _preview_target_round_trip(
+        self, *, symbol: str, start_at: datetime, end_at: datetime,
+        target_order_ids: tuple[str, str],
+    ) -> HistoricalOrderPreview:
+        """Bounded target quantity closure, NOT completeness of today's executions.
+
+        Order/history, execution/history and order/today must each explicitly
+        say has_more=false. execution/today has no pagination promise: prove
+        only these FILLED targets by full quantity plus two matching filters.
+        """
+        history_query = urlencode({"symbol": symbol, "start_at": int(start_at.timestamp()) - 1,
+                                   "end_at": int(end_at.timestamp()) + 1})
+        orders_path = f"{_ORDERS_PATH}?{history_query}"
+        executions_path = f"{_EXECUTIONS_PATH}?{history_query}"
+        symbol_query = urlencode({"symbol": symbol})
+        today_orders_path = f"/v1/trade/order/today?{symbol_query}"
+        today_executions_path = f"/v1/trade/execution/today?{symbol_query}"
+        routes: list[tuple[str, str]] = []
+        raw_routes: list[dict[str, object]] = []
+
+        def read(path: str, label: str) -> dict[str, object]:
+            payload = self._request_payload(path, label=label)
+            fetched_at = datetime.now(timezone.utc)
+            digest = _sha256_json(payload)
+            routes.append((path, digest))
+            raw_routes.append({"path": urlsplit(path).path, "parameters": dict(parse_qsl(urlsplit(path).query)),
+                               "fetched_at": fetched_at.isoformat(), "digest": digest,
+                               "has_more": payload.get("has_more")})
+            return payload
+
+        history_orders = read(orders_path, "orders")
+        history_executions = read(executions_path, "executions")
+        today_orders = read(today_orders_path, "today orders")
+        today_executions = read(today_executions_path, "today executions")
+        order_pages = [_complete_items(history_orders, items_key="orders", label="orders"),
+                       _complete_items(today_orders, items_key="orders", label="today orders")]
+        execution_pages = [_complete_items(history_executions, items_key="trades", label="executions"),
+                           _today_execution_items(today_executions)]
+        orders = _merge_unique_pages(order_pages, "order_id", execution=False)
+        executions = _merge_unique_pages(execution_pages, "trade_id", execution=True)
+        for order_id in target_order_ids:
+            directed_path = "/v1/trade/execution/today?" + urlencode({"symbol": symbol, "order_id": order_id})
+            directed = _merge_unique_pages([_today_execution_items(read(directed_path, "target today executions"))],
+                                          "trade_id", execution=True)
+            if any(_required_text(item, "order_id", "execution") != order_id for item in directed):
+                raise HistoricalPayloadError("order_id-directed execution response contains another order")
+            # The directed /today endpoint can return an older target's
+            # executions. Compare to the FULL history+today symbol union,
+            # not only the current-day symbol partition.
+            expected = [item for item in executions if _required_text(item, "order_id", "execution") == order_id]
+            if {_execution_signature(item) for item in directed} != {_execution_signature(item) for item in expected}:
+                raise HistoricalCompletenessError("symbol and order_id execution filters disagree")
+
+        relevant_orders = []
+        for item in orders:
+            if _required_text(item, "symbol", "order").upper() != symbol:
+                raise HistoricalPayloadError("target order endpoint returned a different symbol")
+            order_id = _required_text(item, "order_id", "order")
+            submitted = _epoch_second(item.get("submitted_at"), "order.submitted_at")
+            matching = [execution for execution in executions if _required_text(execution, "order_id", "execution") == order_id]
+            in_window = [execution for execution in matching
+                         if start_at <= _epoch_second(execution.get("trade_done_at"), "execution.trade_done_at") <= end_at]
+            quantity = _decimal(item.get("executed_quantity"), "order.executed_quantity", allow_zero=True)
+            if order_id not in target_order_ids:
+                # Partial/cancelled executions cannot vanish behind FILLED-only
+                # projection. Reject any third execution in the closed interval.
+                if in_window or (quantity > 0 and start_at <= submitted <= end_at):
+                    raise HistoricalPayloadError("third order has execution or uncertain inventory in target interval")
+                if quantity > 0 and sum((_decimal(execution.get("quantity"), "execution.quantity")
+                                         for execution in matching), start=Decimal(0)) != quantity:
+                    raise HistoricalCompletenessError("third order execution timing cannot be excluded from target interval")
+                if (start_at <= submitted <= end_at
+                        and item.get("status") not in {"CanceledStatus", "RejectedStatus", "ExpiredStatus"}):
+                    raise HistoricalPayloadError("third non-cancelled order cannot be ignored in target interval")
+                continue
+            if not start_at <= submitted <= end_at:
+                raise HistoricalPayloadError("target submission lies outside the requested interval")
+            relevant_orders.append(item)
+        relevant_executions = []
+        known_ids = {_required_text(item, "order_id", "order") for item in orders}
+        order_sides = {_required_text(item, "order_id", "order"): _required_text(item, "side", "order") for item in orders}
+        for item in executions:
+            if _required_text(item, "symbol", "execution").upper() != symbol:
+                raise HistoricalPayloadError("target execution endpoint returned a different symbol")
+            order_id = _required_text(item, "order_id", "execution")
+            at = _epoch_second(item.get("trade_done_at"), "execution.trade_done_at")
+            if item.get("side") is not None and item.get("side") != order_sides.get(order_id):
+                raise HistoricalPayloadError("execution side conflicts with its official order association")
+            if order_id in target_order_ids:
+                relevant_executions.append(item)
+            elif start_at <= at <= end_at:
+                raise HistoricalPayloadError("third execution crosses target interval")
+            elif order_id not in known_ids:
+                raise HistoricalPayloadError("execution has no order in complete order snapshots")
+        filled = _build_filled_order_evidence(relevant_orders, relevant_executions, symbol=symbol,
+                                             start_at=start_at, end_at=end_at)
+        if {item.order_id for item in filled} != set(target_order_ids):
+            raise HistoricalCompletenessError("both target orders must be fully FILLED with quantity-closed executions")
+        orders_digest = _sha256_json(relevant_orders)
+        executions_digest = _sha256_json(relevant_executions)
+        proof = HistoricalCompletenessProof(
+            schema_version=2, provider="longport_official_http_target_quantity_v2",
+            broker_identity_fingerprint=self._broker_identity_fingerprint, symbol=symbol,
+            start_at=start_at, end_at=end_at, orders_path=orders_path, executions_path=executions_path,
+            orders_has_more=cast(bool, history_orders["has_more"]),
+            executions_has_more=cast(bool, history_executions["has_more"]),
+            order_count=len(relevant_orders), execution_count=len(relevant_executions), filled_order_count=len(filled),
+            orders_response_digest=orders_digest, executions_response_digest=executions_digest,
+            preview_digest=_sha256_json({"scope": "target_quantity_closed", "identity": self._broker_identity_fingerprint,
+                                         "target_order_ids": target_order_ids, "routes": routes}),
+            completeness_scope="target_quantity_closed", today_orders_has_more=cast(bool, today_orders["has_more"]),
+            today_executions_has_more=cast(bool | None, today_executions.get("has_more")),
+            target_order_ids=target_order_ids, route_response_digests=tuple(routes),
+            target_execution_completeness="FINAL_FILLED_QUANTITY_CLOSURE", scope=target_order_ids,
+            target_query_matches_symbol_query=True, raw_route_evidence=tuple(raw_routes),
+        )
+        return HistoricalOrderPreview(proof=proof, filled_orders=filled)
 
     def _request_payload(self, path: str, *, label: str) -> dict[str, object]:
         try:
@@ -397,6 +532,50 @@ def _complete_items(
         _object(item, f"historical {label} {items_key}[{index}]")
         for index, item in enumerate(raw_items)
     ]
+
+
+def _today_execution_items(payload: Mapping[str, object]) -> list[dict[str, object]]:
+    flag = payload.get("has_more")
+    if flag is not None and type(flag) is not bool:
+        raise HistoricalPayloadError("today executions has_more must be boolean when present")
+    if flag is True:
+        raise HistoricalCompletenessError("today executions explicitly report truncation")
+    raw = payload.get("trades")
+    if not isinstance(raw, list):
+        raise HistoricalPayloadError("today executions must contain a trades list")
+    return [_object(item, "today execution") for item in raw]
+
+
+def _execution_signature(item: Mapping[str, object]) -> tuple[object, ...]:
+    side = item.get("side")
+    if side is not None and (not isinstance(side, str) or side not in {"Buy", "Sell"}):
+        raise HistoricalPayloadError("execution side is unsupported")
+    return (_required_text(item, "trade_id", "execution"), _required_text(item, "order_id", "execution"),
+            _required_text(item, "symbol", "execution").upper(),
+            _decimal(item.get("quantity"), "execution.quantity"),
+            _decimal(item.get("price"), "execution.price"),
+            _epoch_second(item.get("trade_done_at"), "execution.trade_done_at"), side)
+
+
+def _merge_unique_pages(pages: list[list[dict[str, object]]], key: str, *, execution: bool) -> list[dict[str, object]]:
+    merged: dict[str, dict[str, object]] = {}
+    for page in pages:
+        seen: set[str] = set()
+        for item in page:
+            identity = _required_text(item, key, "execution" if execution else "order")
+            if identity in seen:
+                raise HistoricalPayloadError(f"duplicate {key} inside one official response")
+            seen.add(identity)
+            if identity in merged:
+                left = _execution_signature(merged[identity]) if execution else _canonical_json(merged[identity])
+                right = _execution_signature(item) if execution else _canonical_json(item)
+                if left != right:
+                    raise HistoricalPayloadError(f"conflicting {key} across official endpoints")
+            else:
+                if execution:
+                    _execution_signature(item)
+                merged[identity] = item
+    return [merged[identity] for identity in sorted(merged)]
 
 
 def _build_filled_order_evidence(

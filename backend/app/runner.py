@@ -51,8 +51,8 @@ from app.database import SessionLocal
 from app.models import OrderRecord, ReconciliationEvidence, TrackedEntry, TradeEvent
 from app.services.daily_pnl_service import DailyPnlService
 from app.services.external_order_acknowledgement_service import (
-    ACK_EVENT, append_ack, assert_isolated, assert_unowned, canonical_group,
-    group_digest, instant, replay_exclusions, row_matches, validate_event,
+    ACK_EVENT, append_ack, assert_isolated, assert_unowned, canonical_group, canonical_executions,
+    broker_terminal_matches, completion_at, group_digest, instant, replay_exclusions, row_matches, validate_event,
 )
 from app.services.notification_log_service import get_notification_sink
 from app.services.order_terminal_callback_service import (
@@ -530,7 +530,7 @@ class AppRunner:
         self._unsettled_position_symbols: set[str] = set()
         self._unknown_submission_proof_reason = ""
         self._unknown_submission_proof_at = 0.0
-        self._external_ack_proof: tuple[tuple[object, ...], datetime, float] | None = None
+        self._external_ack_proof: tuple[tuple[object, ...], datetime, float, dict[str, Any] | None] | None = None
         self._protective_reduction_proof_key: tuple[object, ...] | None = None
         self._protective_reduction_proof_at = 0.0
         self._protective_exit_authorization_scope: tuple[object, ...] | None = None
@@ -1430,11 +1430,14 @@ class AppRunner:
             order_id = str(getattr(order, "broker_order_id", ""))
             if order_id not in replay_exclusions(db, identity=identity):
                 return False
-            return any(
-                row_matches(order, validate_event(event, identity)[side])
-                for event in db.query(TradeEvent).filter(TradeEvent.event_type == ACK_EVENT).all()
-                for side in ("buy", "sell")
-            )
+            for event in db.query(TradeEvent).filter(TradeEvent.event_type == ACK_EVENT).all():
+                group = validate_event(event, identity)
+                for side in ("buy", "sell"):
+                    matched = (row_matches(order, group[side]) if isinstance(order, OrderRecord)
+                               else broker_terminal_matches(order, group[side], schema_version=group["schema_version"]))
+                    if matched:
+                        return True
+            return False
         except Exception:
             logger.exception("external terminal acknowledgement failed closed")
             return False
@@ -1615,7 +1618,7 @@ class AppRunner:
             seen.add(str(order.broker_order_id))
             for side in ("buy", "sell"):
                 leg = group[side]
-                if order.broker_order_id == leg["broker_order_id"] and not row_matches(order, leg):
+                if order.broker_order_id == leg["broker_order_id"] and not broker_terminal_matches(order, leg, schema_version=group["schema_version"]):
                     raise ValueError("today terminal facts differ from true execution evidence")
         finished = time.monotonic()
         observed = datetime.now(timezone.utc)
@@ -1626,12 +1629,13 @@ class AppRunner:
     def acknowledge_external_round_trip(
         self, *, broker_identity_fingerprint: str, buy: dict[str, Any], sell: dict[str, Any],
         digest: str, confirmation_reason: str, actor_hash: str,
+        schema_version: int = 1,
     ) -> dict[str, Any]:
         """Append exact owner evidence only. Never changes pause, orders or risk."""
         from app.core.broker import BrokerOrder
         from app.services.historical_order_completeness_reader import build_longport_historical_reader_from_env
 
-        group = canonical_group(broker_identity_fingerprint, buy, sell)
+        group = canonical_group(broker_identity_fingerprint, buy, sell, schema_version=schema_version)
         if digest != group_digest(group) or not confirmation_reason.strip() or not actor_hash.strip():
             raise ValueError("digest, owner confirmation reason and audit actor are required")
         with self._trade_svc.submission_guard():
@@ -1657,24 +1661,42 @@ class AppRunner:
                 reader = build_longport_historical_reader_from_env()
                 preview = reader.preview(symbol=group["buy"]["symbol"],
                                          start_at=instant(group["buy"]["submitted_at"]),
-                                         end_at=instant(group["sell"]["filled_at"]),
-                                         observed_at=history_observed, completed_round_trip=True)
+                                         end_at=completion_at(group["sell"]),
+                                         observed_at=history_observed, completed_round_trip=True,
+                                         target_order_ids=(group["buy"]["broker_order_id"], group["sell"]["broker_order_id"]) if schema_version == 2 else None)
                 if preview.proof.broker_identity_fingerprint != broker_identity_fingerprint:
                     raise ValueError("fresh historical reader identity mismatch")
+                evidence = None
+                if schema_version == 2:
+                    if preview.proof.completeness_scope != "target_quantity_closed":
+                        raise ValueError("v2 requires explicit target quantity closure proof")
+                    evidence = asdict(preview.proof)
                 if {item.order_id for item in preview.filled_orders} != {group[side]["broker_order_id"] for side in ("buy", "sell")}:
                     raise ValueError("historical complete window does not contain only the exact filled pair")
                 legs = []
                 for item in preview.filled_orders:
                     leg = group["buy"] if item.side == "BUY" else group["sell"]
-                    if item.first_executed_at != item.last_executed_at:
+                    if schema_version == 1 and item.first_executed_at != item.last_executed_at:
                         raise ValueError("multi-time executions are not supported by exact-pair acknowledgement")
+                    if schema_version == 2:
+                        if any(execution.order_id != item.order_id or execution.symbol != item.symbol for execution in item.executions):
+                            raise ValueError("official execution order/symbol association conflicts with its leg")
+                        server_executions = canonical_executions([
+                            {"trade_id": execution.trade_id, "quantity": execution.quantity,
+                             "price": execution.price, "trade_done_at": execution.trade_done_at}
+                            for execution in item.executions
+                        ])
+                        if server_executions != leg["executions"] or item.last_executed_at != completion_at(leg):
+                            raise ValueError("requested execution list does not exactly match full official evidence")
+                        if completion_at(leg) > history_observed:
+                            raise ValueError("execution completion is later than the fresh broker observation")
                     row = BrokerOrder(item.order_id, item.symbol, item.side, item.submitted_quantity,
                                       item.submitted_price or item.executed_price, item.executed_quantity,
-                                      item.executed_price, "FILLED", item.submitted_at, item.last_executed_at)
+                                      item.executed_price, "FILLED", item.submitted_at, item.first_executed_at)
                     if not row_matches(row, leg):
                         raise ValueError("fresh historical executions do not match requested terminal facts")
                     for current in today:
-                        if getattr(current, "broker_order_id", None) == item.order_id and not row_matches(current, leg):
+                        if getattr(current, "broker_order_id", None) == item.order_id and not broker_terminal_matches(current, leg, schema_version=schema_version):
                             raise ValueError("today terminal facts differ from true execution evidence")
                     legs.append(row)
                 # History can be slow and owner activity can occur while it is
@@ -1701,14 +1723,16 @@ class AppRunner:
                             raise ValueError("external acknowledgement proof expired before write; restart proof")
                         if (previous is None or previous[0] != proof_key
                                 or not 0 <= time.monotonic() - previous[2] <= _EXTERNAL_ACK_FIRST_PROOF_TTL_SECONDS):
-                            self._external_ack_proof = (proof_key, observed, proof_finished)
+                            self._external_ack_proof = (proof_key, observed, proof_finished, evidence)
                             return {"status": "PROOF_PENDING", "digest": digest, "retry_after_seconds": 5}
                         if final_started - previous[2] < 5 or (observed - previous[1]).total_seconds() < 5:
                             return {"status": "PROOF_PENDING", "digest": digest, "retry_after_seconds": 5}
                         self._external_ack_proof = None
                         event = append_ack(db, group, actor_hash=actor_hash, reason=confirmation_reason,
-                                           observations=(previous[1], observed))
+                                           observations=(previous[1], observed),
+                                           evidence_observations=(previous[3], evidence) if schema_version == 2 else None)
                         db.flush()
+                        validate_event(event, broker_identity_fingerprint)
                         # No network here. Keep identity/local state and the
                         # existing risk safety lock stable through the short
                         # append commit; this guard grants no exit permission.

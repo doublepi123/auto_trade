@@ -9,7 +9,7 @@ import logging
 import math
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, List, Optional, cast
+from typing import Any, List, Literal, Optional, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -32,6 +32,14 @@ logger = logging.getLogger("auto_trade.trade")
 _LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
 
 
+class ExternalRoundTripExecutionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    trade_id: str = Field(min_length=1, max_length=200)
+    quantity: Decimal = Field(gt=0)
+    price: Decimal = Field(gt=0)
+    trade_done_at: datetime
+
+
 class ExternalRoundTripLegRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
     broker_order_id: str = Field(min_length=1, max_length=100)
@@ -40,10 +48,12 @@ class ExternalRoundTripLegRequest(BaseModel):
     price: Decimal = Field(gt=0)
     submitted_at: datetime
     filled_at: datetime
+    executions: list[ExternalRoundTripExecutionRequest] | None = None
 
 
 class ExternalRoundTripAcknowledgementRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    schema_version: Literal[1, 2] = 1
     broker_identity_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
     buy: ExternalRoundTripLegRequest
     sell: ExternalRoundTripLegRequest
@@ -63,6 +73,7 @@ def acknowledge_external_round_trip(
             broker_identity_fingerprint=payload.broker_identity_fingerprint,
             buy=payload.buy.model_dump(), sell=payload.sell.model_dump(), digest=payload.digest,
             confirmation_reason=payload.confirmation_reason, actor_hash=actor_hash,
+            schema_version=payload.schema_version,
         )
         result = str(outcome["status"])
         if result == "PROOF_PENDING":
