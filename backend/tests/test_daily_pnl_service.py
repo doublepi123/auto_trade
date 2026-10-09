@@ -1991,14 +1991,20 @@ class TestDailyPnlService:
         )
 
         class _OrderQuery:
+            def __init__(self, values: list[OrderRecord] | None = None):
+                self.values = [order] if values is None else values
+
             def filter(self, *_args: object) -> "_OrderQuery":
                 return self
 
             def all(self) -> list[OrderRecord]:
-                return [order]
+                return self.values
 
         class _ReplayDb:
             def query(self, *_args: object) -> _OrderQuery:
+                from app.models import TradeEvent
+                if _args[0] is TradeEvent:
+                    return _OrderQuery([])
                 return _OrderQuery()
 
         replay = DailyPnlService(_ReplayDb()).pair_round_trips_with_issues(

@@ -259,9 +259,17 @@ class DailyPnlService:
         to_trade_day: ToTradeDay | None = None,
         fee_rate_us: float = 0.0005,
         fee_rate_hk: float = 0.003,
+        external_ack_identity: str | None = None,
     ) -> DailyPnlResult:
         resolve_day: ToTradeDay = to_trade_day or _utc_date
         target_day = trade_day or resolve_day(datetime.now(timezone.utc))
+        from app.services.external_order_acknowledgement_service import replay_exclusions
+
+        try:
+            external_ids = replay_exclusions(self._db, identity=external_ack_identity)
+        except (ValueError, TypeError, KeyError, ArithmeticError, RecursionError):
+            logger.exception("external round-trip acknowledgement cannot be verified")
+            return DailyPnlResult(target_day, 0.0, 0, [], is_complete=False)
         end_of_day = datetime(target_day.year, target_day.month, target_day.day, tzinfo=timezone.utc) + timedelta(days=1)
         # The 2-day window (end_of_day + 1 day) accounts for timezone boundary
         # handling: fills near midnight in the target timezone may have UTC
@@ -291,6 +299,7 @@ class DailyPnlService:
         fills = [
             fill
             for order in latest_orders.values()
+            if str(order.broker_order_id or "") not in external_ids
             if (fill := self._fill_from_order(order)) is not None
             and resolve_day(fill.filled_at) <= target_day
         ]
@@ -467,6 +476,7 @@ class DailyPnlService:
         fee_rate_hk: float = 0.003,
         include_excursions: bool = True,
         to_trade_day: ToSymbolTradeDay | None = None,
+        external_ack_identity: str | None = None,
     ) -> list[ClosedRoundTrip]:
         """Return only fully reconciled round trips for backwards compatibility."""
         return self.pair_round_trips_with_issues(
@@ -477,6 +487,7 @@ class DailyPnlService:
             fee_rate_hk=fee_rate_hk,
             include_excursions=include_excursions,
             to_trade_day=to_trade_day,
+            external_ack_identity=external_ack_identity,
         ).trades
 
     def pair_round_trips_with_issues(
@@ -489,6 +500,7 @@ class DailyPnlService:
         fee_rate_hk: float = 0.003,
         include_excursions: bool = True,
         to_trade_day: ToSymbolTradeDay | None = None,
+        external_ack_identity: str | None = None,
     ) -> RoundTripReplayResult:
         """Pair recorded fills into closed entry<->exit round trips.
 
@@ -507,6 +519,10 @@ class DailyPnlService:
         untouched.
         """
         from app.models import OrderRecord
+
+        from app.services.external_order_acknowledgement_service import replay_exclusions
+
+        external_ids = replay_exclusions(self._db, identity=external_ack_identity)
 
         query = self._db.query(OrderRecord)
         if symbol:
@@ -538,6 +554,8 @@ class DailyPnlService:
         issues: list[PnlReplayIssue] = []
         invalid_issue_fallback = to_dt or datetime.now(timezone.utc)
         for order in latest_orders.values():
+            if str(order.broker_order_id or "") in external_ids:
+                continue
             invalid_issue = self._invalid_fill_evidence_issue(
                 order,
                 to_trade_day=resolve_day,
@@ -1515,12 +1533,12 @@ class DailyPnlService:
             ))
         return enriched
 
-    def refresh_execution_outcomes(self, *, symbol: str | None = None) -> int:
+    def refresh_execution_outcomes(self, *, symbol: str | None = None, external_ack_identity: str | None = None) -> int:
         """Persist closed-trade outcomes so the order ledger is self-contained."""
         from app.models import OrderRecord
 
         updated = 0
-        for trade in self.pair_round_trips(symbol=symbol):
+        for trade in self.pair_round_trips(symbol=symbol, external_ack_identity=external_ack_identity):
             order = self._db.query(OrderRecord).filter(
                 OrderRecord.id == trade.exit_order_id
             ).first()

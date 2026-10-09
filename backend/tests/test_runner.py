@@ -1013,7 +1013,9 @@ class TestAppRunner:
             def __init__(self, _db: object) -> None:
                 pass
 
-            def refresh_execution_outcomes(self, *, symbol: str | None) -> int:
+            def refresh_execution_outcomes(
+                self, *, symbol: str | None, external_ack_identity: str | None = None,
+            ) -> int:
                 return 0
 
             def calculate(self, **_kwargs: object) -> object:
@@ -1215,7 +1217,9 @@ class TestAppRunner:
             def __init__(self, _db: object) -> None:
                 pass
 
-            def refresh_execution_outcomes(self, *, symbol: str | None) -> int:
+            def refresh_execution_outcomes(
+                self, *, symbol: str | None, external_ack_identity: str | None = None,
+            ) -> int:
                 return 0
 
             def calculate(self, **_kwargs: object) -> object:

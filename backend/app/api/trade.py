@@ -12,6 +12,7 @@ from decimal import Decimal
 from typing import Any, List, Optional, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.api.auth import require_api_key
@@ -29,6 +30,55 @@ router = APIRouter(prefix="/api", tags=["trade"])
 logger = logging.getLogger("auto_trade.trade")
 
 _LIVE_ORDER_STATUSES = {"SUBMITTED", "PARTIAL_FILLED"}
+
+
+class ExternalRoundTripLegRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    broker_order_id: str = Field(min_length=1, max_length=100)
+    symbol: str = Field(pattern=r"^[A-Z0-9][A-Z0-9.-]{0,31}\.(US|HK)$")
+    quantity: Decimal = Field(gt=0)
+    price: Decimal = Field(gt=0)
+    submitted_at: datetime
+    filled_at: datetime
+
+
+class ExternalRoundTripAcknowledgementRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    broker_identity_fingerprint: str = Field(pattern=r"^[0-9a-f]{64}$")
+    buy: ExternalRoundTripLegRequest
+    sell: ExternalRoundTripLegRequest
+    digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    confirmation_reason: str = Field(min_length=1, max_length=1000)
+
+
+@router.post("/control/acknowledge-external-round-trip", dependencies=[Depends(require_api_key())])
+def acknowledge_external_round_trip(
+    request: Request, payload: ExternalRoundTripAcknowledgementRequest,
+    audit: AuditLogger = Depends(get_audit_logger),
+) -> dict[str, Any]:
+    actor_hash, source_ip = extract_actor(request)
+    result = "FAILED"
+    try:
+        outcome = get_runner().acknowledge_external_round_trip(
+            broker_identity_fingerprint=payload.broker_identity_fingerprint,
+            buy=payload.buy.model_dump(), sell=payload.sell.model_dump(), digest=payload.digest,
+            confirmation_reason=payload.confirmation_reason, actor_hash=actor_hash,
+        )
+        result = str(outcome["status"])
+        if result == "PROOF_PENDING":
+            raise HTTPException(status_code=409, detail=outcome)
+        return outcome
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("external round-trip acknowledgement failed closed")
+        raise HTTPException(status_code=409, detail="external acknowledgement could not be proved or committed") from exc
+    finally:
+        audit.record("ACKNOWLEDGE_EXTERNAL_ROUND_TRIP", actor_hash=actor_hash, source_ip=source_ip,
+                     request_summary={"digest": payload.digest, "confirmation_reason": payload.confirmation_reason},
+                     result=result)
 _TERMINAL_ORDER_STATUSES = {"FILLED", "REJECTED", "CANCELLED"}
 _ORDER_STATUS_RANK = {
     "SUBMITTED": 1,

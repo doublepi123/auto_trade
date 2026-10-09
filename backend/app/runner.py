@@ -50,6 +50,10 @@ from app.core.risk import DailyLossSnapshot, RiskConfig, RiskController, Trading
 from app.database import SessionLocal
 from app.models import OrderRecord, ReconciliationEvidence, TrackedEntry, TradeEvent
 from app.services.daily_pnl_service import DailyPnlService
+from app.services.external_order_acknowledgement_service import (
+    ACK_EVENT, append_ack, assert_isolated, assert_unowned, canonical_group,
+    group_digest, instant, replay_exclusions, row_matches, validate_event,
+)
 from app.services.notification_log_service import get_notification_sink
 from app.services.order_terminal_callback_service import (
     OrderTerminalCallbackService,
@@ -139,6 +143,8 @@ _QUOTE_SOURCE_MAX_AGE_SECONDS = 30.0
 _POST_FILL_SETTLEMENT_GRACE_SECONDS = 60.0
 _UNKNOWN_SUBMISSION_RESUME_GRACE_SECONDS = 60.0
 _UNKNOWN_SUBMISSION_SECOND_PROOF_SECONDS = 5.0
+_EXTERNAL_ACK_MAX_PROOF_AGE_SECONDS = 60.0
+_EXTERNAL_ACK_FIRST_PROOF_TTL_SECONDS = 300.0
 _PROTECTIVE_REDUCTION_SECOND_PROOF_SECONDS = 5.0
 _ORDER_PROVENANCE_TIME_TOLERANCE_SECONDS = 600.0
 _POSITION_DRIFT_PCT_TOLERANCE = Decimal("0.05")  # 5% position drift tolerance
@@ -524,6 +530,7 @@ class AppRunner:
         self._unsettled_position_symbols: set[str] = set()
         self._unknown_submission_proof_reason = ""
         self._unknown_submission_proof_at = 0.0
+        self._external_ack_proof: tuple[tuple[object, ...], datetime, float] | None = None
         self._protective_reduction_proof_key: tuple[object, ...] | None = None
         self._protective_reduction_proof_at = 0.0
         self._protective_exit_authorization_scope: tuple[object, ...] | None = None
@@ -728,8 +735,9 @@ class AppRunner:
                 reconciliation_trade_day = self._risk_trade_day()
                 with self._db_session() as db:
                     pnl_service = DailyPnlService(db)
-                    pnl_service.refresh_execution_outcomes(symbol=fill_symbol or None)
+                    pnl_service.refresh_execution_outcomes(symbol=fill_symbol or None, external_ack_identity=self._current_credential_fingerprint())
                     ledger_result = pnl_service.calculate(
+                        external_ack_identity=self._current_credential_fingerprint(),
                         trade_day=self._risk_trade_day(),
                         to_trade_day=self._risk_trade_day_for,
                         fee_rate_us=self.engine.params.fee_rate_us,
@@ -1416,6 +1424,21 @@ class AppRunner:
         )
         return delta <= _ORDER_PROVENANCE_TIME_TOLERANCE_SECONDS
 
+    def _external_ack_matches_terminal_order(self, db: Session, order: object) -> bool:
+        try:
+            identity = self._current_credential_fingerprint()
+            order_id = str(getattr(order, "broker_order_id", ""))
+            if order_id not in replay_exclusions(db, identity=identity):
+                return False
+            return any(
+                row_matches(order, validate_event(event, identity)[side])
+                for event in db.query(TradeEvent).filter(TradeEvent.event_type == ACK_EVENT).all()
+                for side in ("buy", "sell")
+            )
+        except Exception:
+            logger.exception("external terminal acknowledgement failed closed")
+            return False
+
     def _live_order_inventory_from_db(
         self,
         db: Session,
@@ -1549,6 +1572,158 @@ class AppRunner:
             require_any_live_order=True,
             db=db,
         )
+
+    def _external_ack_local_key(self, group: dict[str, Any]) -> tuple[object, ...]:
+        pause = self.risk.pause_verification_snapshot()
+        allowed = {
+            f"broker live or terminal order id={group[side]['broker_order_id']} lacks local submission provenance"
+            for side in ("buy", "sell")
+        }
+        with self._state_lock:
+            issues = tuple(sorted(self._unrepresentable_live_order_issues))
+            if (not self.risk.paused or self.risk.kill_switch
+                    or not pause[0].startswith(_ORDER_RECONCILIATION_UNCERTAIN_PREFIX)
+                    or self._trigger_in_flight or self._unresolved_live_order_ids
+                    or self._reduction_intents or self._post_fill_expectations
+                    or self._unsettled_position_symbols or self.risk.entry_reconciliation_count
+                    or self.execution_state()[0] != "IDLE"
+                    or not issues or not set(issues).issubset(allowed)):
+                raise ValueError("acknowledgement requires an idle, flat, exact-pair provenance-only operational pause")
+            identity = self._current_credential_fingerprint()
+            if identity != group["broker_identity_fingerprint"]:
+                raise ValueError("current broker identity does not match request")
+            key = (pause, identity, id(self.broker), issues, self._primary_generation)
+        if self._trade_svc.has_pending_order or self._trade_svc.snapshot_tracked_entries():
+            raise ValueError("local pending orders or tracked inventory remain")
+        return key
+
+    def _external_ack_broker_snapshot(
+        self, group: dict[str, Any],
+    ) -> tuple[Sequence[object], float, float, datetime]:
+        """Read a new whole-account observation, never a retained snapshot."""
+        started = time.monotonic()
+        positions = self.broker.get_positions()
+        for position in positions:
+            quantity = Decimal(str(position.quantity))
+            if not quantity.is_finite() or quantity != 0:
+                raise ValueError("whole broker account must be flat")
+        today = self.broker.get_today_orders()
+        seen: set[str] = set()
+        for order in today:
+            if str(order.broker_order_id) in seen or order.status not in _TERMINAL_ORDER_STATUSES:
+                raise ValueError("broker account has live, unknown or duplicate orders")
+            seen.add(str(order.broker_order_id))
+            for side in ("buy", "sell"):
+                leg = group[side]
+                if order.broker_order_id == leg["broker_order_id"] and not row_matches(order, leg):
+                    raise ValueError("today terminal facts differ from true execution evidence")
+        finished = time.monotonic()
+        observed = datetime.now(timezone.utc)
+        if not 0 <= finished - started <= _EXTERNAL_ACK_MAX_PROOF_AGE_SECONDS:
+            raise ValueError("external acknowledgement broker snapshot exceeded 60s freshness limit; restart proof")
+        return today, started, finished, observed
+
+    def acknowledge_external_round_trip(
+        self, *, broker_identity_fingerprint: str, buy: dict[str, Any], sell: dict[str, Any],
+        digest: str, confirmation_reason: str, actor_hash: str,
+    ) -> dict[str, Any]:
+        """Append exact owner evidence only. Never changes pause, orders or risk."""
+        from app.core.broker import BrokerOrder
+        from app.services.historical_order_completeness_reader import build_longport_historical_reader_from_env
+
+        group = canonical_group(broker_identity_fingerprint, buy, sell)
+        if digest != group_digest(group) or not confirmation_reason.strip() or not actor_hash.strip():
+            raise ValueError("digest, owner confirmation reason and audit actor are required")
+        with self._trade_svc.submission_guard():
+            try:
+                if self._current_credential_fingerprint() != broker_identity_fingerprint:
+                    raise ValueError("current broker identity does not match request")
+                with self._db_session() as db:
+                    existing = db.query(TradeEvent).filter(TradeEvent.source_event_key == digest).first()
+                    if existing is not None:
+                        if existing.event_type != ACK_EVENT or validate_event(existing, broker_identity_fingerprint) != group:
+                            raise ValueError("acknowledgement digest conflicts with existing evidence")
+                        payload = json.loads(existing.payload_json)
+                        if payload["confirmation_reason"] != confirmation_reason or payload["actor_hash"] != actor_hash:
+                            raise ValueError("retry actor or confirmation differs")
+                        replay_exclusions(db, identity=broker_identity_fingerprint)
+                        return {"status": "ALREADY_ACKNOWLEDGED", "digest": digest, "event_id": existing.id}
+                    acknowledged_ids = replay_exclusions(db, identity=broker_identity_fingerprint)
+                    if acknowledged_ids.intersection({group[side]["broker_order_id"] for side in ("buy", "sell")}):
+                        raise ValueError("either leg already belongs to a different acknowledged group")
+                key = self._external_ack_local_key(group)
+                # All broker reads are outside _state_lock and outside DB transactions.
+                today, proof_started, _, history_observed = self._external_ack_broker_snapshot(group)
+                reader = build_longport_historical_reader_from_env()
+                preview = reader.preview(symbol=group["buy"]["symbol"],
+                                         start_at=instant(group["buy"]["submitted_at"]),
+                                         end_at=instant(group["sell"]["filled_at"]),
+                                         observed_at=history_observed, completed_round_trip=True)
+                if preview.proof.broker_identity_fingerprint != broker_identity_fingerprint:
+                    raise ValueError("fresh historical reader identity mismatch")
+                if {item.order_id for item in preview.filled_orders} != {group[side]["broker_order_id"] for side in ("buy", "sell")}:
+                    raise ValueError("historical complete window does not contain only the exact filled pair")
+                legs = []
+                for item in preview.filled_orders:
+                    leg = group["buy"] if item.side == "BUY" else group["sell"]
+                    if item.first_executed_at != item.last_executed_at:
+                        raise ValueError("multi-time executions are not supported by exact-pair acknowledgement")
+                    row = BrokerOrder(item.order_id, item.symbol, item.side, item.submitted_quantity,
+                                      item.submitted_price or item.executed_price, item.executed_quantity,
+                                      item.executed_price, "FILLED", item.submitted_at, item.last_executed_at)
+                    if not row_matches(row, leg):
+                        raise ValueError("fresh historical executions do not match requested terminal facts")
+                    for current in today:
+                        if getattr(current, "broker_order_id", None) == item.order_id and not row_matches(current, leg):
+                            raise ValueError("today terminal facts differ from true execution evidence")
+                    legs.append(row)
+                # History can be slow and owner activity can occur while it is
+                # read. Re-read both endpoints after history on every attempt.
+                _, final_started, proof_finished, observed = self._external_ack_broker_snapshot(group)
+                if not 0 <= proof_finished - proof_started <= _EXTERNAL_ACK_MAX_PROOF_AGE_SECONDS:
+                    raise ValueError("external acknowledgement proof exceeded 60s freshness limit; restart proof")
+                with self._order_persistence_lock:
+                    with self._db_session() as db:
+                        if db.query(TrackedEntry).first() or db.query(OrderRecord).filter(OrderRecord.status.in_(_LIVE_ORDER_STATUSES)).first():
+                            raise ValueError("durable local inventory or live orders remain")
+                        assert_unowned(db, group)
+                        assert_isolated(db, group, legs)
+                        if self._external_ack_local_key(group) != key:
+                            raise ValueError("local state changed during broker proof")
+                        ledger_key = tuple(
+                            (row.id, row.broker_order_id, row.symbol, row.side, row.status,
+                             row.quantity, row.executed_quantity, row.executed_price, row.created_at, row.filled_at)
+                            for row in db.query(OrderRecord).filter(OrderRecord.symbol == group["buy"]["symbol"]).order_by(OrderRecord.id).all()
+                        )
+                        proof_key = (digest, confirmation_reason, actor_hash, key, ledger_key)
+                        previous = self._external_ack_proof
+                        if time.monotonic() - proof_started > _EXTERNAL_ACK_MAX_PROOF_AGE_SECONDS:
+                            raise ValueError("external acknowledgement proof expired before write; restart proof")
+                        if (previous is None or previous[0] != proof_key
+                                or not 0 <= time.monotonic() - previous[2] <= _EXTERNAL_ACK_FIRST_PROOF_TTL_SECONDS):
+                            self._external_ack_proof = (proof_key, observed, proof_finished)
+                            return {"status": "PROOF_PENDING", "digest": digest, "retry_after_seconds": 5}
+                        if final_started - previous[2] < 5 or (observed - previous[1]).total_seconds() < 5:
+                            return {"status": "PROOF_PENDING", "digest": digest, "retry_after_seconds": 5}
+                        self._external_ack_proof = None
+                        event = append_ack(db, group, actor_hash=actor_hash, reason=confirmation_reason,
+                                           observations=(previous[1], observed))
+                        db.flush()
+                        # No network here. Keep identity/local state and the
+                        # existing risk safety lock stable through the short
+                        # append commit; this guard grants no exit permission.
+                        with self._state_lock, self.risk.protective_permission_guard():
+                            if self._external_ack_local_key(group) != key:
+                                raise ValueError("local state changed before acknowledgement commit")
+                            if time.monotonic() - proof_started > _EXTERNAL_ACK_MAX_PROOF_AGE_SECONDS:
+                                raise ValueError("external acknowledgement proof expired before commit; restart proof")
+                            if time.monotonic() - previous[2] > _EXTERNAL_ACK_FIRST_PROOF_TTL_SECONDS:
+                                raise ValueError("external acknowledgement first proof expired before commit; restart proof")
+                            db.commit()
+                        return {"status": "ACKNOWLEDGED", "digest": digest, "event_id": event.id}
+            except Exception:
+                self._external_ack_proof = None
+                raise
 
     def pause_for_manual_control(self, reason: str) -> bool:
         """Pause manually without replacing a latched operational diagnosis."""
@@ -5251,6 +5426,8 @@ class AppRunner:
                         for order_id in sorted(
                             set(semantic_broker_orders) - submitted_ids
                         ):
+                            if self._external_ack_matches_terminal_order(db, semantic_broker_orders[order_id]):
+                                continue
                             representation_issues.append(
                                 "broker live or terminal order "
                                 f"id={order_id} lacks local submission provenance"
@@ -5665,6 +5842,7 @@ class AppRunner:
                 trade_day = self._risk_trade_day()
                 with self._db_session() as db:
                     pnl_result = DailyPnlService(db).calculate(
+                        external_ack_identity=self._current_credential_fingerprint(),
                         trade_day=trade_day,
                         to_trade_day=self._risk_trade_day_for,
                         fee_rate_us=self.engine.params.fee_rate_us,
@@ -5891,6 +6069,7 @@ class AppRunner:
         try:
             with self._db_session() as db:
                 result = DailyPnlService(db).calculate(
+                    external_ack_identity=self._current_credential_fingerprint(),
                     trade_day=trade_day,
                     to_trade_day=self._risk_trade_day_for,
                     fee_rate_us=self.engine.params.fee_rate_us,
@@ -6154,7 +6333,7 @@ class AppRunner:
         accounting_before = tuple(
             getattr(order, name) for name in accounting_fields
         )
-        if self._has_terminal_execution(order):
+        if self._has_terminal_execution(order) and not self._external_ack_matches_terminal_order(db, order):
             # A locally submitted order may become terminal while the process is
             # down. Rebuild the authoritative outcome from the cost basis frozen
             # on submission before startup drops the row from pending recovery.
@@ -8164,7 +8343,8 @@ class AppRunner:
                     >= float(old_executed_quantity or 0)
                 ):
                     order.executed_price = normalized_executed_price
-                self._update_execution_outcome_fields(order)
+                if not self._external_ack_matches_terminal_order(db, order):
+                    self._update_execution_outcome_fields(order)
                 changed = (
                     old_status != effective_status
                     or old_executed_quantity != order.executed_quantity

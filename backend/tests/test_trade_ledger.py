@@ -337,11 +337,20 @@ class TestPairRoundTrips:
         ]
 
         class _RowsQuery:
+            def __init__(self, values=rows):
+                self.values = values
+
+            def filter(self, *_args):
+                return self
+
             def all(self):
-                return rows
+                return self.values
 
         class _RowsDb:
             def query(self, _model):
+                from app.models import TradeEvent
+                if _model is TradeEvent:
+                    return _RowsQuery([])
                 return _RowsQuery()
 
         trades = DailyPnlService(_RowsDb()).pair_round_trips()

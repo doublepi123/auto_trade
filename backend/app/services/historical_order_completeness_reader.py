@@ -157,6 +157,7 @@ class LongportHistoricalCompletenessReader:
         start_at: datetime,
         end_at: datetime,
         observed_at: datetime | None = None,
+        completed_round_trip: bool = False,
     ) -> HistoricalOrderPreview:
         normalized_symbol = _normalize_symbol(symbol)
         start_utc, end_utc = _validate_window(
@@ -164,6 +165,7 @@ class LongportHistoricalCompletenessReader:
             start_at,
             end_at,
             observed_at=observed_at,
+            completed_round_trip=completed_round_trip,
         )
         query = urlencode({
             "symbol": normalized_symbol,
@@ -330,6 +332,7 @@ def _validate_window(
     end_at: datetime,
     *,
     observed_at: datetime | None,
+    completed_round_trip: bool = False,
 ) -> tuple[datetime, datetime]:
     start_utc = _aware_second(start_at, "start_at")
     end_utc = _aware_second(end_at, "end_at")
@@ -349,7 +352,9 @@ def _validate_window(
         time.min,
         tzinfo=market_timezone,
     ).astimezone(timezone.utc)
-    if end_utc > current_market_day_start:
+    if completed_round_trip and end_utc > observed.astimezone(timezone.utc):
+        raise ValueError("completed round-trip evidence cannot include future executions")
+    if not completed_round_trip and end_utc > current_market_day_start:
         raise ValueError(
             "historical execution preview must end before the current market day"
         )
