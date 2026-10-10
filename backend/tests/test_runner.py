@@ -7095,7 +7095,11 @@ class TestAppRunner:
         assert messages[0]["risks"]["peak_realized_pnl"] == 125.0
         assert messages[0]["risks"]["drawdown_amount"] == 45.0
 
-    def test_active_quote_refresh_fetches_quote_when_push_is_stale(self) -> None:
+    def test_active_quote_refresh_fetches_quote_when_push_is_stale(self, monkeypatch) -> None:
+        # The refresh only pulls while the primary market has a session; pin
+        # it open so this test does not depend on the wall-clock calendar.
+        monkeypatch.setattr(runner_module, "is_trading_hours", lambda _market: True, raising=False)
+
         class Broker:
             def __init__(self) -> None:
                 self.calls: list[list[str]] = []
@@ -7155,6 +7159,7 @@ class TestAppRunner:
         runner._active_quote_refresh_interval_seconds = 15.0
         runner._last_quote_at = 900.0
         monkeypatch.setattr(runner_module.time, "monotonic", lambda: 1000.0)
+        monkeypatch.setattr(runner_module, "is_trading_hours", lambda _market: True, raising=False)
 
         runner._remember_quote(
             Quote(

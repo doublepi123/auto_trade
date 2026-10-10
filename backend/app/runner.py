@@ -458,6 +458,8 @@ class AppRunner:
         self._last_trusted_push_quote_at = 0.0
         self._last_active_quote_refresh_at = 0.0
         self._active_quote_refresh_interval_seconds = 15.0
+        self._active_quote_refresh_failures = 0
+        self._last_active_quote_refresh_failure_at = 0.0
         self._quote_resubscribe_threshold_seconds = 90.0
         self._last_position_sync_at = 0.0
         self._position_sync_interval_seconds = 15.0
@@ -5304,8 +5306,25 @@ class AppRunner:
             symbol = self.engine.params.symbol
             if not symbol:
                 return
+            from app.core.market_calendar import market_for_symbol
+
+            market = market_for_symbol(symbol) or self.engine.params.market
+            if not self._market_in_active_session(market):
+                return
             now = time.monotonic()
             interval = self._active_quote_refresh_interval_seconds
+            if self._last_quote_at > self._last_active_quote_refresh_failure_at:
+                self._active_quote_refresh_failures = 0
+            if self._active_quote_refresh_failures:
+                # First failure waits one base interval; subsequent failures
+                # double it, capped at 120s. Measure from network completion,
+                # not its start: the SDK wait can exceed the polling interval.
+                retry_interval = min(
+                    interval * 2 ** min(self._active_quote_refresh_failures - 1, 3),
+                    120.0,
+                )
+                if now - self._last_active_quote_refresh_failure_at < retry_interval:
+                    return
             if self._last_quote_at > 0 and now - self._last_quote_at < interval:
                 return
             if (
@@ -5319,9 +5338,14 @@ class AppRunner:
             quotes = self.broker.get_quotes([symbol])
         except Exception as exc:
             logger.warning("active quote refresh failed for %s: %s", symbol, exc)
-            return
+            quotes = []
         if not quotes:
+            with self._state_lock:
+                self._active_quote_refresh_failures += 1
+                self._last_active_quote_refresh_failure_at = time.monotonic()
             return
+        with self._state_lock:
+            self._active_quote_refresh_failures = 0
         self._on_quote(quotes[0], is_push=False)
 
     def sync_today_orders_from_broker(self, *, force: bool = False) -> int:
