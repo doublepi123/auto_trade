@@ -4350,6 +4350,8 @@ class AppRunner:
             self._last_push_quote_at = 0.0
             self._last_trusted_push_quote_at = 0.0
             self._last_active_quote_refresh_at = 0.0
+            self._active_quote_refresh_failures = 0
+            self._last_active_quote_refresh_failure_at = 0.0
             if clear_history:
                 self._recent_quotes = deque(maxlen=self._recent_quotes_cap)
 
@@ -5299,6 +5301,18 @@ class AppRunner:
         )
         return True
 
+    def _quote_refresh_market_open(self, market: str) -> bool:
+        """Polling follows venue availability, not entry or protective-exit policy."""
+        if self._market_in_active_session(market):
+            return True
+        # PRE/POST may still support protective reductions without extended
+        # entries enabled. Unknown calendar coverage must not suppress polling.
+        return trade_execution_module.resolve_execution_session(
+            market,
+            datetime.now(timezone.utc),
+            overnight_enabled=self._trade_svc._overnight_trading_effective(),
+        ).phase != "UNAVAILABLE"
+
     def _refresh_quote_if_stale(self) -> None:
         with self._state_lock:
             if not self._running or self._trigger_in_flight:
@@ -5309,7 +5323,7 @@ class AppRunner:
             from app.core.market_calendar import market_for_symbol
 
             market = market_for_symbol(symbol) or self.engine.params.market
-            if not self._market_in_active_session(market):
+            if not self._quote_refresh_market_open(market):
                 return
             now = time.monotonic()
             interval = self._active_quote_refresh_interval_seconds
@@ -5333,6 +5347,7 @@ class AppRunner:
             ):
                 return
             self._last_active_quote_refresh_at = now
+            attempt_started = now
 
         try:
             quotes = self.broker.get_quotes([symbol])
@@ -5341,8 +5356,13 @@ class AppRunner:
             quotes = []
         if not quotes:
             with self._state_lock:
-                self._active_quote_refresh_failures += 1
-                self._last_active_quote_refresh_failure_at = time.monotonic()
+                if self._last_quote_at > attempt_started:
+                    # A trusted primary quote recovered freshness during the
+                    # pull; a later pull failure must not overwrite recovery.
+                    self._active_quote_refresh_failures = 0
+                else:
+                    self._active_quote_refresh_failures += 1
+                    self._last_active_quote_refresh_failure_at = time.monotonic()
             return
         with self._state_lock:
             self._active_quote_refresh_failures = 0

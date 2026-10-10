@@ -172,3 +172,73 @@ def test_fresh_primary_push_resets_failure_spacing_to_base(monkeypatch):
     clock.now += 15.0
     runner._refresh_quote_if_stale()
     assert len(broker.calls) == 5
+
+
+@pytest.mark.parametrize("local_time", ["2026-10-09T04:00:00", "2026-10-09T19:59:00"])
+@pytest.mark.parametrize("protective_exits", [True, False])
+def test_quote_refresh_keeps_extended_session_polling_without_entry_permission(
+    monkeypatch, local_time, protective_exits,
+):
+    runner, broker, _, instant = _runner_at(monkeypatch, local_time)
+    runner._trade_svc.extended_hours_trading_enabled = False
+    runner._trade_svc.extended_hours_protective_exits_enabled = protective_exits
+    assert resolve_execution_session("US", instant).phase in ("PRE", "POST")
+    assert not runner._market_in_active_session("US")
+    runner._refresh_quote_if_stale()
+    assert broker.calls == [1000.0]
+
+
+def test_quote_refresh_skips_friday_without_overnight_session(monkeypatch):
+    runner, broker, _, instant = _runner_at(monkeypatch, "2026-10-09T20:00:00")
+    assert resolve_execution_session("US", instant, overnight_enabled=True).phase == "UNAVAILABLE"
+    runner._refresh_quote_if_stale()
+    assert broker.calls == []
+
+
+def test_quote_refresh_keeps_polling_when_calendar_coverage_is_unknown(monkeypatch):
+    runner, broker, _, instant = _runner_at(monkeypatch, "2030-01-02T10:00:00")
+    monkeypatch.setattr(runner_module, "is_trading_hours", lambda *args: False)
+    assert resolve_execution_session("US", instant, overnight_enabled=True).phase == "UNKNOWN"
+    runner._refresh_quote_if_stale()
+    assert broker.calls == [1000.0]
+
+
+def test_reset_quote_tracking_clears_inherited_refresh_backoff(monkeypatch):
+    runner, broker, clock, _ = _runner_at(monkeypatch, "2026-10-09T10:00:00")
+    _fail_three_times(runner, broker, clock)
+    runner._reset_quote_tracking(clear_history=False)
+    runner._refresh_quote_if_stale()
+    assert len(broker.calls) == 4
+
+
+@pytest.mark.parametrize("failure", ["raise", "empty"])
+def test_primary_quote_during_failed_refresh_preserves_healthy_spacing(monkeypatch, failure):
+    runner, broker, clock, _ = _runner_at(monkeypatch, "2026-10-09T10:00:00")
+    _fail_three_times(runner, broker, clock)
+    clock.now += 60.0
+    original_get_quotes = broker.get_quotes
+
+    def get_quotes_with_primary_push(symbols: list[str]) -> list[Quote]:
+        broker.calls.append(clock.now)
+        clock.now += 1.0
+        runner._remember_quote(broker.quote(symbols[0]))
+        clock.now += 1.0
+        if failure == "raise":
+            raise RuntimeError("quote pull failed after primary push")
+        return []
+
+    monkeypatch.setattr(broker, "get_quotes", get_quotes_with_primary_push)
+    runner._refresh_quote_if_stale()
+    assert len(broker.calls) == 4
+    received_at = runner._last_quote_at
+    monkeypatch.setattr(broker, "get_quotes", original_get_quotes)
+    broker.failure = None
+    clock.now = received_at + 14.99
+    runner._refresh_quote_if_stale()
+    assert len(broker.calls) == 4
+    clock.now = received_at + 15.0
+    runner._refresh_quote_if_stale()
+    assert len(broker.calls) == 5
+    clock.now += 15.0
+    runner._refresh_quote_if_stale()
+    assert len(broker.calls) == 6
