@@ -50,32 +50,56 @@ def _request_id(request: bytes) -> int:
     return request_id
 
 
+def _read_request(request: bytes) -> tuple[int, str | None]:
+    if not request.lstrip().startswith(b"{"):
+        return _request_id(request), None
+    from app.core.broker_read_codec import strict_loads
+    payload = strict_loads(request.decode("utf-8"))
+    if (
+        type(payload) is not dict or set(payload) != {"request_id", "op"}
+        or type(payload["request_id"]) is not int or payload["request_id"] < 1
+        or type(payload["op"]) is not str or payload["op"] not in ("today_orders", "account")
+    ):
+        raise ValueError("invalid isolated broker read request")
+    return payload["request_id"], payload["op"]
+
+
 def _serve_one_request(
     protocol_fd: int,
     trade_ctx: Any,
     classify_retryable: Any,
     build_error_payload: Any,
     request_id: int,
+    op: str | None = None,
 ) -> bool:
-    from app.core.broker import _fetch_position_snapshot_from_context
+    from app.core.broker import (
+        _fetch_position_snapshot_from_context,
+        _fetch_today_orders_from_context,
+        _fetch_account_from_context,
+    )
 
     try:
-        positions = _fetch_position_snapshot_from_context(trade_ctx)
+        if op is None:
+            result = _fetch_position_snapshot_from_context(trade_ctx)
+        else:
+            from app.core.broker_read_codec import encode_result
+            parsed = (_fetch_today_orders_from_context(trade_ctx) if op == "today_orders"
+                      else _fetch_account_from_context(trade_ctx))
+            result = encode_result(op, parsed)
     except Exception as exc:
         retryable = bool(classify_retryable(exc))
         payload = dict(build_error_payload(exc, retryable=retryable))
         payload["request_id"] = request_id
+        if op is not None:
+            payload["op"] = op
         _write_protocol_payload(protocol_fd, payload, terminate=True)
         return False
-    _write_protocol_payload(
-        protocol_fd,
-        {
-            "status": "ok",
-            "request_id": request_id,
-            "positions": positions,
-        },
-        terminate=True,
-    )
+    payload = {"status": "ok", "request_id": request_id}
+    if op is None:
+        payload["positions"] = result
+    else:
+        payload.update(op=op, result=result)
+    _write_protocol_payload(protocol_fd, payload, terminate=True)
     sys.stdout.flush()
     return True
 
@@ -97,7 +121,7 @@ def _serve_persistent(protocol_fd: int) -> int:
             if request is None:
                 return 0
             try:
-                request_id = _request_id(request)
+                request_id, op = _read_request(request)
             except ValueError as exc:
                 _write_protocol_payload(
                     protocol_fd,
@@ -116,6 +140,8 @@ def _serve_persistent(protocol_fd: int) -> int:
                         )
                     )
                     payload["request_id"] = request_id
+                    if op is not None:
+                        payload["op"] = op
                     _write_protocol_payload(protocol_fd, payload, terminate=True)
                     return 1
             if not _serve_one_request(
@@ -124,6 +150,7 @@ def _serve_persistent(protocol_fd: int) -> int:
                 _is_retryable_exception,
                 build_position_probe_error_payload,
                 request_id,
+                op,
             ):
                 return 1
     finally:

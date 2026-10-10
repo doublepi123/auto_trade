@@ -10,7 +10,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation as _DecimalInvalidOp
 from typing import TYPE_CHECKING, Any, Callable, cast
@@ -322,6 +322,95 @@ class AccountInfo:
     # false. Without this the figure is unlabelled and every consumer guesses:
     # the dashboard rendered an HKD balance behind a hardcoded "$".
     currency: str = ""
+
+
+def _fetch_today_orders_from_context(trade_ctx: Any) -> list[BrokerOrder]:
+    response = None
+    last_error: Exception | None = None
+    for method_name in ("today_orders", "order_list", "stock_order_list", "orders"):
+        method = getattr(trade_ctx, method_name, None)
+        if method is None:
+            continue
+        try:
+            response = method()
+            break
+        except TypeError as exc:
+            last_error = exc
+            continue
+    if response is None:
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("broker does not support listing today orders")
+
+    orders: list[BrokerOrder] = []
+    for item in _iter_order_items(response):
+        raw_order_id = _get_value(item, "order_id", _get_value(item, "broker_order_id", None))
+        order_id = str(raw_order_id or "").strip()
+        if not order_id:
+            raise ValueError("broker returned an order without broker_order_id")
+        executed_quantity = _nonnegative_decimal_attr(item, "executed_quantity", "filled_quantity")
+        status = _normalize_order_status(_get_value(item, "status", "SUBMITTED"))
+        raw_filled_at = _get_value(item, "filled_at", None)
+        if raw_filled_at is None and (status == "FILLED" or executed_quantity > 0):
+            raw_filled_at = _get_value(item, "updated_at", None)
+        orders.append(BrokerOrder(
+            broker_order_id=order_id,
+            symbol=str(_get_value(item, "symbol", "")),
+            side=_normalize_order_side(_get_value(item, "side", "")),
+            quantity=_decimal_attr(item, "submitted_quantity", "quantity"),
+            price=_decimal_attr(item, "submitted_price", "price", "limit_price"),
+            executed_quantity=executed_quantity,
+            executed_price=_nonnegative_decimal_attr(item, "executed_price", "filled_price"),
+            status=status,
+            created_at=_parse_datetime(_get_value(item, "created_at", _get_value(item, "submitted_at", None))),
+            filled_at=_parse_datetime(raw_filled_at),
+        ))
+    return orders
+
+
+def _fetch_account_from_context(trade_ctx: Any) -> AccountInfo:
+    response = trade_ctx.account_balance()
+    cash_balances: list[CashBalance] = []
+    net_assets: list[NetAsset] = []
+    margin_infos: list[MarginInfo] = []
+    items = response if isinstance(response, list) else [response]
+    primary_currency = ""
+    primary_total = Decimal("0")
+    fallback_total = Decimal("0")
+    for item in items:
+        currency = str(getattr(item, "currency", ""))
+        net_amount = Decimal(str(getattr(item, "net_assets", "0")))
+        net_assets.append(NetAsset(currency=currency, amount=net_amount))
+        if currency in ("USD", "HKD") and not primary_currency:
+            primary_currency = currency
+            primary_total = net_amount
+        fallback_total += net_amount
+        margin_infos.append(MarginInfo(
+            currency=currency,
+            risk_level=_risk_level_attr(item),
+            margin_call=_decimal_attr(item, "margin_call"),
+            init_margin=_decimal_attr(item, "init_margin"),
+            maintenance_margin=_decimal_attr(item, "maintenance_margin"),
+            max_finance_amount=_decimal_attr(item, "max_finance_amount"),
+            remaining_finance_amount=_decimal_attr(item, "remaining_finance_amount"),
+            buy_power=_decimal_attr(item, "buy_power"),
+        ))
+        cash_infos = getattr(item, "cash_infos", None)
+        if cash_infos:
+            for ci in cash_infos:
+                cash_balances.append(CashBalance(
+                    currency=str(getattr(ci, "currency", "")),
+                    available_cash=Decimal(str(getattr(ci, "available_cash", "0"))),
+                    frozen_cash=Decimal(str(getattr(ci, "frozen_cash", "0"))),
+                ))
+    # Keep the first USD/HKD figure; without one retain the original naive sum.
+    return AccountInfo(
+        total_assets=primary_total if primary_currency else fallback_total,
+        cash_balances=cash_balances,
+        net_assets=net_assets,
+        margin_infos=margin_infos,
+        currency=primary_currency if primary_currency else (net_assets[0].currency if len(net_assets) == 1 else ""),
+    )
 
 
 def _get_value(item: Any, key: str, default: Any = None) -> Any:
@@ -728,6 +817,7 @@ class _PositionProbeWorker:
         self._stderr_thread: threading.Thread | None = None
         self._stderr_lock = threading.Lock()
         self._stderr_closed = threading.Event()
+        self._read_op: str | None = None
 
     def request(
         self,
@@ -735,7 +825,9 @@ class _PositionProbeWorker:
         deadline: float,
         started_at: float,
         timeout_seconds: float,
+        op: str | None = None,
     ) -> tuple[str, int, str]:
+        self._read_op = op
         if not self._begin_request():
             raise _PositionProbeWorkerClosed(
                 "broker position snapshot probe worker was closed"
@@ -861,6 +953,7 @@ class _PositionProbeWorker:
                 "position probe worker pid=%s did not exit after SIGKILL",
                 process.pid,
             )
+            self._reap_later(process)
         self._join_stderr_thread()
         return process.returncode
 
@@ -876,14 +969,18 @@ class _PositionProbeWorker:
 
     def _accept_request_id(self, output: str) -> str:
         try:
-            payload = json.loads(output)
+            if self._read_op is None:
+                payload = json.loads(output)
+            else:
+                from app.core.broker_read_codec import strict_loads
+                payload = strict_loads(output)
         except (TypeError, ValueError) as exc:
             raise OSError("position probe response was not a single payload") from exc
         if not isinstance(payload, dict):
             raise OSError("position probe response was not an object")
         with self._state_lock:
             expected = self._pending_request_id
-        if payload.get("request_id") != expected:
+        if type(payload.get("request_id")) is not int or payload.get("request_id") != expected:
             raise OSError("position probe response id did not match the request")
         payload.pop("request_id")
         return json.dumps(payload, separators=(",", ":"))
@@ -902,7 +999,18 @@ class _PositionProbeWorker:
                 "position probe worker pid=%s did not exit after SIGKILL",
                 process.pid,
             )
+            _PositionProbeWorker._reap_later(process)
         _PositionProbeWorker._close_pipes(process)
+
+    @staticmethod
+    def _reap_later(process: subprocess.Popen[bytes]) -> None:
+        # Retain the Popen until waitpid succeeds without extending the caller's deadline.
+        def reap() -> None:
+            try:
+                process.wait()
+            except OSError:
+                logger.exception("broker read worker pid=%s deferred reap failed", process.pid)
+        threading.Thread(target=reap, name=f"broker-read-reaper-{process.pid}", daemon=True).start()
 
     def stderr_text(self) -> str:
         with self._stderr_lock:
@@ -969,7 +1077,11 @@ class _PositionProbeWorker:
         stdin = process.stdin
         if stdin is None:
             raise OSError("position probe worker stdin is closed")
-        payload = f"{self._next_request_id()}\n".encode("ascii")
+        request_id = self._next_request_id()
+        if self._read_op is None:
+            payload = f"{request_id}\n".encode("ascii")
+        else:
+            payload = (json.dumps({"request_id": request_id, "op": self._read_op}, separators=(",", ":")) + "\n").encode("ascii")
         selector = selectors.DefaultSelector()
         try:
             selector.register(stdin, selectors.EVENT_WRITE)
@@ -2555,67 +2667,11 @@ class BrokerGateway:
 
     def get_today_orders(self) -> list[BrokerOrder]:
         def _fetch() -> list[BrokerOrder]:
+            if settings.broker_position_snapshot_isolation_enabled:
+                return cast(list[BrokerOrder], self._get_broker_read_isolated("today_orders"))
             with self._lock:
                 self._init_clients()
-                response = None
-                last_error: Exception | None = None
-                for method_name in ("today_orders", "order_list", "stock_order_list", "orders"):
-                    method = getattr(self._trade_ctx, method_name, None)
-                    if method is None:
-                        continue
-                    try:
-                        response = method()
-                        break
-                    except TypeError as exc:
-                        last_error = exc
-                        continue
-                if response is None:
-                    if last_error is not None:
-                        raise last_error
-                    raise RuntimeError("broker does not support listing today orders")
-
-                orders: list[BrokerOrder] = []
-                for item in _iter_order_items(response):
-                    raw_order_id = _get_value(
-                        item,
-                        "order_id",
-                        _get_value(item, "broker_order_id", None),
-                    )
-                    order_id = str(raw_order_id or "").strip()
-                    if not order_id:
-                        raise ValueError(
-                            "broker returned an order without broker_order_id"
-                        )
-                    executed_quantity = _nonnegative_decimal_attr(
-                        item,
-                        "executed_quantity",
-                        "filled_quantity",
-                    )
-                    status = _normalize_order_status(
-                        _get_value(item, "status", "SUBMITTED")
-                    )
-                    raw_filled_at = _get_value(item, "filled_at", None)
-                    if raw_filled_at is None and (
-                        status == "FILLED" or executed_quantity > 0
-                    ):
-                        raw_filled_at = _get_value(item, "updated_at", None)
-                    orders.append(BrokerOrder(
-                        broker_order_id=order_id,
-                        symbol=str(_get_value(item, "symbol", "")),
-                        side=_normalize_order_side(_get_value(item, "side", "")),
-                        quantity=_decimal_attr(item, "submitted_quantity", "quantity"),
-                        price=_decimal_attr(item, "submitted_price", "price", "limit_price"),
-                        executed_quantity=executed_quantity,
-                        executed_price=_nonnegative_decimal_attr(
-                            item,
-                            "executed_price",
-                            "filled_price",
-                        ),
-                        status=status,
-                        created_at=_parse_datetime(_get_value(item, "created_at", _get_value(item, "submitted_at", None))),
-                        filled_at=_parse_datetime(raw_filled_at),
-                    ))
-                return orders
+                return _fetch_today_orders_from_context(self._trade_ctx)
         return self._call_with_retry(
             _fetch,
             op="get_today_orders",
@@ -2792,6 +2848,79 @@ class BrokerGateway:
                 return
             self._position_probe_worker = None
         worker.discard()
+
+    def _get_broker_read_isolated(self, op: str) -> list[BrokerOrder] | AccountInfo:
+        from app.core.broker_read_codec import decode_result, strict_loads
+
+        timeout_seconds = settings.broker_position_snapshot_timeout_seconds
+        started_at = time.monotonic()
+        deadline = started_at + timeout_seconds
+        label = f"isolated broker read {op}"
+        if not _POSITION_PROBE_LOCK.acquire(timeout=timeout_seconds):
+            raise _position_probe_timeout_error(
+                f"{label} remained busy beyond {timeout_seconds:g}s timeout",
+                started_at=started_at,
+            )
+        worker: _PositionProbeWorker | None = None
+        try:
+            with self._position_probe_worker_guard:
+                if self._position_probe_worker is None:
+                    self._position_probe_worker = _PositionProbeWorker()
+                worker = self._position_probe_worker
+            output, returncode, stderr = worker.request(
+                deadline=deadline, started_at=started_at,
+                timeout_seconds=timeout_seconds, op=op,
+            )
+            try:
+                if len(output.encode("utf-8")) > _POSITION_PROBE_MAX_OUTPUT_BYTES:
+                    raise ValueError("output exceeded byte limit")
+                payload = strict_loads(output)
+                if type(payload) is not dict or payload.get("op") != op:
+                    raise ValueError("unexpected broker read operation")
+                payload.pop("op")
+                if payload.get("status") == "error":
+                    if set(payload) != {"status", "error_type", "retryable", "sdk_error_code", "sdk_error_category", "error_message"}:
+                        raise ValueError("unknown or missing broker read error fields")
+                    # Reuse the existing strict diagnostic/error taxonomy.
+                    _decode_position_probe_output(
+                        json.dumps(payload, allow_nan=False), returncode=returncode,
+                        stderr=stderr, probe_duration_ms=(time.monotonic() - started_at) * 1_000,
+                    )
+                    raise ValueError("error payload accepted as success")
+                if returncode != 0 or set(payload) != {"status", "result"} or payload["status"] != "ok":
+                    raise ValueError("invalid broker read response")
+                return decode_result(op, payload["result"])
+            except (ValueError, TypeError, KeyError, _DecimalInvalidOp) as exc:
+                raise PositionProbeProtocolError(PositionProbeDiagnostics(
+                    error_type=type(exc).__name__, sdk_error_category="PROTOCOL",
+                    error_message=f"malformed {label} payload", exit_code=returncode,
+                    probe_duration_ms=(time.monotonic() - started_at) * 1_000,
+                    stderr=redact_probe_text(stderr, limit=POSITION_PROBE_STDERR_LIMIT),
+                )) from None
+        except (PositionProbeConnectionError, PositionProbeRuntimeError,
+                PositionProbeProtocolError, PositionProbeTimeoutError) as exc:
+            self._discard_position_probe_worker(worker)
+            message = exc.diagnostics.error_message.replace("broker position snapshot", label)
+            if isinstance(exc, PositionProbeProtocolError):
+                message = f"malformed {label} payload"
+            if not message.startswith(label) and not message.startswith(f"malformed {label}"):
+                message = f"{label}: {message}"
+            error = type(exc)(replace(exc.diagnostics, error_message=message))
+            error.args = (message,)
+            raise error from None
+        except _PositionProbeWorkerClosed:
+            self._discard_position_probe_worker(worker)
+            raise _position_probe_timeout_error(f"{label} worker was closed", started_at=started_at) from None
+        except (OSError, ValueError) as exc:
+            self._discard_position_probe_worker(worker)
+            error = PositionProbeProtocolError(PositionProbeDiagnostics(
+                error_type=type(exc).__name__, sdk_error_category="PROTOCOL",
+                error_message=f"malformed {label} payload",
+            ))
+            error.args = (error.diagnostics.error_message,)
+            raise error from None
+        finally:
+            _POSITION_PROBE_LOCK.release()
 
     def close(self) -> None:
         with self._position_probe_worker_guard:
@@ -2971,78 +3100,11 @@ class BrokerGateway:
 
     def get_account(self) -> AccountInfo:
         def _fetch() -> AccountInfo:
+            if settings.broker_position_snapshot_isolation_enabled:
+                return cast(AccountInfo, self._get_broker_read_isolated("account"))
             with self._lock:
                 self._init_clients()
-                response = self._trade_ctx.account_balance()
-                cash_balances: list[CashBalance] = []
-                net_assets: list[NetAsset] = []
-                margin_infos: list[MarginInfo] = []
-                total_assets = Decimal("0")
-                items = response if isinstance(response, list) else [response]
-                primary_currency = ""
-                primary_total = Decimal("0")
-                fallback_total = Decimal("0")
-
-                for item in items:
-                    currency = str(getattr(item, "currency", ""))
-                    net_amount = Decimal(str(getattr(item, "net_assets", "0")))
-                    net_assets.append(NetAsset(
-                        currency=currency,
-                        amount=net_amount,
-                    ))
-                    if currency in ("USD", "HKD") and not primary_currency:
-                        primary_currency = currency
-                        primary_total = net_amount
-                    fallback_total += net_amount
-
-                    margin_infos.append(MarginInfo(
-                        currency=currency,
-                        risk_level=_risk_level_attr(item),
-                        margin_call=_decimal_attr(item, "margin_call"),
-                        init_margin=_decimal_attr(item, "init_margin"),
-                        maintenance_margin=_decimal_attr(item, "maintenance_margin"),
-                        max_finance_amount=_decimal_attr(item, "max_finance_amount"),
-                        remaining_finance_amount=_decimal_attr(item, "remaining_finance_amount"),
-                        buy_power=_decimal_attr(item, "buy_power"),
-                    ))
-
-                    cash_infos = getattr(item, "cash_infos", None)
-                    if cash_infos:
-                        for ci in cash_infos:
-                            ci_currency = str(getattr(ci, "currency", ""))
-                            ci_available = Decimal(str(getattr(ci, "available_cash", "0")))
-                            ci_frozen = Decimal(str(getattr(ci, "frozen_cash", "0")))
-                            cash_balances.append(CashBalance(
-                                currency=ci_currency,
-                                available_cash=ci_available,
-                                frozen_cash=ci_frozen,
-                            ))
-
-                # total_assets uses the primary-currency (first USD/HKD) net
-                # asset figure rather than a cross-currency sum, which would be
-                # meaningless without FX conversion.  When no USD/HKD entry is
-                # present, fall back to the single-currency total (or naive sum
-                # if multiple non-primary currencies exist).
-                if primary_currency:
-                    total_assets = primary_total
-                else:
-                    total_assets = fallback_total
-
-                return AccountInfo(
-                    total_assets=total_assets,
-                    cash_balances=cash_balances,
-                    net_assets=net_assets,
-                    margin_infos=margin_infos,
-                    # Report the currency that was already chosen above rather
-                    # than discarding it. A single non-primary row is still
-                    # unambiguous, so label it; several rows are a naive sum and
-                    # stay blank.
-                    currency=(
-                        primary_currency
-                        if primary_currency
-                        else (net_assets[0].currency if len(net_assets) == 1 else "")
-                    ),
-                )
+                return _fetch_account_from_context(self._trade_ctx)
         return self._call_with_retry(
             _fetch,
             op="get_account",
