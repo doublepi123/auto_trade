@@ -616,3 +616,22 @@ def test_deploy_files_expose_ledger_epoch() -> None:
     assert expected in compose
     assert expected in dockerhub
     assert "AUTO_TRADE_LEDGER_EPOCH=" in env_example
+
+
+def test_market_data_recording_settings_wired_into_compose_and_env_example() -> None:
+    # Recorder is read-only and off by default; the flag must reach the
+    # container (compose only forwards declared variables) and be documented.
+    names = (
+        "AUTO_TRADE_MARKET_DATA_RECORDING_ENABLED",
+        "AUTO_TRADE_MARKET_DATA_RECORDING_SYMBOLS",
+        "AUTO_TRADE_MARKET_DATA_RECORDING_DIR",
+    )
+    compose = (ROOT / "docker-compose.yaml").read_text(encoding="utf-8")
+    dockerhub = (ROOT / "docker-compose.dockerhub.yaml").read_text(encoding="utf-8")
+    env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+    for name in names:
+        assert f"- {name}=" in compose
+        assert f"- {name}=" in dockerhub
+        assert name in env_example
+    assert "AUTO_TRADE_MARKET_DATA_RECORDING_ENABLED=${AUTO_TRADE_MARKET_DATA_RECORDING_ENABLED:-false}" in compose
+    assert "AUTO_TRADE_MARKET_DATA_RECORDING_DIR=${AUTO_TRADE_MARKET_DATA_RECORDING_DIR:-/app/data/market_data}" in dockerhub

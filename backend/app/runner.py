@@ -2590,6 +2590,17 @@ class AppRunner:
     def is_running(self) -> bool:
         return self._running and self._thread is not None and self._thread.is_alive()
 
+    def _market_data_recording_diagnostics(self) -> dict[str, Any]:
+        """Cached recorder state only: no SDK calls, no disk scans."""
+        reader = getattr(self.broker, "market_data_recording_snapshot", None)
+        if not callable(reader):
+            return {"enabled": False, "state": "OFF"}
+        try:
+            snapshot = reader()
+        except Exception as exc:
+            return {"enabled": True, "state": "DEGRADED", "last_error": str(exc)}
+        return dict(snapshot) if isinstance(snapshot, dict) else {"enabled": False, "state": "OFF"}
+
     def diagnostics(self) -> dict[str, Any]:
         now = time.monotonic()
         tracked_entries = self._trade_svc.snapshot_tracked_entries()
@@ -2724,6 +2735,7 @@ class AppRunner:
                 "trading_state": self._trading_state(),
                 "dedup_suppressed_total": self.notifier.dedup_suppressed_total,
                 "dedup_window_seconds": self.notifier.dedup_window_seconds,
+                "market_data_recording": self._market_data_recording_diagnostics(),
                 "live_safety": {
                     "full_buying_power_usage_enabled": bool(
                         self._trade_svc.full_buying_power_usage_enabled
