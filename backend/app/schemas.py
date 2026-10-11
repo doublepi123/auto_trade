@@ -1950,9 +1950,6 @@ class DiagnosticsResponse(BaseModel):
     decision_funnel: DecisionFunnelDiagnostics = Field(
         default_factory=DecisionFunnelDiagnostics
     )
-    market_data_recording: dict[str, Any] = Field(
-        default_factory=lambda: {"enabled": False, "state": "OFF"},
-    )
 
 
 class OrderResponse(BaseModel):

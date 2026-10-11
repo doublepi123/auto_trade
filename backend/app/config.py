@@ -197,20 +197,6 @@ class Settings(BaseSettings):
         allow_inf_nan=False,
         validation_alias="AUTO_TRADE_BROKER_POSITION_SNAPSHOT_TIMEOUT_SECONDS",
     )
-    # Read-only market-data recorder (off by default). Reuses the existing
-    # QuoteContext; never adds symbols or affects orders/risk.
-    market_data_recording_enabled: bool = Field(
-        default=False,
-        validation_alias="AUTO_TRADE_MARKET_DATA_RECORDING_ENABLED",
-    )
-    market_data_recording_symbols: str = Field(
-        default="TSLA.US",
-        validation_alias="AUTO_TRADE_MARKET_DATA_RECORDING_SYMBOLS",
-    )
-    market_data_recording_dir: str = Field(
-        default="data/market_data",
-        validation_alias="AUTO_TRADE_MARKET_DATA_RECORDING_DIR",
-    )
 
     deepseek_api_key: str = Field(default="", validation_alias="DEEPSEEK_API_KEY")
     deepseek_api_url: str = "https://api.deepseek.com/v1/chat/completions"

@@ -13,7 +13,6 @@ import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation as _DecimalInvalidOp
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, cast
 from zoneinfo import ZoneInfo
 
@@ -1676,58 +1675,6 @@ class BrokerGateway:
         # A latched exit retries the strict read on every quote. One line per
         # symbol per window; suppressed counts are reported, not dropped.
         self._strict_depth_log_throttle = RepeatedLogThrottle(window_seconds=60)
-        # Read-only recorder: created only when the flag is on. Trade
-        # subscription state is separate from the base Quote/Depth state.
-        self._trades_handler_registered = False
-        self._trade_subscribed_symbols: set[str] = set()
-        self._market_recorder: Any = None
-        self._market_recorder_run_seq = 0
-        if settings.market_data_recording_enabled:
-            self._market_recorder = self._build_market_recorder()
-
-    def _build_market_recorder(self) -> Any:
-        from app.core.market_data_recorder import (
-            MarketDataRecorder,
-            parse_recording_symbols,
-        )
-
-        self._market_recorder_run_seq += 1
-        run_id = (
-            f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-            f"-{os.getpid()}-{self._market_recorder_run_seq}"
-        )
-        return MarketDataRecorder(
-            root=Path(settings.market_data_recording_dir),
-            symbols=parse_recording_symbols(settings.market_data_recording_symbols),
-            run_id=run_id,
-            start=True,
-        )
-
-    def market_data_recording_snapshot(self) -> dict[str, Any]:
-        """Cached recorder state for diagnostics. Never touches the SDK."""
-        recorder = self._market_recorder
-        if recorder is None:
-            return {"enabled": False, "state": "OFF"}
-        snap = dict(recorder.snapshot())
-        with self._lock:
-            snap["subscribed_trade_symbols"] = sorted(self._trade_subscribed_symbols)
-            snap["trades_handler_registered"] = self._trades_handler_registered
-        return snap
-
-    def _observe_market_push(self, kind: str, symbol: str, event: Any) -> None:
-        """No-throw observer for SDK pushes. Never touches broker state."""
-        recorder = self._market_recorder
-        if recorder is None:
-            return
-        try:
-            recorder.observe(kind, symbol, event)
-        except Exception:
-            return
-
-    def _on_trades_push(self, fallback_symbol: str, event: Any) -> None:
-        """Record-only trade handler. Must not update BBO/last-trade caches."""
-        symbol = str(getattr(event, "symbol", fallback_symbol))
-        self._observe_market_push("trade", symbol, event)
 
     @staticmethod
     def _best_depth_price(levels: Any, *, side: str) -> float:
@@ -1779,9 +1726,6 @@ class BrokerGateway:
         return bid, ask
 
     def _on_quote_push(self, fallback_symbol: str, event: Any) -> None:
-        self._observe_market_push(
-            "quote", str(getattr(event, "symbol", fallback_symbol)), event,
-        )
         symbol = str(getattr(event, "symbol", fallback_symbol))
         last_price = float(getattr(event, "last_done", 0))
         timestamp = str(getattr(event, "timestamp", ""))
@@ -1803,9 +1747,6 @@ class BrokerGateway:
                 logger.exception("quote callback failed for %s", fallback_symbol)
 
     def _on_depth_push(self, fallback_symbol: str, event: Any) -> None:
-        self._observe_market_push(
-            "depth", str(getattr(event, "symbol", fallback_symbol)), event,
-        )
         symbol = str(getattr(event, "symbol", fallback_symbol))
         bid, ask = self._bbo_from_depth(event)
         with self._lock:
@@ -2525,9 +2466,6 @@ class BrokerGateway:
                 if callback not in self._quote_callbacks:
                     self._quote_callbacks.append(callback)
                     added_callback = True
-                if settings.market_data_recording_enabled and self._market_recorder is None:
-                    # Lazily rebuilt after close(): no writer thread while idle.
-                    self._market_recorder = self._build_market_recorder()
                 missing_symbols = [
                     symbol
                     for symbol in unique_symbols
@@ -2564,7 +2502,6 @@ class BrokerGateway:
                             self._depth_handler_registered = True
 
                 if not missing_symbols:
-                    self._subscribe_trades_for_recorder(quote_ctx, unique_symbols)
                     return
 
                 module = _import_openapi()
@@ -2592,57 +2529,6 @@ class BrokerGateway:
             with self._lock:
                 self._subscribed_symbols.update(missing_symbols)
                 self._subscription_topics = list(topics)
-            self._subscribe_trades_for_recorder(quote_ctx, unique_symbols)
-
-    def _subscribe_trades_for_recorder(
-        self, quote_ctx: Any, requested_symbols: list[str],
-    ) -> None:
-        """Add Trade for whitelisted, already-subscribed symbols only.
-
-        Runs after the base Quote/Depth subscription has committed. Any
-        failure here is logged and swallowed; the base subscription and quote
-        callbacks are never undone. Not retried until the next resubscribe.
-        """
-        recorder = self._market_recorder
-        if recorder is None:
-            return
-        allowed = self._recorder_symbols_for_trades(requested_symbols)
-        if not allowed:
-            return
-        try:
-            module = _import_openapi()
-            SubType = getattr(module, "SubType", None)
-            trade_type = getattr(SubType, "Trade", None)
-            if trade_type is None:
-                raise RuntimeError("longport SDK SubType.Trade not available")
-            if not self._trades_handler_registered:
-                handler = getattr(quote_ctx, "set_on_trades", None)
-                if not callable(handler):
-                    raise RuntimeError("quote context does not support trade push")
-                handler(self._on_trades_push)
-                with self._lock:
-                    self._trades_handler_registered = True
-            quote_ctx.subscribe(allowed, [trade_type])
-        except Exception as exc:
-            logger.warning(
-                "market data trade subscription failed for %s: %s",
-                ", ".join(allowed), exc,
-            )
-            return
-        with self._lock:
-            self._trade_subscribed_symbols.update(allowed)
-
-    def _recorder_symbols_for_trades(self, requested_symbols: list[str]) -> list[str]:
-        recorder = self._market_recorder
-        if recorder is None:
-            return []
-        whitelist = set(recorder.configured_symbols())
-        with self._lock:
-            base = set(self._subscribed_symbols)
-        return sorted(
-            symbol for symbol in dict.fromkeys(requested_symbols)
-            if symbol in whitelist and symbol in base
-        )
 
     def submit_limit_order(
         self, symbol: str, side: str, quantity: Decimal, price: Decimal,
@@ -3042,7 +2928,6 @@ class BrokerGateway:
             self._position_probe_worker = None
         if worker is not None:
             worker.close()
-        recorder = self._market_recorder
         with self._subscription_lock:
             with self._lock:
                 contexts = (self._quote_ctx, self._trade_ctx)
@@ -3051,8 +2936,6 @@ class BrokerGateway:
                 self._subscription_topics.clear()
                 self._quote_handler_registered = False
                 self._depth_handler_registered = False
-                self._trades_handler_registered = False
-                self._trade_subscribed_symbols.clear()
                 self._last_trade_by_symbol.clear()
                 self._bbo_by_symbol.clear()
                 self._quote_ctx = None
@@ -3063,48 +2946,23 @@ class BrokerGateway:
                         ctx.close()
                     except Exception as exc:
                         logger.debug("broker context close error (ignored): %s", exc)
-        # Outside all broker locks: writer join may take up to 2 seconds.
-        if recorder is not None:
-            recorder.close(timeout=2.0)
-            with self._lock:
-                if self._market_recorder is recorder:
-                    self._market_recorder = None
 
     def unsubscribe_quotes(self) -> None:
         with self._subscription_lock:
             with self._lock:
                 symbols = sorted(self._subscribed_symbols)
-                trade_symbols = sorted(self._trade_subscribed_symbols)
                 quote_ctx = self._quote_ctx
                 topics = list(self._subscription_topics)
-                trade_topics = self._trade_topics()
                 self._quote_callbacks.clear()
                 self._subscribed_symbols.clear()
                 self._subscription_topics.clear()
-                self._trade_subscribed_symbols.clear()
                 self._last_trade_by_symbol.clear()
                 self._bbo_by_symbol.clear()
-            # Each group is attempted independently so one failure cannot skip the other.
             if symbols and quote_ctx is not None:
                 try:
                     quote_ctx.unsubscribe(symbols, topics)
                 except Exception:
                     logger.warning("failed to unsubscribe from %s", ", ".join(symbols))
-            if trade_symbols and quote_ctx is not None and trade_topics:
-                try:
-                    quote_ctx.unsubscribe(trade_symbols, trade_topics)
-                except Exception:
-                    logger.warning(
-                        "failed to unsubscribe trades from %s", ", ".join(trade_symbols),
-                    )
-
-    def _trade_topics(self) -> list[Any]:
-        try:
-            module = _import_openapi()
-        except Exception:
-            return []
-        trade_type = getattr(getattr(module, "SubType", None), "Trade", None)
-        return [trade_type] if trade_type is not None else []
 
     def get_cash(self, currency: str | None = None) -> Decimal:
         """Return available cash for the given currency.
