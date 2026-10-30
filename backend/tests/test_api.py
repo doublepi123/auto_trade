@@ -133,6 +133,7 @@ class TestAPI:
         assert data["longbridge_app_key"] == ""
 
     def test_update_strategy_valid(self) -> None:
+        _clean_strategy()
         resp = client.put("/api/strategy", json={
             "symbol": "AAPL.US",
             "market": "US",
@@ -144,7 +145,7 @@ class TestAPI:
             "min_profit_amount": 8.5,
             "auto_resume_minutes": 4,
         })
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
         data = resp.json()
         assert data["symbol"] == "AAPL.US"
         assert data["buy_low"] == 100.0
