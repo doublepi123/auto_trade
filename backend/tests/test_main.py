@@ -2229,6 +2229,42 @@ class TestLLMAnalysisTick:
         assert event_payload["policy_outcome"] == expected_policy_outcome
 
     @pytest.mark.asyncio
+    async def test_tick_does_not_send_primary_interval_as_secondary_configuration(
+        self, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        config = self._make_fake_config(
+            symbol="AAPL.US", market="US",
+            llm_last_analysis_at=datetime.now(timezone.utc) - timedelta(minutes=3),
+        )
+        runner = self._make_fake_runner(last_price=101.0)
+        runner.engine.params = StrategyParams(
+            symbol="AAPL.US", market="US", buy_low=config.buy_low, sell_high=config.sell_high,
+        )
+        runner._symbol_runtimes = {
+            "AAPL.US": SimpleNamespace(symbol="AAPL.US", market="US", engine=runner.engine),
+            "ASML.US": SimpleNamespace(
+                symbol="ASML.US", market="US",
+                engine=SimpleNamespace(
+                    last_price=1500,
+                    params=StrategyParams(
+                        symbol="ASML.US", market="US",
+                        buy_low=config.buy_low, sell_high=config.sell_high,
+                    ),
+                ),
+            ),
+        }
+        calls = self._patch_tick_deps(monkeypatch, config, runner)
+        monkeypatch.setattr(main_module.settings, "llm_max_symbols_per_cycle", 2)
+        monkeypatch.setattr(main_module.settings, "llm_max_analyses_per_hour", 10)
+
+        assert await main_module._llm_analysis_tick() is True
+        assert [call["symbol"] for call in calls] == ["AAPL.US", "ASML.US"]
+        assert calls[0]["current_buy_low"] == config.buy_low
+        assert calls[1]["current_buy_low"] == 0
+        assert calls[1]["current_sell_high"] == 0
+        assert calls[1]["persist"] is False
+
+    @pytest.mark.asyncio
     async def test_tick_uses_secondary_symbol_interval_bounds(self, monkeypatch: pytest.MonkeyPatch) -> None:
         now = datetime.now(timezone.utc)
         config = self._make_fake_config(symbol="AAPL.US", market="US", llm_last_analysis_at=now - timedelta(minutes=3))
@@ -2448,7 +2484,7 @@ class TestLLMAnalysisTick:
             FailedAdvisor,
         )
 
-        await main_module._llm_analysis_tick()
+        assert await main_module._llm_analysis_tick() is False
 
         assert [call["symbol"] for call in calls] == ["AAPL.US"]
 

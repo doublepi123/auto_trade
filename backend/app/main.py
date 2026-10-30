@@ -335,6 +335,13 @@ def _cron_record_failure(name: str, exc: BaseException) -> None:
         logger.debug("cron-health record_failure failed", exc_info=True)
 
 
+def _cron_record_idle(name: str) -> None:
+    """Record loop progress without clearing an unresolved provider failure."""
+    try:
+        get_cron_health_service().record_idle(name)
+    except Exception:
+        logger.debug("cron-health record_idle failed", exc_info=True)
+
 
 
 def _opening_research_quiet_window(
@@ -639,7 +646,8 @@ async def _liveness_heartbeat_task() -> None:
         await asyncio.sleep(interval)
 
 
-async def _llm_analysis_tick() -> None:
+async def _llm_analysis_tick() -> bool | None:
+    """Return the attempted work's outcome, or None when no analysis was due."""
     if _opening_research_quiet_window():
         logger.debug("LLM analysis deferred during opening research quiet window")
         return
@@ -654,6 +662,8 @@ async def _llm_analysis_tick() -> None:
     # entry for every symbol the runner currently knows about.
     _prune_llm_per_symbol_caches()
 
+    attempted_count = 0
+    had_failures = False
     db = SessionLocal()
     try:
         svc = StrategyService(db)
@@ -738,7 +748,6 @@ async def _llm_analysis_tick() -> None:
                     )
 
         cycle_budget = min(settings.llm_max_symbols_per_cycle, remaining_hour_budget)
-        attempted_count = 0
 
         from app.api.llm_advisor import _interval_reference_quantity
         from app.services.llm_interaction_service import (
@@ -866,6 +875,12 @@ async def _llm_analysis_tick() -> None:
 
                 target_buy_low = getattr(params, "buy_low", config.buy_low)
                 target_sell_high = getattr(params, "sell_high", config.sell_high)
+                if not is_primary and (
+                    target_buy_low, target_sell_high
+                ) == (config.buy_low, config.sell_high):
+                    # Secondary runtimes inherit the primary engine's params.
+                    # Those prices are not a configured interval for this symbol.
+                    target_buy_low = target_sell_high = 0.0
                 attempted_count += 1
                 result = await asyncio.to_thread(
                     advisor.analyze,
@@ -981,6 +996,7 @@ async def _llm_analysis_tick() -> None:
                     )
                     db.commit()
                 else:
+                    had_failures = True
                     record_trade_event(
                         db,
                         event_type="LLM_ANALYSIS",
@@ -1012,6 +1028,7 @@ async def _llm_analysis_tick() -> None:
                     )
                     db.commit()
             except Exception:
+                had_failures = True
                 db.rollback()
                 logger.exception("LLM analysis failed for symbol %s; skipping", symbol)
                 # Session may have stale state after rollback; close it and
@@ -1024,6 +1041,9 @@ async def _llm_analysis_tick() -> None:
                 continue
     finally:
         db.close()
+    if had_failures:
+        return False
+    return True if attempted_count else None
 
 
 async def _llm_analysis_cron() -> None:
@@ -1032,8 +1052,16 @@ async def _llm_analysis_cron() -> None:
         async with _llm_analysis_lock:
             _cron_record_start(_CRON_LLM_ANALYSIS)
             try:
-                await _llm_analysis_tick()
-                _cron_record_success(_CRON_LLM_ANALYSIS)
+                outcome = await _llm_analysis_tick()
+                if outcome is False:
+                    _cron_record_failure(
+                        _CRON_LLM_ANALYSIS,
+                        RuntimeError("One or more LLM analyses failed"),
+                    )
+                elif outcome is True:
+                    _cron_record_success(_CRON_LLM_ANALYSIS)
+                else:
+                    _cron_record_idle(_CRON_LLM_ANALYSIS)
             except Exception:
                 logger.exception("LLM analysis cron failed")
                 _cron_record_failure(_CRON_LLM_ANALYSIS, sys.exc_info()[1])  # type: ignore[arg-type]

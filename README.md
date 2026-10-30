@@ -767,7 +767,7 @@ auto_trade/
 | `MINIMAX_BASE_URL` | MiniMax Token Plan base URL；OpenAI-compatible 客户端会拼 `/chat/completions` | `https://api.minimaxi.com/v1` |
 | `MINIMAX_API_URL` | 兼容旧配置：完整 MiniMax Chat Completions endpoint；设置后优先于 `MINIMAX_BASE_URL` | - |
 | `MINIMAX_MODEL` | MiniMax 模型 ID | `MiniMax-M3` |
-| `MINIMAX_THINKING_TYPE` | MiniMax thinking 模式（`adaptive` / `disabled`） | `adaptive` |
+| `MINIMAX_THINKING_TYPE` | MiniMax thinking 模式；短 JSON 建议默认关闭，避免思考耗尽输出预算（`adaptive` / `disabled`） | `disabled` |
 | `MINIMAX_MAX_COMPLETION_TOKENS` | MiniMax 单次响应 completion token 上限 | `8192` |
 | `AUTO_TRADE_LLM_MIN_CONFIDENCE` | 允许应用 LLM 建议的最低置信度 | `0.7` |
 | `AUTO_TRADE_LLM_MAX_STRIPE_WIDTH_PCT` | LLM 区间最大宽度 | `8.0` |

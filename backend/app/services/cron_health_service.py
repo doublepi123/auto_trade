@@ -19,6 +19,8 @@ Scheduler-loop health semantics (documented explicitly):
   ``failing`` (not ``pending``). A success→failure transition is
   ``failing``/unhealthy. A failure→success transition becomes ``healthy``. No
   historical success may mask the latest failure.
+  LLM no-work ticks record progress without replacing the last attempted
+  analysis outcome, so a backoff or budget skip cannot clear a failure.
 * A job is **stale** when it is enabled, has a known expected interval, has
   been activated, and has stopped making progress: either the last completed
   tick is older than ``interval * stale_multiplier`` (default 2.0 — one
@@ -318,6 +320,19 @@ class CronHealthService:
         except Exception:
             logger.debug("cron-health record_failure failed", exc_info=True)
 
+    def record_idle(self, name: str) -> None:
+        """Record a completed no-work tick without changing the work's outcome."""
+        try:
+            now_mono = self._now_monotonic()
+            with self._lock:
+                job = self._jobs.get(name)
+                if job is None:
+                    return
+                job.last_tick_at = now_mono
+                job.tick_count += 1
+        except Exception:
+            logger.debug("cron-health record_idle failed", exc_info=True)
+
     # --- read projection -------------------------------------------------
 
     def as_of(self) -> datetime:
@@ -392,6 +407,10 @@ class CronHealthService:
         if job.last_outcome == "success":
             stale = self._stale_if_overdue_locked(job, now_mono, interval)
             return stale, ("stale" if stale else "healthy")
+        # Idle ticks prove the loop is alive without claiming successful work.
+        if job.last_tick_at is not None:
+            stale = self._stale_if_overdue_locked(job, now_mono, interval)
+            return stale, ("stale" if stale else "pending")
         # Never ticked yet. Decide pending vs stale by activation time; a
         # recently-started first tick is in-flight progress and stays
         # pending until it ages past the in-flight horizon (hung first tick).

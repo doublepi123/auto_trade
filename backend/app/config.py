@@ -239,7 +239,9 @@ class Settings(BaseSettings):
     )
     minimax_model: str = Field(default="MiniMax-M3", validation_alias="MINIMAX_MODEL")
     minimax_thinking_type: Literal["adaptive", "disabled"] = Field(
-        default="adaptive",
+        # Short, structured recommendations must leave room for the JSON
+        # answer. Adaptive thinking can consume the entire completion budget.
+        default="disabled",
         validation_alias="MINIMAX_THINKING_TYPE",
     )
     minimax_max_completion_tokens: int = Field(

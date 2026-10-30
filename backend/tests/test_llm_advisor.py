@@ -49,12 +49,12 @@ def test_deepseek_chat_payload_uses_256k_completion_budget_for_thinking() -> Non
     assert payload["max_tokens"] == 262144
 
 
-def test_minimax_chat_payload_defaults_to_m3_adaptive_thinking() -> None:
+def test_minimax_chat_payload_defaults_to_m3_without_thinking() -> None:
     payload = LLMAdvisorService._minimax_chat_payload("analyze NVDA")
 
     assert payload["model"] == "MiniMax-M3"
     assert payload["max_completion_tokens"] == 8192
-    assert payload["thinking"] == {"type": "adaptive"}
+    assert payload["thinking"] == {"type": "disabled"}
     payload = cast(dict[str, Any], payload)
     assert payload["messages"][1]["content"] == "analyze NVDA"
 
@@ -171,6 +171,79 @@ class TestLLMAdvisorService:
 
         with pytest.raises(ValueError, match="suggested_buy_low"):
             advisor._parse_response(raw)
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            "<think>The analysis consumed the completion budget.</think>\n",
+            '{"suggested_buy_low": 180, "suggested_sell_high": 220, '
+            '"confidence_score": 0.8, "analysis": "complete-looking but truncated"}',
+            "",
+        ],
+    )
+    def test_minimax_truncation_is_rejected_and_retains_usage(
+        self, advisor: LLMAdvisorService, monkeypatch, content: str,
+    ) -> None:
+        import app.config
+        import app.services.llm_advisor_service as service_module
+
+        recorded: list[dict[str, Any]] = []
+
+        class _FakeResponse:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, Any]:
+                return {
+                    "choices": [{
+                        "finish_reason": "length",
+                        "message": {"content": content},
+                    }],
+                    "usage": {
+                        "prompt_tokens": 100,
+                        "completion_tokens": 8192,
+                        "total_tokens": 8292,
+                    },
+                }
+
+        monkeypatch.setattr(app.config.settings, "llm_provider", "minimax")
+        monkeypatch.setattr(app.config.settings, "minimax_api_key", "test-key")
+        monkeypatch.setattr(service_module.httpx, "post", lambda *a, **kw: _FakeResponse())
+        monkeypatch.setattr(advisor._data_aggregator, "fetch_market_data", lambda *a: {})
+        monkeypatch.setattr(advisor, "_build_prompt", lambda **kw: "analyze")
+        monkeypatch.setattr(advisor, "_select_variant", lambda symbol: (None, None))
+        monkeypatch.setattr(advisor, "_record_analysis", lambda *a, **kw: pytest.fail(
+            "truncated output must never update the strategy"
+        ))
+
+        def record(**kwargs: Any) -> int:
+            recorded.append(kwargs)
+            return 42
+
+        monkeypatch.setattr(advisor, "_record_interaction", record)
+        result = advisor.analyze(
+            symbol="TSLA.US", market="US", current_price=200,
+            current_buy_low=180, current_sell_high=220,
+            short_selling=False, current_position="FLAT", recent_trades=[],
+            force=True,
+        )
+
+        assert result["success"] is False
+        assert result["failure_kind"] == "RESPONSE_TRUNCATED"
+        assert result["retry_after_seconds"] == 300
+        assert result["transient"] is False
+        assert recorded[0]["raw_response"] == content
+        assert recorded[0]["success"] is False
+        assert recorded[0]["token_usage"] == LLMTokenUsage(100, 8192, 8292)
+
+    def test_thinking_only_response_has_explicit_failure_kind(self) -> None:
+        with pytest.raises(LLMProviderError) as exc:
+            LLMAdvisorService._parse_provider_response(LLMProviderResponse(
+                content="<think>No final answer</think>",
+                usage=LLMTokenUsage(completion_tokens=8192),
+                finish_reason="stop",
+            ))
+        assert exc.value.failure_kind == "EMPTY_CONTENT"
 
     def test_parse_response_preserves_immediate_order_action(self, advisor: LLMAdvisorService) -> None:
         raw = """

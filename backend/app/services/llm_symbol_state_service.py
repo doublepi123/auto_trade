@@ -74,11 +74,11 @@ class LLMSymbolStateService:
         return {row.symbol: row for row in rows}
 
     def count_analyses_last_hour(self, now: datetime) -> int:
+        """Count all analysis attempts: failed calls also consume provider budget."""
         cutoff = now - timedelta(hours=1)
         return (
             self.db.query(LLMInteraction)
             .filter(LLMInteraction.interaction_type == "analyze")
-            .filter(LLMInteraction.success.is_(True))
             .filter(LLMInteraction.created_at >= cutoff)
             .count()
         )

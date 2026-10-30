@@ -59,6 +59,7 @@ class LLMTokenUsage:
 class LLMProviderResponse:
     content: str
     usage: LLMTokenUsage
+    finish_reason: str | None = None
 
 
 class LLMProviderError(RuntimeError):
@@ -479,7 +480,7 @@ class LLMAdvisorService:
                 provider_response = self._call_llm(prompt)
                 raw_response = provider_response.content
                 token_usage = provider_response.usage
-                result = self._parse_response(raw_response)
+                result = self._parse_provider_response(provider_response)
                 analysis_succeeded = True
 
                 # NOTE: indicator selection is validated against AVAILABLE_INDICATORS
@@ -702,7 +703,7 @@ class LLMAdvisorService:
                 provider_response = self._call_llm(prompt)
                 raw_response = provider_response.content
                 token_usage = provider_response.usage
-                result = self._parse_response(raw_response)
+                result = self._parse_provider_response(provider_response)
                 # LLM succeeded — consume the throttle budget.
                 with _throttle_lock:
                     _LAST_PREVIEW_TIMESTAMP = time.monotonic()
@@ -864,6 +865,7 @@ class LLMAdvisorService:
         return LLMProviderResponse(
             content=content,
             usage=self._parse_token_usage(data.get("usage")),
+            finish_reason=choice.get("finish_reason"),
         )
 
     def _call_minimax(self, prompt: str) -> LLMProviderResponse:
@@ -950,7 +952,9 @@ class LLMAdvisorService:
             content = message.get("content") or ""
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(f"MiniMax response missing message content: {exc}") from exc
-        if not content.strip():
+        if not isinstance(content, str):
+            raise RuntimeError("MiniMax returned non-text message content")
+        if not content.strip() and choice.get("finish_reason") != "length":
             finish_reason = choice.get("finish_reason")
             usage = data.get("usage") or {}
             raise RuntimeError(
@@ -961,7 +965,29 @@ class LLMAdvisorService:
         return LLMProviderResponse(
             content=content,
             usage=self._parse_token_usage(data.get("usage")),
+            finish_reason=choice.get("finish_reason"),
         )
+
+    @staticmethod
+    def _parse_provider_response(response: LLMProviderResponse) -> dict[str, Any]:
+        """Reject incomplete output before parsing, retaining its audit evidence."""
+        if response.finish_reason == "length":
+            raise LLMProviderError(
+                "LLM response truncated at the completion token limit"
+                f" (completion_tokens={response.usage.completion_tokens})."
+                " Disable thinking or increase the provider's completion budget.",
+                failure_kind="RESPONSE_TRUNCATED",
+                transient=False,
+                retry_after_seconds=_MINIMAX_BACKOFF_SECONDS,
+            )
+        if not LLMAdvisorService._strip_response_wrappers(response.content):
+            raise LLMProviderError(
+                "LLM response contains no final answer after removing thinking content",
+                failure_kind="EMPTY_CONTENT",
+                transient=False,
+                retry_after_seconds=_MINIMAX_BACKOFF_SECONDS,
+            )
+        return LLMAdvisorService._parse_response(response.content)
 
     @staticmethod
     def _parse_token_usage(raw_usage: Any) -> LLMTokenUsage:

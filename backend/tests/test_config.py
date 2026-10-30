@@ -976,8 +976,15 @@ class TestSettings:
         assert s.minimax_base_url == "https://api.minimaxi.com/v1"
         assert s.minimax_api_url == ""
         assert s.minimax_model == "MiniMax-M3"
-        assert s.minimax_thinking_type == "adaptive"
+        assert s.minimax_thinking_type == "disabled"
         assert s.minimax_max_completion_tokens == 8192
+
+    def test_minimax_thinking_is_disabled_without_an_environment_override(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    ) -> None:
+        monkeypatch.delenv("MINIMAX_THINKING_TYPE", raising=False)
+        monkeypatch.chdir(tmp_path)
+        assert Settings().minimax_thinking_type == "disabled"
 
     def test_extended_hours_protective_exits_default_false(
         self,

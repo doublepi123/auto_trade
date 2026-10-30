@@ -58,7 +58,7 @@ os.environ["AUTO_TRADE_LLM_PROVIDER"] = "deepseek"
 os.environ["MINIMAX_BASE_URL"] = "https://api.minimaxi.com/v1"
 os.environ["MINIMAX_API_URL"] = ""
 os.environ["MINIMAX_MODEL"] = "MiniMax-M3"
-os.environ["MINIMAX_THINKING_TYPE"] = "adaptive"
+os.environ["MINIMAX_THINKING_TYPE"] = "disabled"
 os.environ["MINIMAX_MAX_COMPLETION_TOKENS"] = "8192"
 os.environ["AUTO_TRADE_BROKER_POSITION_SNAPSHOT_ISOLATION_ENABLED"] = "false"
 

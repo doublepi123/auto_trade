@@ -10,6 +10,7 @@ behavior.
 """
 from __future__ import annotations
 
+import asyncio
 import threading
 from datetime import datetime, timedelta, timezone
 from collections.abc import Generator
@@ -84,7 +85,71 @@ class TestCronHealthServiceRegistration:
         assert names == ["alpha", "zeta"]
 
 
+@pytest.mark.asyncio
+async def test_llm_cron_reports_failed_work_and_preserves_failure_during_backoff(
+    fake_service, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import app.main as main_module
+
+    service, _, _ = fake_service
+    service.register("llm_analysis", expected_interval_seconds=60)
+    service.activate("llm_analysis")
+    outcomes = iter([False, None, True])
+    snapshots: list[JobHealthSnapshot] = []
+
+    async def fake_tick() -> bool | None:
+        return next(outcomes)
+
+    async def fake_sleep(_seconds: float) -> None:
+        snapshots.append(service.snapshot()[0])
+        if len(snapshots) == 4:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(main_module, "_llm_analysis_tick", fake_tick)
+    monkeypatch.setattr(main_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(main_module, "_llm_analysis_lock", asyncio.Lock())
+    with pytest.raises(asyncio.CancelledError):
+        await main_module._llm_analysis_cron()
+    assert [row.status for row in snapshots] == [
+        "pending", "failing", "failing", "healthy",
+    ]
+    assert snapshots[-1].failure_count == 1
+    assert snapshots[-1].tick_count == 3
+
+
 class TestCronHealthServiceSuccess:
+    def test_idle_ticks_keep_failure_visible_until_work_succeeds(self, fake_service) -> None:
+        service, mono, _wall = fake_service
+        service.register("job", expected_interval_seconds=60, enabled_provider=lambda: True)
+        service.activate("job")
+        service.record_failure("job", RuntimeError("provider failed"))
+        for _ in range(4):
+            mono.advance(60)
+            service.record_idle("job")
+        row = service.snapshot()[0]
+        assert row.status == "failing"
+        assert row.stale is False
+        assert row.failure_count == 1
+        assert row.tick_count == 5
+        assert row.last_success_at is None
+        service.record_success("job")
+        assert service.snapshot()[0].status == "healthy"
+
+    def test_idle_before_first_analysis_does_not_claim_success_or_go_stale(
+        self, fake_service,
+    ) -> None:
+        service, mono, _wall = fake_service
+        service.register("job", expected_interval_seconds=60, enabled_provider=lambda: True)
+        service.activate("job")
+        mono.advance(300)
+        service.record_idle("job")
+        row = service.snapshot()[0]
+        assert row.status == "pending"
+        assert row.stale is False
+        assert row.last_success_at is None
+        mono.advance(121)
+        assert service.snapshot()[0].status == "stale"
+
     def test_record_success_updates_last_success_and_tick_count(self, fake_service) -> None:
         service, mono, wall = fake_service
         service.register("job", expected_interval_seconds=60.0, enabled_provider=lambda: True)
