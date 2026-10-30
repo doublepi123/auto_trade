@@ -666,14 +666,19 @@ class TestAPI:
         assert resp.json()["message"] == "trading paused"
 
     def test_resume_trading(self, monkeypatch) -> None:
-        runner = trade_api.get_runner()
-        for order_id in runner._trade_svc.pending_order_ids():
-            runner._trade_svc._clear_pending_order(order_id)
+        from app.runner import AppRunner
+
+        _clean_strategy()
+        _clean_orders()
+        runner = AppRunner()
+        runner.risk.pause("testing")
+        monkeypatch.setattr(trade_api, "get_runner", lambda: runner)
         monkeypatch.setattr(runner.broker, "get_today_orders", lambda: [])
         monkeypatch.setattr(runner.broker, "get_positions", lambda: [])
         resp = client.post("/api/control/resume")
-        assert resp.status_code == 200
+        assert resp.status_code == 200, resp.text
         assert resp.json()["message"] == "trading resumed"
+        assert runner.risk.paused is False
 
     def test_resume_persistence_failure_keeps_runtime_paused(
         self,
@@ -2601,10 +2606,15 @@ class TestAPI:
         assert data["has_sct_key"] is True
 
 
-def test_start_endpoint_writes_audit_success() -> None:
+def test_start_endpoint_writes_audit_success(monkeypatch) -> None:
+    from app.runner import AppRunner
+
+    runner = AppRunner()
+    monkeypatch.setattr(runner, "start", lambda: True)
+    monkeypatch.setattr(trade_api, "get_runner", lambda: runner)
     _clean_audit_logs()
     resp = client.post("/api/control/start", headers={"x-api-key": "k1"})
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text
     db = SessionLocal()
     try:
         rows = db.query(AuditLog).filter_by(action="START").all()
@@ -2858,12 +2868,23 @@ def test_strategy_update_audits_symbol_market_and_mode_changes() -> None:
 
 
 def test_strategy_update_no_change_still_writes_audit() -> None:
+    _clean_strategy()
+    setup = client.put(
+        "/api/strategy",
+        json={
+            "symbol": "AAPL.US",
+            "market": "US",
+            "buy_low": 100.0,
+            "sell_high": 200.0,
+        },
+    )
+    assert setup.status_code == 200, setup.text
     _clean_audit_logs()
     import json
 
     cur = client.get("/api/strategy").json()
     resp = client.put("/api/strategy", json={"buy_low": cur["buy_low"]})
-    assert resp.status_code == 200
+    assert resp.status_code == 200, resp.text
     db = SessionLocal()
     try:
         row = (
