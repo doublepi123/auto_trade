@@ -150,6 +150,7 @@ _ACTION_TO_SIDE: Final[dict[str, str]] = {
     "BUY_TO_COVER": "BUY",
 }
 ENTRY_BUYING_POWER_USAGE = Decimal("0.9")
+ENTRY_SIZING_PRICE_BUFFER_BPS = Decimal("5")
 US_PRICE_TICK = Decimal("0.01")
 RISK_BOUNDARY_VERSION: Final[str] = "pre-submit-risk-v1"
 
@@ -2373,6 +2374,7 @@ class TradeExecutionService:
         cash_currency: str,
         *,
         safety_factor: float | None = None,
+        cap_price: Decimal | None = None,
     ) -> int:
         action = "SELL_SHORT" if side == "SELL" else "BUY"
         # Funded-margin exception (contract §C/§D): resolve the range-lane
@@ -2397,6 +2399,11 @@ class TradeExecutionService:
                 assert_never(unreachable)
         if not price.is_finite() or price <= 0:
             logger.error("%s: entry price must be finite and greater than zero", side)
+            return 0
+        if cap_price is None:
+            cap_price = price
+        elif not cap_price.is_finite() or cap_price < price:
+            logger.error("%s: entry cap price must be finite and at least the limit price", side)
             return 0
 
         position_check = self._entry_position_check(
@@ -2458,12 +2465,12 @@ class TradeExecutionService:
         remaining_qty = limits.max_quantity - current_qty
         candidate = min(candidate, max(Decimal("0"), remaining_qty))
 
-        current_notional = current_qty * price
+        current_notional = current_qty * cap_price
         remaining_notional = limits.max_notional - current_notional
-        notional_qty = max(Decimal("0"), remaining_notional) / price
+        notional_qty = max(Decimal("0"), remaining_notional) / cap_price
         candidate = min(candidate, notional_qty)
 
-        stop_distance = price * limits.stop_loss_pct / Decimal("100")
+        stop_distance = cap_price * limits.stop_loss_pct / Decimal("100")
         remaining_risk = max(
             Decimal("0"),
             limits.max_risk - current_qty * stop_distance,
@@ -3028,7 +3035,16 @@ class TradeExecutionService:
         if price <= 0:
             logger.warning("BUY: price <= 0, price=%s", price)
             return None
-        qty = Decimal(self._entry_quantity_from_margin_power(broker, symbol, "BUY", price, cash_currency))
+        # The pre-submit boundary prices the entry at max(limit, fresh ask);
+        # cap against that price plus a drift buffer so a quantity floored
+        # under the notional/risk caps at last does not overshoot them there.
+        cap_price = max(price, self._positive_finite_limit(quote.ask) or price)
+        cap_price *= 1 + ENTRY_SIZING_PRICE_BUFFER_BPS / Decimal("10000")
+        qty = Decimal(
+            self._entry_quantity_from_margin_power(
+                broker, symbol, "BUY", price, cash_currency, cap_price=cap_price,
+            )
+        )
         if qty <= 0:
             return self._skip_order(
                 symbol,

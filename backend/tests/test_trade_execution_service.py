@@ -1861,6 +1861,105 @@ class TestTradeExecutionServiceBasics:
         broker.get_cash.assert_not_called()
         broker.submit_limit_order.assert_called_once_with("NVDA.US", "BUY", Decimal("90"), Decimal("222.5"))
 
+    def test_buy_sizes_notional_cap_against_ask_above_last(self) -> None:
+        # 2026-10-16 15:06 replay: sized at last 360.16 the 236-share entry
+        # projected 236 x 360.30 = 85030.80 at the fresh ask and the boundary
+        # rejected it against the 85000 notional cap.
+        broker = MagicMock()
+        broker.get_positions.return_value = []
+        broker.estimate_margin_max_quantity.return_value = Decimal("1000")
+        broker.submit_limit_order.return_value = OrderResult(
+            "notional-buffer-order",
+            "TSLA.US",
+            "BUY",
+            Decimal("235"),
+            Decimal("360.30"),
+            "SUBMITTED",
+        )
+        skipped: list[str] = []
+        svc = TradeExecutionService(
+            record_order=lambda *args: None,
+            update_order_status=lambda *args: None,
+            record_risk_event=lambda *args: None,
+            record_order_skipped=lambda _symbol, _action, reason, _payload: (
+                skipped.append(reason)
+            ),
+            max_position_quantity=1000,
+            max_position_notional=85000,
+            max_risk_per_trade=500,
+            stop_loss_pct=0.25,
+            final_order_quote_check=lambda *_args: FinalOrderQuoteCheckResult(
+                executable_price=Decimal("360.30"),
+                bid=Decimal("360.10"),
+                ask=Decimal("360.30"),
+            ),
+        )
+
+        status = svc.execute(
+            "BUY",
+            "TSLA.US",
+            Quote("TSLA.US", 360.16, 360.10, 360.30, ""),
+            broker,
+            RiskController(),
+            ServerChanNotifier(""),
+            "USD",
+        )
+
+        assert skipped == []
+        assert status is not None
+        assert status.status == "SUBMITTED"
+        broker.estimate_margin_max_quantity.assert_called_once_with(
+            "TSLA.US", "BUY", Decimal("360.16"), "USD",
+        )
+        broker.submit_limit_order.assert_called_once_with(
+            "TSLA.US", "BUY", Decimal("235"), Decimal("360.30"),
+        )
+
+    def test_entry_quantity_caps_notional_and_risk_at_cap_price(
+        self, svc: TradeExecutionService,
+    ) -> None:
+        broker = MagicMock()
+        broker.estimate_margin_max_quantity.return_value = Decimal("1000")
+        svc.margin_safety_factor = 1.0
+        svc.max_position_quantity = 1000
+        svc.max_position_notional = 1000
+        svc.max_risk_per_trade = 1000
+        svc.stop_loss_pct = 1.0
+
+        at_limit = svc._entry_quantity_from_margin_power(
+            broker, "AAPL.US", "BUY", Decimal("100"), "USD",
+        )
+        at_cap = svc._entry_quantity_from_margin_power(
+            broker, "AAPL.US", "BUY", Decimal("100"), "USD",
+            cap_price=Decimal("100.01"),
+        )
+        svc.max_position_notional = 1_000_000
+        svc.max_risk_per_trade = 10
+        risk_capped = svc._entry_quantity_from_margin_power(
+            broker, "AAPL.US", "BUY", Decimal("100"), "USD",
+            cap_price=Decimal("100.01"),
+        )
+
+        assert at_limit == 10
+        assert at_cap == 9
+        assert risk_capped == 9
+        for call_args in broker.estimate_margin_max_quantity.call_args_list:
+            assert call_args.args[2] == Decimal("100")
+
+    @pytest.mark.parametrize("cap_price", [Decimal("99.99"), Decimal("NaN")])
+    def test_entry_quantity_rejects_cap_price_below_limit(
+        self, svc: TradeExecutionService, cap_price: Decimal,
+    ) -> None:
+        broker = MagicMock()
+        broker.estimate_margin_max_quantity.return_value = Decimal("1000")
+
+        qty = svc._entry_quantity_from_margin_power(
+            broker, "AAPL.US", "BUY", Decimal("100"), "USD", cap_price=cap_price,
+        )
+
+        assert qty == 0
+        broker.estimate_margin_max_quantity.assert_not_called()
+
     def test_margin_safety_factor_instance_attribute(self, svc: TradeExecutionService) -> None:
         assert svc.margin_safety_factor is None
         svc.margin_safety_factor = 0.75
