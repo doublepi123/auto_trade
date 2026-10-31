@@ -1,4 +1,6 @@
 # pyright: reportArgumentType=false, reportAttributeAccessIssue=false
+import pytest
+
 from app.core.engine import EngineState, StrategyEngine, StrategyParams
 
 
@@ -228,6 +230,42 @@ class TestStrategyEngine:
         assert result.triggered is True
         assert result.action == "SELL"
         assert engine.state == EngineState.FLAT
+
+    def test_long_exit_price_gates_take_profit_on_bid(self) -> None:
+        engine = StrategyEngine(make_params(100, 200))
+        engine.state = EngineState.LONG
+
+        held = engine.update_price(200.10, long_exit_price=199.95)
+        assert held.triggered is False
+        assert engine.state == EngineState.LONG
+
+        result = engine.update_price(200.20, long_exit_price=200.05)
+        assert result.triggered is True
+        assert result.action == "SELL"
+        assert result.description.startswith("Bid 200.05 >= sell_high")
+        assert engine.state == EngineState.FLAT
+        assert engine.last_trigger_price == 200.20
+
+    @pytest.mark.parametrize("long_exit_price", [None, 0.0, -1.0, float("nan")])
+    def test_missing_long_exit_price_falls_back_to_price(
+        self, long_exit_price: float | None,
+    ) -> None:
+        engine = StrategyEngine(make_params(100, 200))
+        engine.state = EngineState.LONG
+
+        result = engine.update_price(201.0, long_exit_price=long_exit_price)
+
+        assert result.triggered is True
+        assert result.action == "SELL"
+        assert result.description.startswith("Price 201.0 >= sell_high")
+
+    def test_long_exit_price_does_not_change_entry_trigger(self) -> None:
+        engine = StrategyEngine(make_params(100, 200))
+
+        result = engine.update_price(99.0, long_exit_price=250.0)
+
+        assert result.triggered is True
+        assert result.action == "BUY"
 
     def test_cooldown_blocks_add_on_buy(self) -> None:
         engine = StrategyEngine(make_params(100, 200))

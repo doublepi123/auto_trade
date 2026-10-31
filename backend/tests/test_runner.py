@@ -8573,6 +8573,43 @@ class TestAppRunner:
         assert broker.position_checks == 1
         assert runner.engine.state == EngineState.LONG
 
+    @pytest.mark.parametrize("paused", [False, True])
+    def test_take_profit_triggers_on_bid_and_quotes_sell_at_bid(self, paused: bool) -> None:
+        # 2026-10-19 13:56: last 362.84 cleared sell_high 362.8352 while the
+        # bid was 362.78; the SELL rested at last and was cancelled unfilled.
+        # The paused case covers the risk-rejected reducing-trigger gate,
+        # which must judge the take-profit on the same bid as the engine.
+        class Broker:
+            def __init__(self) -> None:
+                self.submitted: list[tuple[Decimal, Decimal]] = []
+
+            def get_positions(self) -> list[Position]:
+                return [Position(symbol="TSLA.US", side="LONG", quantity=Decimal("235"), avg_price=Decimal("360.54"))]
+
+            def submit_limit_order(self, symbol: str, side: str, quantity: Decimal, price: Decimal):
+                self.submitted.append((quantity, price))
+                return OrderResult("order-tp", symbol, side, quantity, price, "SUBMITTED")
+
+        runner = AppRunner()
+        broker = Broker()
+        runner.broker = broker
+        runner._running = True
+        runner.engine.params = StrategyParams(symbol="TSLA.US", buy_low=360.0, sell_high=362.8352)
+        runner.engine.state = EngineState.LONG
+        runner.notifier = _NoopNotifier()
+        self._stub_trade_callbacks(runner)
+        if paused:
+            runner.risk.pause("ORDER_TIMEOUT_CANCELLED_UNFILLED: order prior", auto_resumable=True)
+
+        runner._on_quote(Quote("TSLA.US", 362.84, 362.78, 362.87, _fresh_timestamp()))
+
+        assert broker.submitted == []
+        assert runner.engine.state == EngineState.LONG
+
+        runner._on_quote(Quote("TSLA.US", 362.90, 362.85, 362.91, _fresh_timestamp()))
+
+        assert broker.submitted == [(Decimal("235"), Decimal("362.85"))]
+
     def test_missing_position_rolls_back_sell_trigger(self) -> None:
         class Broker:
             def get_positions(self) -> list[Position]:

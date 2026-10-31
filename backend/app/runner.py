@@ -3516,6 +3516,7 @@ class AppRunner:
                 elif not risk_result.approved and not self._should_evaluate_reducing_trigger(
                     active_engine,
                     float(quote.last_price),
+                    long_exit_price=float(quote.bid),
                 ):
                     if (
                         is_primary_symbol
@@ -3581,7 +3582,10 @@ class AppRunner:
                         )
                         return decision
                     decision.engine_snapshot = active_engine.snapshot()
-                    decision.result = active_engine.update_price(quote.last_price)
+                    decision.result = active_engine.update_price(
+                        quote.last_price,
+                        long_exit_price=float(quote.bid),
+                    )
                 if decision.result is not None and decision.result.triggered:
                     if decision.result.action in _POSITION_REDUCING_ACTIONS:
                         if (
@@ -3835,7 +3839,9 @@ class AppRunner:
                     )
                 )
             execution_quote = quote
-            if decision.reduce_only:
+            # The sell_high take-profit triggers on the bid, so quote it at the
+            # bid like protective exits instead of resting at last above it.
+            if decision.reduce_only or result.action == "SELL":
                 executable_price = (
                     decision.exit_limit_price
                     if decision.exit_limit_price is not None
@@ -7968,10 +7974,18 @@ class AppRunner:
             return self.risk.protective_exit_permitted
         return True
 
-    def _should_evaluate_reducing_trigger(self, engine: StrategyEngine, price: float) -> bool:
+    def _should_evaluate_reducing_trigger(
+        self,
+        engine: StrategyEngine,
+        price: float,
+        *,
+        long_exit_price: float | None = None,
+    ) -> bool:
         if self.risk.kill_switch or price <= 0:
             return False
         if engine.state == EngineState.LONG:
+            if long_exit_price is not None and long_exit_price > 0:
+                price = long_exit_price
             return engine.params.sell_high > 0 and price >= engine.params.sell_high
         if engine.state == EngineState.SHORT:
             return engine.params.buy_low > 0 and price <= engine.params.buy_low

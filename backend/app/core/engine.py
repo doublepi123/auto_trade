@@ -76,15 +76,22 @@ class StrategyEngine:
         self._lock = threading.Lock()
         self.reconciliation_gate: str = "passed"
 
-    def update_price(self, price: float) -> TriggerResult:
+    def update_price(self, price: float, *, long_exit_price: float | None = None) -> TriggerResult:
+        """Evaluate ``price`` against the range.
+
+        ``long_exit_price`` is the executable price for closing a LONG (the
+        live bid). When positive it replaces ``price`` for the sell_high
+        take-profit check, so the trigger only fires once the exit can fill
+        at the target; entries and cooldown keep using ``price``.
+        """
         with self._lock:
-            return self._update_price_locked(price)
+            return self._update_price_locked(price, long_exit_price)
 
     def record_price(self, price: float) -> None:
         with self._lock:
             self.last_price = price
 
-    def _update_price_locked(self, price: float) -> TriggerResult:
+    def _update_price_locked(self, price: float, long_exit_price: float | None = None) -> TriggerResult:
         if price <= 0:
             logger.warning("engine received non-positive price %s for %s", price, self.params.symbol)
             return TriggerResult(triggered=False)
@@ -131,14 +138,19 @@ class StrategyEngine:
                 )
 
         elif self.state == EngineState.LONG:
-            if price >= self.params.sell_high:
+            bid_exit = long_exit_price is not None and long_exit_price > 0
+            exit_price = long_exit_price if long_exit_price is not None and bid_exit else price
+            if exit_price >= self.params.sell_high:
                 self.state = EngineState.FLAT
                 self._long_entry_rearm_required = False
                 self._mark_trigger(price)
                 return TriggerResult(
                     triggered=True,
                     action="SELL",
-                    description=f"Price {price} >= sell_high {self.params.sell_high}, sell LONG",
+                    description=(
+                        f"{'Bid' if bid_exit else 'Price'} {exit_price} >= "
+                        f"sell_high {self.params.sell_high}, sell LONG"
+                    ),
                 )
             if self.params.allow_position_addons and price <= self.params.buy_low:
                 self._mark_trigger(price)
