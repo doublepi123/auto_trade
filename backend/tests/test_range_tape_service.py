@@ -301,7 +301,11 @@ def test_duplicate_top_positions_are_ambiguous(tmp_path: Path) -> None:
         _read(_write(tmp_path / "levels.gz", row))
 
 
-@pytest.mark.parametrize("raw", [b"not gzip", b"", b"\x1f\x8b", gzip.compress(b"{}\n")[:-4]])
+@pytest.mark.parametrize(
+    "raw",
+    [b"not gzip", b"", b"\x1f\x8b", gzip.compress(b"{}\n", mtime=0)[:-4]],
+    ids=["not-gzip", "empty", "truncated-header", "truncated-trailer"],
+)
 def test_malformed_or_truncated_gzip_fails(tmp_path: Path, raw: bytes) -> None:
     path = tmp_path / "broken.gz"
     path.write_bytes(raw)
